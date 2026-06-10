@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Styling for Print mount isolation */
+#print-mount-point {
+  display: none;
+}
+
+@media print {
+  body.printing-statement #root {
+    display: none !important;
+  }
+  
+  body.printing-statement #print-mount-point {
+    display: block !important;
+    position: relative !important;
+    width: 100% !important;
+    min-height: 100% !important;
+    margin: 0 !important;
+    padding: 1rem !important;
+    background: white !important;
+    color: #1a202c !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Strip card border and shadows during print for pristine output page format */
+  body.printing-statement #print-mount-point #printable-statement-element {
+    border: none !important;
+    box-shadow: none !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: white !important;
+  }
+}
+
