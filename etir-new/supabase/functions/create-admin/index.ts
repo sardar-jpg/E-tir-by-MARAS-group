@@ -5,17 +5,22 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const ADMIN_EMAIL = 'sardar@maras.iq';
-const ADMIN_PASSWORD = 'Maras@2024!';
-
-const TEST_CLIENT_EMAIL = 'testclient@etir.com';
-const TEST_CLIENT_PASSWORD = '123456';
-
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+// Admin and test-client credentials are read from environment variables
+// (set as Edge Function secrets), never hardcoded in source. Set these with:
+//   supabase secrets set ADMIN_EMAIL=... ADMIN_PASSWORD=... \
+//                        TEST_CLIENT_EMAIL=... TEST_CLIENT_PASSWORD=...
+// If unset, the corresponding bootstrap step is skipped rather than falling
+// back to a hardcoded value.
+const ADMIN_EMAIL = Deno.env.get('ADMIN_EMAIL') ?? '';
+const ADMIN_PASSWORD = Deno.env.get('ADMIN_PASSWORD') ?? '';
+const TEST_CLIENT_EMAIL = Deno.env.get('TEST_CLIENT_EMAIL') ?? '';
+const TEST_CLIENT_PASSWORD = Deno.env.get('TEST_CLIENT_PASSWORD') ?? '';
 
 async function ensureTestClient(adminClient: any) {
+  if (!TEST_CLIENT_EMAIL || !TEST_CLIENT_PASSWORD) {
+    console.log('[create-admin] TEST_CLIENT_EMAIL/PASSWORD not set — skipping test client bootstrap');
+    return;
+  }
   try {
     // Check if test client auth user already exists
     const { data: { users } } = await adminClient.auth.admin.listUsers();
@@ -32,7 +37,7 @@ async function ensureTestClient(adminClient: any) {
       if (error) { console.log('Test client create error:', error.message); return; }
       testUser = data.user;
     } else {
-      // Ensure password is reset to test value
+      // Ensure password is reset to the configured test value
       await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
     }
 
@@ -74,9 +79,22 @@ async function ensureTestClient(adminClient: any) {
     console.log('ensureTestClient error:', String(e));
   }
 }
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
+    if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+      return new Response(JSON.stringify({
+        error: 'ADMIN_EMAIL/ADMIN_PASSWORD not configured on this function. Set them with `supabase secrets set`.',
+      }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
@@ -95,196 +113,17 @@ async function ensureTestClient(adminClient: any) {
       // User profile exists — ensure email is confirmed and reset password
       await adminClient.rpc('confirm_admin_email', { admin_email: ADMIN_EMAIL });
 
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
       // Always sync the password via admin API to ensure it matches
       const { data: { users: allUsers } } = await adminClient.auth.admin.listUsers();
       const adminUser = allUsers?.find((u: any) => u.email === ADMIN_EMAIL);
       if (adminUser) {
         await adminClient.auth.admin.updateUserById(adminUser.id, { password: ADMIN_PASSWORD });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
       }
       // Also ensure test client exists
       await ensureTestClient(adminClient);
       return new Response(JSON.stringify({ success: true, status: 'already_exists', passwordReset: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
     }
 
     // Step 2: Sign up using anon client (normal registration)
@@ -295,259 +134,19 @@ async function ensureTestClient(adminClient: any) {
       options: { data: { full_name: 'Sardar (MARAS Admin)' } },
     });
 
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
-
     if (signUpError) {
       // If user already registered in auth but not in user_profiles
       if (signUpError.message.toLowerCase().includes('already')) {
         // Try to confirm via SQL function
         await adminClient.rpc('confirm_admin_email', { admin_email: ADMIN_EMAIL });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
         return new Response(JSON.stringify({ success: true, status: 'confirmed_existing' }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
       }
       return new Response(JSON.stringify({ error: signUpError.message }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
     }
 
     const userId = signUpData.user?.id;
@@ -556,130 +155,10 @@ async function ensureTestClient(adminClient: any) {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
     }
 
     // Step 3: Immediately confirm email via SQL function (SECURITY DEFINER bypasses RLS)
     const { error: confirmError } = await adminClient.rpc('confirm_admin_email', { admin_email: ADMIN_EMAIL });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
 
     // Step 4: Create test customer account
     await ensureTestClient(adminClient);
@@ -692,190 +171,10 @@ async function ensureTestClient(adminClient: any) {
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}
   }
 });
-
-async function ensureTestClient(adminClient: any) {
-  try {
-    // Check if test client auth user already exists
-    const { data: { users } } = await adminClient.auth.admin.listUsers();
-    let testUser = users?.find((u: any) => u.email === TEST_CLIENT_EMAIL);
-
-    if (!testUser) {
-      // Create auth user with confirmed email
-      const { data, error } = await adminClient.auth.admin.createUser({
-        email: TEST_CLIENT_EMAIL,
-        password: TEST_CLIENT_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Test Client' },
-      });
-      if (error) { console.log('Test client create error:', error.message); return; }
-      testUser = data.user;
-    } else {
-      // Ensure password is reset to test value
-      await adminClient.auth.admin.updateUserById(testUser.id, { password: TEST_CLIENT_PASSWORD });
-    }
-
-    if (!testUser?.id) return;
-
-    // Check if a client record is linked to this test user
-    const { data: linkedClient } = await adminClient
-      .from('clients')
-      .select('id')
-      .eq('customer_user_id', testUser.id)
-      .maybeSingle();
-
-    if (!linkedClient) {
-      // Create a demo client record and link it
-      // Check if a client record with this email already exists; if so, just link it
-      const { data: emailClient } = await adminClient
-        .from('clients')
-        .select('id')
-        .eq('email', TEST_CLIENT_EMAIL)
-        .maybeSingle();
-
-      if (emailClient) {
-        await adminClient.from('clients').update({ customer_user_id: testUser.id }).eq('id', emailClient.id);
-      } else {
-        const { error: insertErr } = await adminClient.from('clients').insert({
-          name: 'Test Client',
-          company: 'Demo Company',
-          email: TEST_CLIENT_EMAIL,
-          phone: '+964 770 000 0001',
-          country: 'Iraq',
-          city: 'Baghdad',
-          notes: 'Auto-created test account for customer portal demo.',
-          customer_user_id: testUser.id,
-        });
-        if (insertErr) console.log('Test client record error:', insertErr.message);
-      }
-    }
-  } catch (e) {
-    console.log('ensureTestClient error:', String(e));
-  }
-}

@@ -40,11 +40,13 @@ Deno.serve(async (req) => {
     // Admin client with service role to perform deletions
     const adminClient = createClient(supabaseUrl, serviceRoleKey);
 
-    // Cascade-delete related rows first (best effort — ignore individual failures)
+    // Cascade-delete related rows first (best effort — ignore individual failures).
+    // Push tokens live on the push_token column of user_profiles/driver_profiles
+    // (no separate push_tokens table exists), so deleting those rows below
+    // already clears them — no separate push token cleanup step needed here.
     await adminClient.from('driver_profiles').delete().eq('id', userId);
     await adminClient.from('user_profiles').delete().eq('id', userId);
     await adminClient.from('clients').update({ customer_user_id: null }).eq('customer_user_id', userId);
-    await adminClient.from('push_tokens').delete().eq('user_id', userId);
 
     // Finally delete the auth user itself
     const { error: deleteError } = await adminClient.auth.admin.deleteUser(userId);

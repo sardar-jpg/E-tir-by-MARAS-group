@@ -26,7 +26,6 @@ const ar = {
     orContinueWith: 'أو تابع باستخدام',
     signInWithGoogle: 'تسجيل الدخول بجوجل',
     googleAdminOnly: 'تسجيل الدخول بجوجل متاح لحسابات المسؤول / المرسل فقط.',
-    trackPublicShipment: 'تتبع شحنة عام',
     fullName: 'الاسم الكامل *',
     username: 'اسم المستخدم *',
     emailAddress: 'البريد الإلكتروني *',

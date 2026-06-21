@@ -26,7 +26,6 @@ const tr = {
     orContinueWith: 'veya şununla devam et', // Added missing key
     signInWithGoogle: 'Google ile giriş yap',
     googleAdminOnly: 'Google girişi yalnızca yönetici / dispatcher hesapları içindir.',
-    trackPublicAgain: 'Sevkiyatı kamuya açık takip et', // Added missing key
     fullName: 'Ad Soyad *',
     username: 'Kullanıcı Adı *',
     emailAddress: 'E-posta Adresi *',
