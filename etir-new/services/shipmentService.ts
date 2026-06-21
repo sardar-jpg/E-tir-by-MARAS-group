@@ -323,19 +323,26 @@ function generateToken(): string {
 /** Fetch the next sequential ETR shipment number (ETR-001, ETR-002, …) */
 export async function getNextEtrNumber(): Promise<string> {
   try {
+    // Fetch all ETR numbers and compute the numeric max client-side.
+    // A server-side `.order('tir_number', { ascending: false }).limit(1)`
+    // sorts lexicographically, not numerically — once counts cross a digit
+    // boundary (e.g. 'ETR-999' vs 'ETR-1000'), string order picks the wrong
+    // "last" row ('ETR-999' > 'ETR-1000' as strings) and the function starts
+    // re-issuing already-used numbers.
     const { data, error } = await supabase
       .from('shipments')
       .select('tir_number')
-      .like('tir_number', 'ETR-%')
-      .order('tir_number', { ascending: false })
-      .limit(1);
+      .like('tir_number', 'ETR-%');
 
     if (error || !data || data.length === 0) return 'ETR-001';
 
-    const lastNum = parseInt((data[0].tir_number as string).replace('ETR-', ''), 10);
-    if (isNaN(lastNum)) return 'ETR-001';
-    const next = lastNum + 1;
-    return `ETR-${String(next).padStart(3, '0')}`;
+    let maxNum = 0;
+    for (const row of data) {
+      const n = parseInt((row.tir_number as string).replace('ETR-', ''), 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+    if (maxNum === 0) return 'ETR-001';
+    return `ETR-${String(maxNum + 1).padStart(3, '0')}`;
   } catch {
     return 'ETR-001';
   }
@@ -346,6 +353,21 @@ export async function createShipment(
   input: CreateShipmentInput
 ): Promise<{ shipment: Shipment | null; error: string | null }> {
   const token = generateToken();
+
+  // The Sea "arrival driver" (port pickup) was previously captured in the
+  // form but never persisted anywhere — it's folded into additional_drivers
+  // here so it's saved using the same mechanism already used for Road
+  // multi-truck assignments, and so the arrival driver shows up via the
+  // existing additional_drivers lookups (fetchDriverShipments, driver.tsx).
+  const additionalDrivers: AdditionalDriver[] = [...(input.additionalDrivers ?? [])];
+  if (input.arrivalDriverId || input.arrivalDriverName) {
+    additionalDrivers.push({
+      driver_id: input.arrivalDriverId,
+      driver_name: input.arrivalDriverName ?? 'Unassigned',
+      plate_number: input.arrivalDriverPlate ?? '—',
+      truck_class: 'Arrival Driver (Port Pickup)',
+    });
+  }
 
   const { data: shipmentData, error: shipmentError } = await supabase
     .from('shipments')
@@ -379,7 +401,7 @@ export async function createShipment(
       bol_number: input.bolNumber?.trim() || null,
       container_number: input.containerNumber?.trim() || null,
       containers: input.containers && input.containers.length > 0 ? input.containers : [],
-      additional_drivers: input.additionalDrivers && input.additionalDrivers.length > 0 ? input.additionalDrivers : [],
+      additional_drivers: additionalDrivers.length > 0 ? additionalDrivers : [],
       port_of_loading: input.portOfLoading?.trim() || null,
       port_of_discharge: input.portOfDischarge?.trim() || null,
       shipping_line: input.shippingLine?.trim() || null,

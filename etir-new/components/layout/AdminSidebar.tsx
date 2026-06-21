@@ -9,6 +9,7 @@ import { useLanguage } from '@/hooks/useLanguage';
 import { ControlPanel } from '@/components/feature/ControlPanel';
 import { LanguagePicker } from '@/components/ui/LanguagePicker';
 import { Colors, FontSize, Spacing, BorderRadius } from '@/constants/theme';
+import { isCustomsStatus } from '@/services/shipmentStatusGroups';
 
 interface NavItem {
   label: string;
@@ -30,9 +31,9 @@ export function AdminSidebar() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const { t } = useLanguage();
 
-  const customsCount = shipments.filter(s =>
-    s.status === 'Customs Clearance' || s.status === 'Customs Pending'
-  ).length;
+  // Includes 'Port Customs' (Sea) alongside the Road customs statuses —
+  // previously this badge undercounted Sea shipments held at port customs.
+  const customsCount = shipments.filter(s => isCustomsStatus(s.status)).length;
 
   const navItems: NavItem[] = [
     { label: t('nav.dashboard'),    icon: 'dashboard',       route: '/(tabs)',           color: Colors.primary },

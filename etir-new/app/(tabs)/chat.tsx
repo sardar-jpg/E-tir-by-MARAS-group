@@ -15,7 +15,6 @@ import { useChat } from '@/hooks/useChat';
 import { useLanguage } from '@/hooks/useLanguage';
 import { LanguagePicker } from '@/components/ui/LanguagePicker';
 import { uploadChatAttachment } from '@/services/chatService';
-import { fetchDriverPushToken, notifyDriverNewMessage } from '@/services/notificationService';
 import { Colors, FontSize, Spacing, BorderRadius, Shadow } from '@/constants/theme';
 import { ChatMessage, ChatThread } from '@/types';
 
@@ -474,16 +473,11 @@ export default function ChatScreen() {
     setMessage('');
     setPendingAttachment(null);
     setShowQuickReplies(false);
+    // Note: sendMessage (ChatContext) already notifies the driver via push
+    // when senderRole is 'admin' — do not duplicate that call here.
     await sendMessage(msgContent, senderId, senderName, 'admin', activeThreadId, pendingAttachment?.url, pendingAttachment?.type);
-    const activeT = threads.find(thr => thr.id === activeThreadId);
-    if (activeT?.driverId) {
-      fetchDriverPushToken(activeT.driverId).then(token => {
-        const preview = msgContent || (pendingAttachment ? '📎 Attachment from dispatch' : '');
-        notifyDriverNewMessage(preview, token);
-      }).catch(() => {});
-    }
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
-  }, [message, pendingAttachment, activeThreadId, sendMessage, senderId, senderName, threads]);
+  }, [message, pendingAttachment, activeThreadId, sendMessage, senderId, senderName]);
 
   const handlePickImage = useCallback(async () => {
     setShowAttachMenu(false);

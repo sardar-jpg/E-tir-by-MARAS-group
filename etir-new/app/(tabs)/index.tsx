@@ -20,6 +20,7 @@ import { ControlPanel } from '@/components/feature/ControlPanel';
 import { FleetMapModal } from '@/components/feature/FleetMapModal';
 import { SeaMapModal } from '@/components/feature/SeaMapModal';
 import { Colors, FontSize, Spacing, BorderRadius, Shadow } from '@/constants/theme';
+import { isActiveStatus, isCustomsStatus } from '@/services/shipmentStatusGroups';
 
 function useScreenWidth() {
   const [width, setWidth] = useState(() => Dimensions.get('window').width);
@@ -269,10 +270,6 @@ export default function DashboardScreen() {
     detained: seaShipments.filter(s => s.status === 'Detained').length,
   }), [seaShipments]);
 
-  const activeShipments = useMemo(() => shipments.filter(s =>
-    ['In Transit', 'Customs Clearance', 'Dispatched', 'Customs Pending', 'Border Crossing'].includes(s.status)
-  ), [shipments]);
-
   // Sort by createdAt (ISO string) — updatedAt is a locale string and cannot be parsed reliably
   const recentShipments = useMemo(() =>
     [...shipments].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 6),
@@ -283,9 +280,9 @@ export default function DashboardScreen() {
   const offlineDrivers = useMemo(() => drivers.filter(d => d.status === 'Offline'), [drivers]);
 
   const distSegments: DistSeg[] = useMemo(() => [
-    { label: t('common.inTransitLabel'), icon: 'directions-car',  color: Colors.primary,  count: shipments.filter(s => ['In Transit','Dispatched','Border Crossing'].includes(s.status)).length },
-    { label: t('common.customsLabel'),   icon: 'verified-user',   color: Colors.warning,  count: shipments.filter(s => ['Customs Clearance','Customs Pending'].includes(s.status)).length },
-    { label: t('common.arrivedLabel'),   icon: 'check-circle',    color: Colors.success,  count: shipments.filter(s => s.status === 'Arrived').length },
+    { label: t('common.inTransitLabel'), icon: 'directions-car',  color: Colors.primary,  count: shipments.filter(s => isActiveStatus(s.status)).length },
+    { label: t('common.customsLabel'),   icon: 'verified-user',   color: Colors.warning,  count: shipments.filter(s => isCustomsStatus(s.status)).length },
+    { label: t('common.arrivedLabel'),   icon: 'check-circle',    color: Colors.success,  count: shipments.filter(s => s.status === 'Arrived' || s.status === 'Arrived at Hub').length },
     { label: t('common.loadedLabel'),    icon: 'inventory',       color: Colors.info,     count: shipments.filter(s => s.status === 'Loaded').length },
     { label: 'Detained',                 icon: 'block',           color: Colors.danger,   count: shipments.filter(s => s.status === 'Detained').length },
   ], [shipments, t]);

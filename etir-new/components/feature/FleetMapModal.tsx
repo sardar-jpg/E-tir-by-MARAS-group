@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Shipment } from '@/types';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { Colors, FontSize, Spacing, BorderRadius, Shadow } from '@/constants/theme';
+import { isActiveStatus, isCustomsStatus } from '@/services/shipmentStatusGroups';
 
 // Lazy-load LiveMap to avoid crashes in Expo Go
 let LiveMap: typeof import('@/components/feature/LiveMap').LiveMap | null = null;
@@ -16,6 +17,7 @@ try { LiveMap = require('@/components/feature/LiveMap').LiveMap; } catch (e) {}
 
 // ── Status colors ─────────────────────────────────────────────────────────────
 const STATUS_COLORS: Record<string, string> = {
+  // Road
   'In Transit':         Colors.primary,
   'Dispatched':         '#D2A8FF',
   'Border Crossing':    '#D2A8FF',
@@ -24,6 +26,17 @@ const STATUS_COLORS: Record<string, string> = {
   'Arrived':            Colors.success,
   'Detained':           Colors.danger,
   'Loaded':             Colors.info,
+  // Sea
+  'Booked':                 '#38BDF8',
+  'At Port of Loading':     '#818CF8',
+  'Vessel Departed':        '#0EA5E9',
+  'At Sea':                 Colors.primary,
+  'At Port of Discharge':   '#818CF8',
+  'Port Customs':           Colors.warning,
+  // Air
+  'Awaiting Flight':    '#7DD3FC',
+  'In Flight':          '#38BDF8',
+  'Arrived at Hub':     '#34D399',
 };
 
 const FILTER_OPTIONS = [
@@ -36,9 +49,9 @@ const FILTER_OPTIONS = [
 
 function matchesFilter(s: Shipment, filter: string): boolean {
   switch (filter) {
-    case 'active':   return ['In Transit', 'Dispatched', 'Border Crossing'].includes(s.status);
-    case 'customs':  return ['Customs Clearance', 'Customs Pending'].includes(s.status);
-    case 'arrived':  return s.status === 'Arrived';
+    case 'active':   return isActiveStatus(s.status);
+    case 'customs':  return isCustomsStatus(s.status);
+    case 'arrived':  return s.status === 'Arrived' || s.status === 'Arrived at Hub';
     case 'detained': return s.status === 'Detained';
     default:         return true;
   }

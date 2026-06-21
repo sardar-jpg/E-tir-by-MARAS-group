@@ -11,7 +11,7 @@ import { Colors, FontSize, Spacing } from '@/constants/theme';
 export default function ShipmentDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { shipments, updateStatus, assignDriver, updateETA } = useShipments();
+  const { shipments, updateStatus, assignDriver, updateETA, setContainersLocal } = useShipments();
 
   const shipment = shipments.find(s => s.id === id);
 
@@ -40,6 +40,7 @@ export default function ShipmentDetailScreen() {
         onStatusChange={updateStatus}
         onDriverAssign={assignDriver}
         onETAChange={updateETA}
+        onContainersChange={setContainersLocal}
       />
     </SafeAreaView>
   );

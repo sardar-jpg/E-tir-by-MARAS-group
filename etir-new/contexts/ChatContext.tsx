@@ -8,6 +8,12 @@ import {
   sendLocalNotification, fetchAdminPushTokens, notifyAdminNewMessage,
   fetchDriverPushToken, notifyDriverNewMessage,
 } from '@/services/notificationService';
+import { supabase } from '@/services/supabaseClient';
+
+function isAdminEmail(email: string | null | undefined): boolean {
+  const e = email ?? '';
+  return e.endsWith('@marasgroup.com') || e.endsWith('@maras.iq');
+}
 
 interface ChatContextType {
   threads: ChatThread[];
@@ -45,6 +51,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // Initialised to null so the FIRST poll never fires stale notifications.
   const prevUnreadRef = useRef<Record<string, number> | null>(null);
 
+  const [isAdmin, setIsAdmin] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     const { threads: data } = await fetchAllThreads();
@@ -56,10 +64,39 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // fetchAllThreads() returns every driver's conversation with dispatch —
+  // only an admin session should trigger that bulk fetch. Driver sessions
+  // populate `threads` via the targeted initDriverThread/getShipmentThread
+  // calls below instead (each driver only ever fetches their own thread(s)).
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (cancelled) return;
+      const admin = isAdminEmail(session?.user?.email);
+      setIsAdmin(admin);
+      if (admin) load();
+      else setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && isAdminEmail(session?.user?.email)) {
+        setIsAdmin(true);
+        load();
+      } else if (event === 'SIGNED_OUT') {
+        setIsAdmin(false);
+        setThreads([]);
+        prevUnreadRef.current = null;
+        setLoading(false);
+      }
+    });
+
+    return () => { cancelled = true; subscription.unsubscribe(); };
+  }, [load]);
 
   // Poll every 10 seconds for new messages + notify admin only when thread is not active
+  // (admin sessions only — see gating above).
   useEffect(() => {
+    if (!isAdmin) return;
     const interval = setInterval(async () => {
       const { threads: freshThreads } = await fetchAllThreads();
 
@@ -91,7 +128,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setLoading(false);
     }, 10000);
     return () => clearInterval(interval);
-  }, [activeThreadId]);
+  }, [activeThreadId, isAdmin]);
 
   const activeThread = activeThreadId
     ? threads.find(t => t.id === activeThreadId) ?? null
@@ -111,7 +148,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const targetId = threadId ?? activeThreadId;
     if (!targetId || (!content.trim() && !attachmentUrl)) return;
 
-    // Optimistic update
+    // Optimistic update — starts unread; flips to read once the recipient
+    // actually opens the thread (see markRead), matching the DB default.
     const newMsg = {
       id: `msg-${Date.now()}`,
       senderId,
@@ -119,7 +157,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       senderRole,
       content: content.trim() || (attachmentUrl ? '📎 Attachment' : ''),
       timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      read: true,
+      read: false,
       attachmentUrl,
       attachmentType,
     };

@@ -290,7 +290,7 @@ function AnimatedCard({ children, index }: { children: React.ReactNode; index: n
 export default function ShipmentsScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ clientId?: string; clientName?: string }>();
-  const { shipments, loading: shipmentsLoading, updateStatus, assignDriver, updateETA } = useShipments();
+  const { shipments, loading: shipmentsLoading, updateStatus, assignDriver, updateETA, setContainersLocal } = useShipments();
   const { t } = useLanguage();
 
   const [statusFilter, setStatusFilter] = useState<FilterKey>('All');
@@ -678,6 +678,7 @@ export default function ShipmentsScreen() {
                 if (!Detail) return null;
                 return (
                   <Detail
+                    key={selectedShipment.id}
                     shipment={selectedShipment}
                     onClose={() => setSelectedShipment(null)}
                     onStatusChange={async (id: string, status: any) => {
@@ -691,6 +692,10 @@ export default function ShipmentsScreen() {
                     onETAChange={async (id: string, estimatedArrival: string) => {
                       await updateETA(id, estimatedArrival);
                       setSelectedShipment((prev: any) => prev ? { ...prev, estimatedArrival } : prev);
+                    }}
+                    onContainersChange={(id: string, containers: any) => {
+                      setContainersLocal(id, containers);
+                      setSelectedShipment((prev: any) => prev?.id === id ? { ...prev, containers } : prev);
                     }}
                   />
                 );

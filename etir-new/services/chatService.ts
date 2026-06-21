@@ -224,7 +224,12 @@ export async function sendChatMessage(
       sender_role: senderRole,
       content: safeContent,
       timestamp,
-      is_read: senderRole === 'admin',
+      // New messages always start unread — is_read reflects whether the
+      // *recipient* has opened this thread (see markThreadRead below), not
+      // who sent it. Marking admin messages read-on-send made the read
+      // receipt checkmark always show "read" even before the driver had
+      // seen it.
+      is_read: false,
       attachment_url: attachmentUrl ?? null,
       attachment_type: attachmentType ?? null,
     })

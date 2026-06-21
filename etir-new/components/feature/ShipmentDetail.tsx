@@ -23,7 +23,7 @@ try {
 } catch (e) {
   // Map unavailable (Expo Go or web fallback)
 }
-import { Shipment, ShipmentStatus, Driver } from '@/types';
+import { Shipment, ShipmentStatus, Driver, ContainerEntry } from '@/types';
 import { useDrivers } from '@/hooks/useDrivers';
 // SeaTrackingMap is lazily required — only loaded when a Sea shipment is actually rendered
 // This prevents react-native-maps from being pulled in when ShipmentDetail is imported
@@ -93,6 +93,7 @@ interface Props {
   onStatusChange?: (id: string, status: ShipmentStatus) => Promise<void>;
   onDriverAssign?: (id: string, driverId: string | null, driverName: string, plateNumber: string) => Promise<void>;
   onETAChange?: (id: string, estimatedArrival: string) => Promise<void>;
+  onContainersChange?: (id: string, containers: ContainerEntry[]) => void;
 }
 
 function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
@@ -104,7 +105,7 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-export function ShipmentDetail({ shipment, onClose, onStatusChange, onDriverAssign, onETAChange }: Props) {
+export function ShipmentDetail({ shipment, onClose, onStatusChange, onDriverAssign, onETAChange, onContainersChange }: Props) {
   const { drivers } = useDrivers();
   const [copied, setCopied] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
@@ -158,10 +159,14 @@ export function ShipmentDetail({ shipment, onClose, onStatusChange, onDriverAssi
       .eq('id', shipment.id);
     setSavingContainers(false);
     if (error) { setContainerSaveError(error.message); return; }
-    // Optimistically reflect in local prop via status change path
-    shipment.containers = payload;
+    // Notify the parent so its own shipment state updates immutably —
+    // mutating `shipment.containers` directly here would not propagate to
+    // the parent's selectedShipment state or the global ShipmentsContext
+    // list, leaving other views showing stale containers until a refetch.
+    onContainersChange?.(shipment.id, payload);
     setShowContainerEditor(false);
   };
+
 
   // ── Route History state ─────────────────────────────────────────────────
   const [routeHistory, setRouteHistory] = useState<LocationPoint[]>([]);
@@ -507,6 +512,21 @@ export function ShipmentDetail({ shipment, onClose, onStatusChange, onDriverAssi
                 ) : null}
                 {shipment.portOfLoading   && <InfoRow label="Port of Loading"    value={shipment.portOfLoading} />}
                 {shipment.portOfDischarge && <InfoRow label="Port of Discharge"  value={shipment.portOfDischarge} />}
+                {(() => {
+                  const arrivalDriver = shipment.additionalDrivers?.find(d => d.truck_class === 'Arrival Driver (Port Pickup)');
+                  if (!arrivalDriver) return null;
+                  return (
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Arrival Driver (Port Pickup)</Text>
+                      <View style={styles.transportModeRow}>
+                        <MaterialIcons name="person-pin" size={13} color={Colors.primary} />
+                        <Text style={[styles.infoValue, { color: Colors.textPrimary }]}>
+                          {arrivalDriver.driver_name}{arrivalDriver.plate_number ? ` (${arrivalDriver.plate_number})` : ''}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })()}
               </>
             )}
             {/* Agreed price — admin view (read-only indicator) */}

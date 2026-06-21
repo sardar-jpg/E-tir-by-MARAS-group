@@ -845,6 +845,14 @@ export function AddShipmentModal({ visible, onClose }: Props) {
     setCheckpoints(prev => prev.map(cp => cp.key === key ? { ...cp, [field]: value } : cp));
 
   const handleSave = async () => {
+    if (shipmentType === 'Air' && !mawbNumber.trim()) {
+      setError('MAWB Number is required for air shipments.');
+      return;
+    }
+    if (shipmentType === 'Sea' && !bolNumber.trim()) {
+      setError('B/L Number is required for sea shipments.');
+      return;
+    }
     const validCps = checkpoints.filter(cp => cp.name.trim());
     setError(''); setSaving(true);
     const input: CreateShipmentInput = {
@@ -1105,7 +1113,7 @@ export function AddShipmentModal({ visible, onClose }: Props) {
                     </View>
                     <View style={styles.twoCol}>
                       <View style={{ flex: 1 }}>
-                        <FormField label="MAWB *" value={mawbNumber} onChangeText={setMawbNumber} placeholder="235-12345678" icon="article" mono required />
+                        <FormField label="MAWB" value={mawbNumber} onChangeText={setMawbNumber} placeholder="235-12345678" icon="article" mono required />
                       </View>
                       <View style={{ flex: 1 }}>
                         <FormField label="HAWB" value={hawbNumber} onChangeText={setHawbNumber} placeholder="Optional" icon="article" mono />
@@ -1145,7 +1153,7 @@ export function AddShipmentModal({ visible, onClose }: Props) {
                         <FormField label="Voyage No." value={voyageNumber} onChangeText={setVoyageNumber} placeholder="e.g. VY-2026-04" icon="confirmation-number" mono />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <FormField label="B/L Number *" value={bolNumber} onChangeText={setBolNumber} placeholder="e.g. MEDUAG012345" icon="article" mono required />
+                        <FormField label="B/L Number" value={bolNumber} onChangeText={setBolNumber} placeholder="e.g. MEDUAG012345" icon="article" mono required />
                       </View>
                     </View>
                     <View style={styles.subDivider}>
@@ -1585,7 +1593,7 @@ function FormField({ label, value, onChangeText, placeholder, icon, mono, keyboa
   return (
     <View style={ffStyles.wrap}>
       <View style={ffStyles.labelRow}>
-        <Text style={ffStyles.label}>{label}{required ? '' : ''}</Text>
+        <Text style={ffStyles.label}>{label}{required ? ' *' : ''}</Text>
         {hint ? <Text style={ffStyles.hint}>{hint}</Text> : null}
       </View>
       <View style={ffStyles.inputRow}>

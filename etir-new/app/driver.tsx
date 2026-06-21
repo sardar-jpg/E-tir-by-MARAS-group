@@ -372,8 +372,21 @@ export default function DriverCompanion() {
 
   useEffect(() => {
     if (!activeShipment) return;
-    const activeStatuses = ['In Transit', 'Customs Clearance', 'Dispatched', 'Loaded', 'Customs Pending', 'Border Crossing'];
-    if (!activeStatuses.includes(activeShipment.status)) return;
+    // In-transit + customs statuses across all shipment types — GPS should
+    // keep tracking while the shipment is moving or sitting at any customs
+    // checkpoint, regardless of transport mode. Terminal statuses ('Arrived',
+    // 'Arrived at Hub', 'Detained') are excluded since there's nothing to track.
+    const trackableStatuses: ShipmentStatus[] = [
+      // Road
+      'Loaded', 'Dispatched', 'In Transit', 'Border Crossing',
+      // Sea
+      'Booked', 'At Port of Loading', 'Vessel Departed', 'At Sea', 'At Port of Discharge', 'Port Customs',
+      // Air
+      'Awaiting Flight', 'In Flight',
+      // Universal customs
+      'Customs Clearance', 'Customs Pending',
+    ];
+    if (!trackableStatuses.includes(activeShipment.status)) return;
     setGpsStarting(true);
     setGpsError('');
     startTracking(activeShipment.id,

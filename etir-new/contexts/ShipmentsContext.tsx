@@ -1,7 +1,9 @@
 import React, { createContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { Shipment, ShipmentStatus } from '@/types';
+import { Shipment, ShipmentStatus, ContainerEntry } from '@/types';
 import { fetchAllShipments, fetchShipmentByToken, updateShipmentStatus, updateShipmentETA, assignDriverToShipment, createShipment, acceptAgreedPrice, CreateShipmentInput } from '@/services/shipmentService';
 import { fetchDriverPushToken, notifyDriverStatusChange } from '@/services/notificationService';
+import { supabase } from '@/services/supabaseClient';
+import { isActiveStatus, isCustomsStatus, isArrivedStatus } from '@/services/shipmentStatusGroups';
 
 interface ShipmentsContextType {
   shipments: Shipment[];
@@ -17,6 +19,8 @@ interface ShipmentsContextType {
   acceptPrice: (id: string) => Promise<void>;
   addShipment: (input: CreateShipmentInput) => Promise<{ error: string | null }>;
   getStats: () => { total: number; active: number; pending: number; arrived: number };
+  /** Sync containers into shared state after they've already been persisted elsewhere (no DB call). */
+  setContainersLocal: (id: string, containers: ContainerEntry[]) => void;
 }
 
 export const ShipmentsContext = createContext<ShipmentsContextType | undefined>(undefined);
@@ -40,7 +44,29 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    // Only load shipments once a session exists (admin or driver). Public/
+    // unauthenticated routes (e.g. /tracking, /customer pre-login) must not
+    // trigger a bulk fetch of every shipment — they look up a single
+    // shipment via fetchShipmentByTirNumber/fetchShipmentById instead.
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (cancelled) return;
+      if (session?.user) load();
+      else setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        load();
+      } else if (event === 'SIGNED_OUT') {
+        setShipments([]);
+        setLoading(false);
+      }
+    });
+
+    return () => { cancelled = true; subscription.unsubscribe(); };
+  }, [load]);
 
   const getByToken = useCallback(
     (token: string) => shipments.find(s => s.token === token) ?? null,
@@ -109,21 +135,22 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
 
   const getStats = useCallback(() => {
     const total = shipments.length;
-    // 'active' = shipments actively moving (Customs Clearance excluded — it is
-    // its own 'pending' category and must not be double-counted).
-    const active = shipments.filter(s =>
-      ['In Transit', 'Dispatched', 'Border Crossing'].includes(s.status)
-    ).length;
-    // 'pending' = shipments held at customs (Clearance + Pending)
-    const pending = shipments.filter(s =>
-      s.status === 'Customs Pending' || s.status === 'Customs Clearance'
-    ).length;
-    const arrived = shipments.filter(s => s.status === 'Arrived').length;
+    // 'active' = shipments actively moving across any transport mode (Road/Sea/Air).
+    // Customs-held statuses are excluded — they are their own 'pending' bucket.
+    const active = shipments.filter(s => isActiveStatus(s.status)).length;
+    // 'pending' = shipments held at any customs checkpoint (Road/Sea/Air all have one).
+    const pending = shipments.filter(s => isCustomsStatus(s.status)).length;
+    // 'arrived' = shipment reached final destination, for any transport mode.
+    const arrived = shipments.filter(s => isArrivedStatus(s.status)).length;
     return { total, active, pending, arrived };
   }, [shipments]);
 
+  const setContainersLocal = useCallback((id: string, containers: ContainerEntry[]) => {
+    setShipments(prev => prev.map(s => s.id === id ? { ...s, containers } : s));
+  }, []);
+
   return (
-    <ShipmentsContext.Provider value={{ shipments, loading, error, refresh: load, getByToken, getById, getByTirNumber, updateStatus, assignDriver, updateETA, acceptPrice, addShipment, getStats }}>
+    <ShipmentsContext.Provider value={{ shipments, loading, error, refresh: load, getByToken, getById, getByTirNumber, updateStatus, assignDriver, updateETA, acceptPrice, addShipment, getStats, setContainersLocal }}>
       {children}
     </ShipmentsContext.Provider>
   );

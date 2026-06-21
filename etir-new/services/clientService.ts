@@ -57,25 +57,40 @@ export interface CreateClientInput {
 export async function createClient(
   input: CreateClientInput
 ): Promise<{ client: Client | null; error: string | null }> {
-  // Use insert without .select().single() to avoid RLS USING clause issues on the
-  // returned row. Instead, fetch the newly created row by name + email after insert.
-  const { error: insertError } = await supabase
+  const payload = {
+    name: input.name.trim(),
+    company: input.company?.trim() || null,
+    email: input.email?.trim() || null,
+    phone: input.phone?.trim() || null,
+    country: input.country?.trim() || null,
+    city: input.city?.trim() || null,
+    notes: input.notes?.trim() || null,
+  };
+
+  // Try the atomic insert+select first — this avoids any race condition
+  // since it returns exactly the row just inserted, not a heuristic lookup.
+  const { data: inserted, error: insertSelectError } = await supabase
     .from('clients')
-    .insert({
-      name: input.name.trim(),
-      company: input.company?.trim() || null,
-      email: input.email?.trim() || null,
-      phone: input.phone?.trim() || null,
-      country: input.country?.trim() || null,
-      city: input.city?.trim() || null,
-      notes: input.notes?.trim() || null,
-    });
+    .insert(payload)
+    .select()
+    .single();
+
+  if (!insertSelectError && inserted) {
+    return { client: mapClient(inserted as RawClient), error: null };
+  }
+
+  // Fallback path: some RLS configurations reject the USING clause on the
+  // returned row even though the insert itself succeeds. Retry as a plain
+  // insert, then look up the row we just created. This re-fetch is a
+  // heuristic (newest row matching name) and is NOT race-free under
+  // concurrent creates of clients with the same name — it's only used when
+  // the atomic path above is unavailable.
+  const { error: insertError } = await supabase.from('clients').insert(payload);
   if (insertError) {
     console.log('[createClient] insert error:', insertError.message, insertError.code);
     return { client: null, error: insertError.message };
   }
 
-  // Fetch the newly created row (latest by created_at matching name)
   const { data: fetchedRows, error: fetchError } = await supabase
     .from('clients')
     .select('*')

@@ -23,20 +23,44 @@ import { Shipment, ShipmentStatus } from '@/types';
 
 type PanelTab = 'operations' | 'broadcast' | 'fleet' | 'alerts' | 'config' | 'approvals';
 
+// All shipment statuses across every transport mode (Road/Sea/Air) — see
+// types/index.ts. This list previously only contained the 8 Road statuses,
+// which meant the Bulk Action status picker couldn't set Sea/Air statuses
+// at all, and the Status Breakdown chart silently dropped any Sea/Air
+// shipment from its rows while still counting it in the percentage total.
 const STATUSES: ShipmentStatus[] = [
-  'Loaded', 'Dispatched', 'In Transit', 'Border Crossing',
-  'Customs Clearance', 'Customs Pending', 'Arrived', 'Detained',
+  // Universal
+  'Loaded', 'Dispatched', 'Customs Clearance', 'Customs Pending', 'Arrived', 'Detained',
+  // Road-specific
+  'In Transit', 'Border Crossing',
+  // Sea-specific
+  'Booked', 'At Port of Loading', 'Vessel Departed', 'At Sea', 'At Port of Discharge', 'Port Customs',
+  // Air-specific
+  'Awaiting Flight', 'In Flight', 'Arrived at Hub',
 ];
 
 const STATUS_COLOR: Record<ShipmentStatus, string> = {
+  // Universal
   'Loaded':             Colors.info,
   'Dispatched':         '#D2A8FF',
-  'In Transit':         Colors.primary,
-  'Border Crossing':    '#D2A8FF',
   'Customs Clearance':  Colors.warning,
   'Customs Pending':    Colors.warning,
   'Arrived':            Colors.success,
   'Detained':           Colors.danger,
+  // Road-specific
+  'In Transit':         Colors.primary,
+  'Border Crossing':    '#D2A8FF',
+  // Sea-specific
+  'Booked':                  '#38BDF8',
+  'At Port of Loading':      '#818CF8',
+  'Vessel Departed':         '#0EA5E9',
+  'At Sea':                  Colors.primary,
+  'At Port of Discharge':    '#818CF8',
+  'Port Customs':            Colors.warning,
+  // Air-specific
+  'Awaiting Flight':    '#7DD3FC',
+  'In Flight':          '#38BDF8',
+  'Arrived at Hub':     '#34D399',
 };
 
 interface ControlPanelProps {

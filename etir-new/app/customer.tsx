@@ -62,9 +62,12 @@ function mapShipment(row: any): Shipment {
     voyageNumber: row.voyage_number,
     bolNumber: row.bol_number,
     containerNumber: row.container_number,
+    containers: Array.isArray(row.containers) ? row.containers : [],
     portOfLoading: row.port_of_loading,
     portOfDischarge: row.port_of_discharge,
     shippingLine: row.shipping_line,
+    incoterms: row.incoterms,
+    additionalDrivers: Array.isArray(row.additional_drivers) ? row.additional_drivers : [],
     clientId: row.client_id,
     clientName: row.client_name,
     createdAt: row.created_at ?? '',
@@ -854,31 +857,47 @@ export default function CustomerPortal() {
 
   // ── Load client record after login ────────────────────────────────────────
   useEffect(() => {
-    if (!session?.user?.email) return;
+    if (!session?.user?.email || !session?.user?.id) return;
     setClientLoading(true);
+
+    const applyClientRecord = (data: any) => {
+      setClientLoading(false);
+      if (data) {
+        clientIdRef.current = data.id;
+        setClientRecord({
+          id: data.id, name: data.name, company: data.company,
+          email: data.email, phone: data.phone, country: data.country,
+          city: data.city, notes: data.notes,
+          createdAt: data.created_at, updatedAt: data.updated_at,
+        });
+        setNoAccount(false);
+        isInitialLoadRef.current = true;
+        loadShipments(data.id);
+      } else {
+        setNoAccount(true);
+      }
+    };
+
+    // customer_user_id is the authoritative link an admin sets explicitly
+    // (see app/(tabs)/clients.tsx "Link Account") — check it first, since
+    // it's meant to work even when the client's email-on-file differs from
+    // the email the customer actually signed up with. Email match is the
+    // fallback for customers who were never explicitly linked.
     supabase
       .from('clients')
       .select('*')
-      .eq('email', session.user.email)
+      .eq('customer_user_id', session.user.id)
       .maybeSingle()
-      .then(({ data }) => {
-        setClientLoading(false);
-        if (data) {
-          clientIdRef.current = data.id;
-          setClientRecord({
-            id: data.id, name: data.name, company: data.company,
-            email: data.email, phone: data.phone, country: data.country,
-            city: data.city, notes: data.notes,
-            createdAt: data.created_at, updatedAt: data.updated_at,
-          });
-          setNoAccount(false);
-          isInitialLoadRef.current = true;
-          loadShipments(data.id);
-        } else {
-          setNoAccount(true);
-        }
+      .then(({ data: byUserId }) => {
+        if (byUserId) { applyClientRecord(byUserId); return; }
+        supabase
+          .from('clients')
+          .select('*')
+          .eq('email', session.user.email)
+          .maybeSingle()
+          .then(({ data: byEmail }) => applyClientRecord(byEmail));
       });
-  }, [session?.user?.email]);
+  }, [session?.user?.email, session?.user?.id]);
 
   // ── Load shipments ────────────────────────────────────────────────────────
   const loadShipments = useCallback(async (clientId: string, isPoll = false) => {
