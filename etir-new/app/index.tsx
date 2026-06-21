@@ -173,6 +173,7 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   // Register fields
   const [regName,       setRegName]       = useState('');
@@ -217,7 +218,7 @@ export default function LoginScreen() {
     }
   }, [user, pathname]);
 
-  if (isLoading && !user) return <SplashScreen />;
+  if (isLoading && !user && !hasInteracted) return <SplashScreen />;
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
   const resetOtp = () => {
@@ -229,6 +230,7 @@ export default function LoginScreen() {
   const focusFirstOtp = () => setTimeout(() => otpRefs[0].current?.focus(), 350);
 
   const handleLogin = async () => {
+    setHasInteracted(true);
     setError('');
     if (!email.trim() || !password.trim()) { setError(t('auth.fillCredentials')); return; }
     const res = await login(email.trim(), password.trim());
@@ -248,6 +250,7 @@ export default function LoginScreen() {
   };
 
   const handleRegister = async () => {
+    setHasInteracted(true);
     setError('');
     if (!regName || !regEmail || !regPhone || !regPlate || !regPassword) {
       setError(t('auth.fillAll')); return;

@@ -1,0 +1,218 @@
+{
+  "entities": {
+    "Driver": {
+      "title": "Driver",
+      "description": "Information about transport vehicle operators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "truckNumber": { "type": "string" },
+        "phone": { "type": "string" },
+        "activeShipmentsCount": { "type": "number" },
+        "completedShipmentsCount": { "type": "number" }
+      },
+      "required": ["id", "name", "username", "truckNumber", "phone", "activeShipmentsCount", "completedShipmentsCount"]
+    },
+    "Shipment": {
+      "title": "Shipment",
+      "description": "Logistical cargo shipment being tracked across multiple countries",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shipmentNumber": { "type": "string" },
+        "companyName": { "type": "string" },
+        "loadingCountry": { "type": "string" },
+        "loadingCity": { "type": "string" },
+        "loadingAddress": { "type": "string" },
+        "loadingContactNumber": { "type": "string" },
+        "deliveryCountry": { "type": "string" },
+        "deliveryCity": { "type": "string" },
+        "deliveryAddress": { "type": "string" },
+        "deliveryContactNumber": { "type": "string" },
+        "cargoDescription": { "type": "string" },
+        "cargoWeight": { "type": "number" },
+        "truckNumber": { "type": "string" },
+        "assignedDriverId": { "type": "string" },
+        "assignedDriverName": { "type": "string" },
+        "agreedAmount": { "type": "number" },
+        "currency": { "type": "string" },
+        "internalNotes": { "type": "string" },
+        "status": { "type": "string" },
+        "documents": { "type": "array" },
+        "timeline": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "isLinkShared": { "type": "boolean" },
+        "shareToken": { "type": "string" },
+        "shareIncludeDocuments": { "type": "boolean" },
+        "shareIncludePhotos": { "type": "boolean" }
+      },
+      "required": ["id", "shipmentNumber", "companyName", "status", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Helpline text or document transmission record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shipmentId": { "type": "string" },
+        "sender": { "type": "string" },
+        "senderName": { "type": "string" },
+        "type": { "type": "string" },
+        "text": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileCategory": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "shipmentId", "sender", "senderName", "type", "timestamp"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Logistics event and chat notification",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shipmentId": { "type": "string" },
+        "shipmentNumber": { "type": "string" },
+        "titleEn": { "type": "string" },
+        "titleTr": { "type": "string" },
+        "titleAr": { "type": "string" },
+        "messageEn": { "type": "string" },
+        "messageTr": { "type": "string" },
+        "messageAr": { "type": "string" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "read": { "type": "boolean" }
+      },
+      "required": ["id", "shipmentId", "shipmentNumber", "type", "read", "timestamp"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "System-wide tracking logs audit trail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shipmentId": { "type": "string" },
+        "shipmentNumber": { "type": "string" },
+        "actionEn": { "type": "string" },
+        "actionTr": { "type": "string" },
+        "actionAr": { "type": "string" },
+        "actor": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "shipmentId", "shipmentNumber", "actor", "timestamp"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Information about registered corporate and individual cargo shippers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "companyName": { "type": "string" },
+        "contactName": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "address": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "companyName", "contactName", "phone", "email", "createdAt"]
+    },
+    "Vendor": {
+      "title": "Vendor",
+      "description": "Information about transport partners, border customs agencies, ports, and external suppliers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "companyName": { "type": "string" },
+        "contactName": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "address": { "type": "string" },
+        "serviceType": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "companyName", "contactName", "phone", "serviceType", "createdAt"]
+    },
+    "CostItem": {
+      "title": "CostItem",
+      "description": "An individual fee or cost line item within a shipment cost breakdown",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "costType": { "type": "string" },
+        "description": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "currency": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "documentUrl": { "type": "string" },
+        "documentName": { "type": "string" },
+        "internalNotes": { "type": "string" }
+      },
+      "required": ["id", "costType", "quantity", "unitPrice", "totalAmount"]
+    },
+    "CostStatement": {
+      "title": "CostStatement",
+      "description": "Accounts cost breakdown and statement for a transport shipment",
+      "type": "object",
+      "properties": {
+        "shipmentId": { "type": "string" },
+        "shipmentNumber": { "type": "string" },
+        "companyName": { "type": "string" },
+        "shipmentType": { "type": "string" },
+        "date": { "type": "string" },
+        "currency": { "type": "string" },
+        "totalCost": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "remainingBalance": { "type": "number" },
+        "paymentStatus": { "type": "string" },
+        "notes": { "type": "string" },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["shipmentId", "shipmentNumber", "companyName", "totalCost", "paidAmount", "remainingBalance", "paymentStatus"]
+    }
+  },
+  "firestore": {
+    "drivers": {
+      "schema": "Driver",
+      "description": "List of active registered logistics drivers"
+    },
+    "shipments": {
+      "schema": "Shipment",
+      "description": "Master tracked shipments storage collection"
+    },
+    "chatMessages": {
+      "schema": "ChatMessage",
+      "description": "Helpline message threads indexed by shipmentId"
+    },
+    "notifications": {
+      "schema": "AppNotification",
+      "description": "List of operational push alerts"
+    },
+    "activityLogs": {
+      "schema": "ActivityLog",
+      "description": "Continuous event log items for dashboard views"
+    },
+    "clients": {
+      "schema": "Client",
+      "description": "Registered clients database for order management"
+    },
+    "vendors": {
+      "schema": "Vendor",
+      "description": "Registered vendors & service agencies database for expense/cost billing"
+    },
+    "costStatements": {
+      "schema": "CostStatement",
+      "description": "Collection storing shipment cost breakdowns and financial accounting data"
+    }
+  }
+}

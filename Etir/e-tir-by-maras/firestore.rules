@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper to check if id is a valid string up to 128 characters
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
+    }
+
+    // Drivers Rules
+    match /drivers/{driverId} {
+      allow read: if true;
+      allow write: if isValidId(driverId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.name is string && 
+                   request.resource.data.username is string;
+    }
+
+    // Shipments Rules
+    match /shipments/{shipmentId} {
+      allow read: if true;
+      allow write: if isValidId(shipmentId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.shipmentNumber is string && 
+                   request.resource.data.status is string;
+    }
+
+    // ChatMessages Rules
+    match /chatMessages/{messageId} {
+      allow read: if true;
+      allow write: if isValidId(messageId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.shipmentId is string && 
+                   request.resource.data.senderName is string;
+    }
+
+    // Notifications Rules
+    match /notifications/{notifId} {
+      allow read: if true;
+      allow write: if isValidId(notifId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.shipmentId is string;
+    }
+
+    // ActivityLogs Rules
+    match /activityLogs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.shipmentId is string;
+    }
+
+    // Clients Rules
+    match /clients/{clientId} {
+      allow read: if true;
+      allow write: if isValidId(clientId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.companyName is string && 
+                   request.resource.data.contactName is string;
+     }
+
+    // Vendors Rules
+    match /vendors/{vendorId} {
+      allow read: if true;
+      allow write: if isValidId(vendorId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.companyName is string && 
+                   request.resource.data.contactName is string;
+    }
+
+    // CostStatements Rules
+    match /costStatements/{statementId} {
+      allow read: if true;
+      allow write: if isValidId(statementId) &&
+                   request.resource.data.shipmentId is string &&
+                   request.resource.data.shipmentNumber is string &&
+                   request.resource.data.paymentStatus is string;
+    }
+
+    // Test Connection Rules
+    match /test/{docId} {
+      allow read, write: if isValidId(docId);
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(code-review)",
+      "Skill(code-review:*)",
+      "Bash(npm run *)",
+      "Bash(git -C /Users/sardardizayee/Downloads/U8Jt5URce9S5mcrMZaBX5Z diff --name-only)",
+      "Bash(mkdir -p /Users/sardardizayee/Downloads/U8Jt5URce9S5mcrMZaBX5Z/.claude)",
+      "Bash(mkdir -p /Users/sardardizayee/Downloads/9oAW6nvJ3nF6JAorFSPGWb/.claude)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(which npx *)",
+      "Bash(ls /Users/sardardizayee/antigravity/e-tir-by-MARAS/node-env/node-v22.12.0-darwin-arm64/bin/)",
+      "Bash(/Users/sardardizayee/antigravity/e-tir-by-MARAS/node-env/node-v22.12.0-darwin-arm64/bin/npm install *)",
+      "Bash(PATH=/Users/sardardizayee/antigravity/e-tir-by-MARAS/node-env/node-v22.12.0-darwin-arm64/bin:__TRACKED_VAR__ node --version)",
+      "Bash(npm --version)",
+      "Bash(PATH=/Users/sardardizayee/antigravity/e-tir-by-MARAS/node-env/node-v22.12.0-darwin-arm64/bin:__TRACKED_VAR__ npm install)",
+      "Bash(PATH=/Users/sardardizayee/antigravity/e-tir-by-MARAS/node-env/node-v22.12.0-darwin-arm64/bin:__TRACKED_VAR__ npm install --legacy-peer-deps)",
+      "Read(//usr/bin/**)",
+      "Read(//Users/sardardizayee/.nvm/alias/**)"
+    ]
+  }
+}

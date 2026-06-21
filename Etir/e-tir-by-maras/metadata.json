@@ -1,0 +1,6 @@
+{
+  "name": "e-tir by MARAS",
+  "description": "Professional logistics and truck management platform developed for MARAS Group to manage international transportation operations between countries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
