@@ -466,13 +466,24 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   useEffect(() => {
     fetch("/api/maps-key")
-      .then(res => res.json())
+      .then(async res => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          return res.json();
+        } else {
+          const text = await res.text();
+          throw new Error(`Non-JSON response: ${text.slice(0, 50)}`);
+        }
+      })
       .then(data => {
         if (data && data.key) {
           setActiveMapsKey(data.key);
         }
       })
-      .catch(err => console.error("Error fetching map configuration:", err));
+      .catch(err => console.warn("Could not retrieve map configuration gracefully:", err.message));
   }, []);
 
   const [localDrivers, setLocalDrivers] = useState<Driver[]>(drivers || []);

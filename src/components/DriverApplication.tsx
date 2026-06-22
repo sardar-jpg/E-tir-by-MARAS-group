@@ -364,13 +364,24 @@ export default function DriverApplication({
 
   useEffect(() => {
     fetch("/api/maps-key")
-      .then(res => res.json())
+      .then(async res => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          return res.json();
+        } else {
+          const text = await res.text();
+          throw new Error(`Non-JSON response: ${text.slice(0, 50)}`);
+        }
+      })
       .then(data => {
         if (data && data.key) {
           setActiveMapsKey(data.key);
         }
       })
-      .catch(err => console.error("Error fetching map configuration:", err));
+      .catch(err => console.warn("Could not retrieve map configuration gracefully:", err.message));
   }, []);
 
   // Driver App Settings & Tools States
@@ -4018,6 +4029,43 @@ export default function DriverApplication({
                               className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all"
                             >
                               {distanceUnit === 'km' ? 'KM (METRIC)' : 'MI (IMPERIAL)'}
+                            </button>
+                          </div>
+
+                          {/* Daylight/Nighttime View Theme Switcher - Now prominently in App Preferences */}
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs">
+                            <div className="space-y-0.5 text-left">
+                              <span className="text-[11px] font-bold text-white block">
+                                {lang === 'tr' ? "Görünürlük Kontrast Modu" : lang === 'ar' ? "وضع تباين الرؤية" : "Visibility Contrast Mode"}
+                              </span>
+                              <span className="text-[9px] text-slate-550 block leading-tight">
+                                {lang === 'tr' 
+                                  ? "Gündüz Işığı ile Gece Karanlığı arasında geçiş yapın" 
+                                  : lang === 'ar' 
+                                  ? "التنقل بين الوضع النهاري والوضع الداكن للرؤية" 
+                                  : "Toggle between bright Day Light and relaxed Night Dark"}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextTheme = theme === 'dark' ? 'light' : 'dark';
+                                setTheme(nextTheme);
+                                triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for bright daylight visibility." : "🌙 Dark mode enabled for relaxed night driving.");
+                              }}
+                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer animate-fade-in"
+                            >
+                              {theme === 'dark' ? (
+                                <>
+                                  <Moon className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+                                  <span>Night (Dark)</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sun className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                  <span>Day (Light)</span>
+                                </>
+                              )}
                             </button>
                           </div>
 
