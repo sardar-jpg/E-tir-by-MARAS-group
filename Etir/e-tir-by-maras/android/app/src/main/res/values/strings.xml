@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">e-TIR by MARAS</string>
-    <string name="title_activity_main">e-TIR by MARAS</string>
-    <string name="package_name">iq.maras.etir</string>
-    <string name="custom_url_scheme">iq.maras.etir</string>
-</resources>
