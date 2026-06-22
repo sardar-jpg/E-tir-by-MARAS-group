@@ -18,7 +18,7 @@ import {
 import { TRANSLATIONS } from "../translations";
 import { 
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, Legend
+  PieChart, Pie, Cell, Legend, LineChart, Line, AreaChart, Area
 } from 'recharts';
 import { 
   Plus, Search, Filter, ShieldCheck, Share2, MessageSquare, 
@@ -692,6 +692,113 @@ MARAS Group e-tir Center`;
     const interval = setInterval(pollShipments, 60000);
     return () => clearInterval(interval);
   }, []);
+
+  // Ref to track status of shipments to detect transitions (e.g. from Pending to In Transit)
+  const prevShipmentsMapRef = React.useRef<Record<string, string>>({});
+  const isShipmentsRefInitialized = React.useRef(false);
+
+  useEffect(() => {
+    if (shipments.length === 0) return;
+
+    if (!isShipmentsRefInitialized.current) {
+      // On first load, initialize the map with current status to avoid false trigger on start
+      const currentMap: Record<string, string> = {};
+      shipments.forEach(s => {
+        currentMap[s.id] = s.status;
+      });
+      prevShipmentsMapRef.current = currentMap;
+      isShipmentsRefInitialized.current = true;
+      
+      // Request Desktop notification permission on first interaction/activation
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+      return;
+    }
+
+    // Compare new statuses against prior ones
+    shipments.forEach(s => {
+      const prevStatus = prevShipmentsMapRef.current[s.id];
+      if (prevStatus && prevStatus !== s.status) {
+        // Did we transit from 'Pending' (or equivalents like 'New', 'Assigned', 'Accepted') to 'In Transit'?
+        const isPriorPending = prevStatus === "Pending" || prevStatus === "New" || prevStatus === "Assigned" || prevStatus === "Accepted" || prevStatus === "Loading" || prevStatus === "Loaded";
+        const isNowTransit = s.status === "In Transit";
+
+        if (isPriorPending && isNowTransit) {
+          // Play clean audio notifications tone
+          try {
+            const ctxClass = window.AudioContext || (window as any).webkitAudioContext;
+            if (ctxClass) {
+              const ctx = new ctxClass();
+              const osc1 = ctx.createOscillator();
+              const gain1 = ctx.createGain();
+              osc1.frequency.value = 587.33; // D5
+              osc1.type = 'sine';
+              osc1.connect(gain1);
+              gain1.connect(ctx.destination);
+              gain1.gain.setValueAtTime(0.02, ctx.currentTime);
+              gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+              osc1.start();
+              osc1.stop(ctx.currentTime + 0.4);
+              
+              setTimeout(() => {
+                try {
+                  const osc2 = ctx.createOscillator();
+                  const gain2 = ctx.createGain();
+                  osc2.frequency.value = 880; // A5
+                  osc2.type = 'sine';
+                  osc2.connect(gain2);
+                  gain2.connect(ctx.destination);
+                  gain2.gain.setValueAtTime(0.02, ctx.currentTime);
+                  gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+                  osc2.start();
+                  osc2.stop(ctx.currentTime + 0.6);
+                } catch (_) {}
+              }, 120);
+            }
+          } catch (_) {}
+
+          // Generate a custom AppNotification object to display on UI
+          const transitNotifId = `transit-update-${s.id}-${Date.now()}`;
+          const customNotif: AppNotification = {
+            id: transitNotifId,
+            shipmentId: s.id,
+            shipmentNumber: s.shipmentNumber,
+            titleEn: "🚚 Shipment In Transit",
+            titleTr: "🚚 Sevkiyat Yola Çıktı",
+            titleAr: "🚚 الشحنة في الطريق الآن",
+            messageEn: `Active route started! Shipment #${s.shipmentNumber} to ${s.deliveryCity} is now In Transit with driver ${s.assignedDriverName || "N/A"}.`,
+            messageTr: `Aktif rota başladı! #${s.shipmentNumber} numaralı teslimat ${s.deliveryCity} yönüne, sürücü ${s.assignedDriverName || "N/A"} ile yola çıktı.`,
+            messageAr: `بدأت الرحلة النشطة! الشحنة رقم #${s.shipmentNumber} المتجهة إلى ${s.deliveryCity} هي الآن في الطريق مع السائق ${s.assignedDriverName || "N/A"}.`,
+            type: 'status_update',
+            timestamp: new Date().toISOString(),
+            read: false
+          };
+
+          // Show floating UI toast
+          showNotificationToast(customNotif);
+
+          // Trigger native push/desktop notification
+          if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+            const pushTitle = lang === "tr" ? "🚚 Sevkiyat Yola Çıktı!" : (lang === "ar" ? "🚚 الشحنة في الطريق!" : "🚚 Shipment In Transit!");
+            const pushBody = lang === "tr" 
+              ? `#${s.shipmentNumber} (${s.deliveryCity}) yönüne yola çıktı. Sürücü: ${s.assignedDriverName}` 
+              : (lang === "ar" ? `الشحنة #${s.shipmentNumber} متجهة إلى ${s.deliveryCity} مع السائق ${s.assignedDriverName}` : `Shipment #${s.shipmentNumber} is heading to ${s.deliveryCity}. Driver: ${s.assignedDriverName}`);
+            
+            try {
+              new Notification(pushTitle, {
+                body: pushBody,
+                tag: `transit-${s.id}`
+              });
+            } catch (_) {}
+          }
+        }
+      }
+      
+      // Update value in local map tracking
+      prevShipmentsMapRef.current[s.id] = s.status;
+    });
+  }, [shipments, lang]);
 
   // Sync manual operation panel values
   useEffect(() => {
@@ -1600,6 +1707,40 @@ MARAS Group e-tir Center`;
     { name: lang === 'tr' ? 'Tamamlanan Teslimat' : (lang === 'ar' ? 'شحنات مكتملة' : 'Completed Deliveries'), value: completedCountVal, color: '#10b981' }
   ].filter(d => d.value > 0);
 
+  // --- REAL-TIME RETRIEVAL STATS & CHARTS DATA ---
+  const shipmentsPendingDocs = shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && (!s.documents || s.documents.length === 0));
+  const pendingDocumentsCount = shipmentsPendingDocs.length;
+  const shipmentsWithDocsCount = shipments.filter(s => s.documents && s.documents.length > 0).length;
+
+  const realTimeDocsStats = [
+    { name: lang === 'tr' ? 'Evraklı Sevkıyatlar' : (lang === 'ar' ? 'شحنات بوثائق' : 'With Docs'), count: shipmentsWithDocsCount },
+    { name: lang === 'tr' ? 'Eksik Evraklılar' : (lang === 'ar' ? 'بانتظار الوثائق' : 'Pending Docs'), count: pendingDocumentsCount }
+  ];
+
+  // Group notifications by type for real-time overview chart
+  const notificationGroups = notifications.reduce((acc, n) => {
+    const type = n.type || 'other';
+    acc[type] = (acc[type] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
+  const notificationCountsChartData = Object.entries(notificationGroups).map(([type, count]) => {
+    let label = type;
+    if (type === 'assignment') label = lang === 'tr' ? 'Atama' : (lang === 'ar' ? 'تبليغ' : 'Assign');
+    else if (type === 'acceptance') label = lang === 'tr' ? 'Kabul' : (lang === 'ar' ? 'قبول' : 'Accept');
+    else if (type === 'rejection') label = lang === 'tr' ? 'Red' : (lang === 'ar' ? 'رفض' : 'Reject');
+    else if (type === 'status_update') label = lang === 'tr' ? 'Durum' : (lang === 'ar' ? 'تحديث' : 'Status');
+    else if (type === 'chat') label = lang === 'tr' ? 'Sohbet' : (lang === 'ar' ? 'دردشة' : 'Chat');
+    else if (type === 'doc_upload') label = lang === 'tr' ? 'Belge' : (lang === 'ar' ? 'وثيقة' : 'Doc Upload');
+    else if (type === 'delivery') label = lang === 'tr' ? 'Teslim' : (lang === 'ar' ? 'تسليم' : 'Delivery');
+    return { name: label, Alerts: count };
+  });
+
+  // Recent 5 alerts list for rapid operational clearance
+  const recentAlertsData = [...notifications]
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 5);
+
   // Match search query against cargo, company, cities, truck, driver, vessel, container or documents
   const filteredShipments = shipments.filter(s => {
     const q = searchQuery.toLowerCase();
@@ -2042,6 +2183,152 @@ MARAS Group e-tir Center`;
                 {currentTime.toLocaleDateString(lang === 'ar' ? 'ar-EG' : (lang === 'tr' ? 'tr-TR' : 'en-US'), { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
               </div>
             </div>
+          </div>
+
+          {/* 📊 REAL-TIME OPERATIONS & DOCUMENT INTEGRITY HUB (RECHARTS CHARTS) */}
+          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-5 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/60 pb-3">
+              <div className="space-y-1">
+                <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 bg-blue-600 rounded-full animate-pulse"></span>
+                  <span>{lang === 'tr' ? "Canlı Operasyonlar ve Belge Yönetimi" : (lang === 'ar' ? "لوحة الإحصائيات الفورية وتكامل الوثائق" : "Real-Time Operations & Document Integrity Hub")}</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 font-medium">
+                  {lang === 'tr' 
+                    ? "Sistem genelindeki aktif yük dağılımlarını, eksik evrak durumlarını ve anlık sürücü uyarılarını izleyin." 
+                    : (lang === 'ar' ? "تتبع توزيع الأحمال النشطة، حالة تسليم الأوراق، وتواتر التنبيهات الفورية الواردة من السائقين." : "Provides live analytics on shipments, pending digital documents (e-TIR backups), and incoming operational alert types.")}
+                </p>
+              </div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-800 text-[10px] font-bold rounded-lg tracking-wider font-mono uppercase cursor-default self-start sm:self-auto select-none">
+                <TrendingUp className="w-3.5 h-3.5" />
+                <span>Live telemetry status</span>
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* Card A: Active Shipments Distribution */}
+              <div className="bg-white p-4.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">{lang === 'tr' ? "Aktif Sevkiyat Dağılımı" : (lang === 'ar' ? "الشحنات النشطة حالياً" : "Active Cargo Loading")}</span>
+                    <h4 className="text-base font-black text-slate-900 tracking-tight flex items-baseline gap-1.5">
+                      <span>{activeShipmentsCount}</span>
+                      <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "yük yolda" : "active loads"}</span>
+                    </h4>
+                  </div>
+                  <span className="p-2 bg-gradient-to-tr from-blue-500/10 to-indigo-500/10 text-blue-600 rounded-lg"><Truck className="w-4 h-4" /></span>
+                </div>
+
+                <div className="h-28 w-full select-none">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={[
+                        { name: lang === 'tr' ? 'Karayolu' : 'Road', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "road").length },
+                        { name: lang === 'tr' ? 'Denizyolu' : 'Sea', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "sea").length },
+                        { name: lang === 'tr' ? 'Havayolu' : 'Air', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "air").length }
+                      ]}
+                      margin={{ top: 5, right: 10, left: -20, bottom: 0 }}
+                    >
+                      <defs>
+                        <linearGradient id="colorActive" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#2563eb" stopOpacity={0.2}/>
+                          <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="name" stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} />
+                      <YAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} />
+                      <Tooltip contentStyle={{ background: '#0f172a', border: 'none', borderRadius: '8px', color: '#fff', fontSize: '10px' }} />
+                      <Area type="monotone" dataKey="value" name={lang === 'tr' ? 'Sevkiyat' : 'Shipments'} stroke="#2563eb" strokeWidth={2} fillOpacity={1} fill="url(#colorActive)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Card B: Document Integrity Check */}
+              <div className="bg-white p-4.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">{lang === 'tr' ? "Belge Güvence Takibi" : (lang === 'ar' ? "تكامل وثائق الشحن" : "Document Integrity")}</span>
+                    <h4 className="text-base font-black text-amber-600 tracking-tight flex items-baseline gap-1.5">
+                      <span>{pendingDocumentsCount}</span>
+                      <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "ihbar var" : "need e-TIR doc"}</span>
+                    </h4>
+                  </div>
+                  <span className="p-2 bg-gradient-to-tr from-amber-500/10 to-orange-500/10 text-amber-600 rounded-lg"><FileText className="w-4 h-4" /></span>
+                </div>
+
+                <div className="h-28 w-full select-none">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={realTimeDocsStats}
+                      margin={{ top: 5, right: 10, left: -25, bottom: 0 }}
+                      barSize={16}
+                    >
+                      <XAxis dataKey="name" stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} />
+                      <YAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} />
+                      <Tooltip contentStyle={{ background: '#0f172a', border: 'none', borderRadius: '8px', color: '#fff', fontSize: '10px' }} />
+                      <Bar dataKey="count" name={lang === 'tr' ? 'Miktar' : 'Count'} radius={[4, 4, 0, 0]}>
+                        <Cell fill="#10b981" />
+                        <Cell fill="#f59e0b" />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Card C: Recent Notifications Distribution */}
+              <div className="bg-white p-4.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">{lang === 'tr' ? "Bildirim Tipi Dağılımı" : (lang === 'ar' ? "تواتر تنبيهات النظام" : "Notification Volume")}</span>
+                    <h4 className="text-base font-black text-rose-600 tracking-tight flex items-baseline gap-1.5">
+                      <span>{notifications.length}</span>
+                      <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "toplam bildirim" : "total notifications"}</span>
+                    </h4>
+                  </div>
+                  <span className="p-2 bg-gradient-to-tr from-rose-500/10 to-red-500/10 text-rose-600 rounded-lg"><BellRing className="w-4 h-4 animate-bounce" /></span>
+                </div>
+
+                <div className="h-28 w-full select-none">
+                  {notificationCountsChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={notificationCountsChartData.slice(0, 4)}
+                        margin={{ top: 5, right: 10, left: -25, bottom: 0 }}
+                        barSize={12}
+                      >
+                        <XAxis dataKey="name" stroke="#94a3b8" fontSize={8.5} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ background: '#0f172a', border: 'none', borderRadius: '8px', color: '#fff', fontSize: '10px' }} />
+                        <Bar dataKey="Alerts" name={lang === 'tr' ? 'Uyarı' : 'Alerts'} fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-slate-400 text-[10px] italic">
+                      {lang === 'tr' ? "Aktif uyarı bulunmamaktadır." : "No live system alerts found."}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Micro alert feed row for rapid response */}
+            {recentAlertsData.length > 0 && (
+              <div className="bg-slate-100 rounded-xl p-3 border border-slate-200/60 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <span className="font-bold text-slate-700 tracking-tight uppercase text-[10px] font-mono flex items-center gap-1.5 select-none shrink-0">
+                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
+                  <span>{lang === 'tr' ? "En Son Sinyaller:" : "Immediate Action Feed:"}</span>
+                </span>
+                <div className="flex-1 overflow-hidden">
+                  <div className="text-[11px] text-slate-650 font-medium truncate">
+                    {recentAlertsData[0].message}
+                  </div>
+                </div>
+                <span className="text-[9.5px] text-slate-400 font-mono whitespace-nowrap select-none">
+                  {new Date(recentAlertsData[0].timestamp).toLocaleTimeString(lang === 'tr' ? 'tr-TR' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* KPI Summary Banner */}

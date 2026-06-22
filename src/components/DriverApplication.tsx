@@ -464,6 +464,74 @@ export default function DriverApplication({
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
 
+  // Call Simulator States and Timers
+  const [callState, setCallState] = useState<'idle' | 'calling' | 'connected'>('idle');
+  const [callDuration, setCallDuration] = useState<number>(0);
+  const [shipmentsFilter, setShipmentsFilter] = useState<'all' | 'assigned' | 'transit' | 'completed'>('all');
+
+  useEffect(() => {
+    let interval: any;
+    if (callState === 'connected') {
+      interval = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    } else {
+      setCallDuration(0);
+    }
+    return () => clearInterval(interval);
+  }, [callState]);
+
+  const handleStartCall = () => {
+    if (callState !== 'idle') return;
+    setCallState('calling');
+    triggerToast(lang === 'tr' ? "☎️ Güvenli sevk telsiz araması başlatılıyor..." : (lang === 'ar' ? "☎️ جاري الاتصال الهاتفي الآمن..." : "☎️ Placing encrypted VoIP radio call to Logistics HQ..."));
+    
+    // Play calling ring tones using Web Audio API
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.frequency.value = 440;
+      gain.gain.setValueAtTime(0.01, audioCtx.currentTime);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.35);
+    } catch (_) {}
+
+    setTimeout(() => {
+      setCallState('connected');
+      triggerToast(lang === 'tr' ? "🎙️ Sevk sorumlusuna bağlanıldı." : (lang === 'ar' ? "🎙️ تم الاتصال بمسؤول المتابعة." : "🎙️ Connected to Logistics Command."));
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.02, audioCtx.currentTime);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.15);
+      } catch (_) {}
+    }, 2200);
+  };
+
+  const handleEndCall = () => {
+    setCallState('idle');
+    triggerToast(lang === 'tr' ? "📞 Sevk telsiz kanalı kapatıldı." : (lang === 'ar' ? "📞 تم إغلاق خط الاتصال." : "📞 Dispatch radio channel closed."));
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.frequency.value = 220;
+      gain.gain.setValueAtTime(0.02, audioCtx.currentTime);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.3);
+    } catch (_) {}
+  };
+
   // Input states
   const [newMessageText, setNewMessageText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1434,6 +1502,79 @@ export default function DriverApplication({
             }
           >
             
+            {/* CALL OVERLAY FOR SMARTPHONE INTERFACE */}
+            {callState !== 'idle' && (
+              <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-lg z-50 flex flex-col justify-between p-6 text-center select-none animate-fade-in" dir="ltr">
+                <div className="pt-10 space-y-2 flex flex-col items-center">
+                  <span className="bg-orange-500/10 text-orange-400 font-mono text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border border-orange-500/20">
+                    Encrypted Sat-Com Audio
+                  </span>
+                  <h3 className="font-extrabold text-white text-lg tracking-tight pt-2">HQ Operations Helpline</h3>
+                  <p className="text-[10px] text-slate-400 font-mono font-medium lowercase">Duty dispatcher dispatcher-hq-node-9</p>
+                </div>
+
+                {/* Pulsing visual indicator */}
+                <div className="flex flex-col items-center justify-center my-6 space-y-4">
+                  <div className="relative">
+                    <div className={`absolute -inset-4 bg-orange-500/10 rounded-full blur-xl transition-all duration-1000 ${callState === 'connected' ? 'scale-125 opacity-100 animate-pulse' : 'scale-75 opacity-20'}`} />
+                    <div className="w-24 h-24 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-white relative z-10 mx-auto">
+                      <div className={`w-20 h-20 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-black text-xl border-4 ${callState === 'connected' ? 'border-emerald-500 animate-pulse' : 'border-slate-850'}`}>
+                        HQ
+                      </div>
+                    </div>
+                    {callState === 'connected' && (
+                      <span className="absolute bottom-1 right-1 w-5 h-5 bg-emerald-500 rounded-full border-4 border-slate-950 flex items-center justify-center animate-ping" />
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    <p className={`font-mono font-bold text-xs ${callState === 'connected' ? 'text-emerald-450' : 'text-orange-400 animate-pulse'}`}>
+                      {callState === 'calling' ? 'DIALING SECURE SAT-LINK...' : 'CONNECTED (VOIP)'}
+                    </p>
+                    {callState === 'connected' && (
+                      <p className="font-mono text-xs font-black text-white/90">
+                        {Math.floor(callDuration / 60).toString().padStart(2, '0')}:{ (callDuration % 60).toString().padStart(2, '0') }
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Call stats / Voice waves */}
+                {callState === 'connected' ? (
+                  <div className="bg-slate-900/60 p-3 rounded-2xl border border-slate-850/45 text-[10px] text-slate-400 max-w-xs w-full mx-auto space-y-1 text-left font-mono">
+                    <div className="flex justify-between font-bold">
+                      <span className="text-slate-500">SIGNAL LATENCY:</span>
+                      <span className="text-emerald-400">12ms (OPTIMAL)</span>
+                    </div>
+                    <div className="flex justify-between font-bold">
+                      <span className="text-slate-500">SAT ENCRYPTION:</span>
+                      <span className="text-orange-400">AES-GCM-256</span>
+                    </div>
+                    <div className="flex justify-between font-bold">
+                      <span className="text-slate-500">BANDWIDTH:</span>
+                      <span className="text-white">Opus High-Def</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-550 max-w-xs mx-auto italic leading-relaxed">
+                    Connecting to closest logistics relay node. If signal is lost, coordinate cache remains stored locally.
+                  </p>
+                )}
+
+                {/* Hang Up Action */}
+                <div className="pb-8 flex flex-col items-center">
+                  <button
+                    onClick={handleEndCall}
+                    className="w-14 h-14 bg-red-600 hover:bg-red-700 hover:scale-105 active:scale-95 text-white rounded-full flex items-center justify-center shadow-[0_4px_20px_rgba(220,38,38,0.4)] transition-all cursor-pointer border-0"
+                    title="End Radio Link"
+                  >
+                    <X className="w-5 h-5 font-black text-white" />
+                  </button>
+                  <span className="text-[9px] font-mono font-black text-slate-500 block uppercase tracking-widest mt-2">End helpline radio</span>
+                </div>
+              </div>
+            )}
+
             {/* Native System Status Bar */}
             <div className="px-5 pt-1.5 pb-1 flex items-center justify-between text-[10px] font-mono text-slate-400 bg-slate-950 z-20 select-none">
               <span className="font-bold tracking-tight text-white">{simTime || "12:00 PM"}</span>
@@ -1561,6 +1702,43 @@ export default function DriverApplication({
                     </div>
                   </div>
 
+                  {/* Dynamic Telemetry Status Hub & Offline Indicators */}
+                  {cachedCoords.length > 0 ? (
+                    <div className="p-3 bg-amber-500/5 hover:bg-amber-500/15 border border-amber-500/25 rounded-2xl flex items-center justify-between text-left relative overflow-hidden transition-all shadow-md select-none animate-pulse">
+                      <div className="flex gap-2.5 items-start">
+                        <div className="w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/20 flex items-center justify-center shrink-0">
+                          <Compass className="w-4 h-4 text-amber-500 animate-spin" style={{ animationDuration: "12s" }} />
+                        </div>
+                        <div className="space-y-0.5">
+                          <h5 className="font-extrabold text-[10.5px] text-amber-400 font-mono tracking-tight">Offline Queue Active</h5>
+                          <p className="text-[9px] text-slate-400 leading-normal max-w-[210px]">
+                            {cachedCoords.length} transit telemetry updates are pending database sync.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await triggerGpsSync();
+                          triggerToast("Re-authenticating logs with HQ...");
+                        }}
+                        disabled={isSyncing}
+                        className="p-1.5 px-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 disabled:opacity-40 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-lg transition-all border-0 shadow-[0_2px_8px_rgba(249,115,22,0.2)]"
+                      >
+                        {isSyncing ? "Syncing..." : "Sync Logs"}
+                      </button>
+                    </div>
+                  ) : (
+                    /* General reporting stable indicator */
+                    <div className="p-2.5 bg-emerald-505/5 border border-emerald-500/15 rounded-2xl flex items-center justify-between text-[10px] text-slate-400 font-mono select-none">
+                      <div className="flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full bg-emerald-505 animate-pulse shrink-0"></div>
+                        <span className="font-bold">TELEMETRY LINK STATUS:</span>
+                      </div>
+                      <span className="text-emerald-450 font-black">SECURELY REPORTING</span>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between border-b border-slate-900 pb-2.5">
                     <div>
                       <h3 className="font-extrabold text-[#f97316] text-xs tracking-wide uppercase font-mono">{t('activeShipments')}</h3>
@@ -1571,8 +1749,43 @@ export default function DriverApplication({
                     </span>
                   </div>
 
+                  {/* Modern Horizontal Filter Bar */}
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 select-none no-scrollbar">
+                    {[
+                      { id: 'all', en: 'All Jobs', tr: 'Tüm Seferler', ar: 'جميع المهام' },
+                      { id: 'assigned', en: 'Assigned', tr: 'Planlananlar', ar: 'المعينة' },
+                      { id: 'transit', en: 'In Transit', tr: 'Yolda Olanlar', ar: 'في الطريق' },
+                      { id: 'completed', en: 'Completed', tr: 'Bitenler', ar: 'المكتملة' }
+                    ].map(f => {
+                      const isActive = shipmentsFilter === f.id;
+                      const label = lang === 'tr' ? f.tr : lang === 'ar' ? f.ar : f.en;
+                      return (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setShipmentsFilter(f.id as any)}
+                          className={`px-3 py-1.5 rounded-xl border font-mono text-[9.5px] font-bold tracking-tight whitespace-nowrap transition-all cursor-pointer ${
+                            isActive
+                              ? 'bg-orange-600/15 border-orange-500/40 text-orange-400 font-black'
+                              : 'bg-slate-950/40 border-slate-850 hover:border-slate-800 text-slate-450'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
                   <div className="space-y-3.5">
-                    {shipments.map((s) => {
+                    {shipments
+                      .filter(s => {
+                        if (shipmentsFilter === 'all') return true;
+                        if (shipmentsFilter === 'assigned') return s.status === 'Assigned';
+                        if (shipmentsFilter === 'transit') return s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance' || s.status === 'Loaded' || s.status === 'Loading' || s.status === 'Accepted';
+                        if (shipmentsFilter === 'completed') return s.status === 'Delivered' || s.status === 'Arrived';
+                        return true;
+                      })
+                      .map((s) => {
                       const isAssigned = s.status === 'Assigned';
                       const isTransit = s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance';
                       const isDelivered = s.status === 'Delivered' || s.status === 'Arrived';
@@ -1676,13 +1889,23 @@ export default function DriverApplication({
             {/* EXPANDED SHIPMENT DETAIL & CHAT / STATUS TAB PANEL */}
             {activeTab === 'shipments' && activeShipment && (
               <div className="space-y-4 pb-20">
-                {/* Back Link */}
-                <button 
-                  onClick={() => setActiveShipment(null)}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-white transition-all bg-slate-900/40 hover:bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full cursor-pointer"
-                >
-                  {lang === 'en' ? '← Back to Jobs' : lang === 'tr' ? '← İşlere Geri Dön' : '← العودة إلى المهام'}
-                </button>
+                {/* Back Link & Direct Call Hotline */}
+                <div className="flex items-center justify-between select-none">
+                  <button 
+                    onClick={() => setActiveShipment(null)}
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-white transition-all bg-slate-900/40 hover:bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full cursor-pointer"
+                  >
+                    {lang === 'en' ? '← Back to Jobs' : lang === 'tr' ? '← İşlere Geri Dön' : '← العودة إلى المهام'}
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={handleStartCall}
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-orange-450 hover:text-white transition-all bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/35 px-3.5 py-1.5 rounded-full cursor-pointer shadow-[0_2px_10px_rgba(249,115,22,0.15)] active:scale-95 duration-250"
+                  >
+                    <Phone className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                    <span>{lang === 'tr' ? 'Sorumluyu Ara' : (lang === 'ar' ? 'اتصال بالمسؤول' : 'Call HQ Dispatch')}</span>
+                  </button>
+                </div>
 
                 {/* ROLE-BASED PRIVACY WARNING IN DRIVER WINDOW */}
                 <div className="p-3 bg-amber-500/5 border border-amber-500/20 text-amber-400 rounded-2xl text-[10.5px]/normal flex items-start gap-2 backdrop-blur-sm shadow-sm select-none">

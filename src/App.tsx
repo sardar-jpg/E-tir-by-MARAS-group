@@ -1310,15 +1310,23 @@ export default function App() {
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
               {chatMessages.map((msg) => {
                 const isAdmin = msg.sender === 'admin';
+                const isSeenReceipt = isAdmin && msg.status === 'seen';
                 return (
                   <div key={msg.id} className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                     <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
                     
-                    <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm ${
+                    <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 ${
                       isAdmin 
-                        ? 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700' 
+                        ? (msg.status === 'seen'
+                          ? 'bg-slate-800/95 text-slate-100 rounded-tr-none border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10'
+                          : 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700') 
                         : 'bg-orange-600 text-white rounded-tl-none font-medium'
                     }`}>
+                      {/* Read Receipt subtle highlight overlay */}
+                      {isSeenReceipt && (
+                        <span className="absolute inset-0 rounded-2xl rounded-tr-none border border-emerald-400 bg-emerald-500/5 animate-pulse pointer-events-none" />
+                      )}
+                      
                       {msg.type === 'file' ? (
                         <div className="space-y-2">
                           <span className={`${isAdmin ? 'bg-slate-900 text-slate-350' : 'bg-orange-850 text-orange-250'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
@@ -1360,14 +1368,14 @@ export default function App() {
                       {isAdmin ? (
                         <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
                           msg.status === 'seen' 
-                            ? 'text-emerald-400 bg-emerald-950/35 font-bold' 
+                            ? 'text-emerald-400 bg-emerald-950/35 font-black ring-1 ring-emerald-500/10' 
                             : 'text-slate-500 bg-slate-900/20'
                         }`}>
                           • 
                           {msg.status === 'seen' ? (
                             <>
-                              <CheckCheck className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
-                              <span>
+                              <CheckCheck className="w-2.5 h-2.5 text-emerald-400 shrink-0 scale-110 animate-bounce" style={{ animationDuration: '2s' }} />
+                              <span className="animate-pulse">
                                 {lang === 'tr' ? 'Sürücü Gördü' : lang === 'ar' ? 'شاهدها السائق' : 'Seen by Driver'}
                               </span>
                             </>
