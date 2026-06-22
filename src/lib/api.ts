@@ -15,6 +15,7 @@ import {
   getDoc, 
   setDoc, 
   updateDoc, 
+  deleteDoc,
   query, 
   where 
 } from "firebase/firestore";
@@ -454,6 +455,31 @@ async function fetchFromFirestoreDirectly(url: string, init?: RequestInit): Prom
       return createMockResponse({ error: "No shipments" }, 404);
     }
 
+    // 1.5 Admins Endpoints
+    if (pathname === "/api/admins") {
+      if (method === "GET") {
+        const col = collection(db, "admins");
+        const snap = await getDocs(col);
+        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        return createMockResponse(list);
+      } else if (method === "POST") {
+        const body = getBodyJson();
+        const docId = body.id || `admin-${Date.now()}`;
+        const finalData = { ...body, id: docId, createdAt: body.createdAt || new Date().toISOString() };
+        await setDoc(doc(db, "admins", docId), finalData);
+        return createMockResponse(finalData);
+      }
+    }
+
+    if (pathname.startsWith("/api/admins/")) {
+      const parts = pathname.split("/");
+      const adminId = parts[3];
+      if (method === "DELETE") {
+        await deleteDoc(doc(db, "admins", adminId));
+        return createMockResponse({ success: true });
+      }
+    }
+
     // 2. Drivers Endpoints
     if (pathname === "/api/drivers") {
       if (method === "GET") {
@@ -619,18 +645,61 @@ async function fetchFromFirestoreDirectly(url: string, init?: RequestInit): Prom
     if (pathname === "/api/verify-session") {
       const body = getBodyJson();
       const resolvedEmail = (body.email || "").trim().toLowerCase();
-      const isAdminEmail = resolvedEmail === "sardar@maras.iq";
+      const isAdminEmail = resolvedEmail === "sardar@maras.iq" || resolvedEmail === "sardar";
       
       if (body.role === "admin" || isAdminEmail) {
+        if (isAdminEmail) {
+          return createMockResponse({
+            success: true,
+            role: "admin",
+            adminType: "super",
+            user: {
+              id: "admin",
+              name: "MARAS Operations Office",
+              username: "admin",
+              phone: "+90 212 555 1234",
+              email: "sardar@maras.iq",
+              adminType: "super"
+            }
+          });
+        }
+
+        try {
+          const adminsCol = collection(db, "admins");
+          const snap = await getDocs(adminsCol);
+          const adminsList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
+          const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === resolvedEmail);
+          
+          if (subAdmin) {
+            return createMockResponse({
+              success: true,
+              role: "admin",
+              adminType: subAdmin.adminType,
+              user: {
+                id: subAdmin.id,
+                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
+                username: subAdmin.email.split("@")[0],
+                phone: subAdmin.phone || "",
+                email: subAdmin.email,
+                adminType: subAdmin.adminType
+              }
+            });
+          }
+        } catch (err) {
+          console.warn("Could not check additional admins during verify-session client fallback:", err);
+        }
+
         return createMockResponse({
           success: true,
           role: "admin",
+          adminType: "super",
           user: {
             id: "admin",
             name: "MARAS Operations Office",
             username: "admin",
             phone: "+90 212 555 1234",
-            email: "sardar@maras.iq"
+            email: "sardar@maras.iq",
+            adminType: "super"
           }
         });
       } else {
@@ -663,15 +732,47 @@ async function fetchFromFirestoreDirectly(url: string, init?: RequestInit): Prom
           return createMockResponse({
             success: true,
             role: "admin",
+            adminType: "super",
             user: {
               id: "admin",
               name: "MARAS Operations Office",
               username: "admin",
               phone: "+90 212 555 1234",
-              email: "sardar@maras.iq"
+              email: "sardar@maras.iq",
+              adminType: "super"
             }
           });
         }
+      }
+
+      // Check sub-admins
+      try {
+        const adminsCol = collection(db, "admins");
+        const adminsSnap = await getDocs(adminsCol);
+        const adminsList = adminsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
+        const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === username);
+
+        if (subAdmin) {
+          if (subAdmin.password === password) {
+            return createMockResponse({
+              success: true,
+              role: "admin",
+              adminType: subAdmin.adminType,
+              user: {
+                id: subAdmin.id,
+                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
+                username: subAdmin.email.split("@")[0],
+                phone: subAdmin.phone || "",
+                email: subAdmin.email,
+                adminType: subAdmin.adminType
+              }
+            });
+          } else {
+            return createMockResponse({ error: "Incorrect password for admin user." }, 401);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not check additional admins collection in login client fallback:", err);
       }
 
       // Query drivers list from Firestore

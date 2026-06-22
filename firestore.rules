@@ -84,6 +84,16 @@ service cloud.firestore {
                    request.resource.data.key is string;
     }
 
+    // Admins Rules
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isValidId(adminId) && 
+                   request.resource.data.id is string && 
+                   request.resource.data.email is string && 
+                   request.resource.data.password is string && 
+                   request.resource.data.adminType is string;
+    }
+
     // Test Connection Rules
     match /test/{docId} {
       allow read, write: if isValidId(docId);

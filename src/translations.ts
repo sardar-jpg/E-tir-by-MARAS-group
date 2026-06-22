@@ -1,6 +1,6 @@
 export const TRANSLATIONS = {
   en: {
-    brand: "e-tir by MARAS",
+    brand: "etir by MARAS",
     tagline: "International Logistics & Truck Management Platform",
     roleAdmin: "MARAS Admin Panel",
     roleDriver: "Driver Mobile App",
@@ -112,7 +112,7 @@ export const TRANSLATIONS = {
     notAuthorizedDesc: "This link is either disabled by the administrator or has expired."
   },
   tr: {
-    brand: "e-tir | MARAS",
+    brand: "etir | MARAS",
     tagline: "Uluslararası Lojistik ve Tır Yönetim Platformu",
     roleAdmin: "MARAS Yönetim Paneli",
     roleDriver: "Sürücü Mobil Uygulaması",

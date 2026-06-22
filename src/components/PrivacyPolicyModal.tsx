@@ -35,7 +35,7 @@ export default function PrivacyPolicyModal({ isOpen, onClose, lang = "en" }: Pri
                   <h2 className="text-sm font-black text-white tracking-widest uppercase">
                     {lang === "tr" ? "GİZLİLİK POLİTİKASI" : lang === "ar" ? "سياسة الخصوصية" : "PRIVACY POLICY"}
                   </h2>
-                  <p className="text-[10px] text-slate-400 font-medium">e-TIR BY MARAS GROUP SECURITY PORTAL</p>
+                  <p className="text-[10px] text-slate-400 font-medium">etir BY MARAS GROUP SECURITY PORTAL</p>
                 </div>
               </div>
               <button
@@ -57,7 +57,7 @@ export default function PrivacyPolicyModal({ isOpen, onClose, lang = "en" }: Pri
                     {lang === "tr" ? "Yasal Bildirim" : lang === "ar" ? "إشعار قانوني" : "Legal Notice & Enforcement"}
                   </h3>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    Welcome to <strong className="text-slate-100">e-TIR by MARAS</strong>. MARAS Logistics & Supply Chain respects your privacy and is committed to protecting your personal information. This policy governs all core digital customs escrows, active telemetry, and manifest declarations.
+                    Welcome to <strong className="text-slate-100">etir by MARAS</strong>. MARAS Logistics & Supply Chain respects your privacy and is committed to protecting your personal information. This policy governs all core digital customs escrows, active telemetry, and manifest declarations.
                   </p>
                   <p className="text-[10px] text-orange-500 font-mono font-bold mt-2 uppercase tracking-wide">
                     {lang === "tr" ? "Yürürlük Tarihi:" : lang === "ar" ? "تاريخ النفاذ:" : "Effective Date:"} June 2026
@@ -218,7 +218,7 @@ export default function PrivacyPolicyModal({ isOpen, onClose, lang = "en" }: Pri
             {/* Footer / Agree */}
             <div className="bg-slate-950 border-t border-slate-800 p-4 shrink-0 flex items-center justify-between">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest font-black hidden sm:inline">
-                e-TIR • MARAS LOGISTICS
+                etir • MARAS LOGISTICS
               </span>
               <button
                 type="button"

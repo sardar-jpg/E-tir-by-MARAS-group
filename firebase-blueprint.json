@@ -188,9 +188,27 @@
         "key": { "type": "string" }
       },
       "required": ["key"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Additional administrative team members with partitioned role-based access control",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "password": { "type": "string" },
+        "adminType": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "email", "password", "adminType", "createdAt"]
     }
   },
   "firestore": {
+    "admins": {
+      "schema": "Admin",
+      "description": "Store live sub-admin metadata profiles and access-control passwords"
+    },
     "drivers": {
       "schema": "Driver",
       "description": "List of active registered logistics drivers"

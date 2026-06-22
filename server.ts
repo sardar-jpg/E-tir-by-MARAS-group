@@ -6,7 +6,7 @@ if (process.env.DD_API_KEY) {
     tracer.init({
       logInjection: true,
       env: process.env.NODE_ENV || "development",
-      service: "e-tir-by-maras-backend"
+      service: "etir-by-maras-backend"
     });
     console.log("Datadog active monitoring initialized successfully on server backend.");
   } catch (error) {
@@ -2425,17 +2425,51 @@ async function startServer() {
         username.toLowerCase() === "sardar@maras.iq";
 
       if (isAdminUser) {
-        return res.json({
-          success: true,
-          role: "admin",
-          user: {
-            id: "admin",
-            name: "MARAS Operations Office",
-            username: "admin",
-            phone: "+90 212 555 1234",
-            email: "sardar@maras.iq"
+        if (password === "maras123" || password === "admin123") {
+          return res.json({
+            success: true,
+            role: "admin",
+            adminType: "super",
+            user: {
+              id: "admin",
+              name: "MARAS Operations Office",
+              username: "admin",
+              phone: "+90 212 555 1234",
+              email: "sardar@maras.iq",
+              adminType: "super"
+            }
+          });
+        }
+      }
+
+      // Check sub-admins
+      try {
+        const adminsCol = collection(db, "admins");
+        const adminsSnapshot = await getDocs(adminsCol);
+        const adminsList = adminsSnapshot.docs.map(doc => doc.data() as any);
+        const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === username.toLowerCase().trim());
+
+        if (subAdmin) {
+          if (subAdmin.password === password) {
+            return res.json({
+              success: true,
+              role: "admin",
+              adminType: subAdmin.adminType,
+              user: {
+                id: subAdmin.id,
+                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
+                username: subAdmin.email.split("@")[0],
+                phone: subAdmin.phone || "",
+                email: subAdmin.email,
+                adminType: subAdmin.adminType
+              }
+            });
+          } else {
+            return res.status(401).json({ error: "Incorrect password for admin user." });
           }
-        });
+        }
+      } catch (err) {
+        console.warn("Could not check additional admins collection in login backend:", err);
       }
 
       // 2. Driver login check - fetch drivers list and try to match username or phone
@@ -2501,22 +2535,51 @@ async function startServer() {
       const isAdminEmail = resolvedEmail === "sardar@maras.iq";
       
       if (role === "admin" || isAdminEmail) {
-        if (!isAdminEmail) {
-          return res.status(403).json({ 
-            success: false, 
-            message: "Forbid: Only the authorized root administrator email is allowed to restore admin sessions." 
+        if (isAdminEmail || resolvedEmail === "sardar") {
+          return res.json({ 
+            success: true, 
+            role: "admin",
+            adminType: "super",
+            user: {
+              id: "admin",
+              name: "MARAS Operations Office",
+              username: "admin",
+              phone: "+90 212 555 1234",
+              email: "sardar@maras.iq",
+              adminType: "super"
+            }
           });
         }
-        return res.json({ 
-          success: true, 
-          role: "admin",
-          user: {
-            id: "admin",
-            name: "MARAS Operations Office",
-            username: "admin",
-            phone: "+90 212 555 1234",
-            email: "sardar@maras.iq"
+
+        // Check sub-admins
+        try {
+          const adminsCol = collection(db, "admins");
+          const adminsSnapshot = await getDocs(adminsCol);
+          const adminsList = adminsSnapshot.docs.map(doc => doc.data() as any);
+          const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === resolvedEmail);
+
+          if (subAdmin) {
+            return res.json({
+              success: true,
+              role: "admin",
+              adminType: subAdmin.adminType,
+              user: {
+                id: subAdmin.id,
+                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
+                username: subAdmin.email.split("@")[0],
+                phone: subAdmin.phone || "",
+                email: subAdmin.email,
+                adminType: subAdmin.adminType
+              }
+            });
           }
+        } catch (err) {
+          console.warn("Could not check additional admins during verify-session backend lookup:", err);
+        }
+
+        return res.status(403).json({ 
+          success: false, 
+          message: "Forbid: Only authorized administrators are allowed to restore admin sessions." 
         });
       }
       
@@ -2583,7 +2646,7 @@ async function startServer() {
 
       res.json({
         enabled: isConfigured,
-        service: "e-tir-by-maras-backend",
+        service: "etir-by-maras-backend",
         env: process.env.NODE_ENV || "development",
         apiKeyMasked: maskedKey,
         status: isConfigured ? "Datadog Tracer online & logging active" : "Tracer offline (add DD_API_KEY to configure)",
@@ -2602,6 +2665,73 @@ async function startServer() {
     res.json({
       key: process.env.GOOGLE_MAPS_PLATFORM_KEY || ""
     });
+  });
+
+  app.get("/api/admins", async (req, res) => {
+    try {
+      const col = collection(db, "admins");
+      const snapshot = await getDocs(col);
+      const list = snapshot.docs.map(doc => doc.data());
+      res.json(list);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to fetch admins" });
+    }
+  });
+
+  app.post("/api/admins", async (req, res) => {
+    try {
+      const data = req.body;
+      const newAdmin = {
+        id: data.id || `admin-${Date.now()}`,
+        name: data.name || "MARAS Team Member",
+        email: data.email || "",
+        password: data.password || "123456",
+        adminType: data.adminType || "operation",
+        createdAt: data.createdAt || new Date().toISOString()
+      };
+      await setDoc(doc(db, "admins", newAdmin.id), newAdmin);
+      res.status(201).json(newAdmin);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to create admin" });
+    }
+  });
+
+  app.delete("/api/admins/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const docRef = doc(db, "admins", id);
+      await deleteDoc(docRef);
+      res.json({ success: true, message: "Admin deleted successfully" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to delete admin" });
+    }
+  });
+
+  app.delete("/api/drivers/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const docRef = doc(db, "drivers", id);
+      await deleteDoc(docRef);
+      res.json({ success: true, message: "Driver deleted successfully" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to delete driver" });
+    }
+  });
+
+  app.delete("/api/clients/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const docRef = doc(db, "clients", id);
+      await deleteDoc(docRef);
+      res.json({ success: true, message: "Client deleted successfully" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to delete client" });
+    }
   });
 
   app.get("/api/drivers", async (req, res) => {

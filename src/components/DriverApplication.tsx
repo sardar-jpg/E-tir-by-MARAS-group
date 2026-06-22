@@ -11,7 +11,7 @@ import {
   TRUCK_TYPES
 } from "../types";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { storage } from "../googleAuth";
+import { storage, auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
@@ -345,6 +345,48 @@ export default function DriverApplication({
   // Active selected shipment for detail / chat inside driver app
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
+
+  // Calculate real percentage of total trip distance based on shipment start and end coordinates
+  const calculateDistancePercentage = (): number => {
+    if (!activeShipment) return 0;
+    if (isShipmentFinished) return 100;
+    if (activeShipment.status === 'New') return 0;
+
+    const startCity = (activeShipment.loadingCity || "istanbul").toLowerCase().trim();
+    const endCity = (activeShipment.deliveryCity || "baghdad").toLowerCase().trim();
+
+    const start = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
+    const end = CITY_COORDINATES[endCity] || CITY_COORDINATES["baghdad"];
+
+    if (!lastGpsCoords) {
+      // Fallback logic if dynamic GPS coordinate has not updated yet
+      switch (activeShipment.status) {
+        case 'Assigned': return 10;
+        case 'Accepted': return 25;
+        case 'Loading': return 40;
+        case 'Loaded': return 55;
+        case 'In Transit': return 75;
+        case 'Border Crossing': return 88;
+        case 'Customs Clearance': return 94;
+        default: return 0;
+      }
+    }
+
+    const vLat = end.lat - start.lat;
+    const vLng = end.lng - start.lng;
+
+    const uLat = lastGpsCoords.lat - start.lat;
+    const uLng = lastGpsCoords.lng - start.lng;
+
+    const denominator = vLat * vLat + vLng * vLng;
+    if (denominator === 0) return 0;
+
+    const dotProduct = uLat * vLat + uLng * vLng;
+    const t = dotProduct / denominator;
+
+    return Math.max(0, Math.min(98, Math.round(t * 100)));
+  };
+
   const [activeTab, setActiveTab] = useState<'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('shipments');
 
   const [activeMapsKey, setActiveMapsKey] = useState<string>(GOOGLE_MAPS_KEY_FALLBACK);
@@ -395,6 +437,154 @@ export default function DriverApplication({
   const [drivingStatus, setDrivingStatus] = useState<'off' | 'driving' | 'resting'>('off');
   const [drivingTimeLeft, setDrivingTimeLeft] = useState<number>(4.5 * 3600); // 4.5 hours in seconds
   const [restingTimeLeft, setRestingTimeLeft] = useState<number>(45 * 60); // 45 minutes in seconds
+
+  // Proof of Delivery Signature States
+  const [podReceiverName, setPodReceiverName] = useState<string>("");
+  const [podChecklist, setPodChecklist] = useState({ sealIntact: false, cargoVerified: false });
+  const [podSigningActive, setPodSigningActive] = useState<boolean>(false);
+  const [podUploading, setPodUploading] = useState<boolean>(false);
+
+  const sigCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isDrawingRef = useRef<boolean>(false);
+
+  const getCoordinates = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    
+    // Check if touch event
+    if ('touches' in e) {
+      if (e.touches.length === 0) return { x: 0, y: 0 };
+      return {
+        x: e.touches[0].clientX - rect.left,
+        y: e.touches[0].clientY - rect.top
+      };
+    } else {
+      return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+    }
+  };
+
+  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const coords = getCoordinates(e);
+    ctx.beginPath();
+    ctx.moveTo(coords.x, coords.y);
+    isDrawingRef.current = true;
+  };
+
+  const drawSignature = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!isDrawingRef.current) return;
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const coords = getCoordinates(e);
+    ctx.lineTo(coords.x, coords.y);
+    ctx.strokeStyle = '#1e3a8a'; // Blue ink color for official feel
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  };
+
+  const stopDrawing = () => {
+    isDrawingRef.current = false;
+  };
+
+  const clearSignature = () => {
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
+
+  const handleCompleteDeliveryWithSignature = async () => {
+    if (!activeShipment) return;
+    const canvas = sigCanvasRef.current;
+    if (!canvas) return;
+
+    const base64DataUrl = canvas.toDataURL('image/png');
+
+    setPodUploading(true);
+    try {
+      // 1. Upload signature image to backend media gateway
+      let finalSignatureUrl = "";
+      try {
+        const uploadRes = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base64DataUrl: base64DataUrl,
+            filename: `SIGNATURE_POD_${activeShipment.shipmentNumber}.png`
+          })
+        });
+        if (uploadRes.ok) {
+          const uploadData = await uploadRes.json();
+          finalSignatureUrl = uploadData.url;
+        }
+      } catch (uploadErr) {
+        console.warn("POD Signature upload failed:", uploadErr);
+      }
+
+      // 2. Put status details
+      const response = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "Delivered",
+          remarksDesc: `Shipment marked delivered at destination depot. Digitally signed by consignee representative: ${podReceiverName || "Authorized Receiver"}. Signature URL linked in logs.`,
+          updaterName: getDriverName(),
+          role: "driver"
+        })
+      });
+
+      if (response.ok) {
+        triggerToast("🎉 Proof of Delivery Captured! Shipment registered as Delivered.");
+        
+        // 3. Document payload for dispatcher chat timeline sync
+        try {
+          const sigPayload = {
+            sender: "driver",
+            senderName: getDriverName(),
+            type: "file",
+            fileName: `POD_Signature_${activeShipment.shipmentNumber}.png`,
+            fileCategory: "delivery_proof",
+            fileUrl: finalSignatureUrl || base64DataUrl,
+            text: `📦 Proof of Delivery (POD) Signed by: ${podReceiverName || "Authorized Receiver"}.\n- Seals Checked: ${podChecklist.sealIntact ? "YES" : "NO"}\n- Cargo Condition Verified: ${podChecklist.cargoVerified ? "YES" : "NO"}`
+          };
+
+          await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(sigPayload)
+          });
+        } catch (chatErr) {
+          console.warn("Could not save POD signature packet to chat timeline:", chatErr);
+        }
+
+        setPodSigningActive(false);
+        setPodReceiverName("");
+        setPodChecklist({ sealIntact: false, cargoVerified: false });
+        fetchData(); // Refresh UI
+      } else {
+        triggerToast("❌ Status update failed. Please check dispatcher connection.");
+      }
+    } catch (err) {
+      console.error("POD Sign-off save error:", err);
+      triggerToast("❌ Communication issue. Retry POD capture.");
+    } finally {
+      setPodUploading(false);
+    }
+  };
 
   // Fuel & Dynamic Cargo Calculator States
   const [calcCargoWeight, setCalcCargoWeight] = useState<number>(18); // 18 tons default
@@ -565,7 +755,54 @@ export default function DriverApplication({
   }, [chatMessages.length, activeTab, activeShipment?.id]);
   
   // Theme mode switch (light vs dark)
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('driver_app_theme');
+    return (saved === 'light' || saved === 'dark') ? saved : 'dark';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('driver_app_theme', theme);
+  }, [theme]);
+
+  // Driver Account Deletion States
+  const [showDriverDeleteConfirm, setShowDriverDeleteConfirm] = useState(false);
+  const [understandDriverDelete, setUnderstandDriverDelete] = useState(false);
+  const [isDeletingDriverAccount, setIsDeletingDriverAccount] = useState(false);
+
+  const handleDeleteDriverAccount = async () => {
+    if (!understandDriverDelete) return;
+    setIsDeletingDriverAccount(true);
+    const targetId = loggedInDriverId || selectedDriverId;
+    try {
+      // 1. Delete backing collection data
+      const response = await fetch(`/api/drivers/${targetId}`, {
+        method: "DELETE"
+      });
+      if (response.ok) {
+        // 2. Delete user session from Firebase auth (if exists)
+        try {
+          if (auth.currentUser) {
+            await auth.currentUser.delete();
+          }
+        } catch (authErr) {
+          console.warn("Firebase Auth deletion failed or requires reauthentication:", authErr);
+        }
+        triggerToast("🗑️ Account completely deleted from corporate registry.");
+        // Logout user session and clean state
+        if (onLogout) {
+          onLogout();
+        }
+      } else {
+        triggerToast("❌ Failed to initiate account purge. Try again.");
+      }
+    } catch (err) {
+      console.error(err);
+      triggerToast("❌ Purge action failed. Check connection.");
+    } finally {
+      setIsDeletingDriverAccount(false);
+      setShowDriverDeleteConfirm(false);
+    }
+  };
 
   // Custom file sim trigger
   const [fileSimOpen, setFileSimOpen] = useState(false);
@@ -2193,7 +2430,7 @@ export default function DriverApplication({
                 <div className="space-y-4.5 animate-fade-in">
                   
                   {/* Stunning Driver stats HUD banner */}
-                  <div className="relative overflow-hidden bg-gradient-to-r from-orange-600/95 via-orange-500/90 to-amber-500/95 rounded-3xl p-4 shadow-[0_12px_24px_rgba(249,115,22,0.18)] border border-orange-400/20 text-white space-y-3 shrink-0">
+                  <div className="relative overflow-hidden bg-gradient-to-r from-orange-600/95 via-orange-500/90 to-amber-500/95 rounded-3xl p-4 shadow-[0_12px_24px_rgba(249,115,22,0.18)] border border-orange-400/20 text-white space-y-3 shrink-0 light-preserve">
                     <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full blur-2xl -mr-6 -mt-6" />
                     <div className="flex items-center justify-between relative z-10">
                       <div className="flex items-center gap-2">
@@ -2877,7 +3114,7 @@ export default function DriverApplication({
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
-                          <span className="font-extrabold text-[#f97316] font-sans text-xs">{isShipmentFinished ? 100 : gpsProgress}% Complete</span>
+                          <span className="font-extrabold text-[#f97316] font-sans text-xs">{calculateDistancePercentage()}% Complete</span>
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Sat Status</span>
@@ -2896,19 +3133,168 @@ export default function DriverApplication({
                       </div>
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono font-bold">
-                          <span>ROUTE PROGRESS</span>
-                          <span>{isShipmentFinished ? 100 : gpsProgress}%</span>
+                          <span>ROUTE PROGRESS (GPS)</span>
+                          <span>{calculateDistancePercentage()}%</span>
                         </div>
                         <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-850">
                           <div 
                             className="bg-gradient-to-r from-orange-600 to-orange-400 h-2 rounded-full transition-all duration-1000" 
-                            style={{ width: `${isShipmentFinished ? 100 : gpsProgress}%` }}
+                            style={{ width: `${calculateDistancePercentage()}%` }}
                           ></div>
                         </div>
                       </div>
                     </div>
                   )}
                 </div>
+
+                {/* PROOF OF DELIVERY (POD) SIGN-OFF & HANDOFF SIGNATURE PANEL */}
+                {!isShipmentFinished && (
+                  <div id="driver-pod-signature-portal" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] text-left select-none relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
+                    <div className="flex items-start gap-2.5 relative z-10 text-left">
+                      <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/25 flex items-center justify-center text-orange-500 shrink-0">
+                        <CheckCircle2 className="w-4 h-4 text-orange-400" />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-black text-white uppercase tracking-wider font-mono block">
+                          Proof of Delivery (POD)
+                        </span>
+                        <span className="text-[9px] text-slate-400 block leading-tight mt-0.5">
+                          Collect digital signature & checklist approval at destination depot
+                        </span>
+                      </div>
+                    </div>
+
+                    {!podSigningActive ? (
+                      <div className="space-y-3.5 relative z-10 text-left">
+                        <p className="text-[10.5px] text-slate-400 leading-normal">
+                          Ready to hand off cargo and complete the logistics run? Verify cargo seal integrity, item count, and collect the consignee representative's signature directly on screen to mark secure delivery.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPodSigningActive(true);
+                            // Clear signature state
+                            setTimeout(clearSignature, 100);
+                          }}
+                          className="w-full py-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 shadow-md border-0"
+                        >
+                          <Edit2 className="w-3.5 h-3.5 text-white" />
+                          <span>Initiate Delivery Sign-off</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 animate-fade-in relative z-10 text-left">
+                        {/* Handoff Checklist */}
+                        <div className="space-y-2.5 bg-slate-950 p-3.5 rounded-2xl border border-slate-850/60">
+                          <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
+                            Handoff Verification Checklist
+                          </span>
+                          
+                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-350 hover:text-white">
+                            <input
+                              type="checkbox"
+                              checked={podChecklist.sealIntact}
+                              onChange={(e) => setPodChecklist(prev => ({ ...prev, sealIntact: e.target.checked }))}
+                              className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-orange-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-orange-500"
+                            />
+                            <span>Confirm trailer seal is intact & matches BOL</span>
+                          </label>
+
+                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-350 hover:text-white">
+                            <input
+                              type="checkbox"
+                              checked={podChecklist.cargoVerified}
+                              onChange={(e) => setPodChecklist(prev => ({ ...prev, cargoVerified: e.target.checked }))}
+                              className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-orange-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-orange-500"
+                            />
+                            <span>Verify cargo item count & physical condition</span>
+                          </label>
+                        </div>
+
+                        {/* Authorized Receiver Name */}
+                        <div className="space-y-1.5">
+                          <label className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
+                            Recipient Name / Stamp
+                          </label>
+                          <input
+                            type="text"
+                            value={podReceiverName}
+                            onChange={(e) => setPodReceiverName(e.target.value)}
+                            placeholder="e.g. John Doe (Depot Manager)"
+                            className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 focus:border-orange-500/50 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none transition-colors"
+                          />
+                        </div>
+
+                        {/* Signature Drawing Canvas Area */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
+                              Recipients Signature Pad
+                            </label>
+                            <button
+                              type="button"
+                              onClick={clearSignature}
+                              className="text-[8px] font-black text-slate-500 hover:text-red-400 uppercase tracking-wider transition-colors cursor-pointer"
+                            >
+                              Clear Pad
+                            </button>
+                          </div>
+                          
+                          <div className="relative bg-slate-950 rounded-xl border border-slate-800 overflow-hidden h-36">
+                            <canvas
+                              ref={sigCanvasRef}
+                              width={360}
+                              height={144}
+                              onMouseDown={startDrawing}
+                              onMouseMove={drawSignature}
+                              onMouseUp={stopDrawing}
+                              onMouseLeave={stopDrawing}
+                              onTouchStart={startDrawing}
+                              onTouchMove={drawSignature}
+                              onTouchEnd={stopDrawing}
+                              className="w-full h-full cursor-crosshair touch-none bg-slate-950"
+                            />
+                            <div className="absolute bottom-2.5 left-3 pointer-events-none text-[8.5px] text-slate-500 uppercase tracking-wider font-mono font-bold select-none opacity-40">
+                              X ___________________________ (Sign Here)
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Sign Actions */}
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="button"
+                            disabled={podUploading}
+                            onClick={() => setPodSigningActive(false)}
+                            className="flex-1 py-3 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+                          >
+                            Cancel
+                          </button>
+                          
+                          <button
+                            type="button"
+                            disabled={podUploading || !podReceiverName.trim() || !podChecklist.sealIntact || !podChecklist.cargoVerified}
+                            onClick={handleCompleteDeliveryWithSignature}
+                            className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
+                          >
+                            {podUploading ? (
+                              <>
+                                <span className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin shrink-0" />
+                                <span>Syncing...</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-4 h-4 text-slate-950" />
+                                <span>Confirm & Deliver</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* DRIVER ASSIST AUTOMATIC Predictive ETA & TRAFFIC PATTERNS PANEL */}
                 {!isShipmentFinished && (() => {
@@ -3884,6 +4270,81 @@ export default function DriverApplication({
                       <span>{profileT.logout}</span>
                     </button>
                   )}
+
+                  <div className="mt-4 pt-4 border-t border-slate-900">
+                    {!showDriverDeleteConfirm ? (
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          setShowDriverDeleteConfirm(true);
+                          setUnderstandDriverDelete(false);
+                        }}
+                        className="w-full py-2 bg-red-950/10 hover:bg-red-950/30 border border-red-900/30 hover:border-red-500/30 text-red-450 font-extrabold text-[10.5px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>{lang === 'tr' ? "Hesabımı Tamamen Sil" : (lang === 'ar' ? "حذف الحساب نهائياً" : "Delete My Account")}</span>
+                      </button>
+                    ) : (
+                      <div className="bg-slate-950 p-3.5 rounded-2xl border border-red-900/20 space-y-3 animate-fade-in">
+                        <div className="flex items-start gap-2 text-red-400">
+                          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 animate-pulse" />
+                          <div className="text-left">
+                            <h5 className="text-[11px] font-black uppercase tracking-wider font-mono">
+                              {lang === 'tr' ? "Kalıcı Hesap Silme İşlemi" : (lang === 'ar' ? "حذف الحساب بشكل نهائي" : "Irreversible Profile Purge")}
+                            </h5>
+                            <p className="text-[9.5px] text-slate-400 leading-tight mt-0.5">
+                              {lang === 'tr' 
+                                ? "Bu işlem geri alınamaz. Tüm lojistik geçmişiniz, aktif tır plakanız ve sürücü sevk yetkileriniz sistemden tamamen silinecektir."
+                                : (lang === 'ar' 
+                                  ? "هذا الإجراء نهائي ولا يمكن التراجع عنه. سيتم مسح تفويض الشاحنة وتاريخ السفر بالكامل من النظم."
+                                  : "This cannot be undone. Your active manifests, historical trips, and fleet registry authorization will be permanently wiped.")}
+                            </p>
+                          </div>
+                        </div>
+
+                        <label className="flex items-start gap-2.5 cursor-pointer text-[10.5px] font-bold text-slate-350 hover:text-white">
+                          <input
+                            type="checkbox"
+                            checked={understandDriverDelete}
+                            onChange={(e) => setUnderstandDriverDelete(e.target.checked)}
+                            className="w-3.5 h-3.5 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5"
+                          />
+                          <span className="leading-tight text-left">
+                            {lang === 'tr' 
+                              ? "Hesabımın silinmesini ve sistemden çıkarılmasını istiyorum."
+                              : (lang === 'ar' 
+                                ? "أوافق على حذف حسابي بشكل دائم ومسح هويتي التعريفية."
+                                : "I consent to permanently purge my account identity and logs.")}
+                          </span>
+                        </label>
+
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="button"
+                            disabled={isDeletingDriverAccount}
+                            onClick={() => setShowDriverDeleteConfirm(false)}
+                            className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+                          >
+                            {lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء Действие" : "Cancel")}
+                          </button>
+                          
+                          <button
+                            type="button"
+                            disabled={isDeletingDriverAccount || !understandDriverDelete}
+                            onClick={handleDeleteDriverAccount}
+                            className="flex-1 py-1.5 bg-gradient-to-r from-red-650 to-red-600 hover:from-red-600 hover:to-red-700 disabled:opacity-40 text-white font-black text-[10px] rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md border-0"
+                          >
+                            {isDeletingDriverAccount ? (
+                              <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                            ) : (
+                              <Trash2 className="w-3 h-3 shrink-0" />
+                            )}
+                            <span>{lang === 'tr' ? "Profilimi Sil" : (lang === 'ar' ? "تأكيد الحذف" : "Purge Account")}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })()}
@@ -4195,7 +4656,7 @@ export default function DriverApplication({
                   );
                 })()}
 
-                <div className="hidden">
+                <div className="space-y-4 pt-4 border-t border-slate-800/60 mt-4">
                 {/* Header title block */}
                 <div className="border-b border-slate-900 pb-3 flex items-center justify-between">
                   <div>

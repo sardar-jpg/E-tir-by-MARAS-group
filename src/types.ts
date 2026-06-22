@@ -29,7 +29,7 @@ export type ShipmentStatus =
   | 'Departed Airport'
   | 'Arrived Airport';
 
-export type Currency = 'USD' | 'IQD' | 'TRY';
+export type Currency = 'USD' | 'IQD' | 'TRY' | 'EUR';
 
 export type DocumentCategory =
   | 'cmr'

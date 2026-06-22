@@ -25,7 +25,7 @@ import {
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff, 
   Edit3, ArrowUpRight, ClipboardList, CheckCircle2, FileText, 
   Paperclip, Image as ImageIcon, Send, X, ExternalLink, RefreshCw, UserPlus, Phone, Mail, Check, AlertCircle, Printer,
-  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp
+  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
 import { apiFetch } from "../lib/api";
@@ -108,6 +108,8 @@ interface AdminPanelProps {
   userRole?: 'admin' | 'accounts';
   isMobile?: boolean;
   isConnectingGmail?: boolean;
+  adminEmail?: string;
+  adminType?: string;
 }
 
 export default function AdminPanel({ 
@@ -121,7 +123,9 @@ export default function AdminPanel({
   onDisconnectGmail,
   userRole = 'admin',
   isMobile = false,
-  isConnectingGmail = false
+  isConnectingGmail = false,
+  adminEmail = '',
+  adminType = ''
 }: AdminPanelProps) {
   const isMobileMode = isMobile || (typeof window !== "undefined" && window.innerWidth < 1024);
 
@@ -164,6 +168,15 @@ export default function AdminPanel({
   const [isAddClientOpen, setIsAddClientOpen] = useState(false);
   const [expandedClientOrdersCompanyName, setExpandedClientOrdersCompanyName] = useState<string | null>(null);
 
+  // Operation Team Management States
+  const [adminsList, setAdminsList] = useState<any[]>([]);
+  const [isAddAdminOpen, setIsAddAdminOpen] = useState(false);
+  const [newAdminName, setNewAdminName] = useState("");
+  const [newAdminEmail, setNewAdminEmail] = useState("");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [newAdminType, setNewAdminType] = useState<"operation" | "accounts">("operation");
+  const [adminFormError, setAdminFormError] = useState<string | null>(null);
+
   // Vendor / Supplier Management States
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorSearchQuery, setVendorSearchQuery] = useState("");
@@ -180,7 +193,194 @@ export default function AdminPanel({
   // Accounts & Cost Statements states
   const [costStatements, setCostStatements] = useState<CostStatement[]>([]);
   const [selectedCostStatement, setSelectedCostStatement] = useState<CostStatement | null>(null);
+
+  // Real coordinate-based progress calculator helper
+  const getShipmentProgressPercentage = (s: Shipment): number => {
+    if (s.status === 'Delivered' || s.status === 'Closed' || s.status === 'Arrived') {
+      return 100;
+    }
+    if (s.status === 'New') {
+      return 0;
+    }
+
+    const CITY_COORDINATES_LOCAL: Record<string, { lat: number; lng: number }> = {
+      "istanbul": { lat: 41.0082, lng: 28.9784 },
+      "bursa": { lat: 40.1885, lng: 29.0610 },
+      "gaziantep": { lat: 37.0662, lng: 37.3833 },
+      "erbil": { lat: 36.1912, lng: 44.0091 },
+      "baghdad": { lat: 33.3152, lng: 44.3661 },
+      "basra": { lat: 30.5081, lng: 47.7835 },
+      "zaho": { lat: 37.1436, lng: 42.6886 },
+      "dahuk": { lat: 36.8615, lng: 42.9926 },
+      "mosul": { lat: 36.3489, lng: 43.1577 },
+      "suleymaniye": { lat: 35.5613, lng: 45.4375 },
+      "kirkuk": { lat: 35.4670, lng: 44.3920 },
+      "ankara": { lat: 39.9334, lng: 32.8597 }
+    };
+
+    const startCity = (s.loadingCity || "istanbul").toLowerCase().trim();
+    const endCity = (s.deliveryCity || "baghdad").toLowerCase().trim();
+
+    const start = CITY_COORDINATES_LOCAL[startCity] || CITY_COORDINATES_LOCAL["istanbul"];
+    const end = CITY_COORDINATES_LOCAL[endCity] || CITY_COORDINATES_LOCAL["baghdad"];
+
+    const driver = drivers.find(d => d.id === s.assignedDriverId);
+    const curLat = driver?.latitude;
+    const curLng = driver?.longitude;
+
+    if (!curLat || !curLng || (curLat === 0 && curLng === 0)) {
+      // Fallback based on shipment status if no active driver telemetry coordinates yet
+      switch (s.status) {
+        case 'Assigned': return 10;
+        case 'Accepted': return 25;
+        case 'Loading': return 40;
+        case 'Loaded': return 55;
+        case 'In Transit': return 75;
+        case 'Border Crossing': return 88;
+        case 'Customs Clearance': return 94;
+        default: return 0;
+      }
+    }
+
+    // Vector projection computation of current coordinates onto total path AB vector segment
+    const vLat = end.lat - start.lat;
+    const vLng = end.lng - start.lng;
+    
+    const uLat = curLat - start.lat;
+    const uLng = curLng - start.lng;
+
+    const denominator = vLat * vLat + vLng * vLng;
+    if (denominator === 0) return 0;
+
+    const dotProduct = uLat * vLat + uLng * vLng;
+    const t = dotProduct / denominator;
+
+    return Math.max(0, Math.min(98, Math.round(t * 100)));
+  };
+  
+  interface TimingAnalysis {
+    colorClass: string;
+    textColorClass: string;
+    bgBadgeClass: string;
+    label: string;
+    subtext: string;
+    lagPercentage?: number;
+  }
+
+  const analyzeShipmentTiming = (s: Shipment): TimingAnalysis => {
+    if (s.status === 'Delivered' || s.status === 'Closed' || s.status === 'Arrived') {
+      return {
+        colorClass: 'bg-green-500',
+        textColorClass: 'text-green-700 font-bold',
+        bgBadgeClass: 'bg-green-50/70 border border-green-200/50',
+        label: lang === 'tr' ? 'Tamamlandı' : (lang === 'ar' ? 'تم التسليم' : 'Completed'),
+        subtext: lang === 'tr' ? 'Hedefe ulaşıldı' : (lang === 'ar' ? 'وصلت الوجهة' : 'Reached destination')
+      };
+    }
+
+    if (s.status === 'New') {
+      return {
+        colorClass: 'bg-slate-400',
+        textColorClass: 'text-slate-600 font-bold',
+        bgBadgeClass: 'bg-slate-100 border border-slate-200',
+        label: lang === 'tr' ? 'Sevk Edilmeyen' : (lang === 'ar' ? 'جديد' : 'New'),
+        subtext: lang === 'tr' ? 'Atama yapılmadı' : (lang === 'ar' ? 'غير مكلف بسائق' : 'Not dispatched')
+      };
+    }
+
+    if (!s.eta) {
+      return {
+        colorClass: 'bg-blue-500',
+        textColorClass: 'text-blue-700 font-bold',
+        bgBadgeClass: 'bg-blue-50/70 border border-blue-200/50',
+        label: lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشط' : 'Active'),
+        subtext: lang === 'tr' ? 'Tahmini varış hesaplanıyor' : (lang === 'ar' ? 'جاري حساب الوقت' : 'Calculating ETA...')
+      };
+    }
+
+    const now = Date.now();
+    const etaTime = new Date(s.eta).getTime();
+    const createdTime = s.createdAt ? new Date(s.createdAt).getTime() : etaTime - (48 * 3600 * 1000);
+
+    if (isNaN(etaTime)) {
+      return {
+        colorClass: 'bg-blue-500',
+        textColorClass: 'text-blue-700 font-bold',
+        bgBadgeClass: 'bg-blue-50/70 border border-blue-200/50',
+        label: lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشط' : 'Active'),
+        subtext: lang === 'tr' ? 'Tahmini varış hesaplanıyor' : (lang === 'ar' ? 'جاري حساب الوقت' : 'Calculating ETA...')
+      };
+    }
+
+    const remainingMs = etaTime - now;
+
+    const getDurationText = (ms: number): string => {
+      const totalMinutes = Math.round(Math.abs(ms) / (60 * 1050));
+      const hours = Math.floor(totalMinutes / 60);
+      const mins = totalMinutes % 60;
+      
+      if (hours > 24) {
+        const days = Math.round(hours / 24);
+        return lang === 'tr' ? `${days} gün` : (lang === 'ar' ? `${days} يوم` : `${days} d`);
+      }
+      
+      if (hours === 0) {
+        return lang === 'tr' ? `${mins} dk` : (lang === 'ar' ? `${mins} دقيقة` : `${mins}m`);
+      }
+      return lang === 'tr' ? `${hours} sa ${mins} dk` : (lang === 'ar' ? `${hours} ساعة ${mins} د` : `${hours}h ${mins}m`);
+    };
+
+    if (remainingMs < 0) {
+      return {
+        colorClass: 'bg-red-500 animate-pulse',
+        textColorClass: 'text-red-600 font-black',
+        bgBadgeClass: 'bg-red-50 border border-red-200',
+        label: lang === 'tr' ? 'Gecikti' : (lang === 'ar' ? 'متأخر' : 'Delayed'),
+        subtext: lang === 'tr' ? `${getDurationText(remainingMs)} gecikti` : (lang === 'ar' ? `متأخر بـ ${getDurationText(remainingMs)}` : `${getDurationText(remainingMs)} overdue`)
+      };
+    }
+
+    const totalDuration = etaTime - createdTime;
+    const elapsedOffset = now - createdTime;
+    const pctDurationElapsed = totalDuration > 0 ? elapsedOffset / totalDuration : 0.5;
+
+    const progressPercentage = getShipmentProgressPercentage(s) / 100;
+    const lag = pctDurationElapsed - progressPercentage;
+
+    if (lag > 0.2) {
+      return {
+        colorClass: 'bg-red-500',
+        textColorClass: 'text-red-600 font-extrabold',
+        bgBadgeClass: 'bg-red-50/80 border border-red-200/50',
+        label: lang === 'tr' ? 'Gecikme Riski' : (lang === 'ar' ? 'خطر التأخير' : 'Lagging'),
+        subtext: lang === 'tr' ? `%${Math.round(lag * 100)} geride • Kalan ${getDurationText(remainingMs)}` : (lang === 'ar' ? `متأخر %${Math.round(lag * 100)} • متبقي ${getDurationText(remainingMs)}` : `${Math.round(lag * 100)}% behind • ${getDurationText(remainingMs)} left`),
+        lagPercentage: lag
+      };
+    }
+
+    if (lag > 0.05 || remainingMs < 4 * 3600 * 1000) {
+      return {
+        colorClass: 'bg-amber-500',
+        textColorClass: 'text-amber-600 font-bold',
+        bgBadgeClass: 'bg-amber-50 border border-amber-200',
+        label: lang === 'tr' ? 'Darboğaz / Sınırda' : (lang === 'ar' ? 'توقيت ضيق' : 'Tight Timing'),
+        subtext: lang === 'tr' ? `Kalan ${getDurationText(remainingMs)}` : (lang === 'ar' ? `متبقي ${getDurationText(remainingMs)}` : `${getDurationText(remainingMs)} left`),
+        lagPercentage: lag
+      };
+    }
+
+    return {
+      colorClass: 'bg-green-500',
+      textColorClass: 'text-emerald-600 font-bold',
+      bgBadgeClass: 'bg-emerald-50/70 border border-emerald-200/50',
+      label: lang === 'tr' ? 'Zamanında' : (lang === 'ar' ? 'في الموعد' : 'On Schedule'),
+      subtext: lang === 'tr' ? `Kalan ${getDurationText(remainingMs)}` : (lang === 'ar' ? `متبقي ${getDurationText(remainingMs)}` : `${getDurationText(remainingMs)} remaining`)
+    };
+  };
+
   const [isStatementEditorOpen, setIsStatementEditorOpen] = useState(false);
+  const [statementPreviewMode, setStatementPreviewMode] = useState<'statement' | 'invoice' | 'client_statement' | 'vendor_statement'>('statement');
+  const [selectedVendorForStatement, setSelectedVendorForStatement] = useState<string>('');
   const [costSearchQuery, setCostSearchQuery] = useState("");
   const [costStatusFilter, setCostStatusFilter] = useState<'All' | 'Unpaid' | 'Partial' | 'Paid'>('All');
   const [costTypeFilter, setCostTypeFilter] = useState<'All' | 'land' | 'sea' | 'air'>('All');
@@ -249,7 +449,7 @@ export default function AdminPanel({
   const generateShipmentBackupContent = (ship: Shipment) => {
     return `=========================================
 MARAS INTERNATIONAL CARGO LOGISTICS
-E-TIR SHIPMENT BACKUP & TRANSIT RECORD
+ETIR SHIPMENT BACKUP & TRANSIT RECORD
 =========================================
 Generated At       : ${new Date().toISOString()}
 Shipment Ref       : #${ship.shipmentNumber}
@@ -285,7 +485,7 @@ Generated securely via MARAS Group Google Workspace interface.
     setDriveResponse(null);
     try {
       const backupText = generateShipmentBackupContent(targetShip);
-      const fileName = `E-TIR-Backup-${targetShip.shipmentNumber}.txt`;
+      const fileName = `ETIR-Backup-${targetShip.shipmentNumber}.txt`;
       
       const metadata = {
         name: fileName,
@@ -331,9 +531,9 @@ Generated securely via MARAS Group Google Workspace interface.
               shipmentId: targetShip.id,
               shipmentNumber: targetShip.shipmentNumber,
               actor: gmailUser?.email || "Google Operator",
-              actionEn: `Backed up e-tir record for #${targetShip.shipmentNumber} to Google Drive`,
-              actionTr: `#${targetShip.shipmentNumber} e-tir kaydı Google Drive'a yedeklendi`,
-              actionAr: `تم نسخ سجل شحنة e-tir #${targetShip.shipmentNumber} احتياطياً إلى Google Drive`
+              actionEn: `Backed up etir record for #${targetShip.shipmentNumber} to Google Drive`,
+              actionTr: `#${targetShip.shipmentNumber} etir kaydı Google Drive'a yedeklendi`,
+              actionAr: `تم نسخ سجل شحنة etir #${targetShip.shipmentNumber} احتياطياً إلى Google Drive`
             })
           });
         } catch (logErr) {
@@ -391,7 +591,7 @@ Generated securely via MARAS Group Google Workspace interface.
       const eventBody = {
         summary: `Cargo Shipment dispatch: #${targetShip.shipmentNumber}`,
         location: `${targetShip.loadingCity}, ${targetShip.loadingCountry} ➔ ${targetShip.deliveryCity}`,
-        description: `Official MARAS cargo transit scheduling for client ${targetShip.companyName}.\nStatus: ${targetShip.status}.\nRecipient phone: ${targetShip.loadingContactNumber || "N/A"}.\nE-Tir document backup integration.`,
+        description: `Official MARAS cargo transit scheduling for client ${targetShip.companyName}.\nStatus: ${targetShip.status}.\nRecipient phone: ${targetShip.loadingContactNumber || "N/A"}.\nEtir document backup integration.`,
         start: {
           date: startDate
         },
@@ -473,7 +673,7 @@ Generated securely via MARAS Group Google Workspace interface.
       const trackingUrl = `${window.location.origin}?token=${shipment.shareToken}`;
       setGmailTo(shipment.loadingContactNumber && shipment.loadingContactNumber.includes("@") ? shipment.loadingContactNumber : "client@maras-cargo.com");
       
-      const sub = `e-tir Tracking Update: #${shipment.shipmentNumber} — ${shipment.companyName}`;
+      const sub = `etir Tracking Update: #${shipment.shipmentNumber} — ${shipment.companyName}`;
       const msgBody = `Hello,
 
 This is an official transit status alert from MARAS Logistics regarding your international cargo shipment:
@@ -488,7 +688,7 @@ You can track your real-time GPS location coordinates, border control checkpoint
 ${trackingUrl}
 
 Best Regards,
-MARAS Group e-tir Center`;
+MARAS Group etir Center`;
       
       setGmailSubject(sub);
       setGmailBody(msgBody);
@@ -643,6 +843,12 @@ MARAS Group e-tir Center`;
       const resUnreadChat = await fetch("/api/chat/unread");
       const resCostStatements = await fetch("/api/cost-statements");
 
+      const resolvedAdminTypeForSWR = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+      let resAdmins: Response | null = null;
+      if (resolvedAdminTypeForSWR === 'super') {
+        resAdmins = await fetch("/api/admins");
+      }
+
       const safeJson = async (res: Response) => {
         const text = await res.text();
         if (text.trim().startsWith("<")) {
@@ -657,6 +863,7 @@ MARAS Group e-tir Center`;
       if (resVendors.ok) setVendors(await safeJson(resVendors));
       if (resLogs.ok) setActivityLogs(await safeJson(resLogs));
       if (resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
+      if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
       
       if (resUnreadChat.ok) {
         setUnreadChatMessages(await safeJson(resUnreadChat));
@@ -964,6 +1171,9 @@ MARAS Group e-tir Center`;
       if (res.ok) {
         const stmt = await res.json();
         setSelectedCostStatement(stmt);
+        setStatementPreviewMode('statement');
+        const firstVendor = stmt.items?.[0]?.supplierName || '';
+        setSelectedVendorForStatement(firstVendor);
         setIsStatementEditorOpen(true);
       } else {
         const s = shipments.find(item => item.id === shipmentId);
@@ -985,6 +1195,8 @@ MARAS Group e-tir Center`;
             updatedAt: new Date().toISOString()
           };
           setSelectedCostStatement(templateStmt);
+          setStatementPreviewMode('statement');
+          setSelectedVendorForStatement('');
           setIsStatementEditorOpen(true);
         }
       }
@@ -1202,21 +1414,86 @@ MARAS Group e-tir Center`;
         format: "a4"
       });
       
-      // MARAS GROUP Corporate Letterhead
+      const sanitizePdfText = (text: any): any => {
+        if (text === null || text === undefined) return "";
+        if (Array.isArray(text)) {
+          return text.map(t => sanitizePdfText(t));
+        }
+        if (typeof text !== "string") {
+          text = String(text);
+        }
+        return text
+          .replace(/ı/g, 'i')
+          .replace(/İ/g, 'I')
+          .replace(/ş/g, 's')
+          .replace(/Ş/g, 'S')
+          .replace(/ğ/g, 'g')
+          .replace(/Ğ/g, 'G')
+          .replace(/ç/g, 'c')
+          .replace(/Ç/g, 'C')
+          .replace(/ö/g, 'o')
+          .replace(/Ö/g, 'O')
+          .replace(/ü/g, 'u')
+          .replace(/Ü/g, 'U');
+      };
+
+      const drawText = (val: any, x: number, y: number, options?: any) => {
+        doc.text(sanitizePdfText(val), x, y, options);
+      };
+      
+      const matchingShipment = shipments.find(s => s.id === selectedCostStatement.shipmentId);
+
+      // Filter items to render based on selection
+      const itemsToRender = statementPreviewMode === 'vendor_statement'
+        ? (selectedCostStatement.items || []).filter(item => item.supplierName === selectedVendorForStatement)
+        : (selectedCostStatement.items || []);
+
+      // Dynamic sub-titles and party details
+      let docSubtitle = "OFFICIAL COST DECLARATION LEDGER";
+      let leftBoxTitle = "STATEMENT METADATA / BEYANNAME DETAYI";
+      let rightBoxTitle = "CLIENT & PAYMENT ACCOUNT / CARI HESAP";
+      let partyLabel = "Client Company / Cari:";
+      const partyName = statementPreviewMode === 'vendor_statement'
+        ? selectedVendorForStatement || "Selected Vendor"
+        : selectedCostStatement.companyName || "";
+
+      if (statementPreviewMode === 'invoice') {
+        docSubtitle = lang === 'tr' ? "RESMI SATIS FATURASI" : "OFFICIAL SALES INVOICE";
+        leftBoxTitle = "INVOICE DETAILS / FATURA METADATA";
+      } else if (statementPreviewMode === 'client_statement') {
+        docSubtitle = lang === 'tr' ? "MUSTERI HESAP EKSTRESI" : "CLIENT ACCOUNT STATEMENT";
+        leftBoxTitle = "LEDGER META / EKSTRE DETAYLARI";
+      } else if (statementPreviewMode === 'vendor_statement') {
+        docSubtitle = lang === 'tr' ? "TEDARIKCI CARI EKSTRESI" : "VENDOR ACCOUNT STATEMENT";
+        leftBoxTitle = "LEDGER META / CARI DETAYLARI";
+        rightBoxTitle = "VENDOR SUMMARY / TEDARIKCI DETAYI";
+        partyLabel = "Vendor Company / Cari:";
+      }
+
+      // MARAS GROUP Corporate Letterhead with Elegant Orange Corporate Logo
+      doc.setFillColor(234, 88, 12); // Orange primary
+      doc.roundedRect(15, 12, 10, 10, 2, 2, "F");
+      
+      // White inner geometric details representing an M / logistics mountains
+      doc.setFillColor(255, 255, 255);
+      doc.triangle(17, 20, 20, 14, 23, 20, "F");
+      doc.setFillColor(234, 88, 12);
+      doc.triangle(18.5, 20, 20, 16.5, 21.5, 20, "F");
+
       doc.setFont("Helvetica", "bold");
       doc.setFontSize(22);
       doc.setTextColor(15, 23, 42); // slate-900
-      doc.text("MARAS GROUP", 15, 20);
+      drawText("MARAS GROUP", 29, 20);
       
       doc.setFont("Helvetica", "bold");
       doc.setFontSize(7);
       doc.setTextColor(234, 88, 12); // Orange primary
-      doc.text("GLOBAL LOGISTICS & ACCOUNTING LEDGER DIVISION", 15, 24);
+      drawText("GLOBAL LOGISTICS & ACCOUNTING LEDGER DIVISION", 29, 24);
       
       // Right side document subtitle
       doc.setFontSize(10);
       doc.setTextColor(71, 85, 105); // slate-600
-      doc.text(lang === 'tr' ? "RESMI BEYANNAME MALÝ TABLOSU" : "OFFICIAL COST DECLARATION LEDGER", 195, 20, { align: "right" });
+      drawText(docSubtitle, 195, 20, { align: "right" });
       
       // Divider Line
       doc.setDrawColor(226, 232, 240); // slate-200
@@ -1230,32 +1507,32 @@ MARAS Group e-tir Center`;
       doc.setFont("Helvetica", "bold");
       doc.setFontSize(8);
       doc.setTextColor(100, 116, 139); // slate-500
-      doc.text("STATEMENT METADATA / BEYANNAME DETAYI", 20, 39);
+      drawText(leftBoxTitle, 20, 39);
       
       doc.setTextColor(51, 65, 85); // slate-700
-      doc.text("Ledger Ref / Referans:", 20, 45);
-      doc.text("Issue Date / Tarih:", 20, 50);
-      doc.text("Modality / Taşıma Tipi:", 20, 55);
+      drawText("Ledger Ref / Referans:", 20, 45);
+      drawText("Issue Date / Tarih:", 20, 50);
+      drawText("Modality / Taşıma Tipi:", 20, 55);
       
       doc.setFont("Helvetica", "normal");
       doc.setTextColor(30, 41, 59); // slate-800
-      doc.text(`MARAS-${new Date(selectedCostStatement.date || '').getFullYear() || '2026'}-${selectedCostStatement.shipmentNumber}`, 55, 45);
-      doc.text(selectedCostStatement.date || "", 55, 50);
-      doc.text(`${selectedCostStatement.shipmentType?.toUpperCase()} Freight`, 55, 55);
+      drawText(`MARAS-${new Date(selectedCostStatement.date || '').getFullYear() || '2026'}-${selectedCostStatement.shipmentNumber}`, 63, 45);
+      drawText(selectedCostStatement.date || "", 63, 50);
+      drawText(`${selectedCostStatement.shipmentType?.toUpperCase()} Freight`, 63, 55);
       
       // Metadata Column 2
       doc.setFont("Helvetica", "bold");
       doc.setTextColor(100, 116, 139); // slate-500
-      doc.text("CLIENT & PAYMENT ACCOUNT / CARI HESAP", 110, 39);
+      drawText(rightBoxTitle, 110, 39);
       
       doc.setTextColor(51, 65, 85);
-      doc.text("Client Company / Cari:", 110, 45);
-      doc.text("Ledger Status / Statü:", 110, 50);
-      doc.text("Currency / Para Birimi:", 110, 55);
+      drawText(partyLabel, 110, 45);
+      drawText("Ledger Status / Statü:", 110, 50);
+      drawText("Currency / Para Birimi:", 110, 55);
       
       doc.setFont("Helvetica", "normal");
       doc.setTextColor(30, 41, 59);
-      doc.text(selectedCostStatement.companyName || "", 145, 45);
+      drawText(partyName, 153, 45);
       
       const status = selectedCostStatement.paymentStatus || "Unpaid";
       if (status === 'Paid') {
@@ -1266,11 +1543,11 @@ MARAS Group e-tir Center`;
         doc.setTextColor(220, 38, 38); // red-600
       }
       doc.setFont("Helvetica", "bold");
-      doc.text(status.toUpperCase(), 145, 50);
+      drawText(status.toUpperCase(), 153, 50);
       
       doc.setFont("Helvetica", "normal");
       doc.setTextColor(30, 41, 59);
-      doc.text(selectedCostStatement.currency || "USD", 145, 55);
+      drawText(selectedCostStatement.currency || "USD", 153, 55);
       
       // Cost Breakdown Table spacing
       let currentY = 68;
@@ -1281,17 +1558,17 @@ MARAS Group e-tir Center`;
       doc.setFontSize(8);
       doc.setTextColor(255, 255, 255); // White header text
       
-      doc.text(lang === 'tr' ? "Gider Türü / Category" : "Expense Category", 17, currentY + 5);
-      doc.text(lang === 'tr' ? "Tedarikçi / Supplier" : "Supplier / Vendor", 52, currentY + 5);
-      doc.text(lang === 'tr' ? "Açıklama / Explanation" : "Description Breakdown", 87, currentY + 5);
-      doc.text("Qty", 143, currentY + 5);
-      doc.text(lang === 'tr' ? "Birim Fiyat" : "Unit Price", 168, currentY + 5, { align: "right" });
-      doc.text(`Total (${selectedCostStatement.currency})`, 193, currentY + 5, { align: "right" });
+      drawText(lang === 'tr' ? "Gider Türü / Category" : "Expense Category", 17, currentY + 5);
+      drawText(lang === 'tr' ? "Tedarikçi / Supplier" : "Supplier / Vendor", 52, currentY + 5);
+      drawText(lang === 'tr' ? "Açıklama / Explanation" : "Description Breakdown", 87, currentY + 5);
+      drawText("Qty", 143, currentY + 5);
+      drawText(lang === 'tr' ? "Birim Fiyat" : "Unit Price", 168, currentY + 5, { align: "right" });
+      drawText(`Total (${selectedCostStatement.currency})`, 193, currentY + 5, { align: "right" });
       
       currentY += 8;
       const rowHeight = 7.5;
       
-      (selectedCostStatement.items || []).forEach((item, index) => {
+      itemsToRender.forEach((item, index) => {
         // Multi-page overflow support
         if (currentY > 245) {
           doc.addPage();
@@ -1300,12 +1577,12 @@ MARAS Group e-tir Center`;
           doc.setFont("Helvetica", "bold");
           doc.setFontSize(8);
           doc.setTextColor(255, 255, 255);
-          doc.text(lang === 'tr' ? "Gider Türü / Category" : "Expense Category", 17, 20);
-          doc.text(lang === 'tr' ? "Tedarikçi / Supplier" : "Supplier / Vendor", 52, 20);
-          doc.text(lang === 'tr' ? "Açıklama / Explanation" : "Description Breakdown", 87, 20);
-          doc.text("Qty", 143, 20);
-          doc.text(lang === 'tr' ? "Birim Fiyat" : "Unit Price", 168, 20, { align: "right" });
-          doc.text(`Total (${selectedCostStatement.currency})`, 193, 20, { align: "right" });
+          drawText(lang === 'tr' ? "Gider Türü / Category" : "Expense Category", 17, 20);
+          drawText(lang === 'tr' ? "Tedarikçi / Supplier" : "Supplier / Vendor", 52, 20);
+          drawText(lang === 'tr' ? "Açıklama / Explanation" : "Description Breakdown", 87, 20);
+          drawText("Qty", 143, 20);
+          drawText(lang === 'tr' ? "Birim Fiyat" : "Unit Price", 168, 20, { align: "right" });
+          drawText(`Total (${selectedCostStatement.currency})`, 193, 20, { align: "right" });
           
           currentY = 23;
         }
@@ -1329,17 +1606,17 @@ MARAS Group e-tir Center`;
         doc.setTextColor(51, 65, 85); // slate-700
         
         const costTypeStr = item.costType || "Expense";
-        doc.text(costTypeStr.length > 20 ? costTypeStr.substring(0, 18) + ".." : costTypeStr, 17, currentY + 4.5);
+        drawText(costTypeStr.length > 20 ? costTypeStr.substring(0, 18) + ".." : costTypeStr, 17, currentY + 4.5);
         
         const supplierStr = item.supplierName || "Internal";
-        doc.text(supplierStr.length > 20 ? supplierStr.substring(0, 18) + ".." : supplierStr, 52, currentY + 4.5);
+        drawText(supplierStr.length > 20 ? supplierStr.substring(0, 18) + ".." : supplierStr, 52, currentY + 4.5);
         
         const descStr = item.description || "";
-        doc.text(descStr.length > 32 ? descStr.substring(0, 30) + ".." : descStr, 87, currentY + 4.5);
+        drawText(descStr.length > 32 ? descStr.substring(0, 30) + ".." : descStr, 87, currentY + 4.5);
         
-        doc.text(String(item.quantity || 0), 145, currentY + 4.5, { align: "center" });
-        doc.text(Number(item.unitPrice || 0).toLocaleString(), 168, currentY + 4.5, { align: "right" });
-        doc.text(Number(item.totalAmount || 0).toLocaleString(), 193, currentY + 4.5, { align: "right" });
+        drawText(String(item.quantity || 0), 145, currentY + 4.5, { align: "center" });
+        drawText(Number(item.unitPrice || 0).toLocaleString(), 168, currentY + 4.5, { align: "right" });
+        drawText(Number(item.totalAmount || 0).toLocaleString(), 193, currentY + 4.5, { align: "right" });
         
         currentY += rowHeight;
       });
@@ -1359,21 +1636,63 @@ MARAS Group e-tir Center`;
       
       doc.setFont("Helvetica", "bold");
       doc.setFontSize(8);
+      
+      let val1Label = lang === 'tr' ? "Toplam Maliyet:" : "Total Cost Breakdown:";
+      let val2Label = lang === 'tr' ? "Ödenen Miktar:" : "Settled / Paid Amount:";
+      let val3Label = lang === 'tr' ? "Kalan Bakiye:" : "Remaining Balance:";
+      
+      let val1Text = `${Number(selectedCostStatement.totalCost || 0).toLocaleString()} ${selectedCostStatement.currency}`;
+      let val2Text = `- ${Number(selectedCostStatement.paidAmount || 0).toLocaleString()} ${selectedCostStatement.currency}`;
+      let val3Text = `${Number(selectedCostStatement.remainingBalance || 0).toLocaleString()} ${selectedCostStatement.currency}`;
+      let balanceVal = Number(selectedCostStatement.remainingBalance || 0);
+
+      if (statementPreviewMode === 'invoice') {
+        const totalInv = matchingShipment?.agreedAmount || 0;
+        const paidDeposit = selectedCostStatement.paidAmount || 0;
+        const balanceRemaining = totalInv - paidDeposit;
+        val1Label = lang === 'tr' ? "Matrah / Toplam Paket:" : "Base Transport Fee:";
+        val2Label = lang === 'tr' ? "Alınan ÖnÖdeme:" : "Advance Deposit Paid:";
+        val3Label = lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:";
+        val1Text = `${totalInv.toLocaleString()} ${selectedCostStatement.currency}`;
+        val2Text = `- ${paidDeposit.toLocaleString()} ${selectedCostStatement.currency}`;
+        val3Text = `${balanceRemaining.toLocaleString()} ${selectedCostStatement.currency}`;
+        balanceVal = balanceRemaining;
+      } else if (statementPreviewMode === 'client_statement') {
+        const totalInv = matchingShipment?.agreedAmount || 0;
+        const paidDeposit = selectedCostStatement.paidAmount || 0;
+        const balanceRemaining = totalInv - paidDeposit;
+        val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
+        val2Label = lang === 'tr' ? "Toplam Kredi Cari:" : "Total Credit Settle:";
+        val3Label = lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:";
+        val1Text = `${totalInv.toLocaleString()} ${selectedCostStatement.currency}`;
+        val2Text = `(${paidDeposit.toLocaleString()}) ${selectedCostStatement.currency}`;
+        val3Text = `${balanceRemaining.toLocaleString()} ${selectedCostStatement.currency}`;
+        balanceVal = balanceRemaining;
+      } else if (statementPreviewMode === 'vendor_statement') {
+        const vendorTotal = itemsToRender.reduce((acc, it) => acc + (Number(it.totalAmount) || 0), 0);
+        val1Label = lang === 'tr' ? "Alt Toplam Alacak:" : "Subtotal Credit Accrued:";
+        val2Label = lang === 'tr' ? "Düzeltmeler / Kesintiler:" : "Adjustments:";
+        val3Label = lang === 'tr' ? "TEDARİKÇİ TOPLAM ALACAK:" : "TOTAL PAYABLE:";
+        val1Text = `${vendorTotal.toLocaleString()} ${selectedCostStatement.currency}`;
+        val2Text = `0.00 ${selectedCostStatement.currency}`;
+        val3Text = `${vendorTotal.toLocaleString()} ${selectedCostStatement.currency}`;
+        balanceVal = vendorTotal;
+      }
+
       doc.setTextColor(100, 116, 139); // slate-500
-      doc.text(lang === 'tr' ? "Toplam Maliyet:" : "Total Cost Breakdown:", 123, currentY + 6.5);
-      doc.text(lang === 'tr' ? "Ödenen Miktar:" : "Settled / Paid Amount:", 123, currentY + 13.5);
-      doc.text(lang === 'tr' ? "Kalan Bakiye:" : "Remaining Balance:", 123, currentY + 23.5);
+      drawText(val1Label, 123, currentY + 6.5);
+      drawText(val2Label, 123, currentY + 13.5);
+      drawText(val3Label, 123, currentY + 23.5);
       
       doc.setTextColor(30, 41, 59); // slate-800
-      doc.text(`${Number(selectedCostStatement.totalCost || 0).toLocaleString()} ${selectedCostStatement.currency}`, 190, currentY + 6.5, { align: "right" });
+      drawText(val1Text, 190, currentY + 6.5, { align: "right" });
       
       doc.setTextColor(22, 163, 74); // green-600
-      doc.text(`- ${Number(selectedCostStatement.paidAmount || 0).toLocaleString()} ${selectedCostStatement.currency}`, 190, currentY + 13.5, { align: "right" });
+      drawText(val2Text, 190, currentY + 13.5, { align: "right" });
       
       doc.setDrawColor(203, 213, 225); // slate-300
       doc.line(123, currentY + 17.5, 192, currentY + 17.5);
       
-      const balanceVal = Number(selectedCostStatement.remainingBalance || 0);
       if (balanceVal > 0) {
         doc.setTextColor(220, 38, 38); // red-600
       } else {
@@ -1381,23 +1700,23 @@ MARAS Group e-tir Center`;
       }
       doc.setFontSize(9);
       doc.setFont("Helvetica", "bold");
-      doc.text(`${balanceVal.toLocaleString()} ${selectedCostStatement.currency}`, 190, currentY + 24.5, { align: "right" });
+      drawText(val3Text, 190, currentY + 24.5, { align: "right" });
       
       // Memo and Remarks block on the left
       if (selectedCostStatement.notes) {
         doc.setTextColor(71, 85, 105); // slate-600
         doc.setFontSize(8);
         doc.setFont("Helvetica", "bold");
-        doc.text("LEDGER REMARKS & MEMORANDUMS:", 15, currentY + 5);
+        drawText("LEDGER REMARKS & MEMORANDUMS:", 15, currentY + 5);
         
         doc.setFont("Helvetica", "normal");
         doc.setTextColor(100, 116, 139); // slate-500
         const splitNotes = doc.splitTextToSize(selectedCostStatement.notes, 100);
-        doc.text(splitNotes, 15, currentY + 11);
+        drawText(splitNotes, 15, currentY + 11);
       }
       
       // System Signatures at the bottom of the active page page
-      const signY = 262;
+      const signY = 252;
       doc.setDrawColor(203, 213, 225);
       doc.setLineWidth(0.3);
       doc.line(15, signY, 70, signY);
@@ -1406,16 +1725,56 @@ MARAS Group e-tir Center`;
       doc.setFont("Helvetica", "bold");
       doc.setFontSize(7);
       doc.setTextColor(148, 163, 184); // slate-400
-      doc.text("ACCOUNTANT CONTROLLER ISSUER", 15, signY + 4);
-      doc.text("MARAS SYSTEM OF VERIFIED DELEGATION", 140, signY + 4);
+      drawText("ACCOUNTANT CONTROLLER ISSUER", 15, signY + 4);
+      drawText("MARAS SYSTEM OF VERIFIED DELEGATION", 140, signY + 4);
       
       doc.setFont("Helvetica", "normal");
       doc.setFontSize(6);
-      doc.text("Internal Verifiable Signature Lock Enabled", 15, signY + 8);
-      doc.text("Key Verification Hash: MARAS-LEDGER-" + selectedCostStatement.shipmentId, 140, signY + 8);
+      drawText("Internal Verifiable Signature Lock Enabled", 15, signY + 8);
+      drawText("Key Verification Hash: MARAS-LEDGER-" + (selectedCostStatement.shipmentId || 'VERIFIED'), 140, signY + 8);
       
-      // Trigger Instant browser file save download that bypasses iframe popup blocked issues!
-      doc.save(`MARAS_CostStatement_${selectedCostStatement.shipmentNumber}.pdf`);
+      // Beautiful semi-transparent orange Audit Stamp/Seal next to signatures
+      doc.setDrawColor(234, 88, 12, 100); // orange border (100% opacity)
+      doc.setLineWidth(0.4);
+      doc.setFillColor(254, 243, 199); // light orange background (amber 100)
+      doc.roundedRect(88, signY - 8, 35, 15, 1.5, 1.5, "FD");
+      
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(6.5);
+      doc.setTextColor(234, 88, 12); // orange text
+      drawText("MARAS AUDITED", 105, signY - 3, { align: "center" });
+      
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(5);
+      doc.setTextColor(120, 113, 108); // stone-500
+      drawText("SYSTEM COMPLIANT", 105, signY + 1.5, { align: "center" });
+      drawText("LOGISTICS LEDGER LOCK", 105, signY + 4, { align: "center" });
+
+      // Dynamic High-Fidelity Page Footer Engine across ALL generated pages
+      const pageCount = (doc.internal as any).getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        
+        // Solid light dividing line at bottom of each page
+        doc.setDrawColor(241, 245, 249); // slate-100
+        doc.setLineWidth(0.3);
+        doc.line(15, 280, 195, 280);
+        
+        // Left footer: Confidential security status
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(6.5);
+        doc.setTextColor(148, 163, 184); // slate-400
+        drawText(`MARAS REGISTER • CONFIDENTIAL DOCUMENT • SECURED SYSTEM RECORDS`, 15, 285);
+        
+        // Right footer: Dynamic page counters
+        doc.setFont("Helvetica", "bold");
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139); // slate-500
+        drawText(`Page ${i} of ${pageCount}`, 195, 285, { align: "right" });
+      }
+      
+      const filename = `MARAS_${statementPreviewMode.toUpperCase()}_${selectedCostStatement.shipmentNumber}.pdf`;
+      doc.save(filename);
       triggerToast(lang === 'tr' ? "PDF başarıyla indirildi!" : "PDF downloaded successfully!");
     } catch (err) {
       console.error("PDF generation error:", err);
@@ -1449,6 +1808,407 @@ MARAS Group e-tir Center`;
       console.error("Print invocation error:", e);
       triggerToast(lang === 'tr' ? "Yazdırma işlemi başarısız oldu." : "Browser print dialog initialization failed.");
     }
+  };
+
+  const renderStatementHeader = (selectedStatement: CostStatement) => {
+    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    let title = lang === 'tr' ? 'MALİYET BEYANNAMESİ' : 'COST STATEMENT';
+    let refNum = `Reference: MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
+    
+    if (statementPreviewMode === 'invoice') {
+      title = lang === 'tr' ? 'SATIŞ FATURASI' : 'COMMERCIAL SALES INVOICE';
+      refNum = `Invoice No: INV-MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
+    } else if (statementPreviewMode === 'client_statement') {
+      title = lang === 'tr' ? 'MÜŞTERİ CARİ HESAP EKSTRESİ' : 'CLIENT ACCOUNT STATEMENT';
+      refNum = `Statement Ref: CLI-${selectedStatement.shipmentNumber}`;
+    } else if (statementPreviewMode === 'vendor_statement') {
+      title = lang === 'tr' ? 'TEDARİKÇİ CARİ HESAP EKSTRESİ' : 'VENDOR ACCOUNT STATEMENT';
+      refNum = `Statement Ref: VND-${selectedVendorForStatement ? selectedVendorForStatement.toUpperCase().replace(/\s+/g, '_') : 'UNSPECIFIED'}-${selectedStatement.shipmentNumber}`;
+    }
+
+    return (
+      <div className="flex justify-between items-start border-b-2 border-orange-500 pb-5 gap-6">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="p-1 px-1.5 bg-orange-500 text-white rounded font-black text-xs">M</div>
+            <h4 className="text-sm font-black text-slate-900 leading-none">MARAS GROUP</h4>
+          </div>
+          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">ETIR LOGISTICS & TRANSPORT AGENCY LTD.</p>
+          <p className="text-[9px] text-slate-500 leading-relaxed mt-0.5">
+            Sardar Avenue Office, Erbil, Iraq<br />
+            Phone: +964 750 MARAS GR | Email: financials@maras.iq
+          </p>
+        </div>
+        <div className="text-right">
+          <h4 className="text-base font-black text-slate-900 tracking-tight">{title}</h4>
+          <p className="text-[10px] font-bold text-slate-400 font-mono uppercase mt-0.5">{refNum}</p>
+          <div className="mt-3 text-[10px] text-slate-500 space-y-0.5">
+            <div><strong>{lang === 'tr' ? 'İşlem Tarihi:' : 'Release Date:'}</strong> {selectedStatement.date}</div>
+            <div><strong>{lang === 'tr' ? 'Ödeme Statüsü:' : 'Payment Status:'}</strong> <span className="font-extrabold text-slate-850 uppercase">{selectedStatement.paymentStatus}</span></div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderStatementPartyInfo = (selectedStatement: CostStatement) => {
+    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    if (statementPreviewMode === 'vendor_statement') {
+      return (
+        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
+          <div>
+            <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALACAKLI TEDARİKÇİ / VENDOR BİLGİSİ' : 'CREDITOR VENDOR / SUPPLIER INFO'}</h5>
+            <div className="font-bold text-slate-900 text-sm">{selectedVendorForStatement || (lang === 'tr' ? 'Belirtilmemiş Tedarikçi' : 'No Supplier Chosen')}</div>
+            <div className="text-slate-500 mt-1">
+              Scope of Service: Contracted Customs Broker / Toll Agency<br />
+              Linked Job Reference: {selectedStatement.shipmentNumber}
+            </div>
+          </div>
+          <div className="border-l border-slate-200 pl-4 space-y-1">
+            <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'SEVKİYAT DETAYI' : 'LOGISTIC CONSIGNMENT OVERVIEW'}</h5>
+            <div><strong>{lang === 'tr' ? 'Araba Plakası:' : 'Truck Plate:'}</strong> {matchingShipment?.truckNumber || "-"}</div>
+            <div><strong>{lang === 'tr' ? 'Yük Tipi:' : 'Freight Modality:'}</strong> <span className="uppercase">{selectedStatement.shipmentType} Freight</span></div>
+            <div><strong>{lang === 'tr' ? 'Öngörülen Rota:' : 'Declared Route:'}</strong> {matchingShipment?.loadingCity} → {matchingShipment?.deliveryCity}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // Default Client perspective
+    return (
+      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
+        <div>
+          <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALICI / MÜŞTERİ BİLGİSİ' : 'CARGO CLIENT / SENDER INFO'}</h5>
+          <div className="font-bold text-slate-900 text-sm">{selectedStatement.companyName}</div>
+          <div className="text-slate-500 mt-1">
+            Cargo Category: {selectedStatement.shipmentType?.toUpperCase()} Cargo<br />
+            Origin Reference Number: {selectedStatement.shipmentNumber}
+          </div>
+        </div>
+        <div className="border-l border-slate-200 pl-4 space-y-1">
+          <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'SEVKİYAT DETAYLARI' : 'CONSIGNMENT OVERVIEW'}</h5>
+          <div><strong>{lang === 'tr' ? 'Taşıma Tipi:' : 'Freight Modality:'}</strong> <span className="uppercase">{selectedStatement.shipmentType} Freight</span></div>
+          <div><strong>{lang === 'tr' ? 'Para Birimi:' : 'Declaration Currency:'}</strong> <span className="uppercase font-mono">{selectedStatement.currency}</span></div>
+          <div><strong>{lang === 'tr' ? 'Gümrük Hattı:' : 'Logistics Sector:'}</strong> Cross-Border TIR Operations</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderStatementBodyTable = (selectedStatement: CostStatement) => {
+    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    if (statementPreviewMode === 'invoice') {
+      const amt = matchingShipment?.agreedAmount || 0;
+      return (
+        <div className="space-y-2">
+          <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'BEYAN EDİLEN HİZMET HAKKI DETAYI' : 'RENDERED CONTRACT SERVICES & HANDLING CHARGES'}</h5>
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-left border-collapse text-[10px] leading-snug">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-extrabold uppercase tracking-wide">
+                  <th className="p-2.5 pl-3">{lang === 'tr' ? 'Hizmet Kalemi / Açıklama' : 'Service Item description'}</th>
+                  <th className="p-2.5 text-center">{lang === 'tr' ? 'Miktar' : 'Qty'}</th>
+                  <th className="p-2.5 text-right font-mono">{lang === 'tr' ? 'Birim Fiyat' : 'Rate'}</th>
+                  <th className="p-2.5 text-right pr-3 font-mono">{lang === 'tr' ? 'Tutar' : 'Amount'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium font-sans">
+                <tr className="text-slate-700">
+                  <td className="p-3 pl-3">
+                    <div className="font-bold text-slate-900">
+                      Cross-Border Freight Logistics Charter Package ({selectedStatement.shipmentType.toUpperCase()})
+                    </div>
+                    <div className="text-[9px] text-slate-400 mt-0.5">
+                      Route: {matchingShipment?.loadingCity || 'Origin'} to {matchingShipment?.deliveryCity || 'Destination'} • Carrier Fleet Plate No: {matchingShipment?.truckNumber || 'N/A'} • Cargo description: {matchingShipment?.cargoDescription || 'General Cargo Merchandise'}
+                    </div>
+                  </td>
+                  <td className="p-3 text-center">1</td>
+                  <td className="p-3 text-right font-mono">{amt.toLocaleString()}</td>
+                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{amt.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                </tr>
+                <tr className="text-slate-700 bg-slate-50/50">
+                  <td className="p-3 pl-3">
+                    <div className="font-bold text-slate-900">Border Custom Agency & Manifest Filing Security</div>
+                    <div className="text-[9px] text-slate-400 mt-0.5 font-sans">Secure transit processing & custom gate clearance facilitation services</div>
+                  </td>
+                  <td className="p-3 text-center">1</td>
+                  <td className="p-3 text-right text-slate-400 italic font-sans">Included</td>
+                  <td className="p-3 text-right pr-3 font-mono font-bold text-emerald-600">0.00 <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    if (statementPreviewMode === 'client_statement') {
+      const contractAmt = matchingShipment?.agreedAmount || 0;
+      const paidAmt = selectedStatement.paidAmount || 0;
+      const balDue = contractAmt - paidAmt;
+      return (
+        <div className="space-y-2">
+          <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'MÜŞTERİ CARİ HESAP EKSTRESİ' : 'CLIENT ACCOUNT LEDGER & MOVEMENT LOG'}</h5>
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-left border-collapse text-[10px] leading-snug">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-extrabold uppercase tracking-wide">
+                  <th className="p-2.5 pl-3">{lang === 'tr' ? 'Tarih' : 'Post Date'}</th>
+                  <th className="p-2.5">{lang === 'tr' ? 'Açıklama / İşlemler' : 'Transaction descriptions'}</th>
+                  <th className="p-2.5 text-right font-mono">{lang === 'tr' ? 'Borç' : 'Debit (+)'}</th>
+                  <th className="p-2.5 text-right font-mono">{lang === 'tr' ? 'Alacak' : 'Credit (-)'}</th>
+                  <th className="p-2.5 text-right pr-3 font-mono">{lang === 'tr' ? 'Bakiye' : 'Running Balance'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium font-sans">
+                <tr className="text-slate-700">
+                  <td className="p-3 pl-3 font-mono">{selectedStatement.date}</td>
+                  <td className="p-3">
+                    <div className="font-bold text-slate-900 font-sans">Logistics Transport Booking Charter Agreed Amount</div>
+                    <div className="text-[9px] text-slate-400 mt-0.5 font-sans">Agreement for shipment number {selectedStatement.shipmentNumber}</div>
+                  </td>
+                  <td className="p-3 text-right font-mono text-slate-900">{contractAmt.toLocaleString()}</td>
+                  <td className="p-3 text-slate-300 font-mono">-</td>
+                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{contractAmt.toLocaleString()} <span className="text-[8px] text-slate-450 font-normal">{selectedStatement.currency}</span></td>
+                </tr>
+                {paidAmt > 0 && (
+                  <tr className="text-slate-700 bg-emerald-50/20">
+                    <td className="p-3 pl-3 font-mono">{selectedStatement.date}</td>
+                    <td className="p-3">
+                      <div className="font-bold text-emerald-800 font-sans">Account Payment Received via Wire Transfer</div>
+                      <div className="text-[9px] text-emerald-600 font-mono">Reference: DEP-{selectedStatement.shipmentNumber}</div>
+                    </td>
+                    <td className="p-3 text-slate-300 font-mono">-</td>
+                    <td className="p-3 text-right font-mono text-emerald-700">({paidAmt.toLocaleString()})</td>
+                    <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{balDue.toLocaleString()} <span className="text-[8px] text-slate-450 font-normal">{selectedStatement.currency}</span></td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    if (statementPreviewMode === 'vendor_statement') {
+      const vendorItems = (selectedStatement.items || []).filter(item => item.supplierName === selectedVendorForStatement);
+      return (
+        <div className="space-y-2">
+          <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'TEDARİKÇİ CARİ HAK EDİŞ LİSTESİ' : `CREDIT TRANSACTIONS FOR VENDOR: ${selectedVendorForStatement?.toUpperCase()}`}</h5>
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-left border-collapse text-[10px] leading-snug">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-extrabold uppercase tracking-wide">
+                  <th className="p-2.5 pl-3">{lang === 'tr' ? 'Maliyet Tipi / İşlem Girdisi' : 'Transaction item details'}</th>
+                  <th className="p-2.5 text-center">{lang === 'tr' ? 'Miktar' : 'Qty'}</th>
+                  <th className="p-2.5 text-right font-mono">{lang === 'tr' ? 'Birim Hakediş' : 'Unit Rate'}</th>
+                  <th className="p-2.5 text-right pr-3 font-mono">{lang === 'tr' ? 'Toplam Alacak' : 'Aggregate Owed'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium font-sans">
+                {vendorItems.length > 0 ? (
+                  vendorItems.map((item) => (
+                    <tr key={item.id} className="text-slate-700">
+                      <td className="p-3 pl-3">
+                        <div className="font-bold text-slate-900 font-sans">{item.costType}</div>
+                        {item.description && <div className="text-[9px] text-slate-400 italic font-normal mt-0.5 font-sans">{item.description}</div>}
+                      </td>
+                      <td className="p-3 text-center">{item.quantity}</td>
+                      <td className="p-3 text-right font-mono">{Number(item.unitPrice).toLocaleString()}</td>
+                      <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{Number(item.totalAmount).toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} className="p-6 text-center italic text-slate-400 bg-slate-50 font-sans">
+                      {lang === 'tr' ? 'Bu tedarikçiye ait herhangi bir maliyet kalemi bildirilmemiştir.' : 'Choose another vendor or add expense lines for this supplier.'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // Default 'statement' View (Internal Cost Statement)
+    return (
+      <div className="space-y-2 font-sans">
+        <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'SEVK GİDELERİ DETAYLI DÖKÜMÜ' : 'DECLARED LOGISTIC CHARGES BREAKDOWN'}</h5>
+        <div className="border border-slate-200 rounded-xl overflow-hidden">
+          <table className="w-full text-left border-collapse text-[10px] leading-snug">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-extrabold uppercase tracking-wide">
+                <th className="p-2 pl-3">{lang === 'tr' ? 'Gider Kalemi' : 'Cost Category / Description'}</th>
+                <th className="p-2">{lang === 'tr' ? 'Tedarikçi Firma' : 'Contract Vendor'}</th>
+                <th className="p-2 text-right">{lang === 'tr' ? 'Miktar' : 'Qty'}</th>
+                <th className="p-2 text-right">{lang === 'tr' ? 'Birim Fiyat' : 'Rate'}</th>
+                <th className="p-2 text-right pr-3">{lang === 'tr' ? 'Tutar' : 'Amount'}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-medium">
+              {selectedStatement.items && selectedStatement.items.length > 0 ? (
+                selectedStatement.items.map((item) => (
+                  <tr key={item.id} className="text-slate-700">
+                    <td className="p-2 pl-3">
+                      <div className="font-bold text-slate-900 font-sans">{item.costType}</div>
+                      {item.description && <div className="text-[9px] text-slate-400 italic font-normal mt-0.5 font-sans">{item.description}</div>}
+                    </td>
+                    <td className="p-2 text-slate-600 truncate max-w-[124px] font-sans">{item.supplierName || "-"}</td>
+                    <td className="p-2 text-right font-mono text-slate-900">{item.quantity}</td>
+                    <td className="p-2 text-right font-mono">{Number(item.unitPrice).toLocaleString()}</td>
+                    <td className="p-2 text-right pr-3 font-mono font-bold text-slate-900">{Number(item.totalAmount).toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center italic text-slate-400 bg-slate-50 font-sans">{lang === 'tr' ? 'Bu faturaya ekli maliyet kalemi bulunmamaktadır.' : 'No declared items added to this draft.'}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  const renderStatementTotalsSection = (selectedStatement: CostStatement) => {
+    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    if (statementPreviewMode === 'invoice') {
+      const totalInv = matchingShipment?.agreedAmount || 0;
+      const paidDeposit = selectedStatement.paidAmount || 0;
+      const balanceRemaining = totalInv - paidDeposit;
+      return (
+        <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
+          <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
+            <p className="font-semibold text-slate-500 mb-1">Standard Wire Payment Details:</p>
+            Bank: Iraqi Islamic Trade Bank (ITB) Erbil<br />
+            IBAN: IQ43 ITBH 1100 0004 9912 3001<br />
+            SWIFT Code: ITBHIQ2AXXX<br />
+            Please quote shipment origin ref key as transfer reference.
+          </div>
+          <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
+            <div className="flex justify-between items-center text-slate-600 pb-1.5">
+              <span>{lang === 'tr' ? 'Matrah / Toplam Paket:' : 'Base Transport Fee:'}</span>
+              <strong className="text-slate-900">{totalInv.toLocaleString()} <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-slate-400 py-1">
+              <span>{lang === 'tr' ? 'KDV / Vergiler (%0):' : 'VAT / Customs Taxes (0%):'}</span>
+              <strong>0.00 <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-emerald-600 py-1">
+              <span>{lang === 'tr' ? 'Alınan ÖnÖdeme:' : 'Advance Deposit Paid:'}</span>
+              <strong>- {paidDeposit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
+              <span>{lang === 'tr' ? 'GENEL TOPLAM BORÇ:' : 'NET TOTAL PAYABLE:'}</span>
+              <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs select-none">
+                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (statementPreviewMode === 'client_statement') {
+      const totalInv = matchingShipment?.agreedAmount || 0;
+      const paidDeposit = selectedStatement.paidAmount || 0;
+      const balanceRemaining = totalInv - paidDeposit;
+      return (
+        <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
+          <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
+            <p className="font-semibold text-slate-500 font-sans">Aging Statement Summary:</p>
+            This ledger represents the total financial balance for client {selectedStatement.companyName} on the selected cargo operations. Any dispute regarding ledger postings must be reported in 7 working days.
+          </div>
+          <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
+            <div className="flex justify-between items-center text-slate-600 pb-1.5">
+              <span>Total Debited Package Value:</span>
+              <strong className="text-slate-900">{totalInv.toLocaleString()} <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-emerald-600 py-1">
+              <span>Total Credit Settlements:</span>
+              <strong>({paidDeposit.toLocaleString()}) <span className="text-[9px] font-bold text-emerald-500">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
+              <span>{lang === 'tr' ? 'CARİ BAKİYE (BORÇ):' : 'STATEMENT OUTSTANDING:'}</span>
+              <span className={`font-mono bg-slate-50 border px-2 py-0.5 rounded text-xs select-none ${balanceRemaining > 0 ? 'text-red-600 border-red-200' : 'text-emerald-700 border-emerald-200'}`}>
+                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (statementPreviewMode === 'vendor_statement') {
+      const vendorItems = (selectedStatement.items || []).filter(item => item.supplierName === selectedVendorForStatement);
+      const vendorTotal = vendorItems.reduce((acc, it) => acc + (Number(it.totalAmount) || 0), 0);
+      return (
+        <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
+          <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
+            <p className="font-semibold text-slate-500 font-sans">Vendor Payment Clause:</p>
+            Account settlements for subcontractors are processed on the 25th of each calendar month. Receipts must match corresponding custom checkpoint transit filings.
+          </div>
+          <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
+            <div className="flex justify-between items-center text-slate-600 pb-1.5">
+              <span>Subtotal Credit Accrued:</span>
+              <strong className="text-slate-900">{vendorTotal.toLocaleString()} <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
+            </div>
+            <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black font-mono">
+              <span>{lang === 'tr' ? 'TEDARİKÇİ TOPLAM ALACAK:' : 'VENDOR TOTAL PAYABLE:'}</span>
+              <span className="text-emerald-700 font-mono bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded text-xs select-none">
+                {vendorTotal.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Default 'statement' View
+    const grossCost = Number(selectedStatement.totalCost) || 0;
+    const paidAmt = Number(selectedStatement.paidAmount) || 0;
+    const remainingAmt = Number(selectedStatement.remainingBalance) || 0;
+    return (
+      <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
+        
+        {/* General explanation or terms watermarks */}
+        <div className="text-[10px] text-slate-400 leading-normal max-w-sm mt-1 space-y-1 font-sans">
+          {selectedStatement.notes && (
+            <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-slate-600 italic font-mono text-[9px]">
+              <strong>Notes:</strong> {selectedStatement.notes}
+            </div>
+          )}
+          <p>
+            This statement constitutes an internal accounting and cost breakdown ledger formulated by the certified board of MARAS Group. All receipts uploaded herein undergo verification against the custom declaration manifests of respective customs checkpoints.
+          </p>
+        </div>
+
+        {/* Accounting summary calculation box */}
+        <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100 font-mono">
+          
+          <div className="flex justify-between items-center text-slate-600 pb-1.5">
+            <span>{lang === 'tr' ? 'Toplam Beyan Edilen Gider:' : 'Aggregate Gross Cost:'}</span>
+            <strong className="text-slate-900">{grossCost.toLocaleString()} <span className="text-[9px] text-slate-500">{selectedStatement.currency}</span></strong>
+          </div>
+
+          <div className="flex justify-between items-center text-emerald-600 pt-1.5 pb-1.5">
+            <span>{lang === 'tr' ? 'Alınan Ödeme (Tahsil):' : 'Amount Received:'}</span>
+            <strong>- {paidAmt.toLocaleString()} <span className="text-[9px] text-emerald-500">{selectedStatement.currency}</span></strong>
+          </div>
+
+          <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
+            <span>{lang === 'tr' ? 'KALAN DÖKÜM BAKİYESİ:' : 'STATEMENT BALANCE DUE:'}</span>
+            <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs select-none">
+              {remainingAmt.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+            </span>
+          </div>
+
+        </div>
+      </div>
+    );
   };
 
   const triggerToast = (msg: string) => {
@@ -1731,6 +2491,72 @@ MARAS Group e-tir Center`;
     }
   };
 
+  // Operation Team management actions
+  const handleCreateAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminFormError(null);
+
+    if (!newAdminName.trim() || !newAdminEmail.trim() || !newAdminPassword.trim()) {
+      setAdminFormError(lang === 'tr' ? 'Lütfen tüm alanları doldurun' : (lang === 'ar' ? 'يرجى ملء جميع الحقول' : 'Please fill all fields'));
+      return;
+    }
+
+    if (!newAdminEmail.includes("@")) {
+      setAdminFormError(lang === 'tr' ? 'Geçersiz e-posta formatı' : (lang === 'ar' ? 'صيغة البريد الإلكتروني غير صالحة' : 'Invalid email format'));
+      return;
+    }
+
+    try {
+      const res = await apiFetch("/api/admins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: newAdminName.trim(),
+          email: newAdminEmail.toLowerCase().trim(),
+          password: newAdminPassword.trim(),
+          adminType: newAdminType,
+          createdAt: new Date().toISOString()
+        })
+      });
+
+      if (res.ok) {
+        setNewAdminName("");
+        setNewAdminEmail("");
+        setNewAdminPassword("");
+        setNewAdminType("operation");
+        setIsAddAdminOpen(false);
+        fetchData(true);
+        triggerToast("Operation team member successfully added.");
+      } else {
+        const errData = await res.json();
+        setAdminFormError(errData.error || "Failed to create team member");
+      }
+    } catch (err: any) {
+      setAdminFormError(err.message || "An exception occurred.");
+    }
+  };
+
+  const handleDeleteAdmin = async (adminId: string) => {
+    const confirmMsg = lang === 'tr' ? 'Bu operasyon üyesini silmek istediğinize emin misiniz?' : (lang === 'ar' ? 'هل أنت متأكد من رغبتك في حذف هذا العضو؟' : 'Are you sure you want to delete this team member?');
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      const res = await apiFetch(`/api/admins/${adminId}`, {
+        method: "DELETE"
+      });
+
+      if (res.ok) {
+        fetchData(true);
+        triggerToast("Operation team member revoked.");
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to delete team member");
+      }
+    } catch (err: any) {
+      triggerToast(err.message || "Deletion error");
+    }
+  };
+
   // Auto compile WhatsApp and Direct Links
   const getDirectLink = (token: string) => {
     const domain = window.location.origin;
@@ -1740,7 +2566,7 @@ MARAS Group e-tir Center`;
   const getWhatsAppLink = (shipmentNum: string, token: string, loading: string, delivery: string) => {
     const link = getDirectLink(token);
     const text = encodeURIComponent(
-      `e-tir by MARAS Group\nShipment: ${shipmentNum}\nRoute: ${loading} ➔ ${delivery}\nTrack logistics progress in real-time here: ${link}`
+      `etir by MARAS Group\nShipment: ${shipmentNum}\nRoute: ${loading} ➔ ${delivery}\nTrack logistics progress in real-time here: ${link}`
     );
     return `https://api.whatsapp.com/send?text=${text}`;
   };
@@ -1755,6 +2581,7 @@ MARAS Group e-tir Center`;
     let amt = s.agreedAmount;
     if (s.currency === "IQD") amt = s.agreedAmount / 1450; // Approximations
     if (s.currency === "TRY") amt = s.agreedAmount / 32;
+    if (s.currency === "EUR") amt = s.agreedAmount * 1.08;
     return acc + amt;
   }, 0);
 
@@ -1801,6 +2628,72 @@ MARAS Group e-tir Center`;
     { name: lang === 'tr' ? 'Aktif Transitler' : (lang === 'ar' ? 'شحنات قيد التنفيذ' : 'Active Transits'), value: activeCountVal, color: '#3b82f6' },
     { name: lang === 'tr' ? 'Tamamlanan Teslimat' : (lang === 'ar' ? 'شحنات مكتملة' : 'Completed Deliveries'), value: completedCountVal, color: '#10b981' }
   ].filter(d => d.value > 0);
+
+  // Generate last 30 days of completed shipments for the chart
+  const performanceAnalyticsData = React.useMemo(() => {
+    const list = [];
+    const now = new Date();
+    
+    // We want the last 30 days: Day 29 (30 days ago) to Day 0 (today)
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(now.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+      
+      const completedOnThisDay = shipments.filter(s => {
+        const isCompleted = ['Arrived', 'Delivered', 'Closed', 'Completed'].includes(s.status);
+        if (!isCompleted) return false;
+        
+        // Find if transit completed time is set via timeline or fallback to updatedAt/createdAt
+        const completeEvent = s.timeline?.find(t => 
+          ['Arrived', 'Delivered', 'Closed', 'Completed'].includes(t.status)
+        );
+        
+        const eventDateStr = completeEvent 
+          ? new Date(completeEvent.timestamp).toISOString().split('T')[0]
+          : new Date(s.updatedAt || s.createdAt).toISOString().split('T')[0];
+          
+        return eventDateStr === dateStr;
+      }).length;
+      
+      const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+      const formattedLabel = d.toLocaleDateString(lang === 'tr' ? 'tr-TR' : (lang === 'ar' ? 'ar-EG' : 'en-US'), options);
+      
+      const dataKey = lang === 'tr' ? 'Tamamlanan' : (lang === 'ar' ? 'المكتملة' : 'Completed');
+      list.push({
+        date: dateStr,
+        label: formattedLabel,
+        [dataKey]: completedOnThisDay,
+      });
+    }
+    return list;
+  }, [shipments, lang]);
+
+  // Calculation of analytics variables
+  const { totalCompleted30d, avgDailyCompleted, peakFormattedDay } = React.useMemo(() => {
+    let total = 0;
+    let peakCount = 0;
+    let peakDayLabel = "";
+    const valKey = lang === 'tr' ? 'Tamamlanan' : (lang === 'ar' ? 'المكتملة' : 'Completed');
+    
+    performanceAnalyticsData.forEach(item => {
+      const count = (item[valKey] || 0) as number;
+      total += count;
+      if (count > peakCount) {
+        peakCount = count;
+        peakDayLabel = `${item.label} (${count})`;
+      }
+    });
+    
+    // Average
+    const avg = (total / 30).toFixed(1);
+    
+    return {
+      totalCompleted30d: total,
+      avgDailyCompleted: avg,
+      peakFormattedDay: peakDayLabel || (lang === 'tr' ? 'Mevcut Değil' : (lang === 'ar' ? 'غير متوفر' : 'N/A'))
+    };
+  }, [performanceAnalyticsData, lang]);
 
   // --- REAL-TIME RETRIEVAL STATS & CHARTS DATA ---
   const shipmentsPendingDocs = shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && (!s.documents || s.documents.length === 0));
@@ -2141,7 +3034,7 @@ MARAS Group e-tir Center`;
             )}
           </div>
 
-          {userRole === 'admin' && (
+          {(adminType === 'super' || adminType === 'operation' || userRole === 'admin') && (
             <button 
               onClick={() => setIsCreateOpen(true)}
               className="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 shadow-lg hover:shadow-orange-200 transition-all"
@@ -2155,35 +3048,54 @@ MARAS Group e-tir Center`;
 
       {/* Admin Module Tabs */}
       <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200 mb-6 overflow-x-auto max-w-full">
-        {([
-          { id: 'dashboard', label: t('dashboard'), icon: ClipboardList },
-          { id: 'shipments', label: t('shipmentManagement'), icon: Ship },
-          { id: 'tracking_map', label: lang === 'tr' ? 'GPS Takip Haritası' : (lang === 'ar' ? 'خريطة التتبع GPS' : 'GPS Tracking Map'), icon: MapIcon },
-          { id: 'drivers', label: t('driverManagement'), icon: Truck },
-          { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
-          { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
-          { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
-          { id: 'reports', label: t('reports'), icon: BarChart },
-          { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
-          { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck }
-        ] as const).filter(tab => userRole === 'admin' || tab.id === 'costs').map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-all ${
-                isActive 
-                  ? 'bg-slate-900 text-white shadow-sm' 
-                  : 'text-slate-600 hover:text-slate-950 hover:bg-slate-200/50'
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
+        {(() => {
+          const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+          const isSuper = resolvedAdminType === 'super';
+          const isOperation = resolvedAdminType === 'operation';
+          const isAccounts = resolvedAdminType === 'accounts' || resolvedAdminType === 'account';
+
+          const rawTabs = [
+            { id: 'dashboard', label: t('dashboard'), icon: ClipboardList },
+            { id: 'shipments', label: t('shipmentManagement'), icon: Ship },
+            { id: 'tracking_map', label: lang === 'tr' ? 'GPS Takip Haritası' : (lang === 'ar' ? 'خريطة التتبع GPS' : 'GPS Tracking Map'), icon: MapIcon },
+            { id: 'drivers', label: t('driverManagement'), icon: Truck },
+            { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
+            { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
+            { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
+            { id: 'reports', label: t('reports'), icon: BarChart },
+            { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
+            { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck },
+            ...(isSuper ? [{ id: 'team', label: lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operation Team'), icon: UserPlus }] : [])
+          ];
+
+          return rawTabs.filter(tab => {
+            if (isSuper) return true;
+            if (isOperation) {
+              return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'clients', 'vendors'].includes(tab.id);
+            }
+            if (isAccounts) {
+              return ['costs', 'reports', 'clients', 'vendors'].includes(tab.id);
+            }
+            return false;
+          }).map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-all ${
+                  isActive 
+                    ? 'bg-slate-900 text-white shadow-sm' 
+                    : 'text-slate-600 hover:text-slate-950 hover:bg-slate-200/50'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          });
+        })()}
       </div>
 
       {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR */}
@@ -2291,7 +3203,7 @@ MARAS Group e-tir Center`;
                 <p className="text-[11px] text-slate-500 font-medium">
                   {lang === 'tr' 
                     ? "Sistem genelindeki aktif yük dağılımlarını, eksik evrak durumlarını ve anlık sürücü uyarılarını izleyin." 
-                    : (lang === 'ar' ? "تتبع توزيع الأحمال النشطة، حالة تسليم الأوراق، وتواتر التنبيهات الفورية الواردة من السائقين." : "Provides live analytics on shipments, pending digital documents (e-TIR backups), and incoming operational alert types.")}
+                    : (lang === 'ar' ? "تتبع توزيع الأحمال النشطة، حالة تسليم الأوراق، وتواتر التنبيهات الفورية الواردة من السائقين." : "Provides live analytics on shipments, pending digital documents (etir backups), and incoming operational alert types.")}
                 </p>
               </div>
               <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-800 text-[10px] font-bold rounded-lg tracking-wider font-mono uppercase cursor-default self-start sm:self-auto select-none">
@@ -2346,7 +3258,7 @@ MARAS Group e-tir Center`;
                     <span className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">{lang === 'tr' ? "Belge Güvence Takibi" : (lang === 'ar' ? "تكامل وثائق الشحن" : "Document Integrity")}</span>
                     <h4 className="text-base font-black text-amber-600 tracking-tight flex items-baseline gap-1.5">
                       <span>{pendingDocumentsCount}</span>
-                      <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "ihbar var" : "need e-TIR doc"}</span>
+                      <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "ihbar var" : "need etir doc"}</span>
                     </h4>
                   </div>
                   <span className="p-2 bg-gradient-to-tr from-amber-500/10 to-orange-500/10 text-amber-600 rounded-lg"><FileText className="w-4 h-4" /></span>
@@ -2677,7 +3589,7 @@ MARAS Group e-tir Center`;
                       <span>{lang === 'tr' ? "Anlık Transit Takip İstasyon İzleme" : (lang === 'ar' ? "مراقبة مسار الشحنات الميدانية" : "Live Cargo Transit Monitoring")}</span>
                     </h3>
                     <p className="text-slate-500 text-xs mt-0.5 font-medium">
-                      {lang === 'tr' ? "E-TIR entegrasyonuyla canlı durum ve evrak doğrulaması" : (lang === 'ar' ? "التحقق المباشر من وثائق الشحنات البرية والبحرية والجوية" : "Real-time dispatch control and document validation for logistics operations")}
+                      {lang === 'tr' ? "etir entegrasyonuyla canlı durum ve evrak doğrulaması" : (lang === 'ar' ? "التحقق المباشر من وثائق الشحنات البرية والبحرية والجوية" : "Real-time dispatch control and document validation for logistics operations")}
                     </p>
                   </div>
                   
@@ -2815,24 +3727,29 @@ MARAS Group e-tir Center`;
                               </span>
                               
                               {/* Micro shipment progress state */}
-                              <div className="w-24 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div 
-                                  className={`h-full rounded-full ${
-                                    shipment.status === 'Delivered' || shipment.status === 'Closed' ? 'bg-green-500' :
-                                    ['Border Crossing', 'Customs Clearance'].includes(shipment.status) ? 'bg-amber-400' : 'bg-blue-500'
-                                  }`}
-                                  style={{ 
-                                    width: 
-                                      shipment.status === 'New' ? '12%' :
-                                      shipment.status === 'Assigned' ? '28%' :
-                                      shipment.status === 'Accepted' ? '38%' :
-                                      shipment.status === 'Loading' ? '48%' :
-                                      shipment.status === 'Loaded' ? '65%' :
-                                      shipment.status === 'In Transit' ? '78%' :
-                                      ['Border Crossing', 'Customs Clearance'].includes(shipment.status) ? '88%' : '100%'
-                                  }}
-                                />
-                              </div>
+                              {(() => {
+                                const analysis = analyzeShipmentTiming(shipment);
+                                return (
+                                  <div className="flex flex-col gap-1 w-28">
+                                    <div className="flex items-center justify-between text-[9px] text-slate-450 font-mono font-bold">
+                                      <span className="flex items-center gap-1">
+                                        <Clock className="w-2.5 h-2.5 inline shrink-0" />
+                                        <span>{analysis.label}</span>
+                                      </span>
+                                      <span className={`${analysis.textColorClass}`}>{getShipmentProgressPercentage(shipment)}%</span>
+                                    </div>
+                                    <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full rounded-full transition-all duration-500 ${analysis.colorClass}`}
+                                        style={{ width: `${getShipmentProgressPercentage(shipment)}%` }}
+                                      />
+                                    </div>
+                                    <div className="text-[8px] text-slate-400 font-medium truncate" title={analysis.subtext}>
+                                      {analysis.subtext}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           </td>
                           <td className="p-4 text-right whitespace-nowrap">
@@ -3114,13 +4031,38 @@ MARAS Group e-tir Center`;
                         {s.agreedAmount.toLocaleString()} {s.currency}
                       </td>
                       <td className="p-4">
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
-                          s.status === 'New' ? 'bg-slate-100 text-slate-700/80' :
-                          s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-850' :
-                          s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
-                        }`}>
-                          {s.status}
-                        </span>
+                        <div className="space-y-1">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                            s.status === 'New' ? 'bg-slate-100 text-slate-700/80' :
+                            s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-850' :
+                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
+                          }`}>
+                            {s.status}
+                          </span>
+                          
+                          {/* Visual Progress bar inside table row with dynamic remaining time color transitions */}
+                          {(() => {
+                            const analysis = analyzeShipmentTiming(s);
+                            const progress = getShipmentProgressPercentage(s);
+                            return (
+                              <div className="flex flex-col gap-0.5 w-32">
+                                <div className="flex items-center justify-between text-[9px] font-mono font-bold text-slate-450 leading-none">
+                                  <span>{analysis.label}</span>
+                                  <span className={analysis.textColorClass}>{progress}%</span>
+                                </div>
+                                <div className="w-full h-1.5 bg-slate-150 rounded-full overflow-hidden">
+                                  <div 
+                                    className={`h-full rounded-full transition-all duration-500 ${analysis.colorClass}`}
+                                    style={{ width: `${progress}%` }}
+                                  />
+                                </div>
+                                <div className="text-[8px] text-slate-400 font-medium truncate" title={analysis.subtext}>
+                                  {analysis.subtext}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
                       </td>
                       <td className="p-4 text-center space-x-1.5 whitespace-nowrap">
                         <button 
@@ -3353,6 +4295,116 @@ MARAS Group e-tir Center`;
                     <div className="h-full flex items-center justify-center text-slate-400 italic">No currency statistics found.</div>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Performance Analytics Section */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">
+                  {lang === 'tr' ? 'Performans ve Hacim Analizi' : (lang === 'ar' ? 'تحليلات الأداء والحجم' : 'Performance Analytics')}
+                </h2>
+                <p className="text-slate-500 text-sm">
+                  {lang === 'tr' ? 'Son 30 günde tamamlanan teslimat hacmi ve operasyonel akış' : (lang === 'ar' ? 'حجم الشحنات المكتملة والإنتاجية التشغيلية على مدار الثلاثين يومًا الماضية' : 'Completed shipment volumes and operational productivity over the last 30 days')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg text-xs font-mono text-slate-600">
+                <TrendingUp className="w-4 h-4 text-orange-500 animate-pulse" />
+                <span>
+                  {lang === 'tr' ? 'Son 30 Gün' : (lang === 'ar' ? 'آخر ٣٠ يومًا' : 'Last 30 Days')}
+                </span>
+              </div>
+            </div>
+
+            {/* Micro stats banner */}
+            <div className={`grid grid-cols-1 ${isMobileMode ? 'grid-cols-1' : 'md:grid-cols-3'} gap-4`}>
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-orange-100/70 flex items-center justify-center text-orange-600 shrink-0">
+                  <CheckCircle2 className="w-5 h-5 font-bold" />
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    {lang === 'tr' ? 'Toplam Tamamlanan (30g)' : (lang === 'ar' ? 'إجمالي المكتمل (٣٠ يوم)' : 'Total Completed (30d)')}
+                  </p>
+                  <p className="text-xl font-black text-slate-800">
+                    {totalCompleted30d}
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-blue-100/70 flex items-center justify-center text-blue-600 shrink-0">
+                  <TrendingUp className="w-5 h-5 font-bold" />
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    {lang === 'tr' ? 'Günlük Ortalama' : (lang === 'ar' ? 'المعدل اليومي' : 'Daily Average')}
+                  </p>
+                  <p className="text-xl font-black text-slate-800">
+                    {avgDailyCompleted}
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-100/70 flex items-center justify-center text-emerald-600 shrink-0">
+                  <Award className="w-5 h-5 font-bold" />
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    {lang === 'tr' ? 'Zirve Hacim Günü' : (lang === 'ar' ? 'يوم ذروة العمليات' : 'Peak Volume Day')}
+                  </p>
+                  <p className="text-xs font-bold text-slate-800 truncate max-w-[180px]">
+                    {peakFormattedDay || "—"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
+              <div className="h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={performanceAnalyticsData} margin={{ top: 10, right: 20, left: -20, bottom: 5 }}>
+                    <XAxis 
+                      dataKey="label" 
+                      stroke="#64748b" 
+                      fontSize={10} 
+                      tickLine={false} 
+                      axisLine={false}
+                      dy={10}
+                    />
+                    <YAxis 
+                      stroke="#64748b" 
+                      fontSize={10} 
+                      tickLine={false} 
+                      axisLine={false}
+                      dx={-5}
+                      allowDecimals={false}
+                    />
+                    <Tooltip 
+                      contentStyle={{ 
+                        backgroundColor: '#0f172a', 
+                        borderRadius: '0.75rem', 
+                        border: 'none', 
+                        color: '#f8fafc',
+                        fontFamily: 'sans-serif',
+                        fontSize: '12px',
+                        boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)'
+                      }}
+                      itemStyle={{ color: '#f97316' }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey={lang === 'tr' ? 'Tamamlanan' : (lang === 'ar' ? 'المكتملة' : 'Completed')} 
+                      stroke="#f97316" 
+                      strokeWidth={3} 
+                      dot={{ r: 4, stroke: '#f97316', strokeWidth: 2, fill: '#ffffff' }}
+                      activeDot={{ r: 6 }} 
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
               </div>
             </div>
           </div>
@@ -4018,6 +5070,209 @@ MARAS Group e-tir Center`;
         </div>
       )}
 
+      {/* Operation Team Section */}
+      {activeTab === 'team' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2">
+                  <UserPlus className="w-5 h-5 text-indigo-600" />
+                  {lang === 'tr' ? 'Operasyon ve Hesap Yönetim Ekibi' : (lang === 'ar' ? 'فريق العمليات والحسابات' : 'Operations & Account Team')}
+                </h2>
+                <p className="text-slate-500 text-xs">
+                  {lang === 'tr' 
+                    ? 'Yönetim paneline sınırlı erişim sağlayacak operasyon veya hesap liderleri yetkilendirin' 
+                    : (lang === 'ar' 
+                      ? 'قم بإضافة مسؤولي عمليات أو حسابات بصلاحيات محدودة للعمل على لوحة التحكم' 
+                      : 'Provision other operation and accounts administrators with limited visual panel boundaries')
+                  }
+                </p>
+              </div>
+              <button 
+                onClick={() => {
+                  setAdminFormError(null);
+                  setIsAddAdminOpen(true);
+                }}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{lang === 'tr' ? 'Ekip Üyesi Ekle' : (lang === 'ar' ? 'إضافة عضو فريق' : 'Add Team Member')}</span>
+              </button>
+            </div>
+
+            <div className="p-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {/* Master Owner administrator Card */}
+                <div className="bg-slate-950 rounded-xl border border-slate-800 p-5 relative overflow-hidden text-white shadow-md">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl pointer-events-none"></div>
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="inline-flex items-center gap-1 text-[9px] font-bold text-orange-500 bg-orange-500/10 uppercase tracking-widest px-2 py-0.5 rounded-full mb-3">
+                        Owner / Super Admin
+                      </span>
+                      <h3 className="text-sm font-bold truncate">Sardar (MARAS Office)</h3>
+                      <p className="text-slate-400 text-xs font-mono select-all truncate mt-1">sardar@maras.iq</p>
+                    </div>
+                    <div className="p-2 bg-slate-900 rounded-lg border border-slate-800 text-orange-500">
+                      <ShieldCheck className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <div className="border-t border-slate-800/60 mt-4 pt-3 flex items-center justify-between text-[11px] text-slate-400">
+                    <span>{lang === 'tr' ? 'Bypass Şifre' : 'Master bypass Key'}</span>
+                    <span className="font-mono bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800 text-orange-400 font-bold select-all">maras123</span>
+                  </div>
+                </div>
+
+                {/* Database fetched admins list */}
+                {adminsList.map((adm: any) => {
+                  const isAccountAdmin = adm.adminType === 'accounts' || adm.adminType === 'account';
+                  return (
+                    <div key={adm.id} className="bg-white rounded-xl border border-slate-200 p-5 relative overflow-hidden hover:shadow-md transition">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mb-3 ${
+                            isAccountAdmin 
+                              ? 'text-teal-600 bg-teal-50' 
+                              : 'text-indigo-600 bg-indigo-50'
+                          }`}>
+                            {isAccountAdmin 
+                              ? (lang === 'tr' ? 'Muhasebe Ekibi' : 'Accounts Admin') 
+                              : (lang === 'tr' ? 'Operasyon Ekibi' : 'Operations Admin')
+                            }
+                          </span>
+                          <h3 className="text-sm font-bold text-slate-900 truncate">{adm.name}</h3>
+                          <p className="text-slate-500 text-xs font-mono select-all truncate mt-1">{adm.email}</p>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteAdmin(adm.id)}
+                          className="p-1.5 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-400 rounded-md transition cursor-pointer border-0"
+                          title="Revoke Access"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="border-t border-slate-100 mt-4 pt-3 space-y-1 text-[11px] text-slate-500">
+                        <div className="flex items-center justify-between">
+                          <span>{lang === 'tr' ? 'Giriş Şifresi' : 'Sign-in Password'}</span>
+                          <span className="font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100 text-slate-700 select-all font-bold">{adm.password}</span>
+                        </div>
+                        {adm.createdAt && (
+                          <div className="flex items-center justify-between text-[10px] text-slate-400">
+                            <span>{lang === 'tr' ? 'Yetkilendirildi' : 'Authorized'}</span>
+                            <span>{new Date(adm.createdAt).toLocaleDateString()}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {adminsList.length === 0 && (
+                  <div className="col-span-full border border-dashed border-slate-200 rounded-xl p-8 text-center bg-slate-50/50">
+                    <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="text-slate-500 text-xs">
+                      {lang === 'tr' ? 'Ek operasyonel ekip bulunmuyor.' : 'No additional operational or finance accounts provisioned yet.'}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* New Admin Creation Dialog Backdrop */}
+          {isAddAdminOpen && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
+              <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+                <div className="p-6 bg-slate-950 text-white relative">
+                  <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-full blur-xl pointer-events-none"></div>
+                  <h3 className="text-base font-black flex items-center gap-2">
+                    <UserPlus className="w-5 h-5 text-indigo-400" />
+                    <span>{lang === 'tr' ? 'Yeni Ekip Üyesi Yetkilendir' : (lang === 'ar' ? 'تفويض عضو فريق جديد' : 'Authorize New Team Member')}</span>
+                  </h3>
+                  <p className="text-slate-400 text-[11px] mt-1">
+                    {lang === 'tr' ? 'Ekip üyesinin mail adresini ve şifresini belirleyin.' : 'Specify name, restricted login credentials, and permission boundaries.'}
+                  </p>
+                </div>
+
+                <form onSubmit={handleCreateAdmin} className="p-6 space-y-4">
+                  {adminFormError && (
+                    <div className="p-3 bg-red-50 text-red-600 rounded-lg text-xs font-semibold select-all">
+                      {adminFormError}
+                    </div>
+                  )}
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">{lang === 'tr' ? 'Tam Adı' : 'Full Name'}</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={newAdminName}
+                      onChange={(e) => setNewAdminName(e.target.value)}
+                      placeholder="e.g. John Doe"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">Email Address</label>
+                    <input 
+                      type="email" 
+                      required
+                      value={newAdminEmail}
+                      onChange={(e) => setNewAdminEmail(e.target.value)}
+                      placeholder="john@maras.iq"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">Password Key</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={newAdminPassword}
+                      onChange={(e) => setNewAdminPassword(e.target.value)}
+                      placeholder="Strong unique key"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">Permission Boundary / Role</label>
+                    <select
+                      value={newAdminType}
+                      onChange={(e) => setNewAdminType(e.target.value as any)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs font-semibold focus:ring-1 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="operation">Operations Administrator (No Accounts / Finance Statements access)</option>
+                      <option value="accounts">Accounts Accountant (No Shipments GPS trackers / Drivers chats access)</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-end gap-2.5">
+                    <button 
+                      type="button"
+                      onClick={() => setIsAddAdminOpen(false)}
+                      className="px-4 py-2 text-slate-500 hover:text-slate-800 text-xs font-extrabold cursor-pointer hover:bg-slate-50 rounded-lg transition border-0 bg-transparent"
+                    >
+                      {lang === 'tr' ? 'Vazgeç' : (lang === 'ar' ? 'إلغاء' : 'Cancel')}
+                    </button>
+                    <button 
+                      type="submit"
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold rounded-lg shadow-sm transition border-0 cursor-pointer"
+                    >
+                      {lang === 'tr' ? 'Yetkilendir' : (lang === 'ar' ? 'تفعيل الحساب' : 'Authorize Member')}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 6. Gmail Workspace Active Tab Card */}
       {activeTab === 'gmail' && (
         <div className="space-y-6">
@@ -4120,7 +5375,7 @@ MARAS Group e-tir Center`;
               <div className="space-y-1">
                 <h3 className="font-extrabold text-slate-900 text-sm">Google Workspace Integration Required</h3>
                 <p className="text-slate-600 text-xs max-w-md mx-auto leading-relaxed">
-                  To operate secure operational dispatches via Gmail, backup e-TIR logs on Google Drive and manage transport scheduling directly on Google Calendar, click the authorization button above.
+                  To operate secure operational dispatches via Gmail, backup etir logs on Google Drive and manage transport scheduling directly on Google Calendar, click the authorization button above.
                 </p>
               </div>
             </div>
@@ -4306,7 +5561,7 @@ MARAS Group e-tir Center`;
                     <input
                       type="text"
                       required
-                      placeholder="e-tir Transit Alert"
+                      placeholder="etir Transit Alert"
                       value={gmailSubject}
                       onChange={(e) => setGmailSubject(e.target.value)}
                       className="w-full px-3 py-2 border border-slate-200 focus:border-orange-500 text-xs text-slate-800 font-semibold rounded-lg focus:outline-none"
@@ -4428,7 +5683,7 @@ MARAS Group e-tir Center`;
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <h3 className="text-xs font-black text-slate-950 uppercase tracking-wider">Drive Backups Archive</h3>
-                    <p className="text-[11px] text-slate-500 mt-0.5">Most recent operational e-TIR logs stored securely on Google Drive.</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Most recent operational etir logs stored securely on Google Drive.</p>
                   </div>
                   <button
                     type="button"
@@ -5143,6 +6398,7 @@ MARAS Group e-tir Center`;
                         className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:bg-white focus:border-slate-400 cursor-pointer"
                       >
                         <option value="USD">USD ($) United States Dollar</option>
+                        <option value="EUR">EUR (€) Euro</option>
                         <option value="IQD">IQD (د.ع) Iraqi Dinar</option>
                         <option value="TRY">TRY (₺) Turkish Lira</option>
                       </select>
@@ -5372,66 +6628,108 @@ MARAS Group e-tir Center`;
                     ) : (
                       <div className="p-8 border-2 border-dashed border-slate-200 rounded-2xl text-center text-slate-400 space-y-2 bg-slate-50">
                         <DollarSign className="w-10 h-10 mx-auto text-slate-300 animate-bounce" />
-                        <p className="text-xs font-bold leading-relaxed">{lang === 'tr' ? 'Maliyet kırılımı bulunmamaktadır.' : 'No expenses added yet.'}</p>
-                        <p className="text-[10px] text-slate-400">{lang === 'tr' ? 'Sağ üst köşedeki "Öğe Ekle" butonunu kullanarak navlun, gümrük vb. kalemi ekleyebilirsiniz.' : 'Use the "Add Item" button above to register border charges, trucking logs, or custom agency clearance.'}</p>
+                        <p className="font-bold text-xs">{lang === 'tr' ? 'Hesap listesi boş.' : 'No expense items added.'}</p>
+                        <p className="text-[10px]">{lang === 'tr' ? 'Masrafları listelemek için "Öğe Ekle" butonunu kullanın.' : 'Click "Add Item" in top right to post transaction records.'}</p>
                       </div>
                     )}
                   </div>
                 </div>
-
-                {/* Optional broad notes section */}
-                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-2">
-                  <label className="block text-[10px] uppercase font-bold text-slate-500">{lang === 'tr' ? 'Kapatma / Beyanname Notları' : 'Notes / Closing remarks'}</label>
-                  <textarea
-                    value={selectedCostStatement.notes}
-                    onChange={(e) => setSelectedCostStatement(prev => prev ? { ...prev, notes: e.target.value } : null)}
-                    placeholder={lang === 'tr' ? "Ödeme koşulları veya genel durum açıklamaları..." : "e.g. Terms of payment and local customs validation remarks..."}
-                    className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:bg-white focus:border-slate-400 h-16 font-medium"
-                  />
-                </div>
-
-                {/* Submitting Actions */}
-                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between gap-4 sticky bottom-0 border-t z-10">
-                  <div className="text-xs font-mono text-slate-400">
-                    {lang === 'tr' ? 'Otomatik güncellenir:' : 'Calculated Live Summary:'} <span className="font-bold text-slate-800">{selectedCostStatement.items?.length || 0} items</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setIsStatementEditorOpen(false);
-                        setSelectedCostStatement(null);
-                      }}
-                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-all border-0 cursor-pointer"
-                    >
-                      {lang === 'tr' ? 'İptal Et' : 'Cancel'}
-                    </button>
-                    <button
-                      onClick={handleSaveCostStatement}
-                      disabled={isSavingCostStatement}
-                      className={`px-5 py-2 bg-orange-500 hover:bg-orange-600 text-white text-xs font-black rounded-xl shadow-lg border-0 cursor-pointer transition-all inline-flex items-center gap-1.5 ${
-                        isSavingCostStatement ? 'opacity-50 cursor-not-allowed' : ''
-                      }`}
-                    >
-                      {isSavingCostStatement ? (
-                        <span className="animate-pulse">{lang === 'tr' ? 'Kaydediliyor...' : 'Saving Statements...'}</span>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-4 h-4 shrink-0" />
-                          <span>{lang === 'tr' ? 'Beyannameyi Kaydet' : 'Save Sheet Statement'}</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
               </div>
 
               {/* RIGHT COLUMN: REAL TIME INVOICE-STYLE PRINTABLE PDF STATEMENT PREVIEW */}
               <div className="w-full lg:w-1/2 p-4 md:p-6 overflow-y-auto bg-slate-50 flex flex-col items-center justify-start max-h-screen">
                 
+                {/* Document Type Selection Group (TABS) */}
+                <div className="w-full max-w-2xl bg-white border border-slate-200 p-3 rounded-2xl shadow-xs mb-4 flex flex-col gap-3 shrink-0">
+                  <div className="text-[10px] uppercase font-mono font-bold text-slate-400 tracking-wider flex items-center justify-between">
+                    <span>{lang === 'tr' ? 'BELGE SEÇİM VE ÖNİZLEME PANELİ' : 'DOCUMENT SELECTOR & DESKTOP PREVIEW'}</span>
+                    <span className="text-orange-500 font-extrabold">{statementPreviewMode.replace('_', ' ').toUpperCase()}</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                    <button
+                      onClick={() => setStatementPreviewMode('statement')}
+                      className={`px-2 py-1.5 text-xs font-black rounded-xl border transition-all cursor-pointer ${
+                        statementPreviewMode === 'statement'
+                          ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'tr' ? 'Maliyet Beyanı' : 'Cost Statement'}
+                    </button>
+                    <button
+                      onClick={() => setStatementPreviewMode('invoice')}
+                      className={`px-2 py-1.5 text-xs font-black rounded-xl border transition-all cursor-pointer ${
+                        statementPreviewMode === 'invoice'
+                          ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'tr' ? 'Müşteri Faturası' : 'Job Invoice'}
+                    </button>
+                    <button
+                      onClick={() => setStatementPreviewMode('client_statement')}
+                      className={`px-2 py-1.5 text-xs font-black rounded-xl border transition-all cursor-pointer ${
+                        statementPreviewMode === 'client_statement'
+                          ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'tr' ? 'Müşteri Ekstresi' : 'Client Account'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setStatementPreviewMode('vendor_statement');
+                        const uniqueVendors = Array.from(new Set((selectedCostStatement.items || []).map(item => item.supplierName).filter(Boolean)));
+                        if (uniqueVendors.length > 0 && !selectedVendorForStatement) {
+                          setSelectedVendorForStatement(uniqueVendors[0]);
+                        }
+                      }}
+                      className={`px-2 py-1.5 text-xs font-black rounded-xl border transition-all cursor-pointer ${
+                        statementPreviewMode === 'vendor_statement'
+                          ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'tr' ? 'Tedarikçi Sır' : 'Vendor Account'}
+                    </button>
+                  </div>
+
+                  {/* Vendor Dropdown selection if Vendor Statement is active */}
+                  {statementPreviewMode === 'vendor_statement' && (() => {
+                    const uniqueVendors = Array.from(new Set((selectedCostStatement.items || []).map(item => item.supplierName).filter(Boolean)));
+                    return (
+                      <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                          {lang === 'tr' ? 'Aktif Tedarikçi Seçin:' : 'Select Creditor Vendor:'}
+                        </span>
+                        {uniqueVendors.length > 0 ? (
+                          <select
+                            value={selectedVendorForStatement}
+                            onChange={(e) => setSelectedVendorForStatement(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-xs font-extrabold text-slate-800 outline-none"
+                          >
+                            {uniqueVendors.map(vendor => (
+                              <option key={vendor} value={vendor}>{vendor}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-[10px] font-bold text-red-500 italic bg-red-50 px-2 py-0.5 rounded border border-red-100">
+                            {lang === 'tr' ? 'Beyannamede henüz tedarikçi dökümü yok!' : 'Declare some cost items with suppliers first.'}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {/* Print button on top */}
                 <div className="w-full max-w-2xl flex items-center justify-between pl-1 pb-4 shrink-0">
-                  <p className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">{lang === 'tr' ? 'Müşteri Beyanname Çıktısı (PDF)' : 'Live Document Statement'}</p>
+                  <p className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    {statementPreviewMode === 'statement' ? (lang === 'tr' ? 'Döküm Belgesi (Cost-Sheet)' : 'Cost Statement Ledger (PDF)') :
+                     statementPreviewMode === 'invoice' ? (lang === 'tr' ? 'Satış Faturası (Sales Invoice)' : 'Commercial Service Invoice') :
+                     statementPreviewMode === 'client_statement' ? (lang === 'tr' ? 'Alıcı Hesap Ekstresi (Client Ledger)' : 'Client Account Statement (PDF)') :
+                     (lang === 'tr' ? 'Tedarikçi Cari Ekstresi (Vendor Ledger)' : 'Vendor Clearance Statement (PDF)')}
+                  </p>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleDownloadPDF("live-statement-preview-draft")}
@@ -5447,150 +6745,31 @@ MARAS Group e-tir Center`;
                       <Printer className="w-4 h-4 shrink-0 text-orange-500" />
                       <span>{lang === 'tr' ? 'Yazdır' : 'Print'}</span>
                     </button>
-                    <button
-                      onClick={() => setIsPrintPreviewOpen(true)}
-                      className="px-3.5 py-1.5 bg-[#f97316] text-white hover:bg-orange-600 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md border-0"
-                    >
-                      <Eye className="w-4 h-4 shrink-0 font-extrabold" />
-                      <span>{lang === 'tr' ? 'Yazdırma Önizlemesi' : 'Print Preview'}</span>
-                    </button>
                   </div>
                 </div>
 
                 {/* Printable physical page simulation container */}
-                <div id="live-statement-preview-draft" className="w-full max-w-2xl bg-white border border-slate-300 shadow-lg rounded-2xl overflow-hidden p-6 md:p-8 space-y-6 font-sans relative text-slate-800 prose select-text print:shadow-none print:border-none print:rounded-none">
+                <div id="live-statement-preview-draft" className="w-full max-w-2xl bg-white border border-slate-300 shadow-lg rounded-2xl overflow-hidden p-6 md:p-8 space-y-6 font-sans relative text-slate-800 prose select-text print:shadow-none print:border-none print:rounded-none light-preserve">
                   
                   {/* Watermark Logo decoration - fully hidden on print if requested but nice decoration */}
                   <div className="absolute inset-y-0 inset-x-y flex items-center justify-center opacity-[0.02] pointer-events-none select-none">
                     <DollarSign className="w-96 h-96 text-slate-900" />
                   </div>
 
-                  {/* Header Title Block */}
-                  <div className="flex justify-between items-start border-b-2 border-orange-500 pb-5 gap-6">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <div className="p-1 px-1.5 bg-orange-500 text-white rounded font-black text-xs">M</div>
-                        <h4 className="text-sm font-black text-slate-900 leading-none">MARAS GROUP</h4>
-                      </div>
-                      <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">E-TIR LOGISTICS & TRANSPORT AGENCY LTD.</p>
-                      <p className="text-[9px] text-slate-500 leading-relaxed mt-0.5">
-                        Sardar Avenue Office, Erbil, Iraq<br />
-                        Phone: +964 750 MARAS GR | Email: financials@maras.iq
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <h4 className="text-base font-black text-slate-900 tracking-tight">{lang === 'tr' ? 'MALİYET BEYANNAMESİ' : 'COST STATEMENT'}</h4>
-                      <p className="text-[10px] font-bold text-slate-400 font-mono uppercase mt-0.5">Reference: MARAS-{new Date(selectedCostStatement.date || '').getFullYear() || '2026'}-{selectedCostStatement.shipmentNumber}</p>
-                      <div className="mt-3 text-[10px] text-slate-500 space-y-0.5">
-                        <div><strong>{lang === 'tr' ? 'İşlem Tarihi:' : 'Release Date:'}</strong> {selectedCostStatement.date}</div>
-                        <div><strong>{lang === 'tr' ? 'Statü:' : 'Calculated Status:'}</strong> <span className="font-extrabold text-slate-850 uppercase">{selectedCostStatement.paymentStatus}</span></div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Shipment metadata block */}
-                  <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
-                    <div>
-                      <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALICI / İŞ ORTAĞI BİLGİSİ' : 'CARGO CLIENT INFO'}</h5>
-                      <div className="font-bold text-slate-900">{selectedCostStatement.companyName}</div>
-                      <div className="text-slate-500 mt-1">
-                        Cargo Category: {selectedCostStatement.shipmentType?.toUpperCase()} Cargo<br />
-                        Origin Ship Reference: {selectedCostStatement.shipmentNumber}
-                      </div>
-                    </div>
-                    <div className="border-l border-slate-200 pl-4 space-y-1">
-                      <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'SEVKİYAT DETAYLARI' : 'CONSIGNMENT OVERVIEW'}</h5>
-                      <div><strong>{lang === 'tr' ? 'Taşıma Tipi:' : 'Freight Modality:'}</strong> <span className="uppercase">{selectedCostStatement.shipmentType} Freight</span></div>
-                      <div><strong>{lang === 'tr' ? 'Beyanname Para Birimi:' : 'Declaration Currency:'}</strong> <span className="uppercase font-mono">{selectedCostStatement.currency}</span></div>
-                      <div><strong>{lang === 'tr' ? 'İhracat / İthalat:' : 'Logistics Sector:'}</strong> Cross-Border TIR Operations</div>
-                    </div>
-                  </div>
-
-                  {/* Cost breakdown inline printable table */}
-                  <div className="space-y-2">
-                    <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'SEVK GİDELERİ DETAYLI DÖKÜMÜ' : 'DECLARED LOGISTIC CHARGES BREAKDOWN'}</h5>
-                    <div className="border border-slate-200 rounded-xl overflow-hidden">
-                      <table className="w-full text-left border-collapse text-[10px] leading-snug">
-                        <thead>
-                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-extrabold uppercase tracking-wide">
-                            <th className="p-2 pl-3">{lang === 'tr' ? 'Gider Kalemi' : 'Cost Category / Description'}</th>
-                            <th className="p-2">{lang === 'tr' ? 'Tedarikçi Firma' : 'Contract Vendor'}</th>
-                            <th className="p-2 text-right">{lang === 'tr' ? 'Miktar' : 'Qty'}</th>
-                            <th className="p-2 text-right">{lang === 'tr' ? 'Birim Fiyat' : 'Rate'}</th>
-                            <th className="p-2 text-right pr-3">{lang === 'tr' ? 'Tutar' : 'Amount'}</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-medium">
-                          {selectedCostStatement.items && selectedCostStatement.items.length > 0 ? (
-                            selectedCostStatement.items.map((item) => (
-                              <tr key={item.id} className="text-slate-700">
-                                <td className="p-2 pl-3">
-                                  <div className="font-bold text-slate-900">{item.costType}</div>
-                                  {item.description && <div className="text-[9px] text-slate-400 italic font-normal mt-0.5">{item.description}</div>}
-                                </td>
-                                <td className="p-2 text-slate-600 truncate max-w-[120px]">{item.supplierName || "-"}</td>
-                                <td className="p-2 text-right font-mono text-slate-900">{item.quantity}</td>
-                                <td className="p-2 text-right font-mono">{Number(item.unitPrice).toLocaleString()}</td>
-                                <td className="p-2 text-right pr-3 font-mono font-bold text-slate-900">{Number(item.totalAmount).toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedCostStatement.currency}</span></td>
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan={5} className="p-6 text-center italic text-slate-400 bg-slate-50">{lang === 'tr' ? 'Bu faturaya ekli maliyet kalemi bulunmamaktadır.' : 'No declared items added to this draft.'}</td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Totals Summary blocks */}
-                  <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
-                    
-                    {/* General explanation or terms watermarks */}
-                    <div className="text-[10px] text-slate-400 leading-normal max-w-sm mt-1 space-y-1">
-                      {selectedCostStatement.notes && (
-                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-slate-600 italic font-mono text-[9px]">
-                          <strong>Notes:</strong> {selectedCostStatement.notes}
-                        </div>
-                      )}
-                      <p>
-                        This statement constitutes an internal accounting and cost breakdown ledger formulated by the certified board of MARAS Group. All receipts uploaded herein undergo verification against the custom declaration manifests of respective customs checkpoints.
-                      </p>
-                    </div>
-
-                    {/* Accounting summary calculation box */}
-                    <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
-                      
-                      <div className="flex justify-between items-center text-slate-600 pb-1.5">
-                        <span>{lang === 'tr' ? 'Toplam Beyan Edilen Gider:' : 'Aggregate Gross Cost:'}</span>
-                        <strong className="text-slate-900">{Number(selectedCostStatement.totalCost).toLocaleString()} <span className="text-[9px] text-slate-500">{selectedCostStatement.currency}</span></strong>
-                      </div>
-
-                      <div className="flex justify-between items-center text-emerald-600 pt-1.5 pb-1.5">
-                        <span>{lang === 'tr' ? 'Alınan Ödeme (Tahsil):' : 'Amount Received:'}</span>
-                        <strong>- {Number(selectedCostStatement.paidAmount).toLocaleString()} <span className="text-[9px] text-emerald-500">{selectedCostStatement.currency}</span></strong>
-                      </div>
-
-                      <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
-                        <span>{lang === 'tr' ? 'KALAN DÖKÜM BAKİYESİ:' : 'STATEMENT BALANCE DUE:'}</span>
-                        <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs">
-                          {Number(selectedCostStatement.remainingBalance).toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedCostStatement.currency}</span>
-                        </span>
-                      </div>
-
-                    </div>
-                  </div>
+                  {renderStatementHeader(selectedCostStatement)}
+                  {renderStatementPartyInfo(selectedCostStatement)}
+                  {renderStatementBodyTable(selectedCostStatement)}
+                  {renderStatementTotalsSection(selectedCostStatement)}
 
                   {/* Signatures */}
-                  <div className="grid grid-cols-2 gap-4 pt-8 text-[10px] text-center text-slate-400 pt-12">
-                    <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4 text-[10px] text-center text-slate-400 pt-12">
+                    <div className="space-y-4 font-sans">
                       <div className="border-t border-slate-200 pt-2">Accounting Officer Signature</div>
                       <div className="font-mono text-[8px] text-slate-300">MARAS FINANCIAL DEPT VERIFIED</div>
                     </div>
-                    <div className="space-y-4">
+                    <div className="space-y-4 font-sans">
                       <div className="border-t border-slate-200 pt-2">Administrative General Audit</div>
-                      <div className="font-mono text-[8px] text-slate-300">E-TIR PLATFORM SECURITY CLEARANCE</div>
+                      <div className="font-mono text-[8px] text-slate-300">ETIR PLATFORM SECURITY CLEARANCE</div>
                     </div>
                   </div>
 
@@ -7259,6 +8438,7 @@ MARAS Group e-tir Center`;
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 focus:border-slate-500 rounded-lg outline-none"
                     >
                       <option value="USD">USD</option>
+                      <option value="EUR">EUR</option>
                       <option value="TRY">TRY</option>
                       <option value="IQD">IQD</option>
                     </select>
@@ -8189,7 +9369,7 @@ MARAS Group e-tir Center`;
                       <div className="p-1 px-1.5 bg-orange-500 text-white rounded font-black text-xs">M</div>
                       <h4 className="text-sm font-black text-slate-900 leading-none">MARAS GROUP</h4>
                     </div>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">E-TIR LOGISTICS & TRANSPORT AGENCY LTD.</p>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">ETIR LOGISTICS & TRANSPORT AGENCY LTD.</p>
                     <p className="text-[9px] text-slate-500 leading-relaxed mt-0.5">
                       Sardar Avenue Office, Erbil, Iraq<br />
                       Phone: +964 750 MARAS GR | Email: financials@maras.iq
@@ -8307,7 +9487,7 @@ MARAS Group e-tir Center`;
                   </div>
                   <div className="space-y-4">
                     <div className="border-t border-slate-200 pt-2">Administrative General Audit</div>
-                    <div className="font-mono text-[8px] text-slate-300">E-TIR PLATFORM SECURITY CLEARANCE</div>
+                    <div className="font-mono text-[8px] text-slate-300">ETIR PLATFORM SECURITY CLEARANCE</div>
                   </div>
                 </div>
 

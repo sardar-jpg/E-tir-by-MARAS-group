@@ -867,7 +867,7 @@ export default function App() {
     );
   }
 
-  const isCurrentlyAdmin = !!(session && session.role === "admin" && session.email?.toLowerCase() === "sardar@maras.iq");
+  const isCurrentlyAdmin = !!(session && session.role === "admin");
 
   // If logged in as client, display authentic customer dashboard directly
   if (session.role === "client") {
@@ -883,7 +883,7 @@ export default function App() {
           />
         </main>
         <footer className="bg-slate-950 py-4 text-center text-[10px] text-slate-500 uppercase border-t border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-sm shrink-0">
-          <span>e-tir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
+          <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -919,7 +919,7 @@ export default function App() {
           />
         </main>
         <footer className="bg-slate-950 py-4 text-center text-[10px] text-slate-500 uppercase border-t border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-sm shrink-0">
-          <span>e-tir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
+          <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -1129,6 +1129,8 @@ export default function App() {
                     onDisconnectGmail={handleDisconnectGmail}
                     isMobile={true}
                     isConnectingGmail={isConnectingGmail}
+                    adminEmail={session?.email}
+                    adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
                   />
                 ) : (
                   <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
@@ -1226,6 +1228,8 @@ export default function App() {
                   onDisconnectGmail={handleDisconnectGmail}
                   isMobile={false}
                   isConnectingGmail={isConnectingGmail}
+                  adminEmail={session?.email}
+                  adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
                 />
               ) : (
                 <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
@@ -1693,7 +1697,7 @@ export default function App() {
 
       {/* CORE STATS FOOTER BRANDING */}
       <footer className="bg-slate-950 py-5 text-center text-[10px] text-slate-500 uppercase border-xs border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-inner">
-        <span>e-tir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway | All rights reserved.</span>
+        <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway | All rights reserved.</span>
         <div className="flex items-center gap-3">
           <button
             type="button"

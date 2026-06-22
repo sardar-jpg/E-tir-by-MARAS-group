@@ -241,7 +241,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             </p>
           </div>
           <div className="pt-6 border-t border-slate-800/80 text-[10px] text-slate-500 font-mono tracking-widest uppercase">
-            e-TIR Security Hub • MARAS Group
+            etir Security Hub • MARAS Group
           </div>
         </div>
       </div>
@@ -289,7 +289,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
   const statusTextsMap = {
     en: {
       "New": "Order entered in system. Logistics teams preparing export clearance profiles.",
-      "Assigned": "Transport unit designated. Secure e-TIR manifest assigned.",
+      "Assigned": "Transport unit designated. Secure etir manifest assigned.",
       "Accepted": "Driver accepted dispatch order. Safety protocols initialized.",
       "Loading": "Cargo arriving at terminal yard. Active verification and load securement.",
       "Loaded": "Manifest sealed by customs authority. Ready for corridor departure.",
@@ -301,7 +301,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     },
     tr: {
       "New": "Sipariş sisteme girildi. İhracat gümrükleme planları hazırlanıyor.",
-      "Assigned": "Taşıma birimi atandı ve güvenli e-TIR beyannamesi oluşturuldu.",
+      "Assigned": "Taşıma birimi atandı ve güvenli etir beyannamesi oluşturuldu.",
       "Accepted": "Sürücü eşleştirmeyi onayladı. Güvenlik prosedürleri başlatıldı.",
       "Loading": "Yük gümrüklü sahaya ulaştı. Yük tespiti ve emniyete alma yapılıyor.",
       "Loaded": "Mühürleme resmi makamlarca tamamlandı. Çıkış izni verildi.",
@@ -312,7 +312,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
       "Delivered": "Yük teslim edildi, fiziki doğrulamalar yapıldı ve teslim evrakı onaylandı."
     },
     ar: {
-      "New": "تم إدخال الشحنة في النظام الأساسي وتجهيز ملفات تصدير e-TIR.",
+      "New": "تم إدخال الشحنة في النظام الأساسي وتجهيز ملفات تصدير etir.",
       "Assigned": "تم تحديد آلية النقل البري وإسناد رقم البيان الجمركي المؤمن.",
       "Accepted": "أكد اختصاصي النقل قبول الشحنة وبدء تفعيل بروتوكول السلامة.",
       "Loading": "وصول الحمولة لساحة التحميل والتأكد من تثبيت الصناديق والمقاييس.",
@@ -807,7 +807,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                   </div>
 
                   <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
-                    <span className="text-slate-500 uppercase text-[9px] font-bold block">e-TIR Security Lock</span>
+                    <span className="text-slate-500 uppercase text-[9px] font-bold block">etir Security Lock</span>
                     <div className="flex items-center gap-1 text-emerald-400 font-bold mt-1">
                       <Shield className="w-3.5 h-3.5 shrink-0" />
                       <span>SECURE DIGITAL SEAL</span>
@@ -1065,7 +1065,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
 
       {/* FOOTER */}
       <footer className="max-w-5xl mx-auto px-4 pt-12 border-t border-slate-900 text-center text-slate-500 text-[10px] uppercase font-mono tracking-widest space-y-2 pb-12">
-        <p>MARAS Group Logistics • Trusted International Road Transit Core (e-TIR Gateway)</p>
+        <p>MARAS Group Logistics • Trusted International Road Transit Core (etir Gateway)</p>
         <p className="text-[9px] text-slate-600">Istanbul | Ankara | Gaziantep | Zakho | Erbil | Baghdad | Basra</p>
         {(onViewPrivacy || onViewTerms) && (
           <p className="pt-2 flex flex-wrap justify-center gap-2">

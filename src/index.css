@@ -42,7 +42,7 @@
 }
 
 /* Ensure Google Maps elements, canvas tags, video elements, and standard buttons with exact colors aren't impacted */
-.theme-light :not(.gm-style):not(.gm-style *):not(canvas):not(video):not(path):not(svg):not(.bg-amber-400):not(.bg-orange-500):not(.bg-orange-600):not(.bg-emerald-500):not(.bg-emerald-600):not(.bg-red-500):not(.bg-blue-600) {
+.theme-light :not(.gm-style):not(.gm-style *):not(canvas):not(video):not(path):not(svg):not(.bg-amber-400):not(.bg-orange-500):not(.bg-orange-600):not(.bg-emerald-500):not(.bg-emerald-600):not(.bg-red-500):not(.bg-blue-600):not(.light-preserve):not(.light-preserve *) {
   
   /* Catch-all to neutralize all dark gradients and background images on slate-themed components */
   &[class*="bg-slate-"], &[class*="from-slate-"], &[class*="to-slate-"], &[class*="via-slate-"], &[class*="bg-gradient-"] {

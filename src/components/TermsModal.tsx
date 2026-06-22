@@ -35,7 +35,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
                   <h2 className="text-sm font-black text-white tracking-widest uppercase">
                     {lang === "tr" ? "KULLANIM KOŞULLARI" : lang === "ar" ? "الشروط والأحكام" : "TERMS & CONDITIONS"}
                   </h2>
-                  <p className="text-[10px] text-slate-400 font-medium font-mono uppercase">e-TIR BY MARAS GROUP LEGAL PORTAL</p>
+                  <p className="text-[10px] text-slate-400 font-medium font-mono uppercase">etir BY MARAS GROUP LEGAL PORTAL</p>
                 </div>
               </div>
               <button
@@ -57,7 +57,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
                     {lang === "tr" ? "Kullanım Şartları ve Koşulları" : lang === "ar" ? "البنود والشروط القانونية" : "User Agreement & Terms of Service"}
                   </h3>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    Welcome to the <strong className="text-slate-100">e-TIR by MARAS</strong> digital system. By accessing or using this logistical gateway, customs declaration ledger, or tracking client portal, you agree to comply with and be bound by the following Terms & Conditions.
+                    Welcome to the <strong className="text-slate-100">etir by MARAS</strong> digital system. By accessing or using this logistical gateway, customs declaration ledger, or tracking client portal, you agree to comply with and be bound by the following Terms & Conditions.
                   </p>
                   <p className="text-[10px] text-orange-500 font-mono font-bold mt-2 uppercase tracking-wide font-medium">
                     {lang === "tr" ? "Yürürlük Tarihi:" : lang === "ar" ? "تاريخ النفاذ:" : "Effective Date:"} June 2026
@@ -74,7 +74,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
                   </h4>
                 </div>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Access to the e-TIR terminal, customs databases, cost declaration ledger, and driver consignment feeds is granted exclusively to:
+                  Access to the etir terminal, customs databases, cost declaration ledger, and driver consignment feeds is granted exclusively to:
                 </p>
                 <ul className="space-y-2 text-[11px] text-slate-300 pl-4 list-disc">
                   <li><strong>Authorized Personnel & Dispatchers:</strong> Internal employees authenticated via verified corporate directories or synchronized credential vaults.</li>
@@ -122,7 +122,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
                     <h5 className="text-[11px] font-black uppercase tracking-wider">Limitation of Liability</h5>
                   </div>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
-                    MARAS Group acts as an e-TIR portal facilitator and carrier coordinator. We do not assume liability for border custom processing interruptions, delayed customs clearing cycles, weather transit obstacles, or hardware failure of carrier telemetry modules.
+                    MARAS Group acts as an etir portal facilitator and carrier coordinator. We do not assume liability for border custom processing interruptions, delayed customs clearing cycles, weather transit obstacles, or hardware failure of carrier telemetry modules.
                   </p>
                 </div>
 
@@ -175,7 +175,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
             {/* Footer / Agree */}
             <div className="bg-slate-950 border-t border-slate-800 p-4 shrink-0 flex items-center justify-between">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest font-black hidden sm:inline font-mono">
-                e-TIR TERMINAL AGREEMENT
+                etir TERMINAL AGREEMENT
               </span>
               <button
                 type="button"

@@ -39,7 +39,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
   // Simple key translations
   const t = {
     en: {
-      title: "e-tir Cargo Gateway",
+      title: "etir Cargo Gateway",
       subtitle: "Multi-Country Operations Hub",
       adminTip: "Demo Admin Support:",
       driverTip: "Demo Driver Support:",
@@ -63,7 +63,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       driverRegDesc: "Register your vehicle to accept international freight manifests."
     },
     tr: {
-      title: "e-tir Kargo Geçidi",
+      title: "etir Kargo Geçidi",
       subtitle: "Çok Ülkeli Operasyon Merkezi",
       adminTip: "Yönetici Bilgisi:",
       driverTip: "Sürücü Bilgisi:",
@@ -87,7 +87,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       driverRegDesc: "Uluslararası navlun belgelerini kabul etmek için aracınızı kaydedin."
     },
     ar: {
-      title: "بوابة شحن e-tir الإلكترونية",
+      title: "بوابة شحن etir الإلكترونية",
       subtitle: "مركز العمليات اللوجستية الدولي",
       adminTip: "بيانات تجربة المسؤول:",
       driverTip: "بيانات تجربة أخصائي النقل:",
@@ -147,17 +147,17 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
               if (foundDriver && foundDriver.email) {
                 resolvedEmail = foundDriver.email.toLowerCase();
               } else {
-                resolvedEmail = `${resolvedEmail}@e-tir.com`;
+                resolvedEmail = `${resolvedEmail}@etir.com`;
               }
             } else {
-              resolvedEmail = `${resolvedEmail}@e-tir.com`;
+              resolvedEmail = `${resolvedEmail}@etir.com`;
             }
           } else {
-            resolvedEmail = `${resolvedEmail}@e-tir.com`;
+            resolvedEmail = `${resolvedEmail}@etir.com`;
           }
         } catch (apiErr) {
           console.warn("Could not pre-fetch drivers to resolve email:", apiErr);
-          resolvedEmail = `${resolvedEmail}@e-tir.com`;
+          resolvedEmail = `${resolvedEmail}@etir.com`;
         }
       }
       const enteredEmail = resolvedEmail;
@@ -202,15 +202,16 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       const checkIsAdmin = 
         enteredEmail === "sardar@maras.iq" ||
         loginUsername.trim().toLowerCase() === "sardar" ||
-        loginUsername.trim().toLowerCase() === "sardar@maras.iq";
+        loginUsername.trim().toLowerCase() === "sardar@maras.iq" ||
+        loginRole === "admin";
 
       if (loginRole === "admin" && !checkIsAdmin) {
-        setLoginError("This account username/email is not registered as an Administrator. Please select the Driver Portal above to log in as a Driver.");
+        setLoginError("This account username/email is not registered as an Administrator.");
         setIsLoggingIn(false);
         return;
       }
 
-      if (loginRole === "driver" && checkIsAdmin) {
+      if (loginRole === "driver" && checkIsAdmin && enteredEmail === "sardar@maras.iq") {
         setLoginError("This account is registered as an Administrator. Please select the Admin Portal above to sign in.");
         setIsLoggingIn(false);
         return;
@@ -229,109 +230,77 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           return;
         }
 
-        let user;
-        try {
-          // 1. Try signing in with client-side Firebase Auth directly
-          const userCredential = await signInWithEmailAndPassword(auth, enteredEmail, loginPassword);
-          user = userCredential.user;
-        } catch (authErr: any) {
-          // 2. If user doesn't exist, automatically sign them up so they establish their password and secure account!
-          if (authErr.code === "auth/user-not-found" || authErr.code === "auth/invalid-credential") {
-            try {
-              console.log("Admin account not found in Auth. Registering administrator account on-the-fly...");
-              const userCredential = await createUserWithEmailAndPassword(auth, enteredEmail, loginPassword);
-              user = userCredential.user;
-              if (user) {
-                try {
-                  await sendEmailVerification(user);
-                } catch (eVer) {
-                  console.warn("Auto-registered admin email verification dispatch error:", eVer);
-                }
-              }
-            } catch (regErr: any) {
-              if (regErr.code === "auth/email-already-in-use") {
-                setLoginError("Incorrect password for this corporate admin account.");
-                setIsLoggingIn(false);
-                return;
-              } else if (regErr.code === "auth/weak-password") {
-                setLoginError("Your new administrator password must be at least 6 characters.");
-                setIsLoggingIn(false);
-                return;
-              } else {
-                console.warn("Auto-register failed, falling back to database check...", regErr);
-              }
-            }
-          } else {
-            console.warn("Auth sign-in failed, checking database fallback...", authErr);
-          }
-        }
+        // Try authenticating through full-stack database matching
+        const res = await apiFetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: loginUsername.trim(),
+            password: loginPassword
+          })
+        });
 
-        if (user && !user.emailVerified) {
-          try {
-            await sendEmailVerification(user);
-          } catch (verErr) {
-            console.warn("Could not send verification email on login:", verErr);
-          }
-          await auth.signOut();
-          setVerificationEmail(user.email || enteredEmail);
-          setIsLoggingIn(false);
-          return;
-        }
-
-        // Check fallback to memory database check if client-side Auth didn't succeed but we still need verification
-        if (!user) {
-          const res = await apiFetch("/api/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              username: loginUsername.trim(),
-              password: loginPassword
-            })
-          });
-
-          if (res.ok) {
-            const text = await res.text();
-            if (text.trim().startsWith("<")) {
-              setLoginError("Backend API is currently offline on your hosting server (received HTML instead of JSON). Please ensure Hostinger is configured to run the full-stack Node.js server (server.ts / server.cjs) and not just serving static files.");
-              setIsLoggingIn(false);
-              return;
-            }
-            const data = JSON.parse(text);
-            onLoginSuccess({
-              role: data.role,
-              driver: data.driver || null,
-              loginType: "local"
-            });
-            return;
-          } else {
-            let serverError = "Administrative access denied. Incorrect password or invalid email formatting constraint.";
-            try {
-              const text = await res.text();
-              if (text.trim().startsWith("<")) {
-                serverError = "Backend API is currently offline on your hosting server (received HTML instead of JSON). Please ensure Hostinger is configured to run the Node.js server.";
-              } else {
-                const errorData = JSON.parse(text);
-                if (errorData && errorData.error) {
-                  serverError = `Corporate security check failed: ${errorData.error}`;
-                }
-              }
-            } catch (jsonErr) {
-              // Ignore backup if non-JSON
-            }
-            setLoginError(serverError);
+        if (res.ok) {
+          const text = await res.text();
+          if (text.trim().startsWith("<")) {
+            setLoginError("Backend API is currently offline on your hosting server (received HTML instead of JSON).");
             setIsLoggingIn(false);
             return;
           }
-        }
+          const data = JSON.parse(text);
+          onLoginSuccess({
+            role: data.role,
+            email: data.user?.email || enteredEmail,
+            driver: data.driver || null,
+            loginType: "local"
+          });
+          return;
+        } else {
+          // If the server failed / returned error, check if it was sardar@maras.iq and try client-side Firebase Auth as backup
+          if (enteredEmail === "sardar@maras.iq" || loginUsername.trim().toLowerCase() === "sardar") {
+            let user;
+            try {
+              const userCredential = await signInWithEmailAndPassword(auth, "sardar@maras.iq", loginPassword);
+              user = userCredential.user;
+            } catch (authErr: any) {
+              console.warn("Root Admin client-side Auth sign-in failed:", authErr);
+            }
 
-        // Success! Logged in as Admin
-        onLoginSuccess({
-          role: "admin",
-          email: "sardar@maras.iq",
-          driver: null,
-          loginType: "firebase"
-        });
-        return;
+            if (user) {
+              if (!user.emailVerified) {
+                try { await sendEmailVerification(user); } catch (e) {}
+                await auth.signOut();
+                setVerificationEmail(user.email || "sardar@maras.iq");
+                setIsLoggingIn(false);
+                return;
+              }
+
+              onLoginSuccess({
+                role: "admin",
+                email: "sardar@maras.iq",
+                driver: null,
+                loginType: "firebase"
+              });
+              return;
+            }
+          }
+
+          let serverError = "Administrative access denied. Incorrect password or invalid email formatting constraint.";
+          try {
+            const text = await res.text();
+            if (text.trim().startsWith("<")) {
+              serverError = "Backend API is currently offline on your hosting server (received HTML instead of JSON).";
+            } else {
+              const errorData = JSON.parse(text);
+              if (errorData && errorData.error) {
+                serverError = `Corporate security check failed: ${errorData.error}`;
+              }
+            }
+          } catch (jsonErr) {}
+          setLoginError(serverError);
+          setIsLoggingIn(false);
+          return;
+        }
       }
 
       // If user is potential driver or normal credentials profile
@@ -559,7 +528,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           </div>
           <div>
             <span className="text-[10px] uppercase font-bold text-blue-400 tracking-wider">MARAS Group</span>
-            <p className="text-xs font-semibold text-slate-300">e-tir Gateway</p>
+            <p className="text-xs font-semibold text-slate-300">etir Gateway</p>
           </div>
         </div>
 
@@ -770,7 +739,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                         setResettingPassword(true);
                         const targetEmail = loginUsername.includes("@") 
                           ? loginUsername.trim().toLowerCase() 
-                          : (loginRole === "admin" ? "sardar@maras.iq" : `${loginUsername.trim().toLowerCase()}@e-tir.com`);
+                          : (loginRole === "admin" ? "sardar@maras.iq" : `${loginUsername.trim().toLowerCase()}@etir.com`);
                         
                         await sendPasswordResetEmail(auth, targetEmail);
                         setLoginError(
