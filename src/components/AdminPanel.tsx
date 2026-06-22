@@ -33,6 +33,69 @@ import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
 
+const COUNTRY_PORTS: Record<string, string[]> = {
+  "Turkey": ["Port of Ambarli (Istanbul)", "Port of Mersin", "Port of Gemlik", "Port of Izmir (Alsancak)", "Port of Aliaga", "Port of Iskenderun", "Port of Derince"],
+  "Türkiye": ["Ambarlı Limanı (İstanbul)", "Mersin Limanı", "Gemlik Limanı", "İzmir Limanı (Alsancak)", "Aliağa Limanı", "İskenderun Limanı", "Derince Limanı"],
+  "China": ["Port of Shanghai", "Port of Shenzhen", "Port of Ningbo-Zhoushan", "Port of Qingdao", "Port of Guangzhou", "Port of Tianjin", "Port of Xiamen"],
+  "Çin": ["Şanghay Limanı", "Shenzhen Limanı", "Ningbo Limanı", "Qingdao Limanı", "Guangzhou Limanı", "Tianjin Limanı"],
+  "Germany": ["Port of Hamburg", "Port of Bremerhaven", "Port of Wilhelmshaven"],
+  "Almanya": ["Hamburg Limanı", "Bremerhaven Limanı"],
+  "Italy": ["Port of Genoa", "Port of Gioia Tauro", "Port of Trieste", "Port of La Spezia"],
+  "İtalya": ["Cenova Limanı", "Gioia Tauro Limanı", "Trieste Limanı"],
+  "Spain": ["Port of Valencia", "Port of Algeciras", "Port of Barcelona"],
+  "İspanya": ["Valensiya Limanı", "Algeciras Limanı", "Barselona Limanı"],
+  "UAE": ["Port of Jebel Ali (Dubai)", "Port of Khalifa (Abu Dhabi)", "Port of Sharjah"],
+  "BAE": ["Cebel Ali Limanı (Dubai)", "Halife Limanı (Abu Dabi)"],
+  "United Arab Emirates": ["Port of Jebel Ali (Dubai)", "Port of Khalifa (Abu Dhabi)", "Port of Sharjah"],
+  "India": ["Port of Nhava Sheva (Mumbai)", "Port of Mundra", "Port of Chennai"],
+  "Hindistan": ["Nhava Sheva Limanı", "Mundra Limanı"],
+  "USA": ["Port of Los Angeles", "Port of New York & New Jersey", "Port of Savannah", "Port of Houston"],
+  "ABD": ["Los Angeles Limanı", "New York Limanı", "Houston Limanı"],
+  "Iraq": ["Port of Umm Qasr (Basra)", "Abu Fulus Port", "Khor Al-Zubair Port"],
+  "Irak": ["Umm Qasr Limanı (Basra)", "Ebu Fulus Limanı", "Hor Al-Zubayr Limanı"]
+};
+
+const getPortsForCountry = (countryName: string): string[] => {
+  if (!countryName) return [];
+  const normalized = countryName.trim().toLowerCase();
+  
+  if (normalized.includes("turk") || normalized.includes("türk")) {
+    return COUNTRY_PORTS["Turkey"];
+  }
+  if (normalized.includes("chin") || normalized.includes("çin")) {
+    return COUNTRY_PORTS["China"];
+  }
+  if (normalized.includes("germany") || normalized.includes("almanya")) {
+    return COUNTRY_PORTS["Germany"];
+  }
+  if (normalized.includes("ital")) {
+    return COUNTRY_PORTS["Italy"];
+  }
+  if (normalized.includes("spain") || normalized.includes("ispan") || normalized.includes("ispān")) {
+    return COUNTRY_PORTS["Spain"];
+  }
+  if (normalized.includes("uae") || normalized.includes("emirate") || normalized.includes("bae") || normalized.includes("birlesik")) {
+    return COUNTRY_PORTS["UAE"];
+  }
+  if (normalized.includes("india") || normalized.includes("hind")) {
+    return COUNTRY_PORTS["India"];
+  }
+  if (normalized.includes("usa") || normalized.includes("united states") || normalized.includes("abd") || normalized.includes("amerika")) {
+    return COUNTRY_PORTS["USA"];
+  }
+  if (normalized.includes("iraq") || normalized.includes("irak")) {
+    return COUNTRY_PORTS["Iraq"];
+  }
+
+  for (const key of Object.keys(COUNTRY_PORTS)) {
+    if (key.toLowerCase() === normalized) {
+      return COUNTRY_PORTS[key];
+    }
+  }
+  
+  return [];
+};
+
 interface AdminPanelProps {
   lang: Language;
   onSelectShipmentChat: (shipment: Shipment) => void;
@@ -496,8 +559,22 @@ MARAS Group e-tir Center`;
     airportOfArrival: "",
     grossWeight: "",
     chargeableWeight: "",
-    numberOfPackages: ""
+    numberOfPackages: "",
+
+    // Custom Broker details
+    destinationBrokerId: "",
+    destinationBrokerName: "",
+    destinationBrokerPhone: "",
+    iraqBorderBrokerId: "",
+    iraqBorderBrokerName: "",
+    iraqBorderBrokerPhone: "",
   });
+
+  // Toggles for Custom POL/POD inputs
+  const [useCustomPOL, setUseCustomPOL] = useState(false);
+  const [useCustomPOD, setUseCustomPOD] = useState(false);
+  const [useEditCustomPOL, setUseEditCustomPOL] = useState(false);
+  const [useEditCustomPOD, setUseEditCustomPOD] = useState(false);
 
   // New Driver Fields
   const [newDriverData, setNewDriverData] = useState({
@@ -539,11 +616,19 @@ MARAS Group e-tir Center`;
   };
 
   // Load backend statistics
-  const fetchData = async () => {
+  const lastFetchedAtRef = React.useRef<number>(0);
+  const fetchData = async (force = true) => {
     if (typeof window !== "undefined" && !navigator.onLine) {
       setSwrStatus('offline');
       return;
     }
+    
+    const now = Date.now();
+    if (!force && now - lastFetchedAtRef.current < 15000) {
+      console.log(`[SWR] Throttling automatic fetchData. Last fetch was ${now - lastFetchedAtRef.current}ms ago. Skipping to protect database reads/quota.`);
+      return;
+    }
+    lastFetchedAtRef.current = now;
     
     setIsSyncing(true);
     setSwrStatus('syncing');
@@ -612,20 +697,20 @@ MARAS Group e-tir Center`;
   // SWR: Revalidate on Window Focus, Visibility Change, and Network state changes
   useEffect(() => {
     const handleFocus = () => {
-      console.log("[SWR] Window/tab focused. Triggering immediate background revalidation.");
-      fetchData();
+      console.log("[SWR] Window/tab focused. Triggering background revalidation (throttled).");
+      fetchData(false);
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        console.log("[SWR] Tab became visible. Triggering immediate background revalidation.");
-        fetchData();
+        console.log("[SWR] Tab became visible. Triggering background revalidation (throttled).");
+        fetchData(false);
       }
     };
 
     const handleOnline = () => {
-      console.log("[SWR] Network restored online. Triggering SWR refresh.");
-      fetchData();
+      console.log("[SWR] Network restored online. Triggering SWR refresh (throttled).");
+      fetchData(false);
     };
 
     const handleOffline = () => {
@@ -658,11 +743,11 @@ MARAS Group e-tir Center`;
         return;
       }
       if (!navigator.onLine) {
-        console.log("[SWR] Offline state active. Paused background polling.");
+         console.log("[SWR] Offline state active. Paused background polling.");
         return;
       }
       console.log("[SWR] Running active periodic revalidation cycle...");
-      fetchData();
+      fetchData(false);
     };
 
     // Stale-While-Revalidate: poll every 12 seconds in active focus to match dashboard refresh interval
@@ -1516,8 +1601,16 @@ MARAS Group e-tir Center`;
           airportOfArrival: "",
           grossWeight: "",
           chargeableWeight: "",
-          numberOfPackages: ""
+          numberOfPackages: "",
+          destinationBrokerId: "",
+          destinationBrokerName: "",
+          destinationBrokerPhone: "",
+          iraqBorderBrokerId: "",
+          iraqBorderBrokerName: "",
+          iraqBorderBrokerPhone: "",
         });
+        setUseCustomPOL(false);
+        setUseCustomPOD(false);
         triggerToast(t('createSuccess'));
         fetchData();
       }
@@ -1698,11 +1791,13 @@ MARAS Group e-tir Center`;
     .sort((a, b) => b.count - a.count)
     .slice(0, 8); // Top 8 routes for professional spacing
 
-  // Active vs. Completed Shipments
-  const activeCountVal = shipments.filter(s => !['Arrived', 'Delivered', 'Closed'].includes(s.status)).length;
-  const completedCountVal = shipments.filter(s => ['Arrived', 'Delivered', 'Closed'].includes(s.status)).length;
+  // Shipment Analytics (Pending, Active, Completed)
+  const pendingCountVal = shipments.filter(s => ['New', 'Assigned', 'Accepted', 'Booking Confirmed', 'Container Released'].includes(s.status)).length;
+  const completedCountVal = shipments.filter(s => ['Arrived', 'Delivered', 'Closed', 'Completed'].includes(s.status)).length;
+  const activeCountVal = shipments.length - pendingCountVal - completedCountVal;
 
-  const activeVsCompletedData = [
+  const shipmentAnalyticsData = [
+    { name: lang === 'tr' ? 'Bekleyen Sevkıyatlar' : (lang === 'ar' ? 'شحنات قيد الانتظار' : 'Pending Shipments'), value: pendingCountVal, color: '#f59e0b' },
     { name: lang === 'tr' ? 'Aktif Transitler' : (lang === 'ar' ? 'شحنات قيد التنفيذ' : 'Active Transits'), value: activeCountVal, color: '#3b82f6' },
     { name: lang === 'tr' ? 'Tamamlanan Teslimat' : (lang === 'ar' ? 'شحنات مكتملة' : 'Completed Deliveries'), value: completedCountVal, color: '#10b981' }
   ].filter(d => d.value > 0);
@@ -2464,27 +2559,27 @@ MARAS Group e-tir Center`;
               </div>
             </div>
 
-            {/* Column 3: Active vs. Completed Shipments */}
+            {/* Column 3: Shipment Analytics */}
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between relative">
               <div>
                 <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
                   <span>
-                    {lang === 'tr' ? "Aktif ve Tamamlanan Analizi" : (lang === 'ar' ? "مقارنة الشحنات النشطة والمكتملة" : "Transit Status Overview")}
+                    {lang === 'tr' ? "Sevkiyat Analizi" : (lang === 'ar' ? "تحليلات الشحنات" : "Shipment Analytics")}
                   </span>
                 </h3>
                 <p className="text-slate-500 text-xs mt-0.5 font-medium">
-                  {lang === 'tr' ? "Aktif operasyonlardaki yüklerin tamamlananlara oranı" : (lang === 'ar' ? "معدل الشحنات قيد الإنجاز مقارنة بالمسلمة" : "Ratio of packages in transit versus successfully delivered consignments")}
+                  {lang === 'tr' ? "Bekleyen, aktif ve tamamlanan sevkiyatların genel dağılımı" : (lang === 'ar' ? "توزيع الشحنات الكلي بين شحنات معلقة، نشطة ومكتملة" : "Comprehensive breakdown of pending, active, and completed shipments")}
                 </p>
               </div>
 
-              <div className="h-64 mt-6 relative flex items-center justify-center">
-                {activeVsCompletedData.length > 0 ? (
+              <div className="h-64 mt-4 relative flex items-center justify-center">
+                {shipmentAnalyticsData.length > 0 ? (
                   <div className="w-full h-full relative">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
-                          data={activeVsCompletedData}
+                          data={shipmentAnalyticsData}
                           cx="50%"
                           cy="48%"
                           innerRadius={65}
@@ -2492,7 +2587,7 @@ MARAS Group e-tir Center`;
                           paddingAngle={3}
                           dataKey="value"
                         >
-                          {activeVsCompletedData.map((entry, index) => (
+                          {shipmentAnalyticsData.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
                         </Pie>
@@ -2506,27 +2601,63 @@ MARAS Group e-tir Center`;
                             fontWeight: 'bold',
                           }}
                         />
-                        <Legend
-                          verticalAlign="bottom"
-                          iconType="circle"
-                          iconSize={8}
-                          formatter={(value) => <span className="text-slate-700 text-xs font-bold">{value}</span>}
-                        />
                       </PieChart>
                     </ResponsiveContainer>
                     {/* Inner Center Statistics Indicator */}
                     <div className="absolute top-[41%] left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none select-none">
                       <p className="text-[10px] text-slate-500 font-extrabold uppercase tracking-widest">{lang === 'tr' ? "TOPLAM" : "TOTAL"}</p>
-                      <p className="text-2xl font-black text-slate-800 leading-tight">
+                      <p className="text-2xl font-black text-slate-800 leading-none">
                         {shipments.length}
                       </p>
                     </div>
                   </div>
                 ) : (
                   <div className="h-full flex items-center justify-center text-slate-400 italic text-xs font-semibold">
-                    {lang === 'tr' ? "Bilgi bulunamadı." : "No metrics available."}
+                    {lang === 'tr' ? "Aktif sevkiyat bilgi bulunamadı." : (lang === 'ar' ? "لا توجد بيانات متاحة للشحنات" : "No shipment analytics data found.")}
                   </div>
                 )}
+              </div>
+
+              {/* Status Shares & Breakdown */}
+              <div className="grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 mt-2 select-none">
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0"></span>
+                    <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-tight">
+                      {lang === 'tr' ? 'Bekleyen' : (lang === 'ar' ? 'معلقة' : 'Pending')}
+                    </span>
+                  </div>
+                  <p className="text-sm font-black text-slate-800 mt-0.5">{pendingCountVal}</p>
+                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                    {shipments.length > 0 ? `${Math.round((pendingCountVal / shipments.length) * 100)}%` : '0%'}
+                  </p>
+                </div>
+
+                <div className="text-center border-x border-slate-100">
+                  <div className="flex items-center justify-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0"></span>
+                    <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-tight">
+                      {lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشطة' : 'Active')}
+                    </span>
+                  </div>
+                  <p className="text-sm font-black text-slate-800 mt-0.5">{activeCountVal}</p>
+                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                    {shipments.length > 0 ? `${Math.round((activeCountVal / shipments.length) * 100)}%` : '0%'}
+                  </p>
+                </div>
+
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+                    <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-tight">
+                      {lang === 'tr' ? 'Tamamlanan' : (lang === 'ar' ? 'مكتملة' : 'Completed')}
+                    </span>
+                  </div>
+                  <p className="text-sm font-black text-slate-800 mt-0.5">{completedCountVal}</p>
+                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                    {shipments.length > 0 ? `${Math.round((completedCountVal / shipments.length) * 100)}%` : '0%'}
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -3000,6 +3131,10 @@ MARAS Group e-tir Center`;
                         </button>
                         <button 
                           onClick={() => {
+                            const portsL = getPortsForCountry(s.loadingCountry || "");
+                            const portsD = getPortsForCountry(s.deliveryCountry || "");
+                            setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
+                            setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
                             setEditingShipment(s);
                             setIsEditOpen(true);
                           }}
@@ -5693,10 +5828,16 @@ MARAS Group e-tir Center`;
                       <div>
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Port of Loading (POL)</span>
                         <p className="font-bold text-slate-905">{targetDetailsShipment.portOfLoading || "-"}</p>
+                        {targetDetailsShipment.loadingCountry && (
+                          <span className="text-[10px] text-slate-400 font-medium">({targetDetailsShipment.loadingCountry})</span>
+                        )}
                       </div>
                       <div>
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Port of Discharge (POD)</span>
                         <p className="font-bold text-slate-905">{targetDetailsShipment.portOfDischarge || "-"}</p>
+                        {targetDetailsShipment.deliveryCountry && (
+                          <span className="text-[10px] text-slate-400 font-medium">({targetDetailsShipment.deliveryCountry})</span>
+                        )}
                       </div>
                       <div className="col-span-2">
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Estimated Departure (ETD)</span>
@@ -5765,6 +5906,40 @@ MARAS Group e-tir Center`;
                         <p className="font-mono font-bold text-orange-655">
                           {targetDetailsShipment.eta ? new Date(targetDetailsShipment.eta).toLocaleString() : "-"}
                         </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 5.3 Land Freight Specific / Customs Brokers block */}
+                {targetDetailsShipment.freightType === 'land' && (
+                  <div className="p-4 bg-orange-50/65 border border-orange-200 rounded-xl space-y-3 md:col-span-2 font-sans">
+                    <h4 className="font-bold text-orange-950 border-b border-orange-120 pb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider">
+                      <ShieldCheck className="w-4 h-4 text-orange-600 font-bold" />
+                      <span>{lang === 'tr' ? "Gümrük Müşavir Bilgileri" : "Customs Broker Information"}</span>
+                    </h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-sans">
+                      <div className="p-3 bg-white/70 rounded-lg border border-orange-100 space-y-1 text-left">
+                        <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider font-extrabold pb-1">
+                          {lang === 'tr' ? "Varış Gümrük Müşaviri" : "Broker at Destination Port"}
+                        </span>
+                        <p className="font-bold text-slate-800 text-sm leading-tight">{targetDetailsShipment.destinationBrokerName || "-"}</p>
+                        {targetDetailsShipment.destinationBrokerPhone && (
+                          <p className="text-[11px] font-mono font-bold text-slate-600 flex items-center gap-1 mt-1 font-mono">
+                            📞 {targetDetailsShipment.destinationBrokerPhone}
+                          </p>
+                        )}
+                      </div>
+                      <div className="p-3 bg-white/70 rounded-lg border border-orange-100 space-y-1 text-left">
+                        <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider font-extrabold pb-1">
+                          {lang === 'tr' ? "Irak Sınır Müşaviri" : "Broker at Iraq Border"}
+                        </span>
+                        <p className="font-bold text-slate-800 text-sm leading-tight">{targetDetailsShipment.iraqBorderBrokerName || "-"}</p>
+                        {targetDetailsShipment.iraqBorderBrokerPhone && (
+                          <p className="text-[11px] font-mono font-bold text-slate-600 flex items-center gap-1 mt-1 font-mono">
+                            📞 {targetDetailsShipment.iraqBorderBrokerPhone}
+                          </p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -6470,6 +6645,125 @@ MARAS Group e-tir Center`;
                       </div>
                     </div>
                   </div>
+
+                  {/* CUSTOMS BROKERS INFORMATION SECTION */}
+                  <div className="p-4 border border-slate-150 rounded-xl space-y-4 text-left">
+                    <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-slate-800">
+                      <ShieldCheck className="w-4 h-4 text-orange-600" /> {lang === 'tr' ? "Gümrük Müşaviri Bilgileri" : "Customs Broker Information"}
+                    </h4>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                      {/* Port of Destination Broker */}
+                      <div className="space-y-2 border border-slate-200 p-3 rounded-lg bg-slate-50/50 text-left">
+                        <label className="text-xs font-bold text-slate-800">
+                          {lang === 'tr' ? "Varış Gümrük Müşaviri" : "Broker at Destination Port"}
+                        </label>
+                        <select
+                          className="w-full p-2 bg-white border border-slate-250 focus:border-slate-500 rounded-lg outline-none text-xs"
+                          value={newShipmentData.destinationBrokerId || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val) {
+                              const found = vendors.find(v => v.id === val);
+                              if (found) {
+                                setNewShipmentData({
+                                  ...newShipmentData,
+                                  destinationBrokerId: found.id,
+                                  destinationBrokerName: found.companyName,
+                                  destinationBrokerPhone: found.phone || ""
+                                });
+                              }
+                            } else {
+                              setNewShipmentData({
+                                ...newShipmentData,
+                                destinationBrokerId: "",
+                                destinationBrokerName: "",
+                                destinationBrokerPhone: ""
+                              });
+                            }
+                          }}
+                        >
+                          <option value="">-- {lang === 'tr' ? "Tedarikçilerden Seç" : "Select from Vendors"} --</option>
+                          {vendors.map(v => (
+                            <option key={v.id} value={v.id}>
+                              {v.companyName} ({v.serviceType || "Vendor"})
+                            </option>
+                          ))}
+                        </select>
+                        <div className="grid grid-cols-1 gap-2 pt-1 font-sans">
+                          <input
+                            type="text"
+                            placeholder={lang === 'tr' ? "Müşavir Adı" : "Broker Name / Agency"}
+                            value={newShipmentData.destinationBrokerName || ""}
+                            onChange={(e) => setNewShipmentData({ ...newShipmentData, destinationBrokerName: e.target.value })}
+                            className="p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-medium"
+                          />
+                          <input
+                            type="text"
+                            placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
+                            value={newShipmentData.destinationBrokerPhone || ""}
+                            onChange={(e) => setNewShipmentData({ ...newShipmentData, destinationBrokerPhone: e.target.value })}
+                            className="p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Iraq Border Broker */}
+                      <div className="space-y-2 border border-slate-200 p-3 rounded-lg bg-slate-50/50 text-left">
+                        <label className="text-xs font-bold text-slate-800">
+                          {lang === 'tr' ? "Irak Sınır Gümrük Müşaviri" : "Broker at Iraq Border"}
+                        </label>
+                        <select
+                          className="w-full p-2 bg-white border border-slate-250 focus:border-slate-500 rounded-lg outline-none text-xs"
+                          value={newShipmentData.iraqBorderBrokerId || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val) {
+                              const found = vendors.find(v => v.id === val);
+                              if (found) {
+                                setNewShipmentData({
+                                  ...newShipmentData,
+                                  iraqBorderBrokerId: found.id,
+                                  iraqBorderBrokerName: found.companyName,
+                                  iraqBorderBrokerPhone: found.phone || ""
+                                });
+                              }
+                            } else {
+                              setNewShipmentData({
+                                ...newShipmentData,
+                                iraqBorderBrokerId: "",
+                                iraqBorderBrokerName: "",
+                                iraqBorderBrokerPhone: ""
+                              });
+                            }
+                          }}
+                        >
+                          <option value="">-- {lang === 'tr' ? "Tedarikçilerden Seç" : "Select from Vendors"} --</option>
+                          {vendors.map(v => (
+                            <option key={v.id} value={v.id}>
+                              {v.companyName} ({v.serviceType || "Vendor"})
+                            </option>
+                          ))}
+                        </select>
+                        <div className="grid grid-cols-1 gap-2 pt-1 font-sans">
+                          <input
+                            type="text"
+                            placeholder={lang === 'tr' ? "Sınır Gümrükçü Adı" : "Border Broker Name / Agency"}
+                            value={newShipmentData.iraqBorderBrokerName || ""}
+                            onChange={(e) => setNewShipmentData({ ...newShipmentData, iraqBorderBrokerName: e.target.value })}
+                            className="p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-medium"
+                          />
+                          <input
+                            type="text"
+                            placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
+                            value={newShipmentData.iraqBorderBrokerPhone || ""}
+                            onChange={(e) => setNewShipmentData({ ...newShipmentData, iraqBorderBrokerPhone: e.target.value })}
+                            className="p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -6618,29 +6912,129 @@ MARAS Group e-tir Center`;
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-2 gap-4 border-t border-dashed border-slate-200 pt-3 mt-1 text-left">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Port of Loading (POL)</label>
+                      <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span>Loading Country / Yükleme Ülkesi</span>
+                      </label>
                       <input 
                         type="text" 
-                        placeholder="e.g. Port of Ambarli, Istanbul"
-                        value={newShipmentData.portOfLoading}
-                        onChange={(e) => setNewShipmentData({ ...newShipmentData, portOfLoading: e.target.value })}
+                        placeholder="e.g. Turkey, China"
+                        value={newShipmentData.loadingCountry}
+                        onChange={(e) => setNewShipmentData({ ...newShipmentData, loadingCountry: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Port of Discharge (POD)</label>
+                      <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span>Delivery Country / Teslimat Ülkesi</span>
+                      </label>
                       <input 
                         type="text" 
-                        placeholder="e.g. Port of Umm Qasr"
-                        value={newShipmentData.portOfDischarge}
-                        onChange={(e) => setNewShipmentData({ ...newShipmentData, portOfDischarge: e.target.value })}
+                        placeholder="e.g. Iraq, Germany"
+                        value={newShipmentData.deliveryCountry}
+                        onChange={(e) => setNewShipmentData({ ...newShipmentData, deliveryCountry: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                       />
                     </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 text-left">
+                    {/* POL */}
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Final Destination</label>
+                      <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
+                        <span>Port of Loading (POL)</span>
+                        {getPortsForCountry(newShipmentData.loadingCountry).length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUseCustomPOL(!useCustomPOL);
+                            }}
+                            className="text-[10px] text-blue-600 hover:underline font-bold"
+                          >
+                            {useCustomPOL ? "List" : "Manual"}
+                          </button>
+                        )}
+                      </label>
+                      {getPortsForCountry(newShipmentData.loadingCountry).length > 0 && !useCustomPOL ? (
+                        <select 
+                          value={newShipmentData.portOfLoading}
+                          onChange={(e) => {
+                            if (e.target.value === "__CUSTOM__") {
+                              setUseCustomPOL(true);
+                              setNewShipmentData({ ...newShipmentData, portOfLoading: "" });
+                            } else {
+                              setNewShipmentData({ ...newShipmentData, portOfLoading: e.target.value });
+                            }
+                          }}
+                          className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs font-medium"
+                        >
+                          <option value="">-- Choose POL --</option>
+                          {getPortsForCountry(newShipmentData.loadingCountry).map(p => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                          <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
+                        </select>
+                      ) : (
+                        <input 
+                          type="text" 
+                          placeholder="e.g. Port of Ambarli, Istanbul"
+                          value={newShipmentData.portOfLoading}
+                          onChange={(e) => setNewShipmentData({ ...newShipmentData, portOfLoading: e.target.value })}
+                          className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs font-medium"
+                        />
+                      )}
+                    </div>
+
+                    {/* POD */}
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans font-sans">
+                        <span>Port of Discharge (POD)</span>
+                        {getPortsForCountry(newShipmentData.deliveryCountry).length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUseCustomPOD(!useCustomPOD);
+                            }}
+                            className="text-[10px] text-blue-600 hover:underline font-bold"
+                          >
+                            {useCustomPOD ? "List" : "Manual"}
+                          </button>
+                        )}
+                      </label>
+                      {getPortsForCountry(newShipmentData.deliveryCountry).length > 0 && !useCustomPOD ? (
+                        <select 
+                          value={newShipmentData.portOfDischarge}
+                          onChange={(e) => {
+                            if (e.target.value === "__CUSTOM__") {
+                              setUseCustomPOD(true);
+                              setNewShipmentData({ ...newShipmentData, portOfDischarge: "" });
+                            } else {
+                              setNewShipmentData({ ...newShipmentData, portOfDischarge: e.target.value });
+                            }
+                          }}
+                          className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs font-medium"
+                        >
+                          <option value="">-- Choose POD --</option>
+                          {getPortsForCountry(newShipmentData.deliveryCountry).map(p => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                          <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
+                        </select>
+                      ) : (
+                        <input 
+                          type="text" 
+                          placeholder="e.g. Port of Umm Qasr"
+                          value={newShipmentData.portOfDischarge}
+                          onChange={(e) => setNewShipmentData({ ...newShipmentData, portOfDischarge: e.target.value })}
+                          className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs font-medium"
+                        />
+                      )}
+                    </div>
+
+                    {/* Final Destination */}
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-slate-700 block h-4 font-sans">Final Destination</label>
                       <input 
                         type="text" 
                         placeholder="e.g. Erbil Depot"
@@ -7117,6 +7511,125 @@ MARAS Group e-tir Center`;
                         />
                       </div>
                     </div>
+
+                    {/* CUSTOMS BROKERS INFORMATION FOR ROAD DISPATCH (EDIT) */}
+                    <div className="p-4 border border-slate-150 rounded-xl space-y-4 text-left font-sans bg-slate-50/50">
+                      <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-slate-800">
+                        <ShieldCheck className="w-4 h-4 text-orange-600" /> {lang === 'tr' ? "Gümrük Müşaviri Bilgileri" : "Customs Broker Information"}
+                      </h4>
+                      
+                      <div className="grid grid-cols-2 gap-4">
+                        {/* Port of Destination Broker */}
+                        <div className="space-y-2 border border-slate-200 p-3 rounded-lg bg-white text-left">
+                          <label className="text-xs font-bold text-slate-800">
+                            {lang === 'tr' ? "Varış Gümrük Müşaviri" : "Broker at Destination Port"}
+                          </label>
+                          <select
+                            className="w-full p-2 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
+                            value={editingShipment.destinationBrokerId || ""}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val) {
+                                const found = vendors.find(v => v.id === val);
+                                if (found) {
+                                  setEditingShipment({
+                                    ...editingShipment,
+                                    destinationBrokerId: found.id,
+                                    destinationBrokerName: found.companyName,
+                                    destinationBrokerPhone: found.phone || ""
+                                  });
+                                }
+                              } else {
+                                setEditingShipment({
+                                  ...editingShipment,
+                                  destinationBrokerId: "",
+                                  destinationBrokerName: "",
+                                  destinationBrokerPhone: ""
+                                });
+                              }
+                            }}
+                          >
+                            <option value="">-- {lang === 'tr' ? "Tedarikçilerden Seç" : "Select from Vendors"} --</option>
+                            {vendors.map(v => (
+                              <option key={v.id} value={v.id}>
+                                {v.companyName} ({v.serviceType || "Vendor"})
+                              </option>
+                            ))}
+                          </select>
+                          <div className="grid grid-cols-1 gap-2 pt-1 font-sans">
+                            <input
+                              type="text"
+                              placeholder={lang === 'tr' ? "Müşavir Adı" : "Broker Name / Agency"}
+                              value={editingShipment.destinationBrokerName || ""}
+                              onChange={(e) => setEditingShipment({ ...editingShipment, destinationBrokerName: e.target.value })}
+                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-medium"
+                            />
+                            <input
+                              type="text"
+                              placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
+                              value={editingShipment.destinationBrokerPhone || ""}
+                              onChange={(e) => setEditingShipment({ ...editingShipment, destinationBrokerPhone: e.target.value })}
+                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Iraq Border Broker */}
+                        <div className="space-y-2 border border-slate-200 p-3 rounded-lg bg-white text-left">
+                          <label className="text-xs font-bold text-slate-800">
+                            {lang === 'tr' ? "Irak Sınır Gümrük Müşaviri" : "Broker at Iraq Border"}
+                          </label>
+                          <select
+                            className="w-full p-2 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
+                            value={editingShipment.iraqBorderBrokerId || ""}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val) {
+                                const found = vendors.find(v => v.id === val);
+                                if (found) {
+                                  setEditingShipment({
+                                    ...editingShipment,
+                                    iraqBorderBrokerId: found.id,
+                                    iraqBorderBrokerName: found.companyName,
+                                    iraqBorderBrokerPhone: found.phone || ""
+                                  });
+                                }
+                              } else {
+                                setEditingShipment({
+                                  ...editingShipment,
+                                  iraqBorderBrokerId: "",
+                                  iraqBorderBrokerName: "",
+                                  iraqBorderBrokerPhone: ""
+                                });
+                              }
+                            }}
+                          >
+                            <option value="">-- {lang === 'tr' ? "Tedarikçilerden Seç" : "Select from Vendors"} --</option>
+                            {vendors.map(v => (
+                              <option key={v.id} value={v.id}>
+                                {v.companyName} ({v.serviceType || "Vendor"})
+                              </option>
+                            ))}
+                          </select>
+                          <div className="grid grid-cols-1 gap-2 pt-1 font-sans">
+                            <input
+                              type="text"
+                              placeholder={lang === 'tr' ? "Sınır Gümrükçü Adı" : "Border Broker Name / Agency"}
+                              value={editingShipment.iraqBorderBrokerName || ""}
+                              onChange={(e) => setEditingShipment({ ...editingShipment, iraqBorderBrokerName: e.target.value })}
+                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-medium"
+                            />
+                            <input
+                              type="text"
+                              placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
+                              value={editingShipment.iraqBorderBrokerPhone || ""}
+                              onChange={(e) => setEditingShipment({ ...editingShipment, iraqBorderBrokerPhone: e.target.value })}
+                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -7253,29 +7766,126 @@ MARAS Group e-tir Center`;
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-2 gap-4 border-t border-dashed border-slate-200 pt-3 mt-1 text-left">
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-700">POL (Loading Port)</label>
+                        <label className="text-xs font-semibold text-slate-700">Loading Country / Yükleme Ülkesi</label>
                         <input 
                           type="text" 
-                          value={editingShipment.portOfLoading || ""}
-                          onChange={(e) => setEditingShipment({ ...editingShipment, portOfLoading: e.target.value })}
+                          value={editingShipment.loadingCountry || ""}
+                          onChange={(e) => setEditingShipment({ ...editingShipment, loadingCountry: e.target.value })}
                           className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs"
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-700">POD (Discharge Port)</label>
+                        <label className="text-xs font-semibold text-slate-700">Delivery Country / Teslimat Ülkesi</label>
                         <input 
                           type="text" 
-                          value={editingShipment.portOfDischarge || ""}
-                          onChange={(e) => setEditingShipment({ ...editingShipment, portOfDischarge: e.target.value })}
+                          value={editingShipment.deliveryCountry || ""}
+                          onChange={(e) => setEditingShipment({ ...editingShipment, deliveryCountry: e.target.value })}
                           className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs"
                         />
                       </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-3 text-left">
+                      {/* Port of Loading (POL) */}
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-700">Final Destination</label>
+                        <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
+                          <span>POL (Loading Port)</span>
+                          {getPortsForCountry(editingShipment.loadingCountry || "").length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setUseEditCustomPOL(!useEditCustomPOL);
+                              }}
+                              className="text-[10px] text-blue-600 hover:underline font-bold font-sans"
+                            >
+                              {useEditCustomPOL ? "List" : "Manual"}
+                            </button>
+                          )}
+                        </label>
+                        {getPortsForCountry(editingShipment.loadingCountry || "").length > 0 && !useEditCustomPOL ? (
+                          <select 
+                            value={editingShipment.portOfLoading || ""}
+                            onChange={(e) => {
+                              if (e.target.value === "__CUSTOM__") {
+                                setUseEditCustomPOL(true);
+                                setEditingShipment({ ...editingShipment, portOfLoading: "" });
+                              } else {
+                                setEditingShipment({ ...editingShipment, portOfLoading: e.target.value });
+                              }
+                            }}
+                            className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs font-medium bg-white"
+                          >
+                            <option value="">-- Choose POL --</option>
+                            {getPortsForCountry(editingShipment.loadingCountry || "").map(p => (
+                              <option key={p} value={p}>{p}</option>
+                            ))}
+                            <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
+                          </select>
+                        ) : (
+                          <input 
+                            type="text" 
+                            placeholder="e.g. Port of Ambarli, Istanbul"
+                            value={editingShipment.portOfLoading || ""}
+                            onChange={(e) => setEditingShipment({ ...editingShipment, portOfLoading: e.target.value })}
+                            className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs font-medium bg-white"
+                          />
+                        )}
+                      </div>
+
+                      {/* Port of Discharge (POD) */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
+                          <span>POD (Discharge Port)</span>
+                          {getPortsForCountry(editingShipment.deliveryCountry || "").length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setUseEditCustomPOD(!useEditCustomPOD);
+                              }}
+                              className="text-[10px] text-blue-600 hover:underline font-bold font-sans"
+                            >
+                              {useEditCustomPOD ? "List" : "Manual"}
+                            </button>
+                          )}
+                        </label>
+                        {getPortsForCountry(editingShipment.deliveryCountry || "").length > 0 && !useEditCustomPOD ? (
+                          <select 
+                            value={editingShipment.portOfDischarge || ""}
+                            onChange={(e) => {
+                              if (e.target.value === "__CUSTOM__") {
+                                setUseEditCustomPOD(true);
+                                setEditingShipment({ ...editingShipment, portOfDischarge: "" });
+                              } else {
+                                setEditingShipment({ ...editingShipment, portOfDischarge: e.target.value });
+                              }
+                            }}
+                            className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs font-medium bg-white"
+                          >
+                            <option value="">-- Choose POD --</option>
+                            {getPortsForCountry(editingShipment.deliveryCountry || "").map(p => (
+                              <option key={p} value={p}>{p}</option>
+                            ))}
+                            <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
+                          </select>
+                        ) : (
+                          <input 
+                            type="text" 
+                            placeholder="e.g. Port of Umm Qasr"
+                            value={editingShipment.portOfDischarge || ""}
+                            onChange={(e) => setEditingShipment({ ...editingShipment, portOfDischarge: e.target.value })}
+                            className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs font-medium bg-white"
+                          />
+                        )}
+                      </div>
+
+                      {/* Final Destination */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold text-slate-700 block h-4 font-sans">Final Destination</label>
                         <input 
                           type="text" 
+                          placeholder="e.g. Erbil Depot"
                           value={editingShipment.finalDestination || ""}
                           onChange={(e) => setEditingShipment({ ...editingShipment, finalDestination: e.target.value })}
                           className="w-full p-2.5 border border-slate-200 rounded-lg outline-none text-xs"

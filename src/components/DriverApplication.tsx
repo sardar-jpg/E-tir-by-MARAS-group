@@ -20,7 +20,7 @@ import {
   X, Camera, FileUp, AlertTriangle, ChevronRight, CornerDownRight, Landmark, User,
   Edit2, Phone, Shield, Check, MapPin, Activity, Briefcase, Paperclip, Search, Languages,
   Star, Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
-  Plus, Minus, Compass, Sun, Moon, Play
+  Plus, Minus, Compass, Sun, Moon, Play, Lock
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -344,6 +344,7 @@ export default function DriverApplication({
   
   // Active selected shipment for detail / chat inside driver app
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
+  const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
   const [activeTab, setActiveTab] = useState<'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('shipments');
 
   const [activeMapsKey, setActiveMapsKey] = useState<string>(GOOGLE_MAPS_KEY_FALLBACK);
@@ -478,7 +479,7 @@ export default function DriverApplication({
   // Call Simulator States and Timers
   const [callState, setCallState] = useState<'idle' | 'calling' | 'connected'>('idle');
   const [callDuration, setCallDuration] = useState<number>(0);
-  const [shipmentsFilter, setShipmentsFilter] = useState<'all' | 'assigned' | 'transit' | 'completed'>('all');
+  const [shipmentsFilter, setShipmentsFilter] = useState<'active' | 'completed'>('active');
 
   useEffect(() => {
     let interval: any;
@@ -633,7 +634,9 @@ export default function DriverApplication({
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(`etir_cached_gps_${selectedDriverId}`, JSON.stringify(cachedCoords));
+    try {
+      localStorage.setItem(`etir_cached_gps_${selectedDriverId}`, JSON.stringify(cachedCoords));
+    } catch (_) {}
   }, [cachedCoords, selectedDriverId]);
 
   const triggerToast = (msg: string) => {
@@ -671,7 +674,13 @@ export default function DriverApplication({
         // update active shipment details dynamically if it is loaded
         if (activeShipment) {
           const fresh = list.find((s: Shipment) => s.id === activeShipment.id);
-          if (fresh) setActiveShipment(fresh);
+          if (fresh) {
+            setActiveShipment(fresh);
+            const isCompleted = fresh.status === 'Delivered' || fresh.status === 'Arrived' || fresh.status === 'Closed' || fresh.status === 'Completed';
+            if (isCompleted) {
+              setGpsSimActive(false);
+            }
+          }
         }
       }
 
@@ -975,37 +984,7 @@ export default function DriverApplication({
                    CITY_COORDINATES["baghdad"];
 
     const interval = setInterval(() => {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const currentLat = position.coords.latitude;
-            const currentLng = position.coords.longitude;
-            setLastGpsCoords({ lat: currentLat, lng: currentLng });
-            transmitGPS(currentLat, currentLng);
-          },
-          (error) => {
-            // Geolocation failed or denied, run graceful simulation fallback path
-            setGpsProgress(prev => {
-              let next = prev + 1;
-              if (next > 95) {
-                next = 10; // Reset loop
-              }
-
-              const interpolationPct = next / 100;
-              const latDrift = (Math.random() - 0.5) * 0.0015;
-              const lngDrift = (Math.random() - 0.5) * 0.0015;
-
-              const currentLat = startLoc.lat + (endLoc.lat - startLoc.lat) * interpolationPct + latDrift;
-              const currentLng = startLoc.lng + (endLoc.lng - startLoc.lng) * interpolationPct + lngDrift;
-
-              setLastGpsCoords({ lat: currentLat, lng: currentLng });
-              transmitGPS(currentLat, currentLng);
-              return next;
-            });
-          },
-          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-        );
-      } else {
+      const runGpsFallback = () => {
         setGpsProgress(prev => {
           let next = prev + 1;
           if (next > 95) {
@@ -1023,6 +1002,29 @@ export default function DriverApplication({
           transmitGPS(currentLat, currentLng);
           return next;
         });
+      };
+
+      if (navigator.geolocation) {
+        try {
+          navigator.geolocation.getCurrentPosition(
+            (position) => {
+              const currentLat = position.coords.latitude;
+              const currentLng = position.coords.longitude;
+              setLastGpsCoords({ lat: currentLat, lng: currentLng });
+              transmitGPS(currentLat, currentLng);
+            },
+            (error) => {
+              // Geolocation failed or denied, run graceful simulation fallback path
+              runGpsFallback();
+            },
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+          );
+        } catch (err) {
+          console.warn("Synchronous Geolocation execution blocked or failed inside iframe:", err);
+          runGpsFallback();
+        }
+      } else {
+        runGpsFallback();
       }
     }, 15000);
 
@@ -1181,25 +1183,33 @@ export default function DriverApplication({
         setGpsSimActive(true);
         if (navigator.geolocation) {
           triggerToast("📡 Initializing hardware GPS connection... Obtaining precise coordinates.");
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              const lat = pos.coords.latitude;
-              const lng = pos.coords.longitude;
-              setLastGpsCoords({ lat, lng });
-              transmitGPS(lat, lng);
-              triggerToast("🚀 Hardware GPS connection synced! Location successfully broadcast to dispatcher.");
-            },
-            (err) => {
-              console.warn("Hardware GPS failed, using smart route simulator fallback:", err.message);
-              // Fallback immediately to simulation start location
-              const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
-              const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
-              setLastGpsCoords(startCoords);
-              transmitGPS(startCoords.lat, startCoords.lng);
-              triggerToast("📡 Simulated GPS tracking initiated in auto-mode.");
-            },
-            { enableHighAccuracy: true, timeout: 5000 }
-          );
+          try {
+            navigator.geolocation.getCurrentPosition(
+              (pos) => {
+                const lat = pos.coords.latitude;
+                const lng = pos.coords.longitude;
+                setLastGpsCoords({ lat, lng });
+                transmitGPS(lat, lng);
+                triggerToast("🚀 Hardware GPS connection synced! Location successfully broadcast to dispatcher.");
+              },
+              (err) => {
+                console.warn("Hardware GPS failed, using smart route simulator fallback:", err.message);
+                // Fallback immediately to simulation start location
+                const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
+                const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
+                setLastGpsCoords(startCoords);
+                transmitGPS(startCoords.lat, startCoords.lng);
+                triggerToast("📡 Simulated GPS tracking initiated in auto-mode.");
+              },
+              { enableHighAccuracy: true, timeout: 5000 }
+            );
+          } catch (geoErr) {
+            console.warn("Synchronous Geolocation blocked or failed in iframe:", geoErr);
+            const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
+            const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
+            setLastGpsCoords(startCoords);
+            transmitGPS(startCoords.lat, startCoords.lng);
+          }
         } else {
           // Fallback immediately to simulation start location
           const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
@@ -2222,17 +2232,15 @@ export default function DriverApplication({
                       <p className="text-[10px] text-slate-500 font-medium">Assigned to your heavy transit fleet</p>
                     </div>
                     <span className="bg-orange-500/10 text-orange-400 font-mono font-black text-[10px] px-2.5 py-0.5 rounded-full border border-orange-500/20">
-                      {shipments.length} Active
+                      {shipments.filter(s => s.status !== 'Delivered' && s.status !== 'Arrived' && s.status !== 'Closed' && s.status !== 'Completed').length} Active
                     </span>
                   </div>
 
                   {/* Modern Horizontal Filter Bar */}
                   <div className="flex gap-1.5 overflow-x-auto pb-1 select-none no-scrollbar">
                     {[
-                      { id: 'all', en: 'All Jobs', tr: 'Tüm Seferler', ar: 'جميع المهام' },
-                      { id: 'assigned', en: 'Assigned', tr: 'Planlananlar', ar: 'المعينة' },
-                      { id: 'transit', en: 'In Transit', tr: 'Yolda Olanlar', ar: 'في الطريق' },
-                      { id: 'completed', en: 'Completed', tr: 'Bitenler', ar: 'المكتملة' }
+                      { id: 'active', en: 'Active Jobs', tr: 'Aktif Seferler', ar: 'المهام النشطة' },
+                      { id: 'completed', en: 'Completed', tr: 'Tamamlananlar', ar: 'المكتملة' }
                     ].map(f => {
                       const isActive = shipmentsFilter === f.id;
                       const label = lang === 'tr' ? f.tr : lang === 'ar' ? f.ar : f.en;
@@ -2256,10 +2264,9 @@ export default function DriverApplication({
                   <div className="space-y-3.5">
                     {shipments
                       .filter(s => {
-                        if (shipmentsFilter === 'all') return true;
-                        if (shipmentsFilter === 'assigned') return s.status === 'Assigned';
-                        if (shipmentsFilter === 'transit') return s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance' || s.status === 'Loaded' || s.status === 'Loading' || s.status === 'Accepted';
-                        if (shipmentsFilter === 'completed') return s.status === 'Delivered' || s.status === 'Arrived';
+                        const isFinished = s.status === 'Delivered' || s.status === 'Arrived' || s.status === 'Closed' || s.status === 'Completed';
+                        if (shipmentsFilter === 'active') return !isFinished;
+                        if (shipmentsFilter === 'completed') return isFinished;
                         return true;
                       })
                       .map((s) => {
@@ -2273,6 +2280,10 @@ export default function DriverApplication({
                           onClick={() => {
                             setActiveShipment(s);
                             setSelectedStatusVal(s.status);
+                            const isCompleted = s.status === 'Delivered' || s.status === 'Arrived' || s.status === 'Closed' || s.status === 'Completed';
+                            if (isCompleted) {
+                              setGpsSimActive(false);
+                            }
                           }}
                           className="group relative bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800/80 hover:border-orange-500/40 rounded-[22px] p-4 transition-all duration-300 cursor-pointer shadow-[0_4px_25px_rgba(0,0,0,0.3)] space-y-3.5 overflow-hidden active:scale-[0.99]"
                         >
@@ -2384,14 +2395,10 @@ export default function DriverApplication({
                   </button>
                 </div>
 
-                {/* ROLE-BASED PRIVACY WARNING IN DRIVER WINDOW */}
-                <div className="p-3 bg-amber-500/5 border border-amber-500/20 text-amber-400 rounded-2xl text-[10.5px]/normal flex items-start gap-2 backdrop-blur-sm shadow-sm select-none">
-                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500 animate-pulse" />
-                  <span>{t('restrictedNotice')}</span>
-                </div>
+
 
                 {/* ACCESSIBILITY-FIRST DRIVER QUICK ACTIONS COCKPIT GRID */}
-                {(() => {
+                {!isShipmentFinished && (() => {
                   const quickT = {
                     en: {
                       title: "Quick Cockpit Actions",
@@ -2866,29 +2873,36 @@ export default function DriverApplication({
                       <div className="grid grid-cols-3 gap-3 text-center">
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Live Speed</span>
-                          <span className="font-bold text-slate-200 font-mono text-xs">{gpsSpeed} km/h</span>
+                          <span className="font-bold text-slate-200 font-mono text-xs">{isShipmentFinished ? 0 : gpsSpeed} km/h</span>
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
-                          <span className="font-extrabold text-[#f97316] font-sans text-xs">{gpsProgress}% Complete</span>
+                          <span className="font-extrabold text-[#f97316] font-sans text-xs">{isShipmentFinished ? 100 : gpsProgress}% Complete</span>
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Sat Status</span>
-                          <span className="font-bold text-emerald-400 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
-                            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
-                            ACTIVE
-                          </span>
+                          {isShipmentFinished ? (
+                            <span className="font-bold text-slate-500 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
+                              <span className="w-1.5 h-1.5 bg-slate-600 rounded-full"></span>
+                              CLOSED
+                            </span>
+                          ) : (
+                            <span className="font-bold text-emerald-400 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
+                              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
+                              ACTIVE
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono font-bold">
                           <span>ROUTE PROGRESS</span>
-                          <span>{gpsProgress}%</span>
+                          <span>{isShipmentFinished ? 100 : gpsProgress}%</span>
                         </div>
                         <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-850">
                           <div 
                             className="bg-gradient-to-r from-orange-600 to-orange-400 h-2 rounded-full transition-all duration-1000" 
-                            style={{ width: `${gpsProgress}%` }}
+                            style={{ width: `${isShipmentFinished ? 100 : gpsProgress}%` }}
                           ></div>
                         </div>
                       </div>
@@ -2897,7 +2911,7 @@ export default function DriverApplication({
                 </div>
 
                 {/* DRIVER ASSIST AUTOMATIC Predictive ETA & TRAFFIC PATTERNS PANEL */}
-                {(() => {
+                {!isShipmentFinished && (() => {
                   const assistT = {
                     en: {
                       title: "Driver Assist Core",
@@ -3149,62 +3163,85 @@ export default function DriverApplication({
                 })()}
 
                 {/* STATUS ACTIONS CONDITIONAL ROUTING */}
-                {activeShipment.status === "Assigned" ? (
-                  <div className="p-5 bg-slate-900 border border-slate-800 rounded-3xl text-center space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
-                    <p className="text-xs text-white font-bold leading-normal">{t('assignDriver')}</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      <button 
-                        onClick={() => handleRejectAssignment(activeShipment)}
-                        className="py-2.5 bg-red-950/40 hover:bg-red-900/40 border border-red-500/20 text-red-400 text-xs font-bold rounded-xl transition-all cursor-pointer active:scale-95"
-                      >
-                        {t('rejectShipment')}
-                      </button>
-                      <button 
-                        onClick={() => handleAcceptAssignment(activeShipment)}
-                        className="py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white text-xs font-bold rounded-xl transition-all shadow-[0_4px_15px_rgba(249,115,22,0.3)] cursor-pointer active:scale-95"
-                      >
-                        {t('acceptShipment')}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <form onSubmit={handleStatusUpdate} className="p-5 bg-slate-900 border border-slate-800 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
-                    <div className="border-b border-slate-800 pb-2">
-                      <h4 className="font-black text-xs text-white uppercase tracking-wider font-mono">{t('status')} Updates Terminal</h4>
-                    </div>
-                    
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Target Logistics State</label>
-                      <select
-                        value={selectedStatusVal}
-                        onChange={(e) => setSelectedStatusVal(e.target.value as ShipmentStatus)}
-                        className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-slate-200 font-bold rounded-xl outline-none focus:border-amber-500 transition-all cursor-pointer"
-                      >
-                        {['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'].map(st => (
-                          <option key={st} value={st} className="bg-slate-950 text-slate-200 font-bold">{st}</option>
-                        ))}
-                      </select>
-                    </div>
+                {(() => {
+                  const isShipmentFinished = activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed';
+                  if (isShipmentFinished) {
+                    return (
+                      <div className="p-5 bg-slate-900 border border-slate-800 rounded-3xl text-center space-y-3 shadow-[0_4px_25px_rgba(0,0,0,0.3)] select-none">
+                        <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
+                          <Lock className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-emerald-400 font-extrabold font-mono tracking-tight uppercase">
+                            {lang === 'tr' ? 'Sefer Tamamlandı ve Kilitlendi' : lang === 'ar' ? 'تم اكتمال المهمة وقفلها' : 'Job Finalized & Locked'}
+                          </p>
+                          <p className="text-[10px] text-slate-400 leading-normal mt-1">
+                            {lang === 'tr' ? 'Bu teslimat tamamlanmıştır, sürücü güncellemelerine kapalıdır.' : lang === 'ar' ? 'تم تسليم هذه الشحنة وإغلاق التحديثات لسلامة البيانات.' : 'This delivery has been successfully finalized. Operational logs are now locked.'}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (activeShipment.status === "Assigned") {
+                    return (
+                      <div className="p-5 bg-slate-900 border border-slate-800 rounded-3xl text-center space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
+                        <p className="text-xs text-white font-bold leading-normal">{t('assignDriver')}</p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button 
+                            onClick={() => handleRejectAssignment(activeShipment)}
+                            className="py-2.5 bg-red-950/40 hover:bg-red-900/40 border border-red-500/20 text-red-400 text-xs font-bold rounded-xl transition-all cursor-pointer active:scale-95"
+                          >
+                            {t('rejectShipment')}
+                          </button>
+                          <button 
+                            onClick={() => handleAcceptAssignment(activeShipment)}
+                            className="py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white text-xs font-bold rounded-xl transition-all shadow-[0_4px_15px_rgba(249,115,22,0.3)] cursor-pointer active:scale-95"
+                          >
+                            {t('acceptShipment')}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <form onSubmit={handleStatusUpdate} className="p-5 bg-slate-900 border border-slate-800 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
+                      <div className="border-b border-slate-800 pb-2">
+                        <h4 className="font-black text-xs text-white uppercase tracking-wider font-mono">{t('status')} Updates Terminal</h4>
+                      </div>
+                      
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Target Logistics State</label>
+                        <select
+                          value={selectedStatusVal}
+                          onChange={(e) => setSelectedStatusVal(e.target.value as ShipmentStatus)}
+                          className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-slate-200 font-bold rounded-xl outline-none focus:border-amber-500 transition-all cursor-pointer"
+                        >
+                          {['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'].map(st => (
+                            <option key={st} value={st} className="bg-slate-950 text-slate-200 font-bold">{st}</option>
+                          ))}
+                        </select>
+                      </div>
 
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Remarks / Cargo Incident Logs</label>
-                      <input 
-                        type="text" 
-                        placeholder={t('remarksPlaceholder')}
-                        value={remarks}
-                        onChange={(e) => setRemarks(e.target.value)}
-                        className="w-full p-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 rounded-xl outline-none focus:border-amber-500 transition-all"
-                      />
-                    </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Remarks / Cargo Incident Logs</label>
+                        <input 
+                          type="text" 
+                          placeholder={t('remarksPlaceholder')}
+                          value={remarks}
+                          onChange={(e) => setRemarks(e.target.value)}
+                          className="w-full p-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 rounded-xl outline-none focus:border-amber-500 transition-all"
+                        />
+                      </div>
 
-                    <button 
-                      type="submit" 
-                      className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-xs rounded-xl shadow-[0_4px_15px_rgba(249,115,22,0.35)] transition-all cursor-pointer active:scale-95 text-center uppercase tracking-wider font-mono"
-                    >
-                      {t('updateStatusBtn')}
-                    </button>
-                  </form>
-                )}
+                      <button 
+                        type="submit" 
+                        className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-xs rounded-xl shadow-[0_4px_15px_rgba(249,115,22,0.35)] transition-all cursor-pointer active:scale-95 text-center uppercase tracking-wider font-mono"
+                      >
+                        {t('updateStatusBtn')}
+                      </button>
+                    </form>
+                  );
+                })()}
 
 
 
@@ -3212,22 +3249,24 @@ export default function DriverApplication({
                 <div className="space-y-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
                   <div className="border-b border-slate-800 pb-2 flex items-center justify-between">
                     <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Shared Files Center</h4>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                        setScanCategory("cmr");
-                        setCapturedImage(null);
-                        setScanFilter("color");
-                        setScanState("scanning");
-                        setIsScanOpen(true);
-                        startCamera();
-                      }}
-                      className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-450 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
-                    >
-                      <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-450" />
-                      <span>Scan Document</span>
-                    </button>
+                    {!(activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                          setScanCategory("cmr");
+                          setCapturedImage(null);
+                          setScanFilter("color");
+                          setScanState("scanning");
+                          setIsScanOpen(true);
+                          startCamera();
+                        }}
+                        className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-450 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                      >
+                        <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-450" />
+                        <span>Scan Document</span>
+                      </button>
+                    )}
                   </div>
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
                     <div className="space-y-2">
@@ -3258,40 +3297,53 @@ export default function DriverApplication({
                   <div className="flex-1 flex flex-col justify-between overflow-hidden h-[540px]">
                     <div className="bg-slate-900/60 p-3.5 border-b border-slate-850 flex items-center justify-between shrink-0 select-none">
                       <div className="flex items-center gap-2">
-                        <span className="relative flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                        </span>
+                        {isShipmentFinished ? (
+                          <span className="relative flex h-2 w-2">
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
+                          </span>
+                        ) : (
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                          </span>
+                        )}
                         <div>
                           <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">Consignee Helpline</h4>
-                          <span className="text-[9px] text-[#f97316] font-mono font-bold">Transit Duty #{activeShipment.shipmentNumber}</span>
+                          <span className="text-[9px] text-[#f97316] font-mono font-bold">
+                            {isShipmentFinished 
+                              ? (lang === 'tr' ? `Tamamlanan Görev #${activeShipment.shipmentNumber}` : lang === 'ar' ? `المهمة المكتملة #${activeShipment.shipmentNumber}` : `Finished Duty #${activeShipment.shipmentNumber}`)
+                              : `Transit Duty #${activeShipment.shipmentNumber}`
+                            }
+                          </span>
                         </div>
                       </div>
-                      <div className="flex gap-1.5 items-center">
-                        <button 
-                          onClick={() => {
-                            setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                            setScanCategory("cmr");
-                            setCapturedImage(null);
-                            setScanFilter("color");
-                            setScanState("scanning");
-                            setIsScanOpen(true);
-                            startCamera();
-                          }}
-                          className="p-1 px-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer shadow-[0_2px_10px_rgba(16,185,129,0.25)] transition-all active:scale-95 border-0"
-                        >
-                          <Camera className="w-3 h-3 shrink-0 animate-pulse" />
-                          <span>Scan Document</span>
-                        </button>
-                        <button 
-                          onClick={() => setFileSimOpen(true)}
-                          className="p-1 px-2.5 bg-slate-800 hover:bg-slate-750 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
-                        >
-                          <FileUp className="w-3 h-3 shrink-0" />
-                          <span>Upload File</span>
-                        </button>
+                      {!isShipmentFinished && (
+                          <div className="flex gap-1.5 items-center">
+                            <button 
+                              onClick={() => {
+                                setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                                setScanCategory("cmr");
+                                setCapturedImage(null);
+                                setScanFilter("color");
+                                setScanState("scanning");
+                                setIsScanOpen(true);
+                                startCamera();
+                              }}
+                              className="p-1 px-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer shadow-[0_2px_10px_rgba(16,185,129,0.25)] transition-all active:scale-95 border-0"
+                            >
+                              <Camera className="w-3 h-3 shrink-0 animate-pulse" />
+                              <span>Scan Document</span>
+                            </button>
+                            <button 
+                              onClick={() => setFileSimOpen(true)}
+                              className="p-1 px-2.5 bg-slate-800 hover:bg-slate-750 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
+                            >
+                              <FileUp className="w-3 h-3 shrink-0" />
+                              <span>Upload File</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
-                    </div>
 
                     {/* Chat Search Input */}
                     <div className="px-3.5 py-2 bg-slate-950 border-b border-slate-905 flex items-center gap-2 shrink-0 transition-all select-none">
@@ -3434,45 +3486,53 @@ export default function DriverApplication({
                     </div>
 
                     {/* Quick response chips list */}
-                    <div className="bg-slate-950 px-3 py-2 border-t border-slate-900 overflow-x-auto shrink-0 flex gap-2 items-center scroll-smooth no-scrollbar select-none">
-                      {(QUICK_TEMPLATES[lang] || QUICK_TEMPLATES.en).map((chip, index) => (
-                        <button
-                          key={index}
-                          type="button"
-                          onClick={() => setNewMessageText(chip.text)}
-                          className="px-3 py-1 bg-slate-900 hover:bg-slate-850 border border-slate-800/80 text-slate-300 hover:text-white rounded-lg text-[9px] font-bold whitespace-nowrap transition-all cursor-pointer shadow-sm select-none active:scale-95"
-                        >
-                          {chip.label}
-                        </button>
-                      ))}
-                    </div>
+                    {!isShipmentFinished && (
+                      <div className="bg-slate-950 px-3 py-2 border-t border-slate-900 overflow-x-auto shrink-0 flex gap-2 items-center scroll-smooth no-scrollbar select-none">
+                        {(QUICK_TEMPLATES[lang] || QUICK_TEMPLATES.en).map((chip, index) => (
+                          <button
+                            key={index}
+                            type="button"
+                            onClick={() => setNewMessageText(chip.text)}
+                            className="px-3 py-1 bg-slate-900 hover:bg-slate-850 border border-slate-800/80 text-slate-300 hover:text-white rounded-lg text-[9px] font-bold whitespace-nowrap transition-all cursor-pointer shadow-sm select-none active:scale-95"
+                          >
+                            {chip.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
                     {/* Message input */}
-                    <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-905 flex items-center gap-2.5 shrink-0 select-none">
-                      <button 
-                        type="button" 
-                        onClick={() => setFileSimOpen(true)}
-                        title="Attach Document / Photo"
-                        className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
-                      >
-                        <Paperclip className="w-4 h-4 shrink-0" />
-                      </button>
+                    {isShipmentFinished ? (
+                      <div className="p-4 bg-slate-950 border-t border-slate-905 text-center text-slate-500 font-mono text-[10px] select-none">
+                        ⚠️ Radio connection has been closed for this completed job.
+                      </div>
+                    ) : (
+                      <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-905 flex items-center gap-2.5 shrink-0 select-none">
+                        <button 
+                          type="button" 
+                          onClick={() => setFileSimOpen(true)}
+                          title="Attach Document / Photo"
+                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
+                        >
+                          <Paperclip className="w-4 h-4 shrink-0" />
+                        </button>
 
-                      <input 
-                        type="text" 
-                        placeholder={t('typeMessage')}
-                        value={newMessageText}
-                        onChange={(e) => setNewMessageText(e.target.value)}
-                        className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono"
-                      />
-                      <button 
-                        type="submit" 
-                        disabled={!newMessageText.trim()}
-                        className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
-                      >
-                        <Send className="w-4 h-4 shrink-0" />
-                      </button>
-                    </form>
+                        <input 
+                          type="text" 
+                          placeholder={t('typeMessage')}
+                          value={newMessageText}
+                          onChange={(e) => setNewMessageText(e.target.value)}
+                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono"
+                        />
+                        <button 
+                          type="submit" 
+                          disabled={!newMessageText.trim()}
+                          className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
+                        >
+                          <Send className="w-4 h-4 shrink-0" />
+                        </button>
+                      </form>
+                    )}
                   </div>
                 ) : (
                   <div className="py-24 text-center text-slate-500 space-y-4 px-6 select-none">

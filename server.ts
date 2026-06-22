@@ -957,8 +957,8 @@ const initialActivityLogs: ActivityLog[] = [
 
 // Seed collection items helper
 async function seedDatabaseIfEmpty() {
-  if (!db) {
-    console.warn("Firestore db is null. Skipping seeding.");
+  if (!db || useMemoryFallback) {
+    console.warn("Firestore db is null or memory fallback is active. Skipping live Firestore seeding.");
     return;
   }
   console.log("Validating and seeding Firestore database if empty using raw methods...");
@@ -1437,6 +1437,14 @@ async function startServer() {
         numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : 0,
         additionalDrivers: data.additionalDrivers || [],
         additionalContainers: data.additionalContainers || [],
+        
+        // Broker details for land shipments
+        destinationBrokerId: data.destinationBrokerId || "",
+        destinationBrokerName: data.destinationBrokerName || "",
+        destinationBrokerPhone: data.destinationBrokerPhone || "",
+        iraqBorderBrokerId: data.iraqBorderBrokerId || "",
+        iraqBorderBrokerName: data.iraqBorderBrokerName || "",
+        iraqBorderBrokerPhone: data.iraqBorderBrokerPhone || "",
       };
 
       if (data.assignedDriverId && driver) {
@@ -1839,6 +1847,14 @@ async function startServer() {
         numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : original.numberOfPackages,
         additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers,
         additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : original.additionalContainers,
+        
+        // Broker details mapping for land shipments
+        destinationBrokerId: data.destinationBrokerId !== undefined ? data.destinationBrokerId : original.destinationBrokerId,
+        destinationBrokerName: data.destinationBrokerName !== undefined ? data.destinationBrokerName : original.destinationBrokerName,
+        destinationBrokerPhone: data.destinationBrokerPhone !== undefined ? data.destinationBrokerPhone : original.destinationBrokerPhone,
+        iraqBorderBrokerId: data.iraqBorderBrokerId !== undefined ? data.iraqBorderBrokerId : original.iraqBorderBrokerId,
+        iraqBorderBrokerName: data.iraqBorderBrokerName !== undefined ? data.iraqBorderBrokerName : original.iraqBorderBrokerName,
+        iraqBorderBrokerPhone: data.iraqBorderBrokerPhone !== undefined ? data.iraqBorderBrokerPhone : original.iraqBorderBrokerPhone,
       };
 
       // Set status to Assigned if first assigned
@@ -1897,6 +1913,19 @@ async function startServer() {
         "edit",
         "Shipment Parameters Updated",
         `Attention: Your shipment #${original.shipmentNumber} was updated by central operations. ${diffMsg}`
+      );
+
+      // In-app notification for the customer application
+      await pushNotification(
+        original.id,
+        original.shipmentNumber,
+        "status_update",
+        "Shipment Updated",
+        "Sevkiyat Güncellendi",
+        "تم تحديث الشحنة",
+        `Attention: Your shipment #${original.shipmentNumber} was updated: ${diffMsg}`,
+        `Yükünüz #${original.shipmentNumber} güncellendi: ${diffMsg}`,
+        `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
       );
 
       await setDoc(sDocRef, updatedShipment);

@@ -119,6 +119,14 @@ export interface Shipment {
   numberOfPackages?: number;
   customerEmails?: string[];
   customerNotificationHistory?: Array<{ id: string; timestamp: string; type: string; title: string; message: string; email: string; channel: 'email' | 'sms' }>;
+  
+  // Custom Broker info for Land Freight
+  destinationBrokerId?: string;
+  destinationBrokerName?: string;
+  destinationBrokerPhone?: string;
+  iraqBorderBrokerId?: string;
+  iraqBorderBrokerName?: string;
+  iraqBorderBrokerPhone?: string;
 }
 
 export interface Driver {

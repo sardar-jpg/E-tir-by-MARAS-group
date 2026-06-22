@@ -4,7 +4,7 @@ import {
   Ship, Globe, Star, Truck, Calendar, DollarSign, Eye, EyeOff, MapPin, 
   Search, Shield, Clipboard, ArrowRight, MessageSquare, CheckCircle2, 
   FileText, Download, Clock, ChevronRight, X, Send, HelpCircle, 
-  Activity, RefreshCw 
+  Activity, RefreshCw, Bell, Lock 
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import TrackingMap from "./TrackingMap";
@@ -51,7 +51,12 @@ const t = {
     bookingNo: "Booking Ref",
     billOfLading: "Bill of Lading",
     airline: "Flight Carrier",
-    waybill: "Air Waybill Number"
+    waybill: "Air Waybill Number",
+    notifsTitle: "Logistics Updates Center",
+    markAllRead: "Mark All as Read",
+    noNewNotifs: "No recent updates",
+    viewShipment: "Track",
+    notifications: "Notifications"
   },
   tr: {
     welcome: "Tekrar hoş geldiniz,",
@@ -93,7 +98,12 @@ const t = {
     bookingNo: "Rezervasyon No",
     billOfLading: "Konşimento No",
     airline: "Havayolu Firması",
-    waybill: "Hava Konşimentosu"
+    waybill: "Hava Konşimentosu",
+    notifsTitle: "Lojistik Bildirim Merkezi",
+    markAllRead: "Tümünü Okundu İşaretle",
+    noNewNotifs: "Yakın zamanda güncelleme yok",
+    viewShipment: "Takip Et",
+    notifications: "Bildirimler"
   },
   ar: {
     welcome: "مرحباً بك مجدداً،",
@@ -135,7 +145,12 @@ const t = {
     bookingNo: "رقم الحجز الملاحي",
     billOfLading: "بوليصة الشحن البحري",
     airline: "شركة الطيران الناقلة",
-    waybill: "رقم بوليصة الشحن الجوي"
+    waybill: "رقم بوليصة الشحن الجوي",
+    notifsTitle: "مركز تحديثات الشحن والخدمات",
+    markAllRead: "تحديد الكل كمقروء",
+    noNewNotifs: "لا توجد تحديثات مؤخرة",
+    viewShipment: "تتبع",
+    notifications: "الإشعارات"
   }
 };
 
@@ -162,12 +177,105 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const [sendingInquiry, setSendingInquiry] = useState(false);
   const [inquiryStatus, setInquiryStatus] = useState<"idle" | "success" | "error">("idle");
 
+  // Real-time Notification Center States
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
+
   const curT = t[lang] || t.en;
   const isRtl = lang === "ar";
 
   useEffect(() => {
     fetchDashboardData();
   }, [clientCompanyName]);
+
+  useEffect(() => {
+    if (toastMessage) {
+      const handle = setTimeout(() => setToastMessage(null), 6000);
+      return () => clearTimeout(handle);
+    }
+  }, [toastMessage]);
+
+  // Sync notifications background polling
+  const syncNotificationsBackground = async () => {
+    try {
+      const resNotifications = await apiFetch("/api/notifications");
+      if (resNotifications.ok) {
+        const text = await resNotifications.text();
+        if (!text.trim().startsWith("<")) {
+          const allNotifications = JSON.parse(text);
+          const myShipmentIds = new Set(shipments.map(s => s.id));
+          const myNotifs = allNotifications.filter((n: any) => 
+            n.shipmentId && 
+            myShipmentIds.has(n.shipmentId) && 
+            n.type !== 'chat' && 
+            n.type !== 'doc_upload' && 
+            n.type !== 'assignment'
+          );
+
+          if (knownNotificationIdsRef.current.size > 0) {
+            let hasNew = false;
+            for (const notif of myNotifs) {
+              if (!knownNotificationIdsRef.current.has(notif.id)) {
+                knownNotificationIdsRef.current.add(notif.id);
+                if (!notif.read) {
+                  hasNew = true;
+                  const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
+                  const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
+                  setToastMessage(`🔔 ${title}: ${msg}`);
+                }
+              }
+            }
+            if (hasNew) {
+              try {
+                const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.type = "sine";
+                oscillator.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + 0.15);
+              } catch (e) {}
+            }
+          } else {
+            const initialIds = new Set<string>();
+            myNotifs.forEach((n: any) => initialIds.add(n.id));
+            knownNotificationIdsRef.current = initialIds;
+          }
+          setNotifications(myNotifs);
+        }
+      }
+    } catch (err) {
+      console.warn("Background notification sync failed:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (shipments.length === 0) return;
+    const handle = setInterval(() => {
+      syncNotificationsBackground();
+    }, 10000);
+    return () => clearInterval(handle);
+  }, [shipments.length]);
+
+  const handleMarkAllRead = async () => {
+    try {
+      const unread = notifications.filter(n => !n.read);
+      if (unread.length === 0) return;
+      
+      setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+      
+      await Promise.all(unread.map(n => 
+        apiFetch(`/api/notifications/${n.id}/read`, { method: "POST" })
+      ));
+    } catch (err) {
+      console.error("Failed to mark all as read:", err);
+    }
+  };
 
   const fetchDashboardData = async () => {
     try {
@@ -200,6 +308,34 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
 
       setShipments(myShipments);
       setDrivers(allDrivers);
+
+      // Fetch customer notifications
+      try {
+        const resNotifications = await apiFetch("/api/notifications");
+        if (resNotifications.ok) {
+          const text = await resNotifications.text();
+          if (!text.trim().startsWith("<")) {
+            const allNotifications = JSON.parse(text);
+            const myShipmentIds = new Set(myShipments.map(s => s.id));
+            const myNotifs = allNotifications.filter((n: any) => 
+              n.shipmentId && 
+              myShipmentIds.has(n.shipmentId) && 
+              n.type !== 'chat' && 
+              n.type !== 'doc_upload' && 
+              n.type !== 'assignment'
+            );
+            
+            if (knownNotificationIdsRef.current.size === 0) {
+              const initialIds = new Set<string>();
+              myNotifs.forEach((n: any) => initialIds.add(n.id));
+              knownNotificationIdsRef.current = initialIds;
+            }
+            setNotifications(myNotifs);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not retrieve notifications stream: ", err);
+      }
 
       // Fetch chats/inquiries for each shipment
       for (const sh of myShipments) {
@@ -310,6 +446,19 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Bell Icon for Notifications */}
+          <button 
+            id="client-notification-bell"
+            onClick={() => setIsNotifOpen(true)}
+            className="p-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700/80 rounded-xl text-slate-300 transition-all cursor-pointer inline-flex items-center justify-center relative"
+            title={curT.notifications}
+          >
+            <Bell className="w-4 h-4 animate-bounce" />
+            {notifications.some(n => !n.read) && (
+              <span id="client-notification-bell-badge" className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-slate-950 animate-pulse"></span>
+            )}
+          </button>
+
           <button 
             onClick={fetchDashboardData}
             disabled={loading}
@@ -779,6 +928,118 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             )}
           </div>
 
+        </div>
+      )}
+
+      {/* Real-time Customer Notification Center Overlay slide-over panel */}
+      {isNotifOpen && (
+        <div id="notifications-overlay" className="fixed inset-0 z-50 overflow-hidden flex justify-end">
+          {/* Backdrop */}
+          <div 
+            className="absolute inset-0 bg-black/60 backdrop-blur-xs transition-opacity"
+            onClick={() => setIsNotifOpen(false)}
+          ></div>
+
+          {/* Sliding Panel */}
+          <div className="relative w-full max-w-md bg-slate-950 border-l border-slate-800 text-slate-100 flex flex-col h-full shadow-2xl select-none">
+            <div className="p-5 border-b border-slate-800 flex items-center justify-between">
+              <div className="space-y-1 text-left">
+                <h3 className="font-extrabold text-sm uppercase tracking-wider font-mono flex items-center gap-2 text-white">
+                  <Bell className="w-4 h-4 text-orange-400 animate-pulse" />
+                  <span>{curT.notifsTitle}</span>
+                </h3>
+                <p className="text-[10px] text-slate-455 font-medium">
+                  {notifications.filter(n => !n.read).length} unread updates matching your fleet
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {notifications.some(n => !n.read) && (
+                  <button
+                    onClick={handleMarkAllRead}
+                    className="p-1 px-2.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 hover:border-orange-500/30 text-[9px] uppercase tracking-wider font-mono font-black rounded-lg transition-all active:scale-95 cursor-pointer"
+                  >
+                    {curT.markAllRead}
+                  </button>
+                )}
+                <button 
+                  onClick={() => setIsNotifOpen(false)}
+                  className="p-1.5 bg-slate-900 border border-slate-800 hover:border-slate-750 text-slate-400 hover:text-white rounded-lg cursor-pointer transition-all active:scale-95"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {notifications.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 space-y-2 py-12">
+                  <Bell className="w-8 h-8 text-slate-700 stroke-[1.5]" />
+                  <p className="text-xs font-semibold">{curT.noNewNotifs}</p>
+                </div>
+              ) : (
+                [...notifications].sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map((notif) => {
+                  const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
+                  const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
+                  const isUnread = !notif.read;
+
+                  // Find shipment link
+                  const linkedShipment = shipments.find(s => s.id === notif.shipmentId);
+
+                  return (
+                    <div 
+                      key={notif.id} 
+                      className={`p-3.5 border rounded-2xl transition-all relative overflow-hidden flex flex-col justify-between gap-2.5 ${
+                        isUnread 
+                          ? "bg-slate-900/60 border-orange-500/20 hover:border-orange-500/30 shadow-md shadow-orange-500-[2%]" 
+                          : "bg-slate-900/20 border-slate-850 hover:border-slate-855"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3 text-left">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-lg text-slate-400 font-black font-mono">
+                              #{notif.shipmentNumber}
+                            </span>
+                            {isUnread && (
+                              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full"></span>
+                            )}
+                          </div>
+                          <h4 className="text-xs font-black text-white">{title}</h4>
+                          <p className="text-[10.5px] text-slate-400 font-medium leading-normal">{msg}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-slate-900 pt-2 text-[9px] font-bold text-slate-500">
+                        <span>
+                          {new Date(notif.timestamp).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "short", day: "numeric" })} at {new Date(notif.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
+                        </span>
+                        {linkedShipment && (
+                          <button
+                            onClick={() => {
+                              setSelectedShipment(linkedShipment);
+                              setIsNotifOpen(false);
+                            }}
+                            className="text-orange-400 hover:text-white flex items-center gap-0.5 uppercase tracking-wider font-mono font-extrabold cursor-pointer transition-all active:scale-95"
+                          >
+                            <span>{curT.viewShipment}</span>
+                            <ChevronRight className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Real-time Toast Alert Notification Banner */}
+      {toastMessage && (
+        <div id="notifications-toast" className="fixed bottom-5 right-5 z-50 max-w-sm p-4 bg-slate-900 border border-orange-500/40 rounded-xl shadow-2xl flex items-center justify-between gap-3 text-xs text-white">
+          <span>{toastMessage}</span>
+          <button onClick={() => setToastMessage(null)} className="text-slate-450 hover:text-white cursor-pointer font-bold p-1">&times;</button>
         </div>
       )}
 

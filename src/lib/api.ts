@@ -20,6 +20,36 @@ import {
 } from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
 
+// Safe, iframe-resilient localStorage fallback storage helper
+const memoryStorage: Record<string, string> = {};
+
+export function safeGetItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch (e) {
+    console.warn(`[Iframe Storage] Read blocked for key "${key}", using virtual memory fallback`);
+    return memoryStorage[key] || null;
+  }
+}
+
+export function safeSetItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn(`[Iframe Storage] Write blocked for key "${key}", saving to virtual memory`);
+    memoryStorage[key] = value;
+  }
+}
+
+export function safeRemoveItem(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch (e) {
+    console.warn(`[Iframe Storage] Purge blocked for key "${key}", deleting from virtual memory`);
+    delete memoryStorage[key];
+  }
+}
+
 let firestoreDb: any = null;
 function getClientFirestore() {
   if (!firestoreDb) {
@@ -138,7 +168,7 @@ export async function apiFetch(input: string | URL, init?: RequestInit): Promise
 
     // Ensure we run in browser context before checking overrides
     if (typeof window !== "undefined") {
-      const storageOverride = localStorage.getItem("etir_backend_url");
+      const storageOverride = safeGetItem("etir_backend_url");
       if (storageOverride && storageOverride.trim()) {
         let cleanOverride = storageOverride.trim();
         try {
@@ -210,16 +240,16 @@ export async function apiFetch(input: string | URL, init?: RequestInit): Promise
 
 export function getSavedBackendUrl(): string {
   if (typeof window === "undefined") return "";
-  return localStorage.getItem("etir_backend_url") || "";
+  return safeGetItem("etir_backend_url") || "";
 }
 
 export function setSavedBackendUrl(url: string): void {
   if (typeof window === "undefined") return;
   const clean = (url || "").trim();
   if (!clean) {
-    localStorage.removeItem("etir_backend_url");
+    safeRemoveItem("etir_backend_url");
   } else {
-    localStorage.setItem("etir_backend_url", clean);
+    safeSetItem("etir_backend_url", clean);
   }
 }
 

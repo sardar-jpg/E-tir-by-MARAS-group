@@ -44,43 +44,42 @@
 /* Ensure Google Maps elements, canvas tags, video elements, and standard buttons with exact colors aren't impacted */
 .theme-light :not(.gm-style):not(.gm-style *):not(canvas):not(video):not(path):not(svg):not(.bg-amber-400):not(.bg-orange-500):not(.bg-orange-600):not(.bg-emerald-500):not(.bg-emerald-600):not(.bg-red-500):not(.bg-blue-600) {
   
+  /* Catch-all to neutralize all dark gradients and background images on slate-themed components */
+  &[class*="bg-slate-"], &[class*="from-slate-"], &[class*="to-slate-"], &[class*="via-slate-"], &[class*="bg-gradient-"] {
+    background-image: none !important;
+  }
+
   /* Override background slates to clean, highly legible off-white and light slate styles */
-  &.bg-slate-950, &.bg-slate-950\/90, &.bg-slate-950\/95, &.bg-slate-950\/80, &.bg-slate-950\/90 {
+  &.bg-slate-950, &.bg-slate-950\/90, &.bg-slate-950\/95, &.bg-slate-950\/80, &.bg-slate-950\/40, &.bg-slate-950\/20, &[class*="bg-slate-950"], &[class*="to-slate-950"] {
     background-color: #f8fafc !important;
   }
-  &.bg-slate-900, &.bg-slate-900\/90, &.bg-slate-900\/95, &.bg-slate-905\/85, &.bg-slate-900\/60 {
+  &.bg-slate-900, &.bg-slate-900\/90, &.bg-slate-900\/95, &.bg-slate-905\/85, &.bg-slate-900\/60, &.bg-slate-900\/40, &.bg-slate-900\/20, &[class*="bg-slate-90"], &[class*="from-slate-90"] {
     background-color: #ffffff !important; /* solid white card panels */
     border-color: #e2e8f0 !important;
   }
-  &.bg-slate-800, &.bg-slate-850, &.bg-slate-750, &.bg-slate-950\/80, &.bg-slate-900\/10 {
+  &.bg-slate-800, &.bg-slate-850, &.bg-slate-750, &.bg-slate-950\/80, &.bg-slate-900\/10, &[class*="bg-slate-8"], &[class*="from-slate-8"], &[class*="to-slate-8"] {
     background-color: #f1f5f9 !important; /* light slate-100 margins */
   }
 
-  /* Border styles */
-  &.border-slate-800, &.border-slate-850, &.border-slate-905, &.border-slate-800\/70, &.border-slate-800\/80, &.border-slate-850\/80, &.border-slate-700 {
+  /* Border styles - catch all border-slate classes */
+  &[class*="border-slate-"], &.border-slate-800, &.border-slate-850, &.border-slate-905, &.border-slate-800\/70, &.border-slate-800\/80, &.border-slate-850\/80, &.border-slate-700 {
     border-color: #cbd5e1 !important; /* slate-300 lines */
   }
 
   /* Text styles */
-  &.text-white, &.text-white\/90 {
-    color: #0f172a !important; /* slate-900 */
-  }
-  &.text-slate-100 {
+  &.text-white, &.text-white\/90, &[class*="text-slate-1"], &[class*="text-slate-2"] {
     color: #1e293b !important; /* slate-800 */
   }
-  &.text-slate-200 {
-    color: #1e293b !important;
-  }
-  &.text-slate-300 {
+  &.text-slate-300, &[class*="text-slate-3"] {
     color: #334155 !important; /* slate-700 */
   }
-  &.text-slate-400 {
+  &.text-slate-400, &[class*="text-slate-4"] {
     color: #475569 !important; /* slate-600 */
   }
   &.text-slate-450 {
     color: #475569 !important;
   }
-  &.text-slate-500 {
+  &.text-slate-500, &[class*="text-slate-5"], &[class*="text-slate-6"] {
     color: #64748b !important; /* slate-500 */
   }
   &.text-slate-550 {

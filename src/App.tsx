@@ -10,7 +10,7 @@ import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
 import TermsModal from "./components/TermsModal";
 import { auth, googleSignIn, logoutGoogle, initAuth, storage } from "./googleAuth";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { Ship, MessageSquare, Globe, Laptop, Smartphone, Eye, Bell, CheckCircle2, ChevronRight, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, User } from "lucide-react";
+import { Ship, MessageSquare, Globe, Laptop, Smartphone, Eye, Bell, CheckCircle2, ChevronRight, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, User, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch, getSavedBackendUrl, setSavedBackendUrl, isCustomDomainActive } from "./lib/api";
 import { onAuthStateChanged } from "firebase/auth";
 
@@ -26,6 +26,13 @@ interface AppSession {
 export default function App() {
   // 1. Language State
   const [lang, setLang] = useState<Language>("en");
+
+  // Custom premium toast notifier
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const triggerToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(prev => prev === msg ? null : prev), 3500);
+  };
 
   // Gmail OAuth States
   const [gmailUser, setGmailUser] = useState<any>(null);
@@ -472,7 +479,7 @@ export default function App() {
     if (session) {
       setActivePersona(session.role);
     }
-  }, [session]);
+  }, [session?.role, session?.email]);
 
   // Listen to Google Auth changes
   useEffect(() => {
@@ -520,9 +527,17 @@ export default function App() {
 
   // 3. Document/Attachment Chat context
   const [chatShipment, setChatShipment] = useState<Shipment | null>(null);
+  const [chatDrawerTab, setChatDrawerTab] = useState<'messages' | 'attachments'>('messages');
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatMessageText, setChatMessageText] = useState("");
   const [activeDetailsId, setActiveDetailsId] = useState<string | null>(null);
+
+  // Reset tab selection when drawer changes
+  useEffect(() => {
+    if (chatShipment) {
+      setChatDrawerTab('messages');
+    }
+  }, [chatShipment?.id]);
 
   // Admin attachment states
   const [adminAttachOpen, setAdminAttachOpen] = useState(false);
@@ -531,6 +546,16 @@ export default function App() {
   const [adminFileUrl, setAdminFileUrl] = useState("#");
   const [adminFile, setAdminFile] = useState<File | null>(null);
   const [isAdminUploading, setIsAdminUploading] = useState(false);
+  const adminMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll admin chat to bottom when a new message arrives
+  useEffect(() => {
+    if (chatShipment && chatMessages.length > 0) {
+      setTimeout(() => {
+        adminMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 80);
+    }
+  }, [chatMessages.length, chatShipment?.id]);
 
   // 4. Token identification for Guest direct links
   const [urlToken, setUrlToken] = useState<string | null>(null);
@@ -546,8 +571,12 @@ export default function App() {
   }, []);
 
   const handleLogout = async () => {
-    localStorage.removeItem("etir_session");
-    localStorage.setItem("etir_logged_out", "true");
+    try {
+      localStorage.removeItem("etir_session");
+      localStorage.setItem("etir_logged_out", "true");
+    } catch (e) {
+      console.warn("Storage write failed. Continuing logout using in-memory state:", e);
+    }
     setSession(null);
     setChatShipment(null);
     try {
@@ -558,12 +587,18 @@ export default function App() {
   };
 
   const handleLoginSuccess = (newSession: AppSession) => {
-    localStorage.removeItem("etir_logged_out");
+    try {
+      localStorage.removeItem("etir_logged_out");
+    } catch (e) {}
     const sessionWithTime: AppSession = {
       ...newSession,
       lastActive: Date.now()
     };
-    localStorage.setItem("etir_session", JSON.stringify(sessionWithTime));
+    try {
+      localStorage.setItem("etir_session", JSON.stringify(sessionWithTime));
+    } catch (e) {
+      console.warn("Storage write failed. Continuing login using in-memory state:", e);
+    }
     setSession(sessionWithTime);
   };
 
@@ -1306,164 +1341,272 @@ export default function App() {
               💡 Document and photo attachments uploaded by driver through chat sync instantly to the shipment Documents folder.
             </div>
 
-            {/* Message Thread Scrollable */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              {chatMessages.map((msg) => {
-                const isAdmin = msg.sender === 'admin';
-                const isSeenReceipt = isAdmin && msg.status === 'seen';
-                return (
-                  <div key={msg.id} className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                    <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                    
-                    <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 ${
-                      isAdmin 
-                        ? (msg.status === 'seen'
-                          ? 'bg-slate-800/95 text-slate-100 rounded-tr-none border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10'
-                          : 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700') 
-                        : 'bg-orange-600 text-white rounded-tl-none font-medium'
-                    }`}>
-                      {/* Read Receipt subtle highlight overlay */}
-                      {isSeenReceipt && (
-                        <span className="absolute inset-0 rounded-2xl rounded-tr-none border border-emerald-400 bg-emerald-500/5 animate-pulse pointer-events-none" />
-                      )}
-                      
-                      {msg.type === 'file' ? (
-                        <div className="space-y-2">
-                          <span className={`${isAdmin ? 'bg-slate-900 text-slate-350' : 'bg-orange-850 text-orange-250'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
-                            {msg.fileCategory}
-                          </span>
-                          <a 
-                            href={msg.fileUrl || "#"} 
-                            download={msg.fileName || "document.bin"}
-                            onClick={(e) => {
-                              if (!msg.fileUrl || msg.fileUrl === "#") {
-                                e.preventDefault();
-                                alert("Document specimen offline preview active.");
-                              }
-                            }}
-                            className="font-bold underline cursor-pointer flex items-center gap-1 hover:text-orange-200 break-all"
-                          >
-                            <FileUp className="w-3.5 h-3.5 shrink-0 inline" />
-                            <span>{msg.fileName}</span>
-                          </a>
-                          
-                          {/* Rich inline image preview if file category is photo or looks like an image */}
-                          {((msg.fileCategory === 'photo' || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)/i)) && msg.fileUrl && msg.fileUrl !== '#') && (
-                            <div className="mt-2 rounded-lg overflow-hidden border border-slate-700 max-w-[180px]">
-                              <img 
-                                src={msg.fileUrl} 
-                                alt={msg.fileName} 
-                                className="w-full h-auto object-cover max-h-[120px]" 
-                                referrerPolicy="no-referrer"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <p>{msg.text}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-1 text-[8px] text-slate-500 font-mono select-none">
-                      <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      {isAdmin ? (
-                        <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
-                          msg.status === 'seen' 
-                            ? 'text-emerald-400 bg-emerald-950/35 font-black ring-1 ring-emerald-500/10' 
-                            : 'text-slate-500 bg-slate-900/20'
-                        }`}>
-                          • 
-                          {msg.status === 'seen' ? (
-                            <>
-                              <CheckCheck className="w-2.5 h-2.5 text-emerald-400 shrink-0 scale-110 animate-bounce" style={{ animationDuration: '2s' }} />
-                              <span className="animate-pulse">
-                                {lang === 'tr' ? 'Sürücü Gördü' : lang === 'ar' ? 'شاهدها السائق' : 'Seen by Driver'}
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <Check className="w-2.5 h-2.5 text-slate-500 shrink-0" />
-                              <span>
-                                {lang === 'tr' ? 'Gönderildi' : lang === 'ar' ? 'تم الإرسال' : 'Sent'}
-                              </span>
-                            </>
-                          )}
-                        </span>
-                      ) : (
-                        <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
-                          msg.status === 'seen' 
-                            ? 'text-orange-400 bg-orange-950/35 font-bold' 
-                            : 'text-slate-400 bg-slate-900/20'
-                        }`}>
-                          • 
-                          {msg.status === 'seen' ? (
-                            <>
-                              <CheckCheck className="w-2.5 h-2.5 text-orange-400 shrink-0" />
-                              <span>
-                                {lang === 'tr' ? 'Biz Okuduk' : lang === 'ar' ? 'مقروءة لدينا' : 'Read'}
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <Check className="w-2.5 h-2.5 text-slate-500 shrink-0" />
-                              <span>
-                                {lang === 'tr' ? 'Sürücüden Gelen' : lang === 'ar' ? 'غير مقروء بعد' : 'Unread'}
-                              </span>
-                            </>
-                          )}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-
-              {chatMessages.length === 0 && (
-                <div className="py-20 text-center text-slate-600 italic text-xs">
-                  No messaging threads active for shipment {chatShipment.shipmentNumber}. Send a greeting to the driver!
-                </div>
-              )}
+            {/* Chat Drawer Tabs */}
+            <div className="flex border-b border-slate-800 bg-slate-950 font-mono text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setChatDrawerTab('messages')}
+                className={`flex-1 py-3 text-center border-b-2 hover:bg-slate-900/40 transition-all cursor-pointer ${
+                  chatDrawerTab === 'messages' 
+                    ? 'border-orange-500 text-orange-400 font-extrabold' 
+                    : 'border-transparent text-slate-450 hover:text-slate-350'
+                }`}
+              >
+                Support Messages
+              </button>
+              <button
+                type="button"
+                onClick={() => setChatDrawerTab('attachments')}
+                className={`flex-1 py-3 text-center border-b-2 hover:bg-slate-900/40 transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                  chatDrawerTab === 'attachments' 
+                    ? 'border-orange-500 text-orange-400 font-extrabold' 
+                    : 'border-transparent text-slate-450 hover:text-slate-350'
+                }`}
+              >
+                <span>Documents & Scans</span>
+                <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${
+                  chatDrawerTab === 'attachments' ? 'bg-orange-950 text-orange-405' : 'bg-slate-900 text-slate-500'
+                }`}>
+                  {chatShipment.documents?.length || 0}
+                </span>
+              </button>
             </div>
 
-            {/* Admin typing input bar */}
-            <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-855 flex items-center gap-2 relative">
-              <button 
-                type="button" 
-                onClick={() => setAdminAttachOpen(true)}
-                title="Attach Document / Photo"
-                className="p-3 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center"
-              >
-                <Paperclip className="w-4 h-4 shrink-0" />
-              </button>
+            {chatDrawerTab === 'messages' ? (
+              <>
+                {/* Message Thread Scrollable */}
+                <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                  {chatMessages.map((msg) => {
+                    const isAdmin = msg.sender === 'admin';
+                    const isSeenReceipt = isAdmin && msg.status === 'seen';
+                    return (
+                      <div key={msg.id} className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                        <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
+                        
+                        <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 ${
+                          isAdmin 
+                            ? (msg.status === 'seen'
+                              ? 'bg-slate-800/95 text-slate-100 rounded-tr-none border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10'
+                              : 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700') 
+                            : 'bg-orange-600 text-white rounded-tl-none font-medium'
+                        }`}>
+                          {/* Read Receipt subtle highlight overlay */}
+                          {isSeenReceipt && (
+                            <span className="absolute inset-0 rounded-2xl rounded-tr-none border border-emerald-400 bg-emerald-500/5 animate-pulse pointer-events-none" />
+                          )}
+                          
+                          {msg.type === 'file' ? (
+                            <div className="space-y-2">
+                              <span className={`${isAdmin ? 'bg-slate-900 text-slate-350' : 'bg-orange-850 text-orange-250'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
+                                {msg.fileCategory}
+                              </span>
+                              <a 
+                                href={msg.fileUrl || "#"} 
+                                download={msg.fileName || "document.bin"}
+                                onClick={(e) => {
+                                  if (!msg.fileUrl || msg.fileUrl === "#") {
+                                    e.preventDefault();
+                                    alert("Document specimen offline preview active.");
+                                  }
+                                }}
+                                className="font-bold underline cursor-pointer flex items-center gap-1 hover:text-orange-200 break-all"
+                              >
+                                <FileUp className="w-3.5 h-3.5 shrink-0 inline" />
+                                <span>{msg.fileName}</span>
+                              </a>
+                              
+                              {/* Rich inline image preview if file category is photo or looks like an image */}
+                              {((msg.fileCategory === 'photo' || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)/i)) && msg.fileUrl && msg.fileUrl !== '#') && (
+                                <div className="mt-2 rounded-lg overflow-hidden border border-slate-700 max-w-[180px]">
+                                  <img 
+                                    src={msg.fileUrl} 
+                                    alt={msg.fileName} 
+                                    className="w-full h-auto object-cover max-h-[120px]" 
+                                    referrerPolicy="no-referrer"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <p>{msg.text}</p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-1 text-[8px] text-slate-500 font-mono select-none">
+                          <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          {isAdmin ? (
+                            <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
+                              msg.status === 'seen' 
+                                ? 'text-emerald-400 bg-emerald-950/35 font-black ring-1 ring-emerald-500/10' 
+                                : 'text-slate-500 bg-slate-900/20'
+                            }`}>
+                              • 
+                              {msg.status === 'seen' ? (
+                                <>
+                                  <CheckCheck className="w-2.5 h-2.5 text-emerald-400 shrink-0 scale-110 animate-bounce" style={{ animationDuration: '2s' }} />
+                                  <span className="animate-pulse">
+                                    {lang === 'tr' ? 'Sürücü Gördü' : lang === 'ar' ? 'شاهدها السائق' : 'Seen by Driver'}
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                                  <span>
+                                    {lang === 'tr' ? 'Gönderildi' : lang === 'ar' ? 'تم الإرسال' : 'Sent'}
+                                  </span>
+                                </>
+                              )}
+                            </span>
+                          ) : (
+                            <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
+                              msg.status === 'seen' 
+                                ? 'text-orange-400 bg-orange-950/35 font-bold' 
+                                : 'text-slate-400 bg-slate-900/20'
+                            }`}>
+                              • 
+                              {msg.status === 'seen' ? (
+                                <>
+                                  <CheckCheck className="w-2.5 h-2.5 text-orange-400 shrink-0" />
+                                  <span>
+                                    {lang === 'tr' ? 'Biz Okuduk' : lang === 'ar' ? 'مقروءة لدينا' : 'Read'}
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                                  <span>
+                                    {lang === 'tr' ? 'Sürücüden Gelen' : lang === 'ar' ? 'غير مقروء بعد' : 'Unread'}
+                                  </span>
+                                </>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
 
-              <input 
-                type="text" 
-                placeholder={t('typeMessage')}
-                value={chatMessageText}
-                onChange={(e) => setChatMessageText(e.target.value)}
-                className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500"
-              />
-              
-              <button 
-                type="submit" 
-                disabled={!chatMessageText.trim()}
-                className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center"
-              >
-                <Send className="w-4 h-4 shrink-0" />
-              </button>
-            </form>
+                  {chatMessages.length === 0 && (
+                    <div className="py-20 text-center text-slate-600 italic text-xs">
+                      No messaging threads active for shipment {chatShipment.shipmentNumber}. Send a greeting to the driver!
+                    </div>
+                  )}
+                  {/* Thread autoscroll anchor point */}
+                  <div ref={adminMessagesEndRef} />
+                </div>
+
+                {/* Admin typing input bar */}
+                <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-855 flex items-center gap-2 relative">
+                  <button 
+                    type="button" 
+                    onClick={() => setAdminAttachOpen(true)}
+                    title="Attach Document / Photo"
+                    className="p-3 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center font-sans"
+                  >
+                    <Paperclip className="w-4 h-4 shrink-0" />
+                  </button>
+
+                  <input 
+                    type="text" 
+                    placeholder={t('typeMessage')}
+                    value={chatMessageText}
+                    onChange={(e) => setChatMessageText(e.target.value)}
+                    className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500"
+                  />
+                  
+                  <button 
+                    type="submit" 
+                    disabled={!chatMessageText.trim()}
+                    className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center"
+                  >
+                    <Send className="w-4 h-4 shrink-0" />
+                  </button>
+                </form>
+              </>
+            ) : (
+              /* Shipment Document Viewer Tab with BULK DOWNLOAD */
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                      <h4 className="font-extrabold text-sm text-white">Attachment Files ({chatShipment.documents?.length || 0})</h4>
+                      <p className="text-[10px] text-slate-500">Synced operational backup documents</p>
+                    </div>
+                    
+                    {chatShipment.documents && chatShipment.documents.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            triggerToast("Generating ZIP archive...");
+                            const { downloadDocumentsAsZip } = await import('./utils/zipHelper');
+                            await downloadDocumentsAsZip(chatShipment.shipmentNumber, chatShipment.documents);
+                            triggerToast("ZIP Downloaded successfully!");
+                          } catch (err) {
+                            console.error(err);
+                            triggerToast("Failed to compile ZIP registry.");
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-orange-500/10 transition-all cursor-pointer border-0"
+                      >
+                        <FolderArchive className="w-3.5 h-3.5 shrink-0" />
+                        <span>Bulk Download</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {chatShipment.documents && chatShipment.documents.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-2.5">
+                      {chatShipment.documents.map((doc) => (
+                        <div key={doc.id} className="p-3 bg-slate-900/60 border border-slate-850 rounded-xl flex items-center justify-between gap-3 hover:border-slate-700 transition-all">
+                          <div className="flex items-center gap-2.5 truncate">
+                            {doc.category === 'photo' ? (
+                              <ImageIcon className="w-4 h-4 text-orange-400 shrink-0" />
+                            ) : (
+                              <FileText className="w-4 h-4 text-blue-400 shrink-0" />
+                            )}
+                            <div className="truncate text-xs">
+                              <p className="font-bold text-slate-200 truncate">{doc.name}</p>
+                              <span className="text-[9px] text-slate-500 font-mono block uppercase">{doc.category} • {doc.uploadedBy}</span>
+                            </div>
+                          </div>
+
+                          <a 
+                            href={doc.url} 
+                            download
+                            onClick={(e) => {
+                              if (doc.url === "#") {
+                                e.preventDefault();
+                                triggerToast("Sample document downloaded");
+                              }
+                            }}
+                            className="p-1 px-2.5 bg-slate-850 hover:bg-slate-800 text-slate-205 border border-slate-800 hover:border-slate-700 rounded text-[10px] font-mono leading-none transition-all cursor-pointer"
+                          >
+                            GET
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="py-20 text-center text-slate-500 italic text-xs">
+                      No documents registered. Any driver camera photos or uploads saved through the live support chat are compiled here instantly.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Admin Attachment Modal Overlay inside chat drawer */}
             {adminAttachOpen && (
               <div className="absolute inset-0 bg-slate-950/95 z-40 flex items-center justify-center p-4">
                 <div className="bg-slate-900 p-4 border border-slate-800 rounded-2xl w-full max-w-[340px] space-y-4 text-xs">
                   <div className="flex items-center justify-between">
-                    <h5 className="font-bold text-slate-200">Attach Document / Photo</h5>
-                    <button onClick={() => setAdminAttachOpen(false)} className="text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
+                    <h5 className="font-bold text-slate-200 font-mono text-[11px] uppercase tracking-wider">Attach Document / Photo</h5>
+                    <button onClick={() => setAdminAttachOpen(false)} className="text-slate-500 cursor-pointer border-0 bg-transparent"><X className="w-4 h-4" /></button>
                   </div>
 
-                  <div className="space-y-3">
+                  <div className="space-y-3 font-sans">
                     <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 block uppercase">Upload Real file</label>
+                      <label className="text-[10px] font-bold text-slate-400 block uppercase font-mono">Upload Real file</label>
                       <input 
                         type="file" 
                         accept="image/*,application/pdf,.doc,.docx"
@@ -1509,8 +1652,8 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 block uppercase">Document Category</label>
+                    <div className="space-y-1 font-sans">
+                      <label className="text-[10px] font-bold text-slate-400 block uppercase font-mono">Document Category</label>
                       <select
                         value={adminFileCategory}
                         onChange={(e) => setAdminFileCategory(e.target.value)}
@@ -1527,6 +1670,7 @@ export default function App() {
                     </div>
 
                     <button 
+                      type="button"
                       onClick={handleSendAdminAttachment}
                       disabled={!adminFileName.trim() || isAdminUploading}
                       className="w-full p-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-slate-850 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 text-[11px]"
@@ -1641,6 +1785,13 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-[200] max-w-sm bg-slate-900 border border-slate-700/80 p-4 rounded-2xl shadow-[0_20px_40px_-5px_rgba(0,0,0,0.5)] flex items-center gap-3 animate-slide-in text-white text-xs font-bold leading-normal">
+          <div className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-ping shrink-0" />
+          <span>{toastMessage}</span>
         </div>
       )}
     </div>
