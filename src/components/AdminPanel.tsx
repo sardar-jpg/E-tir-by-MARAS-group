@@ -670,6 +670,29 @@ MARAS Group e-tir Center`;
     return () => clearInterval(interval);
   }, []);
 
+  // Global polling mechanism to periodically refresh the shipment list data from the backend every 60 seconds
+  useEffect(() => {
+    const pollShipments = async () => {
+      try {
+        if (typeof window !== "undefined" && !navigator.onLine) return;
+        const resShipments = await fetch("/api/shipments");
+        if (resShipments.ok) {
+          const text = await resShipments.text();
+          if (!text.trim().startsWith("<")) {
+            const data = JSON.parse(text);
+            setShipments(data);
+            console.log("[Global Polling] Periodically refreshed shipment list data (60s timer).");
+          }
+        }
+      } catch (err) {
+        console.warn("[Global Polling] Error periodically refreshing shipment list data: ", err);
+      }
+    };
+
+    const interval = setInterval(pollShipments, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Sync manual operation panel values
   useEffect(() => {
     if (openDetailsId) {
@@ -1581,6 +1604,7 @@ MARAS Group e-tir Center`;
   const filteredShipments = shipments.filter(s => {
     const q = searchQuery.toLowerCase();
     const matchSearch = 
+      (s.id || "").toLowerCase().includes(q) ||
       (s.shipmentNumber || "").toLowerCase().includes(q) ||
       (s.companyName || "").toLowerCase().includes(q) ||
       (s.loadingCity || "").toLowerCase().includes(q) ||
@@ -1925,6 +1949,53 @@ MARAS Group e-tir Center`;
           );
         })}
       </div>
+
+      {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR */}
+      {(activeTab === 'dashboard' || activeTab === 'shipments') && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-4.5 mb-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all duration-300">
+          <div className="space-y-1">
+            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+              <span className="p-1 bg-blue-500/10 text-blue-600 rounded"><Search className="w-3.5 h-3.5" /></span>
+              <span>{lang === 'tr' ? "Sevkiyat Arama ve Hızlı Getirme" : (lang === 'ar' ? "البحث السريع واسترجاع الشحنات" : "Shipment Quick Retrieval")}</span>
+            </h3>
+            <p className="text-[11px] text-slate-500 font-medium">
+              {lang === 'tr' 
+                ? "Sevkiyatları ID'sine, atanan sürücüye veya varış/hedef şehrine göre anında arayın ve filtreleyin." 
+                : (lang === 'ar' ? "ابحث عن الشحنات فوراً من خلال رقم التعريف (ID)، اسم السائق، أو مدينة الوصول." : "Search and retrieve shipments instantly using unique ID, assigned driver name, or destination city.")}
+            </p>
+          </div>
+
+          <div className="flex-1 max-w-lg w-full relative">
+            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+              <Search className="h-4 w-4 text-slate-400" />
+            </div>
+            <input
+              type="text"
+              className="block w-full pl-9 pr-10 py-2.5 bg-slate-50 hover:bg-slate-100/80 focus:bg-white text-xs text-slate-900 border border-slate-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 rounded-xl focus:outline-none transition-all placeholder:text-slate-400 font-medium font-sans"
+              placeholder={lang === 'tr' 
+                ? "Sevkiyat ID, sürücü adı veya hedef şehir girin... (Sıfırlamak için Esc)" 
+                : (lang === 'ar' ? "أدخل رقم التعريف، اسم السائق، أو مدينة الوصول... (Esc للمسح)" : "Filter by shipment ID, driver name, or destination city... (Esc to clear)")}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setSearchQuery("");
+                }
+              }}
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-405 hover:text-slate-700 bg-transparent border-0 cursor-pointer"
+                type="button"
+                title={lang === 'tr' ? "Temizle" : "Clear Query"}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 1. Dashboard Overview Tab */}
       {activeTab === 'dashboard' && (
