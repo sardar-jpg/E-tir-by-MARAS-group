@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { 
   Shipment, 
   Driver, 
@@ -20,7 +20,7 @@ import {
   X, Camera, FileUp, AlertTriangle, ChevronRight, CornerDownRight, Landmark, User,
   Edit2, Phone, Shield, Check, MapPin, Activity, Briefcase, Paperclip, Search, Languages,
   Star, Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
-  Plus, Minus, Compass, Sun, Moon
+  Plus, Minus, Compass, Sun, Moon, Play
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -577,6 +577,11 @@ export default function DriverApplication({
   const [gpsProgress, setGpsProgress] = useState<number>(35); // starts at 35% along path
   const [gpsSpeed, setGpsSpeed] = useState<number>(82); // simulated speed in km/h
   const [lastGpsCoords, setLastGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  
+  // Driver Assist adaptive routing & traffic patterns states
+  const [trafficPattern, setTrafficPattern] = useState<'optimal' | 'moderate' | 'congested' | 'border_delay'>('moderate');
+  const [assistActive, setAssistActive] = useState<boolean>(true);
+  const [quickStatusOpen, setQuickStatusOpen] = useState(false);
 
   const [toast, setToast] = useState<string | null>(null);
 
@@ -959,28 +964,55 @@ export default function DriverApplication({
                    CITY_COORDINATES["baghdad"];
 
     const interval = setInterval(() => {
-      setGpsProgress(prev => {
-        let next = prev + 1;
-        if (next > 95) {
-          next = 10; // Reset loop
-        }
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const currentLat = position.coords.latitude;
+            const currentLng = position.coords.longitude;
+            setLastGpsCoords({ lat: currentLat, lng: currentLng });
+            transmitGPS(currentLat, currentLng);
+          },
+          (error) => {
+            // Geolocation failed or denied, run graceful simulation fallback path
+            setGpsProgress(prev => {
+              let next = prev + 1;
+              if (next > 95) {
+                next = 10; // Reset loop
+              }
 
-        // Interpolation
-        const interpolationPct = next / 100;
-        // Adding slight random micro-drift to simulate active bumpy driving feedback
-        const latDrift = (Math.random() - 0.5) * 0.0015;
-        const lngDrift = (Math.random() - 0.5) * 0.0015;
+              const interpolationPct = next / 100;
+              const latDrift = (Math.random() - 0.5) * 0.0015;
+              const lngDrift = (Math.random() - 0.5) * 0.0015;
 
-        const currentLat = startLoc.lat + (endLoc.lat - startLoc.lat) * interpolationPct + latDrift;
-        const currentLng = startLoc.lng + (endLoc.lng - startLoc.lng) * interpolationPct + lngDrift;
+              const currentLat = startLoc.lat + (endLoc.lat - startLoc.lat) * interpolationPct + latDrift;
+              const currentLng = startLoc.lng + (endLoc.lng - startLoc.lng) * interpolationPct + lngDrift;
 
-        setLastGpsCoords({ lat: currentLat, lng: currentLng });
+              setLastGpsCoords({ lat: currentLat, lng: currentLng });
+              transmitGPS(currentLat, currentLng);
+              return next;
+            });
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        );
+      } else {
+        setGpsProgress(prev => {
+          let next = prev + 1;
+          if (next > 95) {
+            next = 10; // Reset loop
+          }
 
-        // Submit position to transmitter helper
-        transmitGPS(currentLat, currentLng);
+          const interpolationPct = next / 100;
+          const latDrift = (Math.random() - 0.5) * 0.0015;
+          const lngDrift = (Math.random() - 0.5) * 0.0015;
 
-        return next;
-      });
+          const currentLat = startLoc.lat + (endLoc.lat - startLoc.lat) * interpolationPct + latDrift;
+          const currentLng = startLoc.lng + (endLoc.lng - startLoc.lng) * interpolationPct + lngDrift;
+
+          setLastGpsCoords({ lat: currentLat, lng: currentLng });
+          transmitGPS(currentLat, currentLng);
+          return next;
+        });
+      }
     }, 15000);
 
     return () => clearInterval(interval);
@@ -1133,6 +1165,38 @@ export default function DriverApplication({
       });
       if (res.ok) {
         triggerToast(t('acceptSuccess'));
+        
+        // Automatically enable and sync the device GPS location data upon accepting a shipment
+        setGpsSimActive(true);
+        if (navigator.geolocation) {
+          triggerToast("📡 Initializing hardware GPS connection... Obtaining precise coordinates.");
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const lat = pos.coords.latitude;
+              const lng = pos.coords.longitude;
+              setLastGpsCoords({ lat, lng });
+              transmitGPS(lat, lng);
+              triggerToast("🚀 Hardware GPS connection synced! Location successfully broadcast to dispatcher.");
+            },
+            (err) => {
+              console.warn("Hardware GPS failed, using smart route simulator fallback:", err.message);
+              // Fallback immediately to simulation start location
+              const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
+              const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
+              setLastGpsCoords(startCoords);
+              transmitGPS(startCoords.lat, startCoords.lng);
+              triggerToast("📡 Simulated GPS tracking initiated in auto-mode.");
+            },
+            { enableHighAccuracy: true, timeout: 5000 }
+          );
+        } else {
+          // Fallback immediately to simulation start location
+          const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
+          const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
+          setLastGpsCoords(startCoords);
+          transmitGPS(startCoords.lat, startCoords.lng);
+        }
+
         fetchData();
       }
     } catch (e) {
@@ -1638,7 +1702,131 @@ export default function DriverApplication({
   const getDriverTruck = () => {
     const dr = drivers.find(d => d.id === selectedDriverId);
     return dr ? dr.truckNumber : "";
-  };  return (
+  };
+
+  // Driver Assist logic block (Adaptive ETA & Traffic Pattern Engine)
+  const assistCalculations = useMemo(() => {
+    if (!activeShipment) return null;
+
+    const originName = (activeShipment.loadingCity || "istanbul").toLowerCase().trim();
+    const destName = (activeShipment.deliveryCity || "baghdad").toLowerCase().trim();
+
+    const origin = CITY_COORDINATES[originName] || CITY_COORDINATES["istanbul"];
+    const dest = CITY_COORDINATES[destName] || CITY_COORDINATES["baghdad"];
+
+    // Haversine calculation to determine real road coordinates distance
+    const R = 6371; // earth radius in km
+    const dLat = (dest.lat - origin.lat) * Math.PI / 180;
+    const dLon = (dest.lng - origin.lng) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(origin.lat * Math.PI / 180) * Math.cos(dest.lat * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const rawDistance = Math.round(R * c);
+    
+    // Road/routing layout safety factor multiplier (usually physical roads are ~25% longer than straight lines)
+    const routeDistance = Math.max(120, Math.round(rawDistance * 1.25));
+    const processedDistance = Math.max(0, Math.round(routeDistance * (1 - gpsProgress / 100)));
+
+    // Choose speed parameters and delay bounds based on selected traffic scenarios
+    let avgSpeed = 70; // km/h
+    let trafficFactorDescription = "";
+    let borderDelayHours = 0;
+    let congestionDelayHours = 0;
+    let statusLabelEnglish = "Moderate Flow";
+
+    switch(trafficPattern) {
+      case 'optimal':
+        avgSpeed = 82;
+        borderDelayHours = 0.5;
+        congestionDelayHours = 0.04;
+        trafficFactorDescription = lang === 'tr' 
+          ? "Akıcı Yol Koşulları - Gecikme Saptanmadı (%100 Motor Hızı)" 
+          : (lang === 'ar' ? "حركة مرور طليقة - لم يتم العثور على تأخيرات (سعة ١٠٠٪)" : "Fluid highway velocity - No active delays detected.");
+        statusLabelEnglish = "Optimal Flow";
+        break;
+      case 'congested':
+        avgSpeed = 44;
+        borderDelayHours = 1.0;
+        congestionDelayHours = 2.4;
+        trafficFactorDescription = lang === 'tr' 
+          ? "Yoğun Trafik ve Otoyol Çalışmaları - Düşük Hız ve Dur-Kalk" 
+          : (lang === 'ar' ? "ازدحام شديد وأعمال طرق - سرعة منخفضة" : "Heavy metropolitan bumper-to-bumper peak queueing & lane restrictions.");
+        statusLabelEnglish = "Severe Congestion";
+        break;
+      case 'border_delay':
+        avgSpeed = 70;
+        borderDelayHours = 4.5;
+        congestionDelayHours = 0.5;
+        trafficFactorDescription = lang === 'tr' 
+          ? "Sınır Gümrük Yoğunluğu - Uzun TIR Kuyrukları ve Belge Kontrolü" 
+          : (lang === 'ar' ? "تراكم الشاحنات بجمارك الحدود - فحص ممتد" : "Customs checkpoint backlog and documentation safety verification queue.");
+        statusLabelEnglish = "Customs Backlog";
+        break;
+      case 'moderate':
+      default:
+        avgSpeed = 68;
+        borderDelayHours = 1.0;
+        congestionDelayHours = 0.8;
+        trafficFactorDescription = lang === 'tr' 
+          ? "Tipik Şehirlerarası Yoğunluk ve Olağan Sınır Kontrolü" 
+          : (lang === 'ar' ? "ازدحام معتاد وفحص جمركي عادي" : "Standard inter-state congestion & average customs clearance inspection period.");
+        statusLabelEnglish = "Normal Volumes";
+        break;
+    }
+
+    // Combine current telemetry velocity if available and simulation is active
+    let activeSpeed = avgSpeed;
+    if (gpsSimActive && gpsSpeed > 0) {
+      // average simulated telemetry with pattern
+      activeSpeed = Math.round((gpsSpeed + avgSpeed) / 2);
+    }
+
+    // Remaining travel hours
+    const netTravelHours = processedDistance / activeSpeed;
+    const totalDelays = borderDelayHours + congestionDelayHours;
+    const finalEtaHours = netTravelHours + totalDelays;
+
+    // Relative ETA text formatting
+    const totalMinutes = Math.round(finalEtaHours * 60);
+    const displayHours = Math.floor(totalMinutes / 60);
+    const displayMinutes = totalMinutes % 60;
+
+    // Target absolute arrival date
+    const now = new Date();
+    const etaDate = new Date(now.getTime() + totalMinutes * 60 * 1000);
+    
+    // Formatting absolute time
+    const timeString = etaDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    
+    let etaDayLabel = lang === 'tr' ? "Bugün" : (lang === 'ar' ? "اليوم" : "Today");
+    if (etaDate.getDate() !== now.getDate()) {
+      etaDayLabel = lang === 'tr' ? "Yarın" : (lang === 'ar' ? "غداً" : "Tomorrow");
+      if (etaDate.getDate() > now.getDate() + 1) {
+        etaDayLabel = etaDate.toLocaleDateString([], { day: 'numeric', month: 'short' });
+      }
+    }
+
+    return {
+      routeDistance,
+      processedDistance,
+      avgSpeed,
+      activeSpeed,
+      borderDelayHours,
+      congestionDelayHours,
+      totalDelays,
+      finalEtaHours,
+      displayHours,
+      displayMinutes,
+      etaDayLabel,
+      timeString,
+      trafficFactorDescription,
+      statusLabelEnglish
+    };
+  }, [activeShipment, gpsProgress, gpsSpeed, gpsSimActive, trafficPattern, lang]);
+
+  return (
     <div 
       className={`${isMobileMode 
         ? "w-full min-h-screen text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none" 
@@ -1923,22 +2111,6 @@ export default function DriverApplication({
               <div className="flex items-center gap-1.5">
                 <button 
                   type="button"
-                  onClick={() => {
-                    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-                    setTheme(nextTheme);
-                    triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for daylight driving." : "🌙 Dark mode enabled for nighttime driving.");
-                  }}
-                  className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all cursor-pointer"
-                  title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-                >
-                  {theme === 'dark' ? (
-                    <Sun className="w-4 h-4 text-slate-400 hover:text-amber-400 transition-colors" />
-                  ) : (
-                    <Moon className="w-4 h-4 text-orange-500 hover:text-orange-600 transition-colors" />
-                  )}
-                </button>
-                <button 
-                  type="button"
                   onClick={() => setActiveTab('notifications')}
                   className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all relative cursor-pointer"
                 >
@@ -2207,6 +2379,290 @@ export default function DriverApplication({
                   <span>{t('restrictedNotice')}</span>
                 </div>
 
+                {/* ACCESSIBILITY-FIRST DRIVER QUICK ACTIONS COCKPIT GRID */}
+                {(() => {
+                  const quickT = {
+                    en: {
+                      title: "Quick Cockpit Actions",
+                      subtitle: "High-contrast controls optimized for secure one-tap driving use",
+                      startShipment: "Start Shipment",
+                      startShipmentSubAction: "Accept Shipment",
+                      startShipmentSubTransit: "Set In-Transit",
+                      startShipmentSubActive: "Driving Live",
+                      addDoc: "Add Document",
+                      addDocSub: "Scan CMR / Paperwork",
+                      statusUpdate: "Status Update",
+                      statusUpdateSub: "Tap to change state",
+                      recommendedNext: "RECOMMENDED NEXT",
+                      currentStatus: "Current status: ",
+                      cancel: "Close Panel",
+                      updating: "Updating Logistics status..."
+                    },
+                    tr: {
+                      title: "Hızlı Sürücü Eylemleri",
+                      subtitle: "Tek dokunuşla güvenli sürüş için optimize edilmiş kontroller",
+                      startShipment: "Sevkiyatı Başlat",
+                      startShipmentSubAction: "Sevkiyatı Kabul Et",
+                      startShipmentSubTransit: "Yola Çık",
+                      startShipmentSubActive: "Yolculuk Aktif",
+                      addDoc: "Evrak Ekle",
+                      addDocSub: "CMR veya Belge Tara",
+                      statusUpdate: "Durum Güncelle",
+                      statusUpdateSub: "Konumu değiştir",
+                      recommendedNext: "SIRADAKİ ÖNERİLEN",
+                      currentStatus: "Mevcut durum: ",
+                      cancel: "Paneli Kapat",
+                      updating: "Lojistik durumu güncelleniyor..."
+                    },
+                    ar: {
+                      title: "أوامر السائق السريعة",
+                      subtitle: "أزرار تحكم متباينة للغاية ومحسنة للاستخدام الآمن بلمسة واحدة أثناء القيادة",
+                      startShipment: "بدء الشحن",
+                      startShipmentSubAction: "قبول الشحنة",
+                      startShipmentSubTransit: "تغيير إلى في الطريق",
+                      startShipmentSubActive: "التتبع جاري",
+                      addDoc: "إضافة ملف",
+                      addDocSub: "مسح CMR مستندات",
+                      statusUpdate: "تحديث الحالة",
+                      statusUpdateSub: "اضغط لتعديل الخطوة",
+                      recommendedNext: "الخطوة التالية المقترحة",
+                      currentStatus: "الحالة الحالية: ",
+                      cancel: "إغلاق لوحة التحكم",
+                      updating: "جاري تحديث الحالة اللوجستية..."
+                    }
+                  }[lang as 'en' | 'tr' | 'ar'] || {
+                    title: "Quick Cockpit Actions",
+                    subtitle: "High-contrast controls optimized for secure one-tap driving use",
+                    startShipment: "Start Shipment",
+                    startShipmentSubAction: "Accept Shipment",
+                    startShipmentSubTransit: "Set In-Transit",
+                    startShipmentSubActive: "Driving Live",
+                    addDoc: "Add Document",
+                    addDocSub: "Scan CMR / Paperwork",
+                    statusUpdate: "Status Update",
+                    statusUpdateSub: "Tap to change state",
+                    recommendedNext: "RECOMMENDED NEXT",
+                    currentStatus: "Current status: ",
+                    cancel: "Close Panel",
+                    updating: "Updating Logistics status..."
+                  };
+
+                  const getNextExpectedStatus = (curr: string): string => {
+                    const list = ['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'];
+                    const idx = list.indexOf(curr);
+                    if (idx !== -1 && idx < list.length - 1) {
+                      return list[idx + 1];
+                    }
+                    return 'Delivered';
+                  };
+
+                  const nextRecStatus = getNextExpectedStatus(activeShipment.status);
+
+                  const handleQuickStart = async () => {
+                    if (activeShipment.status === "Assigned") {
+                      await handleAcceptAssignment(activeShipment);
+                    } else if (activeShipment.status === "In Transit") {
+                      triggerToast(lang === 'tr' ? "ℹ️ Yolculuk zaten aktif. GPS verici düzgün çalışıyor." : "ℹ️ Transit is already active. GPS transmitter running normally.");
+                    } else {
+                      try {
+                        const res = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            status: "In Transit",
+                            remarksDesc: "Transit auto-started via high-contrast Quick Actions cockpit.",
+                            updaterName: getDriverName(),
+                            role: "driver"
+                          })
+                        });
+                        if (res.ok) {
+                          setGpsSimActive(true);
+                          triggerToast(lang === 'tr' ? "🚀 Yolculuk Başlatıldı! GPS simülatörü aktif." : "🚀 Transit Started! GPS live transmitter activated.");
+                          fetchData();
+                        }
+                      } catch (err) {
+                        console.error("Quick Start transit error:", err);
+                      }
+                    }
+                  };
+
+                  const handleQuickAddDoc = () => {
+                    setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                    setScanCategory("cmr");
+                    setCapturedImage(null);
+                    setScanFilter("color");
+                    setScanState("scanning");
+                    setIsScanOpen(true);
+                    startCamera();
+                  };
+
+                  const handleQuickStatusSelect = async (newSt: string) => {
+                    try {
+                      const res = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          status: newSt,
+                          remarksDesc: `Auto-updated via Driver Quick Actions cockpit`,
+                          updaterName: getDriverName(),
+                          role: "driver"
+                        })
+                      });
+                      if (res.ok) {
+                        triggerToast(`${lang === 'tr' ? 'Durum Güncellendi:' : 'Logistics State Verified:'} ${newSt}`);
+                        setQuickStatusOpen(false);
+                        fetchData();
+                        if (newSt === "In Transit") {
+                          setGpsSimActive(true);
+                        }
+                      }
+                    } catch (err) {
+                      console.error("Status check update error", err);
+                    }
+                  };
+
+                  // Check highlight or active state
+                  const isAssigned = activeShipment.status === "Assigned";
+                  const isPreTransit = ["Accepted", "Loading", "Loaded"].includes(activeShipment.status);
+                  const isTransit = activeShipment.status === "In Transit";
+
+                  return (
+                    <div id="driver-quick-actions-cockpit" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] select-none">
+                      <div className="flex flex-col text-left">
+                        <span className="text-[9px] font-black tracking-widest text-[#f97316] uppercase font-mono">
+                          {quickT.title}
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">
+                          {quickT.subtitle}
+                        </span>
+                      </div>
+
+                      {/* Three Column Spacious Tactile Grid */}
+                      <div className="grid grid-cols-3 gap-3.5">
+                        {/* 1. START SHIPMENT */}
+                        <button
+                          type="button"
+                          onClick={handleQuickStart}
+                          className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all duration-300 transform active:scale-95 cursor-pointer max-w-full text-center relative overflow-hidden h-24 ${
+                            isAssigned 
+                              ? "bg-orange-500 text-white border-orange-600 shadow-[0_4px_18px_rgba(249,115,22,0.4)] animate-pulse"
+                              : isPreTransit
+                              ? "bg-slate-900 hover:bg-slate-800 text-orange-400 border-orange-500/30 animate-shimmer"
+                              : isTransit
+                              ? "bg-emerald-950/40 text-emerald-400 border-emerald-500/30"
+                              : "bg-slate-950/80 text-slate-500 border-slate-900"
+                          }`}
+                        >
+                          <div className={`p-2 rounded-xl mb-1.5 ${isAssigned ? "bg-white/10" : "bg-slate-950/60"}`}>
+                            <Play className={`w-5 h-5 ${isAssigned ? "text-white" : isTransit ? "text-emerald-400" : "text-orange-500"}`} />
+                          </div>
+                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
+                            {quickT.startShipment}
+                          </span>
+                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
+                            {isAssigned 
+                              ? quickT.startShipmentSubAction 
+                              : isPreTransit 
+                              ? quickT.startShipmentSubTransit 
+                              : isTransit 
+                              ? quickT.startShipmentSubActive 
+                              : activeShipment.status}
+                          </span>
+                        </button>
+
+                        {/* 2. ADD DOCUMENT */}
+                        <button
+                          type="button"
+                          onClick={handleQuickAddDoc}
+                          className="flex flex-col items-center justify-center p-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-100 hover:border-slate-700 transition-all transform active:scale-95 cursor-pointer h-24 text-center"
+                        >
+                          <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-orange-500">
+                            <Camera className="w-5 h-5 text-orange-400" />
+                          </div>
+                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
+                            {quickT.addDoc}
+                          </span>
+                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
+                            {quickT.addDocSub}
+                          </span>
+                        </button>
+
+                        {/* 3. STATUS UPDATE */}
+                        <button
+                          type="button"
+                          onClick={() => setQuickStatusOpen(!quickStatusOpen)}
+                          className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all transform active:scale-95 cursor-pointer h-24 text-center ${
+                            quickStatusOpen 
+                              ? "bg-slate-800 text-white border-slate-600 shadow-inner" 
+                              : "bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[#f97316] hover:border-slate-750"
+                          }`}
+                        >
+                          <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-[#f97316]">
+                            <Activity className="w-5 h-5 text-orange-400" />
+                          </div>
+                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
+                            {quickT.statusUpdate}
+                          </span>
+                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
+                            {quickT.statusUpdateSub}
+                          </span>
+                        </button>
+                      </div>
+
+                      {/* EXPANDED INTERACTIVE HIGH-CONTRAST CHANNELS DRAWER */}
+                      {quickStatusOpen && (
+                        <div className="p-4 bg-slate-950 border border-slate-850 rounded-2xl space-y-3 animate-fade-in text-left">
+                          <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                            <div>
+                              <span className="text-[8px] font-black uppercase tracking-widest text-slate-500 block font-mono">
+                                {quickT.currentStatus}
+                              </span>
+                              <span className="text-white font-extrabold text-xs uppercase font-mono">
+                                {activeShipment.status}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setQuickStatusOpen(false)}
+                              className="text-[9px] font-bold text-slate-500 hover:text-white uppercase tracking-wider bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800 cursor-pointer"
+                            >
+                              {quickT.cancel}
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            {['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'].map(st => {
+                              const isNext = st === nextRecStatus;
+                              const isCurrent = st === activeShipment.status;
+                              return (
+                                <button
+                                  key={st}
+                                  type="button"
+                                  onClick={() => handleQuickStatusSelect(st)}
+                                  className={`p-3 rounded-xl border text-xs font-bold transition-all text-center flex flex-col items-center justify-center gap-0.5 cursor-pointer relative ${
+                                    isCurrent 
+                                      ? "bg-amber-500/10 text-amber-500 border-amber-500/30 font-black cursor-default"
+                                      : isNext
+                                      ? "bg-orange-500 text-white border-orange-600 shadow-[0_2px_12px_rgba(249,115,22,0.3)] font-black"
+                                      : "bg-slate-900 text-slate-300 border-slate-850 hover:bg-slate-850 hover:text-white"
+                                  }`}
+                                >
+                                  {isNext && (
+                                    <span className="absolute -top-1 px-1 bg-[#f97316] text-[#ffffff] text-[6.5px] font-black rounded uppercase tracking-wider scale-95 border border-orange-600 block">
+                                      {quickT.recommendedNext}
+                                    </span>
+                                  )}
+                                  <span>{st}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Driver views parameters */}
                 <div className="p-5 bg-slate-900 border border-slate-800/80 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)] relative overflow-hidden group">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
@@ -2428,6 +2884,258 @@ export default function DriverApplication({
                     </div>
                   )}
                 </div>
+
+                {/* DRIVER ASSIST AUTOMATIC Predictive ETA & TRAFFIC PATTERNS PANEL */}
+                {(() => {
+                  const assistT = {
+                    en: {
+                      title: "Driver Assist Core",
+                      subtitle: "Adaptive traffic & predictive ETA autopilot",
+                      modeAuto: "Auto-Predictor Live",
+                      modeManual: "Autopilot Paused",
+                      trafficScenario: "Selected Road Scenario",
+                      remDistance: "Remaining Dist.",
+                      estSpeed: "Estimated Speed",
+                      extraDelay: "Scheduled Delays",
+                      etaArrival: "Predicted Arrival Time",
+                      calculating: "Dynamic calculations live...",
+                      optimal: "Optimal Flow",
+                      moderate: "Normal Peak",
+                      congested: "Heavy Traffic",
+                      border: "Custom Backlog",
+                      statusText: "Traffic conditions optimized",
+                      enableHint: "Toggle off to enter manual routing planning.",
+                      disabledHint: "Adaptive driver assist is currently paused. Tap above to resume dynamic ETA prediction."
+                    },
+                    tr: {
+                      title: "Sürücü Asistanı Paneli",
+                      subtitle: "Yapay zeka uyumlu trafik ve ETA hesaplama",
+                      modeAuto: "Otomatik Tahminleyici Aktif",
+                      modeManual: "Yapay Zeka Duraklatıldı",
+                      trafficScenario: "Yol ve Trafik Durumu Simülasyonu",
+                      remDistance: "Kalan Mesafe",
+                      estSpeed: "Öngörülen Hız",
+                      extraDelay: "Gümrük & Kontrol Gecikmesi",
+                      etaArrival: "Tahmini Varış Süresi",
+                      calculating: "Canlı güncellenen veriler...",
+                      optimal: "Akıcı Yol",
+                      moderate: "Olağan Akış",
+                      congested: "Yoğun Trafik",
+                      border: "Sınır Yoğunluğu",
+                      statusText: "Trafik koşulları optimize edildi",
+                      enableHint: "Manuel planlamaya geçmek için devredışı bırakın.",
+                      disabledHint: "Uyumlu asistan geçici olarak durduruldu. Canlı tahmini başlatmak için yukarı dokunun."
+                    },
+                    ar: {
+                      title: "مساعد السائق الذكي",
+                      subtitle: "حساب الوقت المقدر والازدحام التلقائي",
+                      modeAuto: "توقع تلقائي نشط",
+                      modeManual: "مساعد السائق معطل",
+                      trafficScenario: "محاكاة حالة المرور المحددة",
+                      remDistance: "المسافة المتبقية",
+                      estSpeed: "السرعة المتوقعة",
+                      extraDelay: "تأخيرات التفتيش والجمارك",
+                      etaArrival: "وقت الوصول المتوقع",
+                      calculating: "تحديث ذكي مستمر...",
+                      optimal: "طريق سريع",
+                      moderate: "تدفق معتاد",
+                      congested: "ازدحام شديد",
+                      border: "طابور الحدود",
+                      statusText: "تم تحسين حسابات القيادة",
+                      enableHint: "قم بالإيقاف للعودة للتخطيط اليدوي.",
+                      disabledHint: "مساعد السائق معطل حاليًا. انقر أعلاه لاستئناف توقع وقت الوصول التلقائي."
+                    }
+                  }[lang as 'en' | 'tr' | 'ar'] || {
+                    title: "Driver Assist Core",
+                    subtitle: "Adaptive traffic & predictive ETA autopilot",
+                    modeAuto: "Auto-Predictor Live",
+                    modeManual: "Autopilot Paused",
+                    trafficScenario: "Selected Road Scenario",
+                    remDistance: "Remaining Dist.",
+                    estSpeed: "Estimated Speed",
+                    extraDelay: "Scheduled Delays",
+                    etaArrival: "Predicted Arrival Time",
+                    calculating: "Dynamic calculations live...",
+                    optimal: "Optimal Flow",
+                    moderate: "Normal Peak",
+                    congested: "Heavy Traffic",
+                    border: "Custom Backlog",
+                    statusText: "Traffic conditions optimized",
+                    enableHint: "Toggle off to enter manual routing planning.",
+                    disabledHint: "Adaptive driver assist is currently paused. Tap above to resume dynamic ETA prediction."
+                  };
+
+                  return (
+                    <div id="driver-assist-core" className="p-5 bg-slate-900 border border-slate-800/80 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)] relative overflow-hidden group select-none">
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
+                      
+                      {/* Section Title with Activation Toggle */}
+                      <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                        <div className="flex items-start gap-2 max-w-[70%] text-left">
+                          <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/25 flex items-center justify-center text-orange-500 shrink-0">
+                            <Compass className="w-4 h-4 animate-pulse text-orange-400" />
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-black text-white uppercase tracking-wider font-mono block">
+                              {assistT.title}
+                            </span>
+                            <span className="text-[9px] text-slate-450 block truncate leading-tight mt-0.5">
+                              {assistT.subtitle}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Slide/Toggle Pill Element */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextState = !assistActive;
+                            setAssistActive(nextState);
+                            triggerToast(nextState ? "⚡ Driver Assist predictor activated!" : "⚠️ Driver Assist paused. Manual calculations set.");
+                          }}
+                          className={`px-3 py-1.5 rounded-full border text-[9px] font-black uppercase tracking-wider transition-all duration-300 inline-flex items-center gap-1.5 cursor-pointer ${
+                            assistActive 
+                              ? "bg-orange-500/15 text-orange-400 border-orange-500/35 shadow-[0_2px_10px_rgba(249,115,22,0.15)] animate-shimmer" 
+                              : "bg-slate-950/80 text-slate-400 border-slate-800 hover:bg-slate-900"
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${assistActive ? "bg-orange-500 animate-pulse" : "bg-slate-500"}`} />
+                          <span>{assistActive ? assistT.modeAuto : assistT.modeManual}</span>
+                        </button>
+                      </div>
+
+                      {assistActive && assistCalculations ? (
+                        <div className="space-y-4">
+                          {/* Traffic Simulation Scenarios Selector */}
+                          <div className="space-y-2">
+                            <span className="text-slate-500 text-[8px] font-bold uppercase tracking-wider font-mono block text-left">
+                              {assistT.trafficScenario}
+                            </span>
+                            <div className="grid grid-cols-4 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-850">
+                              {[
+                                { key: 'optimal', text: assistT.optimal },
+                                { key: 'moderate', text: assistT.moderate },
+                                { key: 'congested', text: assistT.congested },
+                                { key: 'border_delay', text: assistT.border }
+                              ].map(item => (
+                                <button
+                                  key={item.key}
+                                  type="button"
+                                  onClick={() => {
+                                    setTrafficPattern(item.key as any);
+                                    triggerToast(`Driver Assist: Traffic pattern adjusted to ${item.key.toUpperCase()}`);
+                                  }}
+                                  className={`py-1 text-[8px] font-bold rounded-lg uppercase tracking-wider transition-all duration-200 cursor-pointer text-center select-none border border-transparent box-border ${
+                                    trafficPattern === item.key 
+                                      ? "bg-orange-500 !text-white border-orange-600 shadow-sm font-black" 
+                                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/40"
+                                  }`}
+                                >
+                                  {item.text}
+                                </button>
+                              ))}
+                            </div>
+                            
+                            {/* Scenario verbal description contextual helper */}
+                            <p className="text-[10px] text-slate-440 leading-relaxed text-left border-l-2 border-orange-500/40 pl-2 py-0.5 select-text">
+                              {assistCalculations.trafficFactorDescription}
+                            </p>
+                          </div>
+
+                          {/* Predictor Core Metric Bento Grid */}
+                          <div className="grid grid-cols-3 gap-3">
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center relative overflow-hidden">
+                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                                {assistT.remDistance}
+                              </span>
+                              <div className="mt-1 flex items-baseline justify-center gap-0.5">
+                                <span className="font-bold text-slate-250 text-xs font-mono">
+                                  {assistCalculations.processedDistance}
+                                </span>
+                                <span className="text-[8px] font-mono text-slate-500">KM</span>
+                              </div>
+                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
+                                / {assistCalculations.routeDistance} km total
+                              </span>
+                            </div>
+
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center">
+                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                                {assistT.estSpeed}
+                              </span>
+                              <div className="mt-1 flex items-baseline justify-center gap-1">
+                                <Gauge className="w-3 h-3 text-orange-400 shrink-0 self-center" />
+                                <span className="font-bold text-slate-250 text-xs font-mono">
+                                  {assistCalculations.activeSpeed}
+                                </span>
+                                <span className="text-[8px] font-mono text-slate-500">KMH</span>
+                              </div>
+                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
+                                avg road factor
+                              </span>
+                            </div>
+
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center">
+                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                                {assistT.extraDelay}
+                              </span>
+                              <div className="mt-1 flex items-baseline justify-center gap-0.5">
+                                <span className={`font-bold text-xs font-mono ${assistCalculations.totalDelays > 2 ? 'text-orange-405' : 'text-slate-250'}`}>
+                                  +{assistCalculations.totalDelays.toFixed(1)}
+                                </span>
+                                <span className="text-[8px] font-mono text-slate-500">HRS</span>
+                              </div>
+                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
+                                border & queue wait
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Main High Contrast Predicted ETA Output Block */}
+                          <div className="bg-orange-500/5 rounded-2xl p-4 border border-orange-500/15 flex items-center justify-between">
+                            <div className="space-y-1 text-left">
+                              <span className="text-[8px] font-bold text-[#f97316] uppercase tracking-wider font-mono block">
+                                {assistT.etaArrival}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-white font-black text-xl tracking-tight font-sans">
+                                  {assistCalculations.timeString}
+                                </span>
+                                <span className="bg-orange-500/10 text-orange-400 text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border border-orange-500/20">
+                                  {assistCalculations.etaDayLabel}
+                                </span>
+                              </div>
+                              <p className="text-[9px] font-mono text-slate-500">
+                                {assistT.calculating}
+                              </p>
+                            </div>
+
+                            <div className="flex flex-col items-end gap-1 font-mono">
+                              <div className="bg-orange-500/10 text-orange-400 text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg border border-orange-500/20 inline-flex items-center gap-1">
+                                <Timer className="w-3 h-3 text-orange-400" />
+                                <span>
+                                  {assistCalculations.displayHours > 0 && `${assistCalculations.displayHours}h `}
+                                  {assistCalculations.displayMinutes}m
+                                </span>
+                              </div>
+                              <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">
+                                total duration
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        /* Paused Manual planning dashboard view */
+                        <div className="py-4 px-2 rounded-2xl bg-slate-950/40 border border-slate-850/60 flex flex-col items-center justify-center text-center space-y-2">
+                          <AlertTriangle className="w-7 h-7 text-slate-500" />
+                          <p className="text-[10.5px] text-slate-400 max-w-xs leading-relaxed">
+                            {assistT.disabledHint}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* STATUS ACTIONS CONDITIONAL ROUTING */}
                 {activeShipment.status === "Assigned" ? (

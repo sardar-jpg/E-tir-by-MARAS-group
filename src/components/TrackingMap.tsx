@@ -206,9 +206,11 @@ function RouteDisplay({ shipment, truckLocation, origin, destination }: RouteDis
 interface MapCustomControlsProps {
   selectedShipment: Shipment | null;
   lang: Language;
+  shipments: Shipment[];
+  getShipmentLocation: (s: Shipment) => { lat: number; lng: number };
 }
 
-function MapCustomControls({ selectedShipment, lang }: MapCustomControlsProps) {
+function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocation }: MapCustomControlsProps) {
   const map = useMap();
 
   const handleZoomIn = () => {
@@ -246,6 +248,47 @@ function MapCustomControls({ selectedShipment, lang }: MapCustomControlsProps) {
     }
   };
 
+  const handleFitAllRoutes = () => {
+    if (!map) return;
+    if (typeof google === "undefined" || !google.maps || !google.maps.LatLngBounds) return;
+
+    // Filter shipments that are currently active (In Transit, Loading, Loaded, Accepted, Assigned)
+    const activeShipments = shipments.filter(s => 
+      s.status === "In Transit" || 
+      s.status === "Loading" || 
+      s.status === "Loaded" || 
+      s.status === "Accepted" || 
+      s.status === "Assigned"
+    );
+
+    // If there are no active shipments, fall back to all shipments
+    const targets = activeShipments.length > 0 ? activeShipments : shipments;
+
+    if (targets.length === 0) {
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(CITY_COORDINATES["istanbul"]);
+      bounds.extend(CITY_COORDINATES["baghdad"]);
+      map.fitBounds(bounds);
+      return;
+    }
+
+    const bounds = new google.maps.LatLngBounds();
+    targets.forEach(s => {
+      const originName = s.loadingCity?.toLowerCase().trim();
+      const destName = s.deliveryCity?.toLowerCase().trim();
+      const startLoc = CITY_COORDINATES[originName] || CITY_COORDINATES["istanbul"];
+      const endLoc = CITY_COORDINATES[destName] || CITY_COORDINATES["baghdad"];
+      
+      bounds.extend(startLoc);
+      bounds.extend(endLoc);
+
+      const loc = getShipmentLocation(s);
+      bounds.extend({ lat: loc.lat, lng: loc.lng });
+    });
+
+    map.fitBounds(bounds, 60);
+  };
+
   return (
     <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 pointer-events-auto">
       {/* Zoom Panel */}
@@ -267,6 +310,18 @@ function MapCustomControls({ selectedShipment, lang }: MapCustomControlsProps) {
           <Minus className="w-4 h-4" />
         </button>
       </div>
+
+      {/* Fit All Routes Control */}
+      <button
+        type="button"
+        onClick={handleFitAllRoutes}
+        title={
+          lang === "tr" ? "Tüm Rotaları Sığdır" : lang === "ar" ? "ملاءمة جميع المسارات" : "Fit All Routes"
+        }
+        className="w-9 h-9 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl shadow-xl flex items-center justify-center text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+      >
+        <Expand className="w-4 h-4 text-emerald-500" />
+      </button>
 
       {/* Auto-Centering Control */}
       <button
@@ -1678,7 +1733,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         onIdle={() => setGoogleMapLoading(false)}
                       >
                         {/* Custom Map Controls (Zoom Panel and Auto-Center) */}
-                        <MapCustomControls selectedShipment={selectedShipment} lang={lang} />
+                        <MapCustomControls selectedShipment={selectedShipment} lang={lang} shipments={shipments} getShipmentLocation={getShipmentVectorLocation} />
 
                         {/* Selected Shipment Route rendering dynamic polylines */}
                         {selectedShipment && (() => {
