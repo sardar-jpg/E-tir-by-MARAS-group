@@ -79,11 +79,13 @@ function findVectorCity(cityName: string): { x: number; y: number } {
 }
 
 interface RouteDisplayProps {
+  shipment: Shipment;
+  truckLocation: google.maps.LatLngLiteral;
   origin: google.maps.LatLngLiteral;
   destination: google.maps.LatLngLiteral;
 }
 
-function RouteDisplay({ origin, destination }: RouteDisplayProps) {
+function RouteDisplay({ shipment, truckLocation, origin, destination }: RouteDisplayProps) {
   const map = useMap();
   const routesLib = useMapsLibrary('routes');
   const polylinesRef = useRef<google.maps.Polyline[]>([]);
@@ -91,34 +93,112 @@ function RouteDisplay({ origin, destination }: RouteDisplayProps) {
   useEffect(() => {
     if (!routesLib || !map) return;
     
-    // Clear previous route
+    // Clear previous routes
     polylinesRef.current.forEach(p => p.setMap(null));
     polylinesRef.current = [];
 
-    routesLib.Route.computeRoutes({
-      origin,
-      destination,
-      travelMode: 'DRIVING',
-      fields: ['path', 'distanceMeters', 'durationMillis', 'viewport'],
-    }).then(({ routes }) => {
-      if (routes?.[0]) {
-        const newPolylines = routes[0].createPolylines();
-        newPolylines.forEach(p => p.setMap(map));
-        polylinesRef.current = newPolylines;
+    const isMoving = shipment.status === "In Transit";
 
-        if (routes[0].viewport) {
-          map.fitBounds(routes[0].viewport);
+    if (isMoving) {
+      // Route Part A: Traversed route from Loading City (Origin) to Truck position
+      routesLib.Route.computeRoutes({
+        origin,
+        destination: truckLocation,
+        travelMode: 'DRIVING',
+        fields: ['path'],
+      }).then(({ routes }) => {
+        if (routes?.[0] && map) {
+          const completedPolylines = routes[0].createPolylines();
+          completedPolylines.forEach(p => {
+            p.setOptions({
+              strokeColor: "#64748b", // Slate 500 representing traveled history path
+              strokeOpacity: 0.6,
+              strokeWeight: 4,
+            });
+            p.setMap(map);
+            polylinesRef.current.push(p);
+          });
         }
+      }).catch(err => {
+        console.warn("Traversed segment path rendering failed:", err);
+      });
+
+      // Route Part B: Active/Remaining route from Truck position to Delivery City (Destination)
+      routesLib.Route.computeRoutes({
+        origin: truckLocation,
+        destination,
+        travelMode: 'DRIVING',
+        fields: ['path', 'viewport'],
+      }).then(({ routes }) => {
+        if (routes?.[0] && map) {
+          const remainingPolylines = routes[0].createPolylines();
+          remainingPolylines.forEach(p => {
+            p.setOptions({
+              strokeColor: "#f97316", // Solid bright orange for active remaining route
+              strokeOpacity: 0.95,
+              strokeWeight: 6,
+            });
+            p.setMap(map);
+            polylinesRef.current.push(p);
+          });
+        }
+      }).catch(err => {
+        console.warn("Remaining route path rendering failed:", err);
+      });
+
+    } else {
+      // Not currently moving or already finished/completed
+      const isDelivered = ["Arrived", "Delivered", "Closed"].includes(shipment.status);
+      routesLib.Route.computeRoutes({
+        origin,
+        destination,
+        travelMode: 'DRIVING',
+        fields: ['path', 'viewport'],
+      }).then(({ routes }) => {
+        if (routes?.[0] && map) {
+          const fullPolylines = routes[0].createPolylines();
+          fullPolylines.forEach(p => {
+            p.setOptions({
+              strokeColor: isDelivered ? "#475569" : "#3b82f6", // Slate-600 if completed, Solid blue if pending plan
+              strokeOpacity: isDelivered ? 0.6 : 0.85,
+              strokeWeight: 5,
+            });
+            p.setMap(map);
+            polylinesRef.current.push(p);
+          });
+        }
+      }).catch(err => {
+        console.warn("Direct route path rendering failed:", err);
+      });
+    }
+
+    // Centering bounds beautifully to include all loaded route anchors
+    if (typeof google !== "undefined" && google.maps && google.maps.LatLngBounds) {
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(origin);
+      bounds.extend(destination);
+      if (isMoving) {
+        bounds.extend(truckLocation);
       }
-    }).catch(err => {
-      console.warn("Google Maps Corridor Routing failed:", err);
-    });
+      map.fitBounds(bounds);
+    }
 
     return () => {
       polylinesRef.current.forEach(p => p.setMap(null));
       polylinesRef.current = [];
     };
-  }, [routesLib, map, origin.lat, origin.lng, destination.lat, destination.lng]);
+  }, [
+    routesLib, 
+    map, 
+    shipment.id, 
+    shipment.status, 
+    origin.lat, 
+    origin.lng, 
+    destination.lat, 
+    destination.lng, 
+    truckLocation.lat, 
+    truckLocation.lng
+  ]);
 
   return null;
 }
@@ -1601,12 +1681,18 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         <MapCustomControls selectedShipment={selectedShipment} lang={lang} />
 
                         {/* Selected Shipment Route rendering dynamic polylines */}
-                        {selectedShipment && (
-                          <RouteDisplay 
-                            origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
-                            destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
-                          />
-                        )}
+                        {selectedShipment && (() => {
+                          const activeLoc = getShipmentVectorLocation(selectedShipment);
+                          const truckLoc = { lat: activeLoc.lat, lng: activeLoc.lng };
+                          return (
+                            <RouteDisplay 
+                              shipment={selectedShipment}
+                              truckLocation={truckLoc}
+                              origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
+                              destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
+                            />
+                          );
+                        })()}
 
                         {/* Rendering Origin & Destination for selected shipment with pins */}
                         {selectedShipment && (() => {

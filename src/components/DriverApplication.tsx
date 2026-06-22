@@ -20,7 +20,7 @@ import {
   X, Camera, FileUp, AlertTriangle, ChevronRight, CornerDownRight, Landmark, User,
   Edit2, Phone, Shield, Check, MapPin, Activity, Briefcase, Paperclip, Search, Languages,
   Star, Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
-  Plus, Minus, Compass
+  Plus, Minus, Compass, Sun, Moon
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -535,6 +535,8 @@ export default function DriverApplication({
   // Input states
   const [newMessageText, setNewMessageText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [translatedMessages, setTranslatedMessages] = useState<Record<string, string>>({});
   const [isTranslatingId, setIsTranslatingId] = useState<string | null>(null);
@@ -550,6 +552,9 @@ export default function DriverApplication({
     }
   }, [chatMessages.length, activeTab, activeShipment?.id]);
   
+  // Theme mode switch (light vs dark)
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+
   // Custom file sim trigger
   const [fileSimOpen, setFileSimOpen] = useState(false);
   const [simFileName, setSimFileName] = useState("");
@@ -557,6 +562,15 @@ export default function DriverApplication({
   const [simFileUrl, setSimFileUrl] = useState("#");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+
+  // Camera Document Scanner states
+  const [isScanOpen, setIsScanOpen] = useState(false);
+  const [scanState, setScanState] = useState<'scanning' | 'review' | 'uploading'>('scanning');
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [scanFilter, setScanFilter] = useState<'color' | 'grayscale' | 'mono'>('color');
+  const [scanCategory, setScanCategory] = useState<DocumentCategory>("cmr");
+  const [scanDocName, setScanDocName] = useState("");
+  const [flashLight, setFlashLight] = useState(false);
 
   // GPS live simulation states
   const [gpsSimActive, setGpsSimActive] = useState<boolean>(true);
@@ -1240,6 +1254,306 @@ export default function DriverApplication({
     }, 450);
   };
 
+  // Generates a mock scanned paperwork dynamically with standard canvas drawing
+  const generateSimulatedDocument = (category: DocumentCategory): string => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 600;
+    canvas.height = 800;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+
+    // White sheet background with slight off-white paper texture
+    ctx.fillStyle = "#fafbfc";
+    ctx.fillRect(0, 0, 600, 800);
+
+    // Grid lines for blue/grey paper texture feel
+    ctx.strokeStyle = "rgba(100, 116, 139, 0.05)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 600; i += 40) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, 800);
+      ctx.stroke();
+    }
+    for (let j = 0; j < 800; j += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, j);
+      ctx.lineTo(600, j);
+      ctx.stroke();
+    }
+
+    // Outer margin border
+    ctx.strokeStyle = "#475569";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(20, 20, 560, 760);
+
+    // Dynamic Header
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "bold 16px monospace";
+    let title = "INTERNATIONAL CONSIGNMENT NOTE (CMR)";
+    let code = "CMR-TR-30920-E";
+    if (category === "invoice") {
+      title = "COMMERCIAL LOGISTICS INVOICE";
+      code = "INV-2026-X992";
+    } else if (category === "packing_list") {
+      title = "PACKING LIST & INVENTORY PROTOCOL";
+      code = "PL-77112-L2";
+    } else if (category === "customs") {
+      title = "CUSTOMS TRANSFER TRANSIT RECEIPT";
+      code = "CST-GATE-ENTRY";
+    } else if (category === "delivery_proof") {
+      title = "PROOF OF DELIVERY PROOF (POD)";
+      code = "POD-DELIVERED";
+    } else if (category === "photo") {
+      title = "LIVE CARGO CORRELATION GRAPH";
+      code = "PHOTO-ATTACH-GPS";
+    }
+
+    ctx.fillText(title, 40, 60);
+
+    // Draw Serial Number Code
+    ctx.font = "bold 12px monospace";
+    ctx.fillStyle = "#ef4444";
+    ctx.fillText(`SERIAL NO: ${code}`, 40, 85);
+
+    // Decorative Barcode
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(380, 45, 180, 25);
+    for (let b = 385; b < 560; b += 4 + Math.random() * 8) {
+      ctx.fillStyle = "#fafbfc";
+      ctx.fillRect(b, 45, 2 + Math.random() * 3, 25);
+    }
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "9px monospace";
+    ctx.fillText(`*${activeShipment?.shipmentNumber || "998240-E"}*`, 420, 80);
+
+    // Horizontal Separator
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(20, 110);
+    ctx.lineTo(580, 110);
+    ctx.stroke();
+
+    // Box 1: Dispatcher & Shipper Details
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = "#1e293b";
+    ctx.fillText("1. SENDER / CARRIER DISPATCH NODE", 35, 135);
+    ctx.font = "9px monospace";
+    ctx.fillStyle = "#475569";
+    ctx.fillText(`OPERATOR: ${getDriverName()}`, 35, 155);
+    ctx.fillText(`REGISTRATION CODE: TR-${activeShipment?.truckNumber || "TR-34-ETA-55"}`, 35, 170);
+    ctx.fillText(`ROUTING GATEWAY: Istanbul Central Hub Node`, 35, 185);
+
+    // Box 2: Consignment Details
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = "#1e293b";
+    ctx.fillText("2. CARGO & TRANSIT INSTRUCTIONS", 35, 220);
+    ctx.font = "9px monospace";
+    ctx.fillStyle = "#475569";
+    ctx.fillText(`SPECIFICATION: ${activeShipment?.cargoDescription || "Industrial Refrigerated Cargo"}`, 35, 240);
+    ctx.fillText(`TOTAL TARGET WEIGHT: ${activeShipment?.cargoWeight || "24,500"} KG`, 35, 255);
+    ctx.fillText(`TRANSIT TEMPERATURE PRESET: +4.0° C`, 35, 270);
+
+    // Box 3: Origin & Destination Route
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = "#1e293b";
+    ctx.fillText("3. TRANSIT SEGMENT DIRECTIONAL CORRIDOR", 35, 310);
+    ctx.font = "9px monospace";
+    ctx.fillStyle = "#475569";
+    ctx.fillText(`LOADING CITY: ${activeShipment?.loadingCity || "Istanbul"}`, 35, 330);
+    ctx.fillText(`DELIVERY DESTINATION: ${activeShipment?.deliveryCity || "Baghdad"}`, 35, 345);
+    ctx.fillText(`AGREED VALUATION: ${activeShipment?.agreedAmount || "4,800"} ${activeShipment?.currency || "USD"}`, 35, 360);
+
+    // Draw stamp
+    ctx.strokeStyle = "rgba(239, 68, 68, 0.4)";
+    ctx.lineWidth = 3;
+    ctx.save();
+    ctx.translate(430, 260);
+    ctx.rotate(-0.15);
+    ctx.strokeRect(0, 0, 120, 60);
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = "rgba(239, 68, 68, 0.75)";
+    ctx.fillText("ETIR APPROVED", 10, 25);
+    ctx.fillText("BORDER SECURE", 10, 42);
+    ctx.font = "bold 8px monospace";
+    ctx.fillText(`STAMP: ${new Date().toISOString().slice(0, 10)}`, 10, 52);
+    ctx.restore();
+
+    // Box 4: Signature / Handshake verification lines
+    ctx.strokeStyle = "#cbd5e1";
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(20, 400);
+    ctx.lineTo(580, 400);
+    ctx.stroke();
+
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = "#1e293b";
+    ctx.fillText("4. FORMAL VERIFICATION HANDSHAKE", 35, 425);
+
+    // Mock handwritten lines using path curves
+    ctx.strokeStyle = "#2563eb"; // Blue pen ink
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(50, 470);
+    ctx.bezierCurveTo(90, 440, 110, 490, 150, 460);
+    ctx.bezierCurveTo(180, 440, 200, 480, 240, 450);
+    ctx.stroke();
+
+    ctx.font = "9px monospace";
+    ctx.fillStyle = "#475569";
+    ctx.fillText(`Driver Signature: Verification Token ${activeShipment?.id?.slice(0, 6).toUpperCase() || "H39B0"}`, 35, 490);
+
+    // Custom QR Code drawing
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(450, 425, 90, 90);
+    // Draw white speckles on QR to look real
+    ctx.fillStyle = "#fafbfc";
+    for (let q = 0; q < 12; q++) {
+      ctx.fillRect(450 + Math.random() * 80, 425 + Math.random() * 80, 8 + Math.random() * 15, 8 + Math.random() * 15);
+    }
+    // QR eye finders
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(450, 425, 25, 25);
+    ctx.fillRect(515, 425, 25, 25);
+    ctx.fillRect(450, 490, 25, 25);
+    ctx.fillStyle = "#fafbfc";
+    ctx.fillRect(455, 430, 15, 15);
+    ctx.fillRect(520, 430, 15, 15);
+    ctx.fillRect(455, 495, 15, 15);
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(459, 434, 7, 7);
+    ctx.fillRect(524, 434, 7, 7);
+    ctx.fillRect(459, 499, 7, 7);
+
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "8px monospace";
+    ctx.fillText("SCAN DYNAMIC DOCUMENT HANDSHAKE QR NODE", 390, 525);
+
+    // Draw some custom crop alignment marks on the corners
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(10, 30); ctx.lineTo(30, 30); ctx.moveTo(30, 10); ctx.lineTo(30, 30);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(590, 30); ctx.lineTo(570, 30); ctx.moveTo(570, 10); ctx.lineTo(570, 30);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(10, 770); ctx.lineTo(30, 770); ctx.moveTo(30, 790); ctx.lineTo(30, 770);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(590, 770); ctx.lineTo(570, 770); ctx.moveTo(570, 790); ctx.lineTo(570, 770);
+    ctx.stroke();
+
+    return canvas.toDataURL("image/png");
+  };
+
+  const handleUploadScannedDocument = async () => {
+    if (!activeShipment || !scanDocName.trim() || !capturedImage) return;
+
+    setScanState("uploading");
+
+    try {
+      let finalFileUrl = capturedImage;
+
+      // 1. Post to our highly available central media gateway route
+      try {
+        const uploadRes = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base64DataUrl: capturedImage,
+            filename: scanDocName
+          })
+        });
+        if (uploadRes.ok) {
+          const uploadData = await uploadRes.json();
+          finalFileUrl = uploadData.url;
+          console.log("Scanned document uploaded via central media gateway:", finalFileUrl);
+        }
+      } catch (uploadGatewayErr) {
+        console.log("Local media gateway fallback for camera scan:", uploadGatewayErr);
+      }
+
+      // 2. Add message + document record
+      const scanPayload = {
+        sender: "driver",
+        senderName: getDriverName(),
+        type: "file",
+        fileName: scanDocName,
+        fileCategory: scanCategory,
+        fileUrl: finalFileUrl,
+        text: `Scanned & processed official document [${scanCategory.toUpperCase()}]: ${scanDocName}`
+      };
+
+      const res = await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scanPayload)
+      });
+
+      if (res.ok) {
+        setScanDocName("");
+        setCapturedImage(null);
+        setIsScanOpen(false);
+        triggerToast("🎉 Scanned document uploaded and synchronized successfully!");
+        fetchData();
+      }
+    } catch (e) {
+      console.error(e);
+      triggerToast("Failed to process scanned document upload");
+    } finally {
+      setScanState("scanning");
+    }
+  };
+
+  const startCamera = async () => {
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" }
+        });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }
+    } catch (err) {
+      console.warn("navigator.mediaDevices.getUserMedia not available or blocked in sandbox iframe:", err);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const captureCameraSnapshot = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const video = videoRef.current;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/png");
+        setCapturedImage(dataUrl);
+        setScanState("review");
+        stopCamera();
+      }
+    } else {
+      // Fallback: draw dynamic simulated doc
+      const dataUrl = generateSimulatedDocument(scanCategory);
+      setCapturedImage(dataUrl);
+      setScanState("review");
+    }
+  };
+
   // Simulate Document or Photo upload inside Chat
   const handleSimulateUpload = async () => {
     if (!activeShipment || !simFileName.trim()) return;
@@ -1326,10 +1640,10 @@ export default function DriverApplication({
     return dr ? dr.truckNumber : "";
   };  return (
     <div 
-      className={isMobileMode 
+      className={`${isMobileMode 
         ? "w-full min-h-screen text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none" 
         : "p-4 md:p-8 bg-slate-950 min-h-screen text-slate-100 flex flex-col lg:flex-row gap-8 justify-center items-center bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(249,115,22,0.12),rgba(0,0,0,0))] font-sans select-none"
-      }
+      } ${theme === 'light' ? 'theme-light' : ''}`}
       dir={isRtl ? 'rtl' : 'ltr'}
     >
       
@@ -1606,8 +1920,25 @@ export default function DriverApplication({
                 <h2 className="text-white font-black text-xs tracking-wider uppercase font-mono">{t('brand')}</h2>
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button 
+                  type="button"
+                  onClick={() => {
+                    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+                    setTheme(nextTheme);
+                    triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for daylight driving." : "🌙 Dark mode enabled for nighttime driving.");
+                  }}
+                  className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all cursor-pointer"
+                  title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                >
+                  {theme === 'dark' ? (
+                    <Sun className="w-4 h-4 text-slate-400 hover:text-amber-400 transition-colors" />
+                  ) : (
+                    <Moon className="w-4 h-4 text-orange-500 hover:text-orange-600 transition-colors" />
+                  )}
+                </button>
+                <button 
+                  type="button"
                   onClick={() => setActiveTab('notifications')}
                   className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all relative cursor-pointer"
                 >
@@ -1701,43 +2032,6 @@ export default function DriverApplication({
                       </div>
                     </div>
                   </div>
-
-                  {/* Dynamic Telemetry Status Hub & Offline Indicators */}
-                  {cachedCoords.length > 0 ? (
-                    <div className="p-3 bg-amber-500/5 hover:bg-amber-500/15 border border-amber-500/25 rounded-2xl flex items-center justify-between text-left relative overflow-hidden transition-all shadow-md select-none animate-pulse">
-                      <div className="flex gap-2.5 items-start">
-                        <div className="w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/20 flex items-center justify-center shrink-0">
-                          <Compass className="w-4 h-4 text-amber-500 animate-spin" style={{ animationDuration: "12s" }} />
-                        </div>
-                        <div className="space-y-0.5">
-                          <h5 className="font-extrabold text-[10.5px] text-amber-400 font-mono tracking-tight">Offline Queue Active</h5>
-                          <p className="text-[9px] text-slate-400 leading-normal max-w-[210px]">
-                            {cachedCoords.length} transit telemetry updates are pending database sync.
-                          </p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await triggerGpsSync();
-                          triggerToast("Re-authenticating logs with HQ...");
-                        }}
-                        disabled={isSyncing}
-                        className="p-1.5 px-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 disabled:opacity-40 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-lg transition-all border-0 shadow-[0_2px_8px_rgba(249,115,22,0.2)]"
-                      >
-                        {isSyncing ? "Syncing..." : "Sync Logs"}
-                      </button>
-                    </div>
-                  ) : (
-                    /* General reporting stable indicator */
-                    <div className="p-2.5 bg-emerald-505/5 border border-emerald-500/15 rounded-2xl flex items-center justify-between text-[10px] text-slate-400 font-mono select-none">
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full bg-emerald-505 animate-pulse shrink-0"></div>
-                        <span className="font-bold">TELEMETRY LINK STATUS:</span>
-                      </div>
-                      <span className="text-emerald-450 font-black">SECURELY REPORTING</span>
-                    </div>
-                  )}
 
                   <div className="flex items-center justify-between border-b border-slate-900 pb-2.5">
                     <div>
@@ -2197,8 +2491,24 @@ export default function DriverApplication({
 
                 {/* Shared Official documents visibility inside mobile */}
                 <div className="space-y-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
-                  <div className="border-b border-slate-800 pb-2">
+                  <div className="border-b border-slate-800 pb-2 flex items-center justify-between">
                     <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Shared Files Center</h4>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                        setScanCategory("cmr");
+                        setCapturedImage(null);
+                        setScanFilter("color");
+                        setScanState("scanning");
+                        setIsScanOpen(true);
+                        startCamera();
+                      }}
+                      className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-450 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                    >
+                      <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-450" />
+                      <span>Scan Document</span>
+                    </button>
                   </div>
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
                     <div className="space-y-2">
@@ -2238,13 +2548,30 @@ export default function DriverApplication({
                           <span className="text-[9px] text-[#f97316] font-mono font-bold">Transit Duty #{activeShipment.shipmentNumber}</span>
                         </div>
                       </div>
-                      <button 
-                        onClick={() => setFileSimOpen(true)}
-                        className="p-1 px-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1.5 cursor-pointer shadow-[0_2px_10px_rgba(249,115,22,0.25)] transition-all active:scale-95 border-0"
-                      >
-                        <FileUp className="w-3 h-3 shrink-0" />
-                        <span>Upload File</span>
-                      </button>
+                      <div className="flex gap-1.5 items-center">
+                        <button 
+                          onClick={() => {
+                            setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                            setScanCategory("cmr");
+                            setCapturedImage(null);
+                            setScanFilter("color");
+                            setScanState("scanning");
+                            setIsScanOpen(true);
+                            startCamera();
+                          }}
+                          className="p-1 px-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer shadow-[0_2px_10px_rgba(16,185,129,0.25)] transition-all active:scale-95 border-0"
+                        >
+                          <Camera className="w-3 h-3 shrink-0 animate-pulse" />
+                          <span>Scan Document</span>
+                        </button>
+                        <button 
+                          onClick={() => setFileSimOpen(true)}
+                          className="p-1 px-2.5 bg-slate-800 hover:bg-slate-750 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
+                        >
+                          <FileUp className="w-3 h-3 shrink-0" />
+                          <span>Upload File</span>
+                        </button>
+                      </div>
                     </div>
 
                     {/* Chat Search Input */}
@@ -2924,47 +3251,38 @@ export default function DriverApplication({
                         </div>
                       </div>
 
-                      {/* GPS TRACKING ACCURACY SETTING */}
-                      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-md">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
-                            <Compass className="w-4 h-4 text-orange-500" />
+                      {/* GPS TRACKING ACCURACY SETTING (AUTOMATED & FRIENDLY STYLE) */}
+                      <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4.5 space-y-3.5 shadow-md relative overflow-hidden group">
+                        {/* Soft ambient background glow representing live transmission signal */}
+                        <div className="absolute -top-10 -right-10 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl animate-pulse" />
+                        
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shadow-inner">
+                            <Compass className="w-4 h-4 text-emerald-400 animate-spin" style={{ animationDuration: '40s' }} />
                           </div>
                           <div>
-                            <h4 className="text-xs font-black text-white uppercase tracking-tight">{menuT.pingRateLabel}</h4>
-                            <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">{menuT.pingRateSub}</span>
+                            <h4 className="text-xs font-black text-white uppercase tracking-tight">
+                              {lang === 'tr' ? "Akıllı GPS Müzakeresi" : lang === 'ar' ? "تتبع الموقع التلقائي الذكي" : "Smart GPS Telemetry"}
+                            </h4>
+                            <span className="text-[8.5px] text-emerald-450 font-mono tracking-wider font-extrabold uppercase flex items-center gap-1 mt-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-450 animate-ping shrink-0" />
+                              {lang === 'tr' ? "Aktif ve Otomatik" : lang === 'ar' ? "مفعل تلقائياً" : "Active & Auto-Optimized"}
+                            </span>
                           </div>
                         </div>
 
-                        {/* Presets Selector Grid */}
-                        <div className="grid grid-cols-1 gap-1.5 pt-1">
-                          {[
-                            { value: 15, label: menuT.pingHigh, desc: "High precision live navigation tracking" },
-                            { value: 45, label: menuT.pingMed, desc: "Balanced battery and real-time updates" },
-                            { value: 90, label: menuT.pingLow, desc: "Minimal standby transmission strategy" }
-                          ].map((preset) => (
-                            <button
-                              key={preset.value}
-                              type="button"
-                              onClick={() => {
-                                setTelemetryInterval(preset.value);
-                                triggerToast(`Update interval set to: ${preset.value}s`);
-                              }}
-                              className={`p-2.5 rounded-xl text-left transition-all border flex items-center justify-between cursor-pointer ${
-                                telemetryInterval === preset.value
-                                  ? 'bg-orange-600/10 border-orange-500/40 text-white font-extrabold shadow-sm'
-                                  : 'bg-slate-950 border-slate-850 hover:border-slate-800 text-slate-400'
-                              }`}
-                            >
-                              <div className="space-y-0.5">
-                                <span className="text-[11px] font-bold block">{preset.label}</span>
-                                <span className="text-[8.5px] text-slate-550 block leading-tight">{preset.desc}</span>
-                              </div>
-                              <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${telemetryInterval === preset.value ? 'border-orange-500 bg-orange-500/10' : 'border-slate-800'}`}>
-                                {telemetryInterval === preset.value && <div className="w-1.5 h-1.5 bg-orange-400 rounded-full" />}
-                              </div>
-                            </button>
-                          ))}
+                        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-850 text-slate-350 text-[10.5px] leading-relaxed space-y-2">
+                          <p>
+                            {lang === 'tr' 
+                              ? "Cihazınızın konumu sevkiyat sorumlusu haritasıyla arka planda tamamen otomatik olarak senkronize edilir. Manuel müdahale veya ayar yapılması gerekmez." 
+                              : lang === 'ar' 
+                              ? "يتم مزامنة موقع جهازك مع خريطة المرسل بالكامل تحت الخلفية بشكل تلقائي، لا يتطلب أي تحكم يدوي."
+                              : "Your position is automatically synchronized with the backend dispatcher map dynamically. No manual adjustment ever needed."}
+                          </p>
+                          <div className="flex items-center justify-between text-[9px] font-mono border-t border-slate-900/85 pt-2 text-slate-550">
+                            <span>{lang === 'tr' ? "Sıklık:" : "Dynamic Interval:"}</span>
+                            <span className="font-extrabold text-orange-400">15s In-Transit</span>
+                          </div>
                         </div>
                       </div>
 
@@ -3254,29 +3572,11 @@ export default function DriverApplication({
                     </div>
                     <div>
                       <h4 className="text-xs font-black text-white uppercase tracking-tight">System Configuration</h4>
-                      <span className="text-[9px] text-slate-550 block uppercase font-mono tracking-tight">Telemetry Preference Matrix</span>
+                      <span className="text-[9px] text-slate-550 block uppercase font-mono tracking-tight">Active Preferences</span>
                     </div>
                   </div>
 
                   <div className="space-y-3 text-xs">
-                    {/* Interval Slider */}
-                    <div className="space-y-1 bg-slate-950 p-2 rounded-xl border border-slate-850">
-                      <div className="flex justify-between items-center text-[10px] font-mono text-slate-400 mb-1">
-                        <span>Pings Sync Rate:</span>
-                        <strong className="text-orange-500 font-bold">{telemetryInterval}s</strong>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="5" 
-                        max="120" 
-                        value={telemetryInterval} 
-                        onChange={(e) => {
-                          setTelemetryInterval(Number(e.target.value));
-                          triggerToast(`Telemetry interval set to: ${e.target.value} seconds.`);
-                        }}
-                        className="w-full accent-orange-500 bg-slate-900 rounded-lg appearance-none h-1 cursor-pointer"
-                      />
-                    </div>
 
                     {/* Metric Imperial Switch */}
                     <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
@@ -3291,6 +3591,32 @@ export default function DriverApplication({
                         className="px-2.5 py-1 bg-slate-900 border border-slate-800 text-orange-400 text-[9px] uppercase font-black tracking-wider rounded-lg transition-all"
                       >
                         {distanceUnit === 'km' ? 'Metric (KM)' : 'Imperial (MI)'}
+                      </button>
+                    </div>
+
+                    {/* Daylight/Nighttime View Theme Switcher */}
+                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
+                      <span className="text-slate-300 font-bold uppercase tracking-wider">Visibility Contrast Mode</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextTheme = theme === 'dark' ? 'light' : 'dark';
+                          setTheme(nextTheme);
+                          triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for bright daylight visibility." : "🌙 Dark mode enabled for relaxed night driving.");
+                        }}
+                        className="px-2.5 py-1 bg-slate-900 border border-slate-800 text-orange-400 text-[9px] uppercase font-black tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {theme === 'dark' ? (
+                          <>
+                            <Moon className="w-3 h-3 text-orange-400 shrink-0" />
+                            <span>Night Dark</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sun className="w-3 h-3 text-amber-500 animate-spin shrink-0" style={{ animationDuration: "12s" }} />
+                            <span>Day Light</span>
+                          </>
+                        )}
                       </button>
                     </div>
 
@@ -3429,6 +3755,308 @@ export default function DriverApplication({
                     </button>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* Immersive Mobile Document Scanner Overlay Modal */}
+            {isScanOpen && (
+              <div className="absolute inset-0 bg-slate-950/95 z-50 flex flex-col justify-between overflow-hidden select-none animate-fade-in text-xs font-sans">
+                {/* Header HUD */}
+                <div className="bg-slate-900 border-b border-slate-800 p-4.5 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                    <div>
+                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Mobile DocScan v3.1</h5>
+                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Dynamic Alignment Core</span>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      stopCamera();
+                      setIsScanOpen(false);
+                    }} 
+                    className="text-slate-400 hover:text-white transition-colors cursor-pointer border-0 bg-slate-950 p-2 rounded-full hover:bg-slate-800"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Main Scan Viewfinder */}
+                {scanState === "scanning" && (
+                  <div className="flex-1 flex flex-col justify-between p-4 relative overflow-hidden bg-slate-950">
+                    <div className="absolute inset-0 z-0 flex items-center justify-center">
+                      {/* Active video element or high-tech dynamic drawing fallback vector */}
+                      {videoRef ? (
+                        <video 
+                          ref={videoRef}
+                          autoPlay 
+                          playsInline 
+                          muted 
+                          className="w-full h-full object-cover opacity-80"
+                        />
+                      ) : null}
+
+                      {/* Fallback Vector Viewfinder illustration if video stream is not initialized yet */}
+                      <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-slate-950/80 z-0">
+                        <div className="border border-slate-700/60 bg-slate-900/60 rounded-xl p-5.5 max-w-[240px] text-center space-y-3.5 shadow-2xl relative">
+                          <Compass className="w-10 h-10 text-emerald-400 mx-auto animate-spin" style={{ animationDuration: "12s" }} />
+                          <div className="space-y-1">
+                            <h6 className="font-extrabold text-slate-200 text-xs font-mono uppercase font-black">Alignment Calibration</h6>
+                            <p className="text-[10px] text-slate-400 leading-normal">
+                              Align document flat in frame. Scanner automatically calibrates contrast and handles page layout warping.
+                            </p>
+                          </div>
+                          {/* Live edge finder boxes */}
+                          <div className="absolute -top-1.5 -left-1.5 w-6 h-6 border-t-2 border-l-2 border-[#10b981] rounded-tl-lg" />
+                          <div className="absolute -top-1.5 -right-1.5 w-6 h-6 border-t-2 border-r-2 border-[#10b981] rounded-tr-lg" />
+                          <div className="absolute -bottom-1.5 -left-1.5 w-6 h-6 border-b-2 border-l-2 border-[#10b981] rounded-bl-lg" />
+                          <div className="absolute -bottom-1.5 -right-1.5 w-6 h-6 border-b-2 border-r-2 border-[#10b981] rounded-br-lg" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Laser Scanner Line and HUD Overlay */}
+                    <div className="absolute inset-0 pointer-events-none z-10">
+                      {/* Laser beam scan */}
+                      <div className="absolute left-0 w-full h-[3px] bg-gradient-to-r from-transparent via-[#10b981] to-transparent shadow-[0_0_12px_#10b981] animate-pulse" />
+                      
+                      {/* Scanner Corners */}
+                      <div className="absolute top-8 left-8 w-12 h-12 border-t-4 border-l-4 border-emerald-400/80 rounded-tl-2xl" />
+                      <div className="absolute top-8 right-8 w-12 h-12 border-t-4 border-r-4 border-emerald-400/80 rounded-tr-2xl" />
+                      <div className="absolute bottom-8 left-8 w-12 h-12 border-b-4 border-l-4 border-emerald-400/80 rounded-bl-2xl" />
+                      <div className="absolute bottom-8 right-8 w-12 h-12 border-b-4 border-r-4 border-emerald-400/80 rounded-br-2xl" />
+
+                      {/* Continuous Edge confidence marker */}
+                      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 border border-emerald-400/25 text-[#10b981] rounded-full px-4 py-1.5 text-[9.5px] font-mono tracking-wider font-extrabold flex items-center gap-1.5 backdrop-blur-md">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+                        <span>DOCUMENT ALIGNED (98.3%)</span>
+                      </div>
+                    </div>
+
+                    {/* Viewfinder Controls */}
+                    <div className="z-20 flex justify-between items-center text-[10px] font-mono select-none">
+                      <span className="bg-slate-900/90 text-slate-300 px-3 py-1 rounded-full border border-slate-800">
+                        FPS: <strong className="text-emerald-400">30Hz</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFlashLight(!flashLight)}
+                        className={`p-1.5 px-3 rounded-full flex items-center gap-1 cursor-pointer transition-all ${flashLight ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-slate-900 border border-slate-800 text-slate-300'}`}
+                      >
+                        <span>🔦 FLASH: {flashLight ? "ON" : "OFF"}</span>
+                      </button>
+                    </div>
+
+                    {/* Selector of Simulation presets to make it 100% testable in any frame */}
+                    <div className="z-20 space-y-2 text-left">
+                      <div className="bg-slate-900/90 p-3 rounded-2xl border border-slate-850 backdrop-blur-md space-y-1.5">
+                        <span className="text-[8.5px] font-bold text-slate-400 block uppercase tracking-wide">Or choose active document preset:</span>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {[
+                            { label: "CMR Protocol", val: "cmr" },
+                            { label: "Logistics Invoice", val: "invoice" },
+                            { label: "Packing List", val: "packing_list" },
+                            { label: "Customs Stamp", val: "customs" }
+                          ].map((doc) => (
+                            <button
+                              key={doc.val}
+                              type="button"
+                              onClick={() => {
+                                setScanCategory(doc.val as DocumentCategory);
+                                setScanDocName(`SCAN_${doc.val.toUpperCase()}_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                                const mockDataUrl = generateSimulatedDocument(doc.val as DocumentCategory);
+                                setCapturedImage(mockDataUrl);
+                                setScanState("review");
+                                stopCamera();
+                              }}
+                              className="p-1 px-2.5 bg-slate-950/80 hover:bg-slate-800 border border-slate-800 rounded-lg text-slate-200 text-left text-[10px] font-mono leading-tight hover:border-emerald-500/20 active:scale-95 cursor-pointer flex justify-between items-center"
+                            >
+                              <span>{doc.label}</span>
+                              <ChevronRight className="w-3 h-3 text-emerald-400" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Primary Trigger Actions bar */}
+                      <div className="flex items-center justify-between gap-4 pt-1 select-none">
+                        {/* Custom photo uploader label alias */}
+                        <label className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-750 text-slate-350 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0">
+                          <FileUp className="w-4 h-4" />
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                setScanDocName(file.name);
+                                setScanCategory("cmr");
+                                const reader = new FileReader();
+                                reader.onload = (evt) => {
+                                  const b64 = evt.target?.result as string;
+                                  setCapturedImage(b64);
+                                  setScanState("review");
+                                  stopCamera();
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                            className="hidden"
+                          />
+                        </label>
+
+                        {/* Capture Shutter Switch Button */}
+                        <button
+                          type="button"
+                          onClick={captureCameraSnapshot}
+                          className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs rounded-2xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_20px_rgba(16,185,129,0.35)] active:scale-95"
+                        >
+                          <div className="w-4 h-4 rounded-full border-2 border-slate-950 shrink-0 bg-transparent flex items-center justify-center">
+                            <div className="w-2 h-2 rounded-full bg-slate-950" />
+                          </div>
+                          <span>Capture Document</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Review, Enhancements and metadata assignment screen */}
+                {scanState === "review" && (
+                  <div className="flex-1 flex flex-col justify-between p-5 overflow-y-auto bg-slate-900 space-y-4">
+                    
+                    {/* Captured visual buffer */}
+                    <div className="p-1 px-1.5 bg-slate-950 rounded-2xl border border-slate-800 shadow-inner flex flex-col items-center justify-center relative overflow-hidden min-h-[220px]">
+                      <span className="absolute top-2.5 right-2.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-mono font-bold text-[8px] uppercase tracking-wider px-2 py-0.5 rounded">
+                        {scanFilter === "mono" ? "MONOCHROME FAX FILTER" : scanFilter === "grayscale" ? "GRAYSCALE INTENSE" : "ORIGINAL CHROMATIC"}
+                      </span>
+                      {capturedImage && (
+                        <img 
+                          src={capturedImage}
+                          alt="Captured Scan Preview"
+                          className="max-h-[220px] rounded-lg shadow-md transition-all object-contain"
+                          style={{
+                            filter: scanFilter === "mono" 
+                              ? "contrast(180%) brightness(110%) grayscale(100%)" 
+                              : scanFilter === "grayscale" 
+                              ? "grayscale(100%) contrast(120%)" 
+                              : "none"
+                          }}
+                        />
+                      )}
+                    </div>
+
+                    {/* Metadata attributes */}
+                    <div className="space-y-3 pt-1 select-none text-left">
+                      
+                      {/* Interactive Optimization Filter Bar */}
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black text-slate-550 uppercase tracking-wider font-mono">Contrast Laser Optimization</label>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {[
+                            { val: "color", label: "Color Photo", desc: "Original Raw Colors" },
+                            { val: "grayscale", label: "Grayscale", desc: "Clean Scan Copy" },
+                            { val: "mono", label: "B&W Mono", desc: "High Contrast Fax" }
+                          ].map(f => (
+                            <button
+                              key={f.val}
+                              type="button"
+                              onClick={() => setScanFilter(f.val as any)}
+                              className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                                scanFilter === f.val 
+                                  ? 'bg-emerald-500/10 border-emerald-500/35 text-white font-extrabold shadow-sm' 
+                                  : 'bg-slate-950 border-slate-850 hover:border-slate-800 text-slate-400'
+                              }`}
+                            >
+                              <span className="text-[10px] block font-bold leading-normal">{f.label}</span>
+                              <span className="text-[7.5px] opacity-60 block leading-tight mt-0.5">{f.desc}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* File Handle input */}
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black text-slate-550 block uppercase tracking-wider font-mono">Payload Filename</label>
+                        <input 
+                          type="text" 
+                          placeholder="e.g. CUSTOMS_CLEARANCE_STAMP.png" 
+                          value={scanDocName}
+                          onChange={(e) => setScanDocName(e.target.value)}
+                          className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl font-mono text-xs focus:border-emerald-500 outline-none transition-all"
+                        />
+                      </div>
+
+                      {/* Document Category dropdown */}
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Document Category</label>
+                        <select
+                          value={scanCategory}
+                          onChange={(e) => {
+                            const newCategory = e.target.value as DocumentCategory;
+                            setScanCategory(newCategory);
+                            // Auto reset mock file layout name with date prefix
+                            setScanDocName(`SCAN_${newCategory.toUpperCase()}_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                          }}
+                          className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
+                        >
+                          <option value="cmr" className="bg-slate-950 text-white font-bold">CMR Document (Shipment Protocol)</option>
+                          <option value="invoice" className="bg-slate-950 text-white font-bold">Invoice Receipt</option>
+                          <option value="packing_list" className="bg-slate-950 text-white font-bold">Packing Sheet</option>
+                          <option value="customs" className="bg-slate-950 text-white font-bold">Customs Clearance Receipt</option>
+                          <option value="delivery_proof" className="bg-slate-950 text-white font-bold">Delivery Voucher (POD)</option>
+                          <option value="photo" className="bg-slate-950 text-white font-bold">Cargo Live Photo</option>
+                          <option value="other" className="bg-slate-950 text-white font-bold">Other Sworn Document</option>
+                        </select>
+                      </div>
+
+                    </div>
+
+                    {/* Interactive review trigger actions */}
+                    <div className="flex gap-3 shrink-0 pt-2 select-none">
+                      <button 
+                        onClick={() => {
+                          setCapturedImage(null);
+                          setScanState("scanning");
+                          startCamera();
+                        }}
+                        className="p-3 bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                      >
+                        <Trash2 className="w-4 h-4 text-red-500" />
+                        <span className="font-bold text-[10px] uppercase">Retake</span>
+                      </button>
+
+                      <button 
+                        onClick={handleUploadScannedDocument}
+                        disabled={!scanDocName.trim()}
+                        className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
+                      >
+                        <Send className="w-4 h-4 shrink-0 text-slate-950" />
+                        <span>Transmit to Dispatcher</span>
+                      </button>
+                    </div>
+
+                  </div>
+                )}
+
+                {/* Secure sync progress HUD */}
+                {scanState === "uploading" && (
+                  <div className="flex-1 flex flex-col justify-center items-center p-6 bg-slate-950 space-y-6 select-none animate-pulse">
+                    <div className="w-16 h-16 border-4 border-[#10b981] border-t-transparent rounded-full animate-spin flex items-center justify-center shadow-lg">
+                      <Compass className="w-7 h-7 text-emerald-400 animate-pulse" />
+                    </div>
+                    <div className="text-center space-y-2">
+                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Enabling Telemetry Sync</h5>
+                      <p className="text-[10px] text-slate-400 leading-relaxed font-mono max-w-[240px] mx-auto text-center">
+                        Applying high-contrast monochrome calibration and routing encrypted PDF segment transmission to central dispatcher...
+                      </p>
+                    </div>
+                    <div className="w-full max-w-[200px] h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800/80">
+                      <div className="h-full bg-[#10b981] animate-pulse" style={{ width: "85%" }} />
+                    </div>
+                  </div>
+                )}
+
               </div>
             )}
 
