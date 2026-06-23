@@ -18,7 +18,7 @@ service cloud.firestore {
     // (including plaintext passwords) with no login at all. That hole is
     // closed below.
     function isServerAccount() {
-      return request.auth != null && request.auth.uid == "MSpctdmCq7gaxDsRHwIV81ppd0p2";
+      return request.auth != null && request.auth.uid == "mQadHKcpmgbLIAwQaz8AqrAytIo2";
     }
 
     match /{document=**} {
