@@ -15,7 +15,7 @@ service firebase.storage {
     // firestore.rules) rather than leaving Storage's defaults unconfigured
     // or, worse, wide open.
     function isServerAccount() {
-      return request.auth != null && request.auth.uid == "DpfqNKAi9dUOW6ksGlDVXWcCvVJ2";
+      return request.auth != null && request.auth.uid == "MSpctdmCq7gaxDsRHwIV81ppd0p2";
     }
 
     match /{allPaths=**} {
