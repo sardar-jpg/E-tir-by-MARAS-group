@@ -410,7 +410,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sender: "driver", // Simulating external party posting in operational portal messages
+          sender: "client",
           senderName: `${clientCompanyName} (${lang === "ar" ? "عميل" : "Client"})`,
           type: "text",
           text: inquiryText.trim()
@@ -522,7 +522,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           
           <button 
             onClick={onLogout}
-            className="px-4 py-2.5 bg-red-950/20 hover:bg-red-950/40 border border-red-900/40 hover:border-red-500/30 text-red-0 px-4 text-red-400 font-bold rounded-xl text-xs shadow-lg transition-all cursor-pointer shrink-0"
+            className="px-4 py-2.5 bg-red-950/20 hover:bg-red-950/40 border border-red-900/40 hover:border-red-500/30 text-red-50 px-4 text-red-400 font-bold rounded-xl text-xs shadow-lg transition-all cursor-pointer shrink-0"
           >
             Sign Out
           </button>
@@ -579,7 +579,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       </div>
 
       {/* 3. Filter Navigation & Searches */}
-      <div className="bg-slate-950/40 border border-slate-850 p-4 rounded-2xl flex flex-col lg:flex-row gap-4 justify-between items-center">
+      <div className="bg-slate-950/40 border border-slate-800 p-4 rounded-2xl flex flex-col lg:flex-row gap-4 justify-between items-center">
         {/* Navigation Categories Tabs */}
         <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/80 p-1 border border-slate-800 rounded-xl w-full lg:w-auto">
           <button
@@ -624,7 +624,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={curT.searchPlaceholder}
-            className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-750 focus:border-orange-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
+            className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-orange-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
           />
         </div>
       </div>
@@ -636,7 +636,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           <div className="animate-pulse h-28 bg-slate-900 border border-slate-800 rounded-2xl w-full"></div>
         </div>
       ) : filteredShipments.length === 0 ? (
-        <div className="bg-slate-900 dark:bg-slate-900 p-8 rounded-2xl border border-slate-850/80 text-center text-slate-400 font-medium text-xs">
+        <div className="bg-slate-900 dark:bg-slate-900 p-8 rounded-2xl border border-slate-800/80 text-center text-slate-400 font-medium text-xs">
           {curT.noShipments}
         </div>
       ) : (
@@ -697,7 +697,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   </div>
 
                   {/* Weight, Plate info */}
-                  <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-850 pt-3">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-800 pt-3">
                     <div className="flex items-center gap-1">
                       <Truck className="w-3.5 h-3.5 text-slate-500" />
                       <span className="font-bold text-slate-300">{ship.truckNumber || "M-7733-IQ"}</span>
@@ -739,7 +739,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
 
                 {/* Specific Sea/Air details section */}
                 {(selectedShipment.freightType === "sea" || selectedShipment.freightType === "air") && (
-                  <div className="bg-slate-950 border border-slate-850 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
                     {selectedShipment.freightType === "sea" && (
                       <>
                         <div className="space-y-1">
@@ -794,7 +794,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                     <Globe className="w-3.5 h-3.5 text-orange-500 animate-spin-slow" />
                     <span>{curT.viewMap}</span>
                   </h4>
-                  <div className="h-56 bg-slate-950 rounded-xl overflow-hidden border border-slate-850 relative">
+                  <div className="h-56 bg-slate-950 rounded-xl overflow-hidden border border-slate-800 relative">
                     <TrackingMap 
                       shipments={[selectedShipment]} 
                       lang={lang} 
@@ -853,7 +853,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         })}
                       </div>
                     ) : (
-                      <div className="p-4 bg-slate-950 border border-slate-850 rounded-xl text-center text-slate-500 text-[11px] font-semibold">
+                      <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center text-slate-500 text-[11px] font-semibold">
                         Freight manifests initialized. Full-scale tracking trace will activate upon truck engine start.
                       </div>
                     )}
@@ -872,7 +872,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                       {selectedShipment.documents && selectedShipment.documents.length > 0 ? (
                         <div className="grid grid-cols-1 gap-1.5">
                           {selectedShipment.documents.map((doc, dIdx) => (
-                            <div key={dIdx} className="bg-slate-950 border border-slate-850 p-2 text-xs rounded-xl flex items-center justify-between hover:border-slate-830">
+                            <div key={dIdx} className="bg-slate-950 border border-slate-800 p-2 text-xs rounded-xl flex items-center justify-between hover:border-slate-800">
                               <div className="flex items-center gap-2 truncate">
                                 <FileText className="w-4 h-4 text-orange-500 shrink-0" />
                                 <div className="truncate text-left">
@@ -894,7 +894,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                           ))}
                         </div>
                       ) : (
-                        <div className="p-4 bg-slate-950 border border-slate-850 rounded-xl text-center text-slate-400 text-[11px] font-semibold">
+                        <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center text-slate-400 text-[11px] font-semibold">
                           {curT.noDocs}
                         </div>
                       )}
@@ -914,7 +914,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
 
                         {/* Message Feed logs */}
                         {inquiries[selectedShipment.id] && inquiries[selectedShipment.id].length > 0 && (
-                          <div className="bg-slate-950 border border-slate-850 rounded-xl p-3 max-h-36 overflow-y-auto space-y-2 text-[11px]">
+                          <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-36 overflow-y-auto space-y-2 text-[11px]">
                             {inquiries[selectedShipment.id].map((msg, mIdx) => {
                               const isAdminSender = msg.sender === "admin" || (msg.senderName && (msg.senderName.toLowerCase().includes("admin") || msg.senderName.toLowerCase().includes("maras")));
                               return (
@@ -940,7 +940,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             value={inquiryText}
                             onChange={(e) => setInquiryText(e.target.value)}
                             placeholder={curT.inquiryPlaceholder}
-                            className="w-full bg-slate-950 border border-slate-850 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
+                            className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
                           />
                           
                           {inquiryStatus === "success" && (
@@ -968,7 +968,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
 
               </div>
             ) : (
-              <div className="bg-slate-900/40 p-12 text-center text-slate-400 font-medium text-xs border border-slate-850 border-dashed rounded-2xl h-80 flex flex-col justify-center items-center gap-3">
+              <div className="bg-slate-900/40 p-12 text-center text-slate-400 font-medium text-xs border border-slate-800 border-dashed rounded-2xl h-80 flex flex-col justify-center items-center gap-3">
                 <div className="p-3 bg-slate-900 text-orange-400 rounded-xl border border-slate-800">
                   <Star className="w-5 h-5" />
                 </div>
@@ -1000,7 +1000,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   <Bell className="w-4 h-4 text-orange-400 animate-pulse" />
                   <span>{curT.notifsTitle}</span>
                 </h3>
-                <p className="text-[10px] text-slate-455 font-medium">
+                <p className="text-[10px] text-slate-500 font-medium">
                   {notifications.filter(n => !n.read).length} unread updates matching your fleet
                 </p>
               </div>
@@ -1015,7 +1015,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 )}
                 <button 
                   onClick={() => setIsNotifOpen(false)}
-                  className="p-1.5 bg-slate-900 border border-slate-800 hover:border-slate-750 text-slate-400 hover:text-white rounded-lg cursor-pointer transition-all active:scale-95"
+                  className="p-1.5 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 hover:text-white rounded-lg cursor-pointer transition-all active:scale-95"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1043,7 +1043,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                       className={`p-3.5 border rounded-2xl transition-all relative overflow-hidden flex flex-col justify-between gap-2.5 ${
                         isUnread 
                           ? "bg-slate-900/60 border-orange-500/20 hover:border-orange-500/30 shadow-md shadow-orange-500-[2%]" 
-                          : "bg-slate-900/20 border-slate-850 hover:border-slate-855"
+                          : "bg-slate-900/20 border-slate-800 hover:border-slate-900"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3 text-left">
@@ -1090,7 +1090,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       {/* Delete Account Modal */}
       {showClientDeleteConfirm && (
         <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in text-left">
-          <div className="bg-gradient-to-b from-slate-900 to-slate-1050 border border-red-900/40 rounded-3xl p-6 max-w-md w-full shadow-[0_20px_50px_rgba(239,68,68,0.15)] space-y-6">
+          <div className="bg-gradient-to-b from-slate-900 to-slate-950 border border-red-900/40 rounded-3xl p-6 max-w-md w-full shadow-[0_20px_50px_rgba(239,68,68,0.15)] space-y-6">
             <div className="flex items-start gap-3.5">
               <div className="w-10 h-10 rounded-xl bg-red-900/20 border border-red-800/40 flex items-center justify-center text-red-100 shrink-0 select-none">
                 <ShieldAlert className="w-5 h-5 text-red-500 animate-pulse" />
@@ -1132,7 +1132,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 type="button"
                 disabled={isDeletingClientAccount}
                 onClick={() => setShowClientDeleteConfirm(false)}
-                className="flex-1 py-3 bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+                className="flex-1 py-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
               >
                 {lang === 'tr' ? "İptal Et" : (lang === 'ar' ? "إلغاء الأمر" : "Cancel")}
               </button>
@@ -1141,7 +1141,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 type="button"
                 disabled={isDeletingClientAccount || !understandClientDelete}
                 onClick={handleDeleteClientAccount}
-                className="flex-1 py-3 bg-gradient-to-r from-red-650 to-red-550 hover:from-red-550 hover:to-red-650 disabled:opacity-40 text-white font-extrabold text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(239,68,68,0.2)] active:scale-95"
+                className="flex-1 py-3 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 disabled:opacity-40 text-white font-extrabold text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(239,68,68,0.2)] active:scale-95"
               >
                 {isDeletingClientAccount ? (
                   <>
@@ -1164,7 +1164,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       {toastMessage && (
         <div id="notifications-toast" className="fixed bottom-5 right-5 z-50 max-w-sm p-4 bg-slate-900 border border-orange-500/40 rounded-xl shadow-2xl flex items-center justify-between gap-3 text-xs text-white">
           <span>{toastMessage}</span>
-          <button onClick={() => setToastMessage(null)} className="text-slate-450 hover:text-white cursor-pointer font-bold p-1">&times;</button>
+          <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-white cursor-pointer font-bold p-1">&times;</button>
         </div>
       )}
 

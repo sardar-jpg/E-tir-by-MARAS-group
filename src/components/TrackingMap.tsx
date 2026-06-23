@@ -940,7 +940,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 <Compass className="w-5 h-5 text-orange-500 shrink-0" />
                 <h2 className="font-black text-slate-900 tracking-tight text-[11px] uppercase">{t.activeTracking}</h2>
               </div>
-              <span className="bg-orange-100 text-orange-850 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
+              <span className="bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
                 {inTransitShipments.length}
               </span>
             </div>
@@ -956,7 +956,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t.searchPlaceholder}
-                className="w-full pl-8 pr-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-350 transition-all font-medium"
+                className="w-full pl-8 pr-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 transition-all font-medium"
               />
             </div>
 
@@ -1009,7 +1009,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setSelectedTruckTypes([...TRUCK_TYPES.map(tk => tk.id), "unspecified"])}
-                    className="text-[9px] font-bold text-orange-600 hover:text-orange-850 transition-colors uppercase font-mono cursor-pointer"
+                    className="text-[9px] font-bold text-orange-600 hover:text-orange-800 transition-colors uppercase font-mono cursor-pointer"
                   >
                     {t.allTypes.split(" ")[0]}
                   </button>
@@ -1043,7 +1043,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left cursor-pointer ${
                         isChecked
                           ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-150 hover:bg-slate-100"
+                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
                       }`}
                     >
                       <span className="flex items-center gap-1.5 truncate max-w-[130px]">
@@ -1085,7 +1085,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left col-span-2 cursor-pointer ${
                         isChecked
                           ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-150 hover:bg-slate-100"
+                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
                       }`}
                     >
                       <span className="flex items-center gap-1.5">
@@ -1115,7 +1115,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
             <div className="grid grid-cols-2 gap-2">
               <button 
                 onClick={handleShowAll}
-                className="py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
+                className="py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
               >
                 <Globe className="w-3.5 h-3.5" />
                 <span>{t.viewAllTransit}</span>
@@ -1128,7 +1128,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     handleShowAll();
                   }
                 }}
-                className="py-2.5 bg-orange-600 hover:bg-orange-505 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
+                className="py-2.5 bg-orange-600 hover:bg-orange-500 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
                 title="Odaklan"
               >
                 <Navigation className="w-3.5 h-3.5" />
@@ -1139,7 +1139,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
             {/* Go to my current location button */}
             <button 
               onClick={handleGoToMyLocation}
-              className="w-full mt-2 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-250 text-slate-800 font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
+              className="w-full mt-2 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
               title={lang === "ar" ? "الذهاب إلى موقعي الحالي" : lang === "tr" ? "Koordinatlarıma Git" : "Go to my current location"}
             >
               <MapPin className="w-3.5 h-3.5 text-orange-600 animate-pulse" />
@@ -1170,7 +1170,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col gap-2 relative overflow-hidden ${
                       isSelected 
                         ? "bg-slate-100 border-slate-300 shadow-xs" 
-                        : "bg-white border-slate-150 hover:bg-slate-50"
+                        : "bg-white border-slate-100 hover:bg-slate-50"
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -1200,7 +1200,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       const loc = getShipmentVectorLocation(s);
                       const city = getNearestCity(loc.x, loc.y);
                       return (
-                        <div className="text-[10.5px] bg-emerald-50/80 text-emerald-850 font-mono p-1.5 rounded-xl border border-emerald-150 flex items-center justify-between gap-1.5">
+                        <div className="text-[10.5px] bg-emerald-50/80 text-emerald-800 font-mono p-1.5 rounded-xl border border-emerald-100 flex items-center justify-between gap-1.5">
                           <span className="flex items-center gap-1 font-extrabold truncate">
                             <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span className="truncate">{city}</span>
@@ -1222,7 +1222,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                           e.stopPropagation();
                           handleSelectShipment(s);
                         }}
-                        className="text-orange-600 hover:text-orange-850 font-bold transition-all text-[9.5px] uppercase cursor-pointer"
+                        className="text-orange-600 hover:text-orange-800 font-bold transition-all text-[9.5px] uppercase cursor-pointer"
                       >
                         {t.viewOnMap} ➔
                       </button>
@@ -1659,14 +1659,14 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         </p>
 
                         <div className="space-y-2">
-                          <div className="border-t border-slate-850 pt-2 space-y-0.5">
+                          <div className="border-t border-slate-800 pt-2 space-y-0.5">
                             <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest block">Authorization Target URL:</span>
-                            <div className="bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10.5px] font-mono font-bold text-orange-400 select-all break-all leading-normal">
+                            <div className="bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10.5px] font-mono font-bold text-orange-400 select-all break-all leading-normal">
                               {window.location.origin}/*
                             </div>
                           </div>
 
-                          <div className="bg-slate-955 p-3 rounded-xl border border-slate-850/60 text-[9.5px]/normal text-slate-400">
+                          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800/60 text-[9.5px]/normal text-slate-400">
                             <p className="font-bold text-slate-300 uppercase tracking-wider text-[8px] font-mono">🔧 How To Resolve in 1 Minute:</p>
                             <ol className="list-decimal list-inside space-y-0.5 pl-1">
                               <li>Go to <strong className="text-white">Google Cloud Console &gt; Credentials</strong></li>
@@ -1831,7 +1831,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                   ) : (
                     /* Elegant Google Map API Instructions if keys aren't found */
                     <div className="w-full h-full flex flex-col justify-center items-center text-center p-6 space-y-4">
-                      <div className="w-12 h-12 rounded-full bg-orange-950/40 border border-orange-850 flex items-center justify-center shrink-0">
+                      <div className="w-12 h-12 rounded-full bg-orange-950/40 border border-orange-800 flex items-center justify-center shrink-0">
                         <MapPin className="w-6 h-6 text-orange-400 animate-bounce" />
                       </div>
                       <div className="space-y-1">

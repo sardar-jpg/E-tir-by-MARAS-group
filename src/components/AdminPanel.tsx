@@ -55,6 +55,23 @@ const COUNTRY_PORTS: Record<string, string[]> = {
   "Irak": ["Umm Qasr Limanı (Basra)", "Ebu Fulus Limanı", "Hor Al-Zubayr Limanı"]
 };
 
+/**
+ * Approximate exchange rates to USD, used only for the single-currency
+ * "Total Revenue" dashboard KPI. These are NOT live rates — there's no
+ * exchange-rate API integrated into this app — so they will drift from
+ * real-world rates over time and need periodic manual updates.
+ *
+ * UPDATE_NEEDED: last manually verified around when this constant was
+ * introduced. If the revenue KPI looks off, check these against current
+ * rates and update this object — it's the only place they're defined.
+ */
+const APPROX_USD_EXCHANGE_RATES: Record<Currency, number> = {
+  USD: 1,
+  IQD: 1 / 1450,
+  TRY: 1 / 32,
+  EUR: 1.08,
+};
+
 const getPortsForCountry = (countryName: string): string[] => {
   if (!countryName) return [];
   const normalized = countryName.trim().toLowerCase();
@@ -1844,7 +1861,7 @@ MARAS Group etir Center`;
           <p className="text-[10px] font-bold text-slate-400 font-mono uppercase mt-0.5">{refNum}</p>
           <div className="mt-3 text-[10px] text-slate-500 space-y-0.5">
             <div><strong>{lang === 'tr' ? 'İşlem Tarihi:' : 'Release Date:'}</strong> {selectedStatement.date}</div>
-            <div><strong>{lang === 'tr' ? 'Ödeme Statüsü:' : 'Payment Status:'}</strong> <span className="font-extrabold text-slate-850 uppercase">{selectedStatement.paymentStatus}</span></div>
+            <div><strong>{lang === 'tr' ? 'Ödeme Statüsü:' : 'Payment Status:'}</strong> <span className="font-extrabold text-slate-800 uppercase">{selectedStatement.paymentStatus}</span></div>
           </div>
         </div>
       </div>
@@ -1855,7 +1872,7 @@ MARAS Group etir Center`;
     const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
     if (statementPreviewMode === 'vendor_statement') {
       return (
-        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
+        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 text-[11px] leading-relaxed">
           <div>
             <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALACAKLI TEDARİKÇİ / VENDOR BİLGİSİ' : 'CREDITOR VENDOR / SUPPLIER INFO'}</h5>
             <div className="font-bold text-slate-900 text-sm">{selectedVendorForStatement || (lang === 'tr' ? 'Belirtilmemiş Tedarikçi' : 'No Supplier Chosen')}</div>
@@ -1876,7 +1893,7 @@ MARAS Group etir Center`;
 
     // Default Client perspective
     return (
-      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
+      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 text-[11px] leading-relaxed">
         <div>
           <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALICI / MÜŞTERİ BİLGİSİ' : 'CARGO CLIENT / SENDER INFO'}</h5>
           <div className="font-bold text-slate-900 text-sm">{selectedStatement.companyName}</div>
@@ -1969,7 +1986,7 @@ MARAS Group etir Center`;
                   </td>
                   <td className="p-3 text-right font-mono text-slate-900">{contractAmt.toLocaleString()}</td>
                   <td className="p-3 text-slate-300 font-mono">-</td>
-                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{contractAmt.toLocaleString()} <span className="text-[8px] text-slate-450 font-normal">{selectedStatement.currency}</span></td>
+                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{contractAmt.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
                 </tr>
                 {paidAmt > 0 && (
                   <tr className="text-slate-700 bg-emerald-50/20">
@@ -1980,7 +1997,7 @@ MARAS Group etir Center`;
                     </td>
                     <td className="p-3 text-slate-300 font-mono">-</td>
                     <td className="p-3 text-right font-mono text-emerald-700">({paidAmt.toLocaleString()})</td>
-                    <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{balDue.toLocaleString()} <span className="text-[8px] text-slate-450 font-normal">{selectedStatement.currency}</span></td>
+                    <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{balDue.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
                   </tr>
                 )}
               </tbody>
@@ -2373,9 +2390,14 @@ MARAS Group etir Center`;
         setUseCustomPOD(false);
         triggerToast(t('createSuccess'));
         fetchData();
+      } else {
+        let msg = "Failed to create shipment.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (err) {
       console.error(err);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
   };
 
@@ -2394,9 +2416,14 @@ MARAS Group etir Center`;
         setEditingShipment(null);
         triggerToast(t('updateSuccess'));
         fetchData();
+      } else {
+        let msg = "Failed to update shipment.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (err) {
       console.error(err);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
   };
 
@@ -2453,9 +2480,12 @@ MARAS Group etir Center`;
       });
       if (res.ok) {
         fetchData();
+      } else {
+        triggerToast("❌ Failed to update document visibility.");
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server.");
     }
   };
 
@@ -2470,9 +2500,12 @@ MARAS Group etir Center`;
       if (res.ok) {
         fetchData();
         triggerToast(t('updateSuccess'));
+      } else {
+        triggerToast("❌ Failed to update share link settings.");
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server.");
     }
   };
 
@@ -2485,9 +2518,12 @@ MARAS Group etir Center`;
       });
       if (res.ok) {
         fetchData();
+      } else {
+        triggerToast("❌ Failed to update sharing settings.");
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server.");
     }
   };
 
@@ -2576,13 +2612,12 @@ MARAS Group etir Center`;
   const activeShipmentsCount = shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed").length;
   const completedShipmentsCount = shipments.filter(s => s.status === "Delivered" || s.status === "Closed").length;
   
-  // Calculate revenue total by currency (converting approx to USD for single KPI overview)
+  // Calculate revenue total by currency (approximate conversion to USD for
+  // a single KPI overview — see APPROX_USD_EXCHANGE_RATES for the rates
+  // used and why they're not live).
   const totalRevenueUSD = shipments.reduce((acc, s) => {
-    let amt = s.agreedAmount;
-    if (s.currency === "IQD") amt = s.agreedAmount / 1450; // Approximations
-    if (s.currency === "TRY") amt = s.agreedAmount / 32;
-    if (s.currency === "EUR") amt = s.agreedAmount * 1.08;
-    return acc + amt;
+    const rate = APPROX_USD_EXCHANGE_RATES[s.currency] ?? 1;
+    return acc + (s.agreedAmount || 0) * rate;
   }, 0);
 
   // Recharts metric generation
@@ -2887,7 +2922,11 @@ MARAS Group etir Center`;
                               </span>
                             </div>
                             <div className="text-[11px] font-bold text-slate-700">
-                              {msg.senderName} ({lang === 'tr' ? 'Sürücü' : lang === 'ar' ? 'سائق' : 'Driver'})
+                              {msg.senderName} ({
+                                msg.sender === 'client'
+                                  ? (lang === 'tr' ? 'Müşteri' : lang === 'ar' ? 'عميل' : 'Client')
+                                  : (lang === 'tr' ? 'Sürücü' : lang === 'ar' ? 'سائق' : 'Driver')
+                              })
                             </div>
                             <p className="text-slate-600 font-medium leading-normal italic truncate">
                               {msg.type === 'file' ? (lang === 'tr' ? '📁 Dosya / Belge' : lang === 'ar' ? '📁 ملف / مستند' : '📁 File Attachment') : msg.text}
@@ -3134,7 +3173,7 @@ MARAS Group etir Center`;
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery("")}
-                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-405 hover:text-slate-700 bg-transparent border-0 cursor-pointer"
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-700 bg-transparent border-0 cursor-pointer"
                 type="button"
                 title={lang === 'tr' ? "Temizle" : "Clear Query"}
               >
@@ -3327,7 +3366,7 @@ MARAS Group etir Center`;
                   <span>{lang === 'tr' ? "En Son Sinyaller:" : "Immediate Action Feed:"}</span>
                 </span>
                 <div className="flex-1 overflow-hidden">
-                  <div className="text-[11px] text-slate-650 font-medium truncate">
+                  <div className="text-[11px] text-slate-600 font-medium truncate">
                     {recentAlertsData[0].message}
                   </div>
                 </div>
@@ -3345,7 +3384,7 @@ MARAS Group etir Center`;
               <div className="space-y-1">
                 <span className="text-slate-500 text-xs font-semibold uppercase tracking-wider">{t('activeShipments')}</span>
                 <p className="text-3xl font-black text-slate-900">{activeShipmentsCount}</p>
-                <div className="flex items-center gap-1 text-[10px] font-bold text-orange-550">
+                <div className="flex items-center gap-1 text-[10px] font-bold text-orange-500">
                   <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-ping"></span>
                   <span>
                     {lang === 'tr' ? `${shipments.filter(s => s.status === 'In Transit').length} yolda aktif` : (lang === 'ar' ? `${shipments.filter(s => s.status === 'In Transit').length} في الطريق` : `${shipments.filter(s => s.status === 'In Transit').length} in active transit`)}
@@ -3397,7 +3436,7 @@ MARAS Group etir Center`;
                 <span className="text-slate-500 text-xs font-semibold uppercase tracking-wider">
                   {lang === 'tr' ? "Sürücü Doluluk Oranı" : (lang === 'ar' ? "إشغال أسطول السائقين" : "Fleet Utilization")}
                 </span>
-                <p className="text-3xl font-black text-indigo-655">
+                <p className="text-3xl font-black text-indigo-700">
                   {drivers.length > 0 ? `${Math.round((drivers.filter(d => shipments.some(s => s.assignedDriverId === d.id && s.status !== "Delivered" && s.status !== "Closed")).length / drivers.length) * 100)}%` : "0%"}
                 </p>
                 <div className="text-[10px] font-bold text-slate-500">
@@ -3540,7 +3579,7 @@ MARAS Group etir Center`;
                     </span>
                   </div>
                   <p className="text-sm font-black text-slate-800 mt-0.5">{pendingCountVal}</p>
-                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                  <p className="text-[9px] text-slate-400 font-medium font-mono">
                     {shipments.length > 0 ? `${Math.round((pendingCountVal / shipments.length) * 100)}%` : '0%'}
                   </p>
                 </div>
@@ -3553,7 +3592,7 @@ MARAS Group etir Center`;
                     </span>
                   </div>
                   <p className="text-sm font-black text-slate-800 mt-0.5">{activeCountVal}</p>
-                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                  <p className="text-[9px] text-slate-400 font-medium font-mono">
                     {shipments.length > 0 ? `${Math.round((activeCountVal / shipments.length) * 100)}%` : '0%'}
                   </p>
                 </div>
@@ -3566,7 +3605,7 @@ MARAS Group etir Center`;
                     </span>
                   </div>
                   <p className="text-sm font-black text-slate-800 mt-0.5">{completedCountVal}</p>
-                  <p className="text-[9px] text-slate-405 font-medium font-mono">
+                  <p className="text-[9px] text-slate-400 font-medium font-mono">
                     {shipments.length > 0 ? `${Math.round((completedCountVal / shipments.length) * 100)}%` : '0%'}
                   </p>
                 </div>
@@ -3711,7 +3750,7 @@ MARAS Group etir Center`;
                             <span className="text-slate-900 block font-black text-xs">
                               {shipment.agreedAmount.toLocaleString()} {shipment.currency}
                             </span>
-                            <span className="text-[9px] text-slate-450 font-medium block">Cleared Settlement</span>
+                            <span className="text-[9px] text-slate-400 font-medium block">Cleared Settlement</span>
                           </td>
                           <td className="p-4">
                             <div className="space-y-1">
@@ -3731,7 +3770,7 @@ MARAS Group etir Center`;
                                 const analysis = analyzeShipmentTiming(shipment);
                                 return (
                                   <div className="flex flex-col gap-1 w-28">
-                                    <div className="flex items-center justify-between text-[9px] text-slate-450 font-mono font-bold">
+                                    <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono font-bold">
                                       <span className="flex items-center gap-1">
                                         <Clock className="w-2.5 h-2.5 inline shrink-0" />
                                         <span>{analysis.label}</span>
@@ -3776,7 +3815,7 @@ MARAS Group etir Center`;
 
                               <button 
                                 onClick={() => onSelectShipmentChat(shipment)}
-                                className="p-1.5 text-slate-400 hover:text-slate-850 hover:bg-slate-100 rounded transition-all border-0 bg-transparent cursor-pointer"
+                                className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded transition-all border-0 bg-transparent cursor-pointer"
                                 title="Chat Session"
                               >
                                 <MessageSquare className="w-3.5 h-3.5" />
@@ -3788,7 +3827,7 @@ MARAS Group etir Center`;
                     })}
                     {filteredShipments.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="p-12 text-center text-slate-450 italic">
+                        <td colSpan={6} className="p-12 text-center text-slate-400 italic">
                           <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                           <span>{t('noShipmentsMatched')}</span>
                         </td>
@@ -3806,7 +3845,7 @@ MARAS Group etir Center`;
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col justify-between">
                 <div className="p-4 border-b border-slate-100 bg-slate-50/30 flex items-center justify-between">
                   <div>
-                    <h4 className="text-xs font-black uppercase text-slate-850 tracking-wider flex items-center gap-1.5">
+                    <h4 className="text-xs font-black uppercase text-slate-800 tracking-wider flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
                       <span>{lang === 'tr' ? "Canlı Güvenlik Logları" : (lang === 'ar' ? "سجل النشاط الإداري" : "Operational Activity Stream")}</span>
                     </h4>
@@ -3828,7 +3867,7 @@ MARAS Group etir Center`;
                   ) : (
                     activityLogs.slice(0, 5).map((log, idx) => (
                       <div key={log.id || idx} className="pt-2 pb-1.5 text-[11px] first:pt-0">
-                        <div className="flex items-center justify-between text-slate-405 text-[10px] mb-0.5">
+                        <div className="flex items-center justify-between text-slate-400 text-[10px] mb-0.5">
                           <span className="font-bold text-slate-700 truncate max-w-[120px] bg-slate-100 px-1.5 py-0.5 rounded">
                             {log.actor}
                           </span>
@@ -3836,7 +3875,7 @@ MARAS Group etir Center`;
                             {new Date(log.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                           </span>
                         </div>
-                        <p className="text-slate-605 font-semibold leading-relaxed">
+                        <p className="text-slate-600 font-semibold leading-relaxed">
                           {lang === 'tr' ? log.actionTr : (lang === 'ar' ? log.actionAr : log.actionEn)}
                         </p>
                         {log.shipmentNumber && (
@@ -3851,7 +3890,7 @@ MARAS Group etir Center`;
               </div>
 
               {/* Widget B: Fast Navigation Operations Drawer */}
-              <div className="bg-slate-955 bg-slate-900 text-white rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col justify-between">
+              <div className="bg-slate-950 bg-slate-900 text-white rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col justify-between">
                 <div>
                   <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider mb-1">
                     {lang === 'tr' ? "Hızlı Lojistik Eylemleri" : (lang === 'ar' ? "إجراءات إدارية سريعة" : "Administrative Operations Quick Links")}
@@ -4034,7 +4073,7 @@ MARAS Group etir Center`;
                         <div className="space-y-1">
                           <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
                             s.status === 'New' ? 'bg-slate-100 text-slate-700/80' :
-                            s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-850' :
+                            s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-800' :
                             s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
                           }`}>
                             {s.status}
@@ -4046,11 +4085,11 @@ MARAS Group etir Center`;
                             const progress = getShipmentProgressPercentage(s);
                             return (
                               <div className="flex flex-col gap-0.5 w-32">
-                                <div className="flex items-center justify-between text-[9px] font-mono font-bold text-slate-450 leading-none">
+                                <div className="flex items-center justify-between text-[9px] font-mono font-bold text-slate-400 leading-none">
                                   <span>{analysis.label}</span>
                                   <span className={analysis.textColorClass}>{progress}%</span>
                                 </div>
-                                <div className="w-full h-1.5 bg-slate-150 rounded-full overflow-hidden">
+                                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                                   <div 
                                     className={`h-full rounded-full transition-all duration-500 ${analysis.colorClass}`}
                                     style={{ width: `${progress}%` }}
@@ -4105,7 +4144,7 @@ MARAS Group etir Center`;
         <div className="space-y-6">
           <div className={`grid ${isMobileMode ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'}`}>
             {drivers.map((driver) => (
-              <div key={driver.id} className="bg-white p-5 rounded-xl border border-slate-200/90 shadow-sm flex flex-col justify-between hover:border-slate-350 transition-all">
+              <div key={driver.id} className="bg-white p-5 rounded-xl border border-slate-200/90 shadow-sm flex flex-col justify-between hover:border-slate-400 transition-all">
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     {driver.avatarUrl ? (
@@ -4129,7 +4168,7 @@ MARAS Group etir Center`;
                     <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                       <span className="text-xs text-slate-500 font-mono">@{driver.username}</span>
                       {driver.truckType && (
-                        <span className="text-[9px] bg-orange-100 text-orange-850 border border-orange-200/50 font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                        <span className="text-[9px] bg-orange-100 text-orange-800 border border-orange-200/50 font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
                           {(() => {
                             const found = TRUCK_TYPES.find(t => t.id === driver.truckType);
                             return found ? (lang === 'en' ? found.en : (lang === 'tr' ? found.tr : found.ar)) : driver.truckType;
@@ -4160,7 +4199,7 @@ MARAS Group etir Center`;
 
           {/* New Driver Form inside section */}
           {isDriverCreateOpen && (
-            <div className="bg-white p-6 rounded-xl border border-slate-350 shadow-md max-w-xl">
+            <div className="bg-white p-6 rounded-xl border border-slate-400 shadow-md max-w-xl">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-bold text-slate-950 text-lg flex items-center gap-2">
                   <UserPlus className="w-5 h-5 text-orange-500" /> {t('addDriver')}
@@ -4529,7 +4568,7 @@ MARAS Group etir Center`;
                                   onClick={() => {
                                     setExpandedClientOrdersCompanyName(isExpanded ? null : client.companyName);
                                   }}
-                                  className="px-2.5 py-1.5 bg-orange-100 hover:bg-orange-200 text-orange-700 hover:text-orange-850 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
+                                  className="px-2.5 py-1.5 bg-orange-100 hover:bg-orange-200 text-orange-700 hover:text-orange-800 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
                                 >
                                   <ClipboardList className="w-3.5 h-3.5" />
                                   <span>
@@ -5118,10 +5157,6 @@ MARAS Group etir Center`;
                       <ShieldCheck className="w-4 h-4" />
                     </div>
                   </div>
-                  <div className="border-t border-slate-800/60 mt-4 pt-3 flex items-center justify-between text-[11px] text-slate-400">
-                    <span>{lang === 'tr' ? 'Bypass Şifre' : 'Master bypass Key'}</span>
-                    <span className="font-mono bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800 text-orange-400 font-bold select-all">maras123</span>
-                  </div>
                 </div>
 
                 {/* Database fetched admins list */}
@@ -5336,7 +5371,7 @@ MARAS Group etir Center`;
                   onClick={() => setWorkspaceSubTab('gmail')}
                   className={`px-5 py-2.5 font-black text-xs tracking-wider uppercase border-b-2 transition-all cursor-pointer whitespace-nowrap ${
                     workspaceSubTab === 'gmail' 
-                      ? 'border-orange-500 text-orange-550' 
+                      ? 'border-orange-500 text-orange-500' 
                       : 'border-transparent text-slate-400 hover:text-white'
                   }`}
                 >
@@ -5346,7 +5381,7 @@ MARAS Group etir Center`;
                   onClick={() => setWorkspaceSubTab('drive')}
                   className={`px-5 py-2.5 font-black text-xs tracking-wider uppercase border-b-2 transition-all cursor-pointer whitespace-nowrap ${
                     workspaceSubTab === 'drive' 
-                      ? 'border-orange-500 text-orange-550' 
+                      ? 'border-orange-500 text-orange-500' 
                       : 'border-transparent text-slate-400 hover:text-white'
                   }`}
                 >
@@ -5356,7 +5391,7 @@ MARAS Group etir Center`;
                   onClick={() => setWorkspaceSubTab('calendar')}
                   className={`px-5 py-2.5 font-black text-xs tracking-wider uppercase border-b-2 transition-all cursor-pointer whitespace-nowrap ${
                     workspaceSubTab === 'calendar' 
-                      ? 'border-orange-500 text-orange-550' 
+                      ? 'border-orange-500 text-orange-500' 
                       : 'border-transparent text-slate-400 hover:text-white'
                   }`}
                 >
@@ -5400,7 +5435,7 @@ MARAS Group etir Center`;
                         className={`w-full text-left p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                           isSelected 
                             ? 'bg-orange-50/70 border-orange-300 text-orange-950 shadow-xs' 
-                            : 'bg-slate-50/50 border-slate-150 hover:bg-slate-50 text-slate-700'
+                            : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50 text-slate-700'
                         }`}
                       >
                         <div className="space-y-1">
@@ -5413,7 +5448,7 @@ MARAS Group etir Center`;
                         </div>
                         <div className="text-right">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-850'
+                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-800'
                           }`}>
                             {s.status}
                           </span>
@@ -5434,8 +5469,8 @@ MARAS Group etir Center`;
                 {gmailResponse && (
                   <div className={`p-4 rounded-xl border text-xs font-bold text-center flex items-center justify-center gap-2 ${
                     gmailResponse.success 
-                      ? 'bg-emerald-50 border-emerald-250 text-emerald-800' 
-                      : 'bg-red-50 border-red-250 text-red-800'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                      : 'bg-red-50 border-red-200 text-red-800'
                   }`}>
                     {gmailResponse.success ? <Check className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
                     <span>{gmailResponse.message}</span>
@@ -5623,7 +5658,7 @@ MARAS Group etir Center`;
                         className={`w-full text-left p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                           isSelected 
                             ? 'bg-orange-50 border-orange-300 text-orange-950 shadow-xs' 
-                            : 'bg-slate-50/50 border-slate-150 hover:bg-slate-50 text-slate-700'
+                            : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50 text-slate-700'
                         }`}
                       >
                         <div className="space-y-1">
@@ -5636,7 +5671,7 @@ MARAS Group etir Center`;
                         </div>
                         <div className="text-right">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-850'
+                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-800'
                           }`}>
                             {s.status}
                           </span>
@@ -5669,8 +5704,8 @@ MARAS Group etir Center`;
                 {driveResponse && (
                   <div className={`p-4 rounded-xl border text-xs font-bold text-center flex items-center justify-center gap-2 ${
                     driveResponse.success 
-                      ? 'bg-emerald-50 border-emerald-250 text-emerald-800' 
-                      : 'bg-red-50 border-red-250 text-red-800'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                      : 'bg-red-50 border-red-200 text-red-800'
                   }`}>
                     {driveResponse.success ? <Check className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
                     <span>{driveResponse.message}</span>
@@ -5702,13 +5737,13 @@ MARAS Group etir Center`;
                     <span>Loading files from secure Drive...</span>
                   </div>
                 ) : driveFiles.length === 0 ? (
-                  <div className="text-center py-12 border-2 border-dashed border-slate-150 rounded-2xl p-6 text-slate-400 text-xs">
+                  <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-2xl p-6 text-slate-400 text-xs">
                     No files found on Drive backup path. Choose a shipment on the left to export.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[460px] overflow-y-auto pr-1">
                     {driveFiles.map(file => (
-                      <div key={file.id} className="p-3.5 rounded-xl border border-slate-150 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col justify-between gap-3">
+                      <div key={file.id} className="p-3.5 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col justify-between gap-3">
                         <div className="space-y-1">
                           <p className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5" title={file.name}>
                             <FileText className="w-3.5 h-3.5 text-orange-500 shrink-0" />
@@ -5764,7 +5799,7 @@ MARAS Group etir Center`;
                         className={`w-full text-left p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                           isSelected 
                             ? 'bg-orange-50 border-orange-300 text-orange-950 shadow-xs' 
-                            : 'bg-slate-50/50 border-slate-150 hover:bg-slate-50 text-slate-700'
+                            : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50 text-slate-700'
                         }`}
                       >
                         <div className="space-y-1">
@@ -5777,7 +5812,7 @@ MARAS Group etir Center`;
                         </div>
                         <div className="text-right">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-850'
+                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-800'
                           }`}>
                             {s.status}
                           </span>
@@ -5810,8 +5845,8 @@ MARAS Group etir Center`;
                 {calendarResponse && (
                   <div className={`p-4 rounded-xl border text-xs font-bold text-center flex items-center justify-center gap-2 ${
                     calendarResponse.success 
-                      ? 'bg-emerald-50 border-emerald-250 text-emerald-800' 
-                      : 'bg-red-50 border-red-250 text-red-800'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                      : 'bg-red-50 border-red-200 text-red-800'
                   }`}>
                     {calendarResponse.success ? <Check className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
                     <span>{calendarResponse.message}</span>
@@ -5843,13 +5878,13 @@ MARAS Group etir Center`;
                     <span>Querying Google Calendar service...</span>
                   </div>
                 ) : calendarEvents.length === 0 ? (
-                  <div className="text-center py-12 border-2 border-dashed border-slate-150 rounded-2xl p-6 text-slate-400 text-xs text-slate-400">
+                  <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-2xl p-6 text-slate-400 text-xs text-slate-400">
                     No upcoming calendar slots scheduled.
                   </div>
                 ) : (
                   <div className="space-y-3.5 max-h-[460px] overflow-y-auto pr-1">
                     {calendarEvents.map(event => (
-                      <div key={event.id} className="p-4 rounded-xl border border-slate-150 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div key={event.id} className="p-4 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                         <div className="space-y-1">
                           <p className="text-xs font-black text-slate-900 flex items-center gap-2 pb-0.5">
                             <span className="w-2 h-2 rounded-full bg-orange-500"></span>
@@ -6038,7 +6073,7 @@ MARAS Group etir Center`;
                     <p className="text-lg font-black text-emerald-900 mt-0.5">{statusCounts.Paid || 0}</p>
                   </div>
                   <div className="text-center bg-orange-50 border border-orange-200 rounded-lg p-2 flex-1">
-                    <p className="text-xs text-orange-850 font-bold">{lang === 'tr' ? 'Kısmi' : 'Partial'}</p>
+                    <p className="text-xs text-orange-800 font-bold">{lang === 'tr' ? 'Kısmi' : 'Partial'}</p>
                     <p className="text-lg font-black text-orange-950 mt-0.5">{statusCounts.Partial || 0}</p>
                   </div>
                   <div className="text-center bg-red-50 border border-red-200 rounded-lg p-2 flex-1">
@@ -6254,7 +6289,7 @@ MARAS Group etir Center`;
                             <td className="p-3 text-center">
                               {stmt ? (
                                 <span className={`inline-block text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wide ${
-                                  stmt.paymentStatus === 'Paid' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200/50' : stmt.paymentStatus === 'Partial' ? 'bg-orange-100 text-orange-850 border border-orange-200/50' : 'bg-red-100 text-red-800 border border-red-200/50'
+                                  stmt.paymentStatus === 'Paid' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200/50' : stmt.paymentStatus === 'Partial' ? 'bg-orange-100 text-orange-800 border border-orange-200/50' : 'bg-red-100 text-red-800 border border-red-200/50'
                                 }`}>
                                   {stmt.paymentStatus}
                                 </span>
@@ -6301,7 +6336,7 @@ MARAS Group etir Center`;
       {/* CORE INTEGRATED DIALOG: LIVE-BUILT DUAL COLUMN COST STATEMENT EDITOR & PDF PREVIEW GENERATOR */}
       {selectedCostStatement && isStatementEditorOpen && (
         <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 md:p-4 z-50 overflow-y-auto block font-sans">
-          <div className="bg-slate-100 rounded-3xl border border-slate-350 shadow-2xl w-full max-w-7xl h-[95vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-slate-100 rounded-3xl border border-slate-400 shadow-2xl w-full max-w-7xl h-[95vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             
             {/* Modal Header bar */}
             <div className="bg-slate-950 text-white p-4 shrink-0 flex items-center justify-between border-b border-slate-800">
@@ -6337,7 +6372,7 @@ MARAS Group etir Center`;
                 </button>
                 <button
                   onClick={() => handleExportCSV(selectedCostStatement)}
-                  className="px-3 py-1.5 bg-slate-900 border border-slate-800 text-xs font-bold rounded-xl text-slate-300 hover:text-white hover:bg-slate-850 flex items-center gap-1 transition-all cursor-pointer"
+                  className="px-3 py-1.5 bg-slate-900 border border-slate-800 text-xs font-bold rounded-xl text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1 transition-all cursor-pointer"
                   title="Export records to CSV formatted file"
                 >
                   <ArrowUpRight className="w-3.5 h-3.5 text-slate-400" />
@@ -6348,7 +6383,7 @@ MARAS Group etir Center`;
                     setIsStatementEditorOpen(false);
                     setSelectedCostStatement(null);
                   }}
-                  className="p-1.5 bg-slate-900 hover:bg-red-950 hover:text-red-400 rounded-xl text-slate-400 transition-all border border-slate-850 cursor-pointer"
+                  className="p-1.5 bg-slate-900 hover:bg-red-950 hover:text-red-400 rounded-xl text-slate-400 transition-all border border-slate-800 cursor-pointer"
                   title="Close module draft"
                 >
                   <X className="w-5 h-5" />
@@ -6364,7 +6399,7 @@ MARAS Group etir Center`;
                 
                 {/* Section header */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-                  <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-widest border-b border-slate-150 pb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2 flex items-center justify-between">
                     <span>{lang === 'tr' ? '1. Temel Muhasebe Verileri' : '1. Core Accounting Parameters'}</span>
                     <span className="text-[10px] text-slate-400 font-mono normal-case">Linked cargo: {selectedCostStatement.companyName}</span>
                   </h4>
@@ -6449,7 +6484,7 @@ MARAS Group etir Center`;
                 {/* COST BREAKDOWN ACCORDION BLOCK OR EDITABLE LIST */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
                   
-                  <div className="flex items-center justify-between border-b border-slate-150 pb-2">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div>
                       <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-widest">{lang === 'tr' ? '2. Maliyet Girdi Kalemleri' : '2. Expense Items Breakdown'}</h4>
                       <p className="text-[10px] text-slate-400 mt-0.5">{lang === 'tr' ? 'Port, gümrük, navlun, depo, demuraj vb. tüm işlem masraflarını buraya ekleyebilirsiniz.' : 'Enter all logistic transactions, including fees, custom clearances, taxes and border penalties here.'}</p>
@@ -6480,7 +6515,7 @@ MARAS Group etir Center`;
                             </button>
 
                             {/* Item Number Tracker */}
-                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-250 pb-1.5 max-w-sm">Expense Item #{idx + 1}</div>
+                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-200 pb-1.5 max-w-sm">Expense Item #{idx + 1}</div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
                               
@@ -6733,7 +6768,7 @@ MARAS Group etir Center`;
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleDownloadPDF("live-statement-preview-draft")}
-                      className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-850 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md border border-slate-300"
+                      className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md border border-slate-300"
                     >
                       <Download className="w-4 h-4 shrink-0 text-orange-500" />
                       <span>{lang === 'tr' ? 'PDF İndir' : 'Download PDF'}</span>
@@ -6787,7 +6822,7 @@ MARAS Group etir Center`;
       {/* DETAILED MODAL PORTAL: SHIPMENT DRAWER SCREEN */}
       {targetDetailsShipment && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto block">
-          <div className="bg-white rounded-2xl border border-slate-350 shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-400 shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
             
             {/* Modal Header */}
             <div className="sticky top-0 bg-slate-900 text-white p-5 rounded-t-2xl flex items-center justify-between gap-4 border-b border-slate-800 z-10">
@@ -6910,7 +6945,7 @@ MARAS Group etir Center`;
                     {/* Display additional drivers/trucks supporting multiple trucks per load */}
                     {targetDetailsShipment.additionalDrivers && targetDetailsShipment.additionalDrivers.length > 0 && (
                       <div className="border-t border-dashed border-slate-200 pt-2 mt-2 space-y-1.5 text-left">
-                        <span className="text-slate-550 text-[10.5px] uppercase font-bold tracking-wider block font-mono">
+                        <span className="text-slate-500 text-[10.5px] uppercase font-bold tracking-wider block font-mono">
                           {lang === 'tr' ? "İlave Sevk Araçları" : "Supplementary Trucks / Drivers"}
                         </span>
                         <div className="flex flex-col gap-1.5">
@@ -6935,7 +6970,7 @@ MARAS Group etir Center`;
                                 </div>
                                 <div className="flex items-center gap-2">
                                   {ad.agreedAmount !== undefined && ad.agreedAmount > 0 ? (
-                                    <span className="font-mono text-orange-650 font-extrabold bg-orange-50 px-1.5 py-0.5 rounded text-[10px] border border-orange-200">
+                                    <span className="font-mono text-orange-600 font-extrabold bg-orange-50 px-1.5 py-0.5 rounded text-[10px] border border-orange-200">
                                       {ad.agreedAmount.toLocaleString()} <span className="text-[8px] font-bold">{targetDetailsShipment.currency || "USD"}</span>
                                     </span>
                                   ) : (
@@ -6987,7 +7022,7 @@ MARAS Group etir Center`;
                         <div className="flex flex-col gap-1.5 mt-1">
                           <div className="flex items-center justify-between bg-white/70 p-1 px-2 rounded border border-blue-100 font-mono text-[11px] font-bold">
                             <span className="text-slate-500 font-sans text-[10px]">#1 (Core)</span>
-                            <span className="text-slate-905">{targetDetailsShipment.containerNumber || "-"}</span>
+                            <span className="text-slate-900">{targetDetailsShipment.containerNumber || "-"}</span>
                           </div>
                           {targetDetailsShipment.additionalContainers && targetDetailsShipment.additionalContainers.map((c, idx) => (
                             <div key={idx} className="flex items-center justify-between bg-white/70 p-1 px-2 rounded border border-blue-100 font-mono text-[11px] font-bold">
@@ -7006,14 +7041,14 @@ MARAS Group etir Center`;
                       </div>
                       <div>
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Port of Loading (POL)</span>
-                        <p className="font-bold text-slate-905">{targetDetailsShipment.portOfLoading || "-"}</p>
+                        <p className="font-bold text-slate-900">{targetDetailsShipment.portOfLoading || "-"}</p>
                         {targetDetailsShipment.loadingCountry && (
                           <span className="text-[10px] text-slate-400 font-medium">({targetDetailsShipment.loadingCountry})</span>
                         )}
                       </div>
                       <div>
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Port of Discharge (POD)</span>
-                        <p className="font-bold text-slate-905">{targetDetailsShipment.portOfDischarge || "-"}</p>
+                        <p className="font-bold text-slate-900">{targetDetailsShipment.portOfDischarge || "-"}</p>
                         {targetDetailsShipment.deliveryCountry && (
                           <span className="text-[10px] text-slate-400 font-medium">({targetDetailsShipment.deliveryCountry})</span>
                         )}
@@ -7026,7 +7061,7 @@ MARAS Group etir Center`;
                       </div>
                       <div className="col-span-2">
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Estimated Arrival (ETA)</span>
-                        <p className="font-mono font-bold text-orange-650">
+                        <p className="font-mono font-bold text-orange-600">
                           {targetDetailsShipment.eta ? new Date(targetDetailsShipment.eta).toLocaleString() : "-"}
                         </p>
                       </div>
@@ -7082,7 +7117,7 @@ MARAS Group etir Center`;
                       </div>
                       <div className="col-span-2">
                         <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Estimated Arrival (ETA)</span>
-                        <p className="font-mono font-bold text-orange-655">
+                        <p className="font-mono font-bold text-orange-700">
                           {targetDetailsShipment.eta ? new Date(targetDetailsShipment.eta).toLocaleString() : "-"}
                         </p>
                       </div>
@@ -7093,7 +7128,7 @@ MARAS Group etir Center`;
                 {/* 5.3 Land Freight Specific / Customs Brokers block */}
                 {targetDetailsShipment.freightType === 'land' && (
                   <div className="p-4 bg-orange-50/65 border border-orange-200 rounded-xl space-y-3 md:col-span-2 font-sans">
-                    <h4 className="font-bold text-orange-950 border-b border-orange-120 pb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider">
+                    <h4 className="font-bold text-orange-950 border-b border-orange-100 pb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider">
                       <ShieldCheck className="w-4 h-4 text-orange-600 font-bold" />
                       <span>{lang === 'tr' ? "Gümrük Müşavir Bilgileri" : "Customs Broker Information"}</span>
                     </h4>
@@ -7125,7 +7160,7 @@ MARAS Group etir Center`;
                 )}
 
                 {/* Google Maps Distance Matrix API Transit Calculations Block */}
-                <div className="p-5 bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-250 rounded-xl space-y-4 md:col-span-2 shadow-xs transition-all duration-300">
+                <div className="p-5 bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-200 rounded-xl space-y-4 md:col-span-2 shadow-xs transition-all duration-300">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-3">
                     <div className="flex items-center gap-2.5">
                       <div className="bg-emerald-100 text-emerald-700 p-2 rounded-lg">
@@ -7177,10 +7212,10 @@ MARAS Group etir Center`;
                     </div>
                   ) : distanceMatrixError ? (
                     <div className="p-3.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg font-mono flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 text-red-650 shrink-0 mt-0.5" />
+                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                       <div>
                         <p className="font-bold">Matrix Error</p>
-                        <p className="text-[11px] text-red-650">{distanceMatrixError}</p>
+                        <p className="text-[11px] text-red-600">{distanceMatrixError}</p>
                       </div>
                     </div>
                   ) : distanceMatrixData ? (
@@ -7256,7 +7291,7 @@ MARAS Group etir Center`;
                       <span>Log Transit Milestone / Manuel İşlem Masası</span>
                     </h4>
                   </div>
-                  <p className="text-[11px] text-slate-350 leading-relaxed font-medium">
+                  <p className="text-[11px] text-slate-400 leading-relaxed font-medium">
                     Since Air and Maritime cargos do not utilize driver apps, you must log current status milestones directly from this panel. These status changes immediately updates client charts and alerts.
                   </p>
 
@@ -7266,7 +7301,7 @@ MARAS Group etir Center`;
                       <select
                         value={manualStatus}
                         onChange={(e) => setManualStatus(e.target.value as ShipmentStatus)}
-                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-750 text-white rounded-lg focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
+                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
                       >
                         {(targetDetailsShipment.freightType === 'sea'
                           ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
@@ -7286,7 +7321,7 @@ MARAS Group etir Center`;
                         placeholder="e.g., Vessel departed from Port of loading, ETA intact."
                         value={manualRemarks}
                         onChange={(e) => setManualRemarks(e.target.value)}
-                        className="w-full text-xs p-2.5 bg-slate-800 border border-slate-750 text-white placeholder:text-slate-500 rounded-lg focus:ring-1 focus:ring-blue-500 outline-none"
+                        className="w-full text-xs p-2.5 bg-slate-800 border border-slate-700 text-white placeholder:text-slate-500 rounded-lg focus:ring-1 focus:ring-blue-500 outline-none"
                       />
                     </div>
                   </div>
@@ -7337,7 +7372,7 @@ MARAS Group etir Center`;
 
                       {targetDetailsShipment.isLinkShared && (
                         <div className="flex flex-col gap-1 pl-6">
-                          <label className="flex items-center gap-1.5 text-xs text-orange-905 cursor-pointer">
+                          <label className="flex items-center gap-1.5 text-xs text-orange-900 cursor-pointer">
                             <input 
                               type="checkbox" 
                               checked={targetDetailsShipment.shareIncludeDocuments}
@@ -7347,7 +7382,7 @@ MARAS Group etir Center`;
                             <span>{t('includeDocs')}</span>
                           </label>
 
-                          <label className="flex items-center gap-1.5 text-xs text-orange-905 cursor-pointer">
+                          <label className="flex items-center gap-1.5 text-xs text-orange-900 cursor-pointer">
                             <input 
                               type="checkbox" 
                               checked={targetDetailsShipment.shareIncludePhotos}
@@ -7412,7 +7447,7 @@ MARAS Group etir Center`;
                   {targetDetailsShipment.documents.length > 0 ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {targetDetailsShipment.documents.map((doc) => (
-                        <div key={doc.id} className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-3 hover:border-slate-350 transition-all shadow-xs">
+                        <div key={doc.id} className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-3 hover:border-slate-400 transition-all shadow-xs">
                           <div className="flex items-center gap-2 truncate">
                             {doc.category === 'photo' ? (
                               <ImageIcon className="w-5 h-5 text-teal-600 shrink-0" />
@@ -7461,7 +7496,7 @@ MARAS Group etir Center`;
 
                 {/* 8. Detailed Shipment Timeline Tracker */}
                 <div className="md:col-span-2 space-y-3">
-                  <h4 className="font-bold text-slate-900 border-b border-slate-150 pb-2">{t('timeline')}</h4>
+                  <h4 className="font-bold text-slate-900 border-b border-slate-100 pb-2">{t('timeline')}</h4>
                   <div className="relative border-l border-slate-200 dark:border-slate-200 pl-4 space-y-6 ml-2 pt-2">
                     {targetDetailsShipment.timeline.map((event, idx) => (
                       <div key={idx} className="relative">
@@ -7506,11 +7541,11 @@ MARAS Group etir Center`;
       {/* 4. CREATE SHIPMENT modal overlay */}
       {isCreateOpen && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto block">
-          <div className="bg-white rounded-2xl border border-slate-350 shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-400 shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white rounded-t-2xl">
               <h3 className="font-bold text-lg">{t('createShipment')}</h3>
-              <button onClick={() => setIsCreateOpen(false)} className="p-1.5 bg-slate-850 hover:bg-slate-700 rounded-lg text-slate-300">
+              <button onClick={() => setIsCreateOpen(false)} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -7578,7 +7613,7 @@ MARAS Group etir Center`;
                         className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all ${
                           isSelected 
                             ? 'bg-slate-900 text-white border-slate-900 shadow-md font-bold' 
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-350 hover:bg-slate-50'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400 hover:bg-slate-50'
                         }`}
                       >
                         <ModeIcon className={`w-5 h-5 mb-1 ${isSelected ? 'text-orange-500' : 'text-slate-400'}`} />
@@ -7593,7 +7628,7 @@ MARAS Group etir Center`;
               {newShipmentData.freightType === 'land' && (
                 <div className="space-y-4">
                   {/* LOADING DETAILS ROW */}
-                  <div className="p-4 border border-slate-150 rounded-xl space-y-4">
+                  <div className="p-4 border border-slate-100 rounded-xl space-y-4">
                     <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded bg-orange-500"></span> {t('loadingInfo')}
                     </h4>
@@ -7647,7 +7682,7 @@ MARAS Group etir Center`;
                   </div>
 
                   {/* DELIVERY DETAILS ROW */}
-                  <div className="p-4 border border-slate-150 rounded-xl space-y-4">
+                  <div className="p-4 border border-slate-100 rounded-xl space-y-4">
                     <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded bg-blue-500"></span> {t('deliveryInfo')}
                     </h4>
@@ -7701,7 +7736,7 @@ MARAS Group etir Center`;
                   </div>
 
                   {/* CARGO WEIGHT & DRIVER */}
-                  <div className="p-4 border border-slate-150 rounded-xl space-y-4">
+                  <div className="p-4 border border-slate-100 rounded-xl space-y-4">
                     <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider">{t('truckAndDriver')}</h4>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1">
@@ -7720,7 +7755,7 @@ MARAS Group etir Center`;
                         <select
                           value={newShipmentData.assignedDriverId}
                           onChange={(e) => setNewShipmentData({ ...newShipmentData, assignedDriverId: e.target.value })}
-                          className="w-full p-2.5 bg-slate-50 border border-slate-250 focus:border-slate-500 rounded-lg outline-none text-xs"
+                          className="w-full p-2.5 bg-slate-50 border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                         >
                           <option value="">-- {t('selectDriver')} --</option>
                           {drivers.map(d => (
@@ -7826,7 +7861,7 @@ MARAS Group etir Center`;
                   </div>
 
                   {/* CUSTOMS BROKERS INFORMATION SECTION */}
-                  <div className="p-4 border border-slate-150 rounded-xl space-y-4 text-left">
+                  <div className="p-4 border border-slate-100 rounded-xl space-y-4 text-left">
                     <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-slate-800">
                       <ShieldCheck className="w-4 h-4 text-orange-600" /> {lang === 'tr' ? "Gümrük Müşaviri Bilgileri" : "Customs Broker Information"}
                     </h4>
@@ -7838,7 +7873,7 @@ MARAS Group etir Center`;
                           {lang === 'tr' ? "Varış Gümrük Müşaviri" : "Broker at Destination Port"}
                         </label>
                         <select
-                          className="w-full p-2 bg-white border border-slate-250 focus:border-slate-500 rounded-lg outline-none text-xs"
+                          className="w-full p-2 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                           value={newShipmentData.destinationBrokerId || ""}
                           onChange={(e) => {
                             const val = e.target.value;
@@ -7893,7 +7928,7 @@ MARAS Group etir Center`;
                           {lang === 'tr' ? "Irak Sınır Gümrük Müşaviri" : "Broker at Iraq Border"}
                         </label>
                         <select
-                          className="w-full p-2 bg-white border border-slate-250 focus:border-slate-500 rounded-lg outline-none text-xs"
+                          className="w-full p-2 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                           value={newShipmentData.iraqBorderBrokerId || ""}
                           onChange={(e) => {
                             const val = e.target.value;
@@ -7948,7 +7983,7 @@ MARAS Group etir Center`;
 
               {/* DYNAMIC SEA PARAMETERS */}
               {newShipmentData.freightType === 'sea' && (
-                <div className="p-4 border border-slate-150 rounded-xl space-y-4 bg-slate-50/50">
+                <div className="p-4 border border-slate-100 rounded-xl space-y-4 bg-slate-50/50">
                   <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-blue-800">
                     <Anchor className="w-4 h-4 text-blue-500" /> Maritime Shipping Parameters / Denizyolu Bilgileri
                   </h4>
@@ -8272,7 +8307,7 @@ MARAS Group etir Center`;
 
               {/* DYNAMIC AIR PARAMETERS */}
               {newShipmentData.freightType === 'air' && (
-                <div className="p-4 border border-slate-150 rounded-xl space-y-4 bg-slate-50/50">
+                <div className="p-4 border border-slate-100 rounded-xl space-y-4 bg-slate-50/50">
                   <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-blue-800">
                     <Plane className="w-4 h-4 text-blue-500" /> Air Freight Parameters / Havayolu Bilgileri
                   </h4>
@@ -8403,7 +8438,7 @@ MARAS Group etir Center`;
               )}
 
               {/* SHARED GENERAL CARGO DESCRIPTION & AMOUNT */}
-              <div className="p-4 border border-slate-150 rounded-xl space-y-4">
+              <div className="p-4 border border-slate-100 rounded-xl space-y-4">
                 <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider">Cargo & Deal Agreement</h4>
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-700">{t('cargoDesc')} <span className="text-red-500">*</span></label>
@@ -8447,7 +8482,7 @@ MARAS Group etir Center`;
               </div>
 
               {/* SHARED NOTES */}
-              <div className="p-4 bg-slate-50 border border-slate-150 rounded-xl space-y-2">
+              <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl space-y-2">
                 <label className="font-bold text-slate-900">{t('internalNotes')}</label>
                 <textarea 
                   rows={3}
@@ -8458,7 +8493,7 @@ MARAS Group etir Center`;
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-150">
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
                 <button type="button" onClick={() => setIsCreateOpen(false)} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
                   {t('cancel')}
                 </button>
@@ -8475,14 +8510,14 @@ MARAS Group etir Center`;
       {/* EDIT SHIPMENT OVERLAY MODAL */}
       {isEditOpen && editingShipment && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto block">
-          <div className="bg-white rounded-2xl border border-slate-350 shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-400 shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white rounded-t-2xl">
               <h3 className="font-bold text-lg">{t('editShipment')} — {editingShipment.shipmentNumber}</h3>
               <button onClick={() => {
                 setIsEditOpen(false);
                 setEditingShipment(null);
-              }} className="p-1.5 bg-slate-850 hover:bg-slate-700 rounded-lg text-slate-300">
+              }} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -8526,15 +8561,15 @@ MARAS Group etir Center`;
                   <span className="text-[10px] font-extrabold uppercase text-slate-400 tracking-wider block mb-1">Active Transport Mode</span>
                   <div className="flex items-center gap-2">
                     {editingShipment.freightType === 'sea' ? (
-                      <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full text-xs font-bold border border-blue-150">
+                      <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full text-xs font-bold border border-blue-100">
                         <Anchor className="w-3.5 h-3.5" /> Ocean Freight / Deniz Yolu
                       </span>
                     ) : editingShipment.freightType === 'air' ? (
-                      <span className="inline-flex items-center gap-1 bg-orange-50 text-orange-700 px-2.5 py-1 rounded-full text-xs font-bold border border-orange-150">
+                      <span className="inline-flex items-center gap-1 bg-orange-50 text-orange-700 px-2.5 py-1 rounded-full text-xs font-bold border border-orange-100">
                         <Plane className="w-3.5 h-3.5" /> Air Freight / Hava Yolu
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full text-xs font-bold border border-emerald-150">
+                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full text-xs font-bold border border-emerald-100">
                         <Truck className="w-3.5 h-3.5" /> Land Freight / Kara Yolu
                       </span>
                     )}
@@ -8593,7 +8628,7 @@ MARAS Group etir Center`;
                               <div className="flex items-center gap-1.5">
                                 <span className="font-mono bg-slate-100 text-slate-600 font-bold px-1.5 py-0.5 rounded text-[9.5px] border border-slate-200">🚚 #{idx + 2}</span>
                                 <div className="text-left">
-                                  <p className="font-extrabold text-slate-850 leading-tight">{ad.driverName}</p>
+                                  <p className="font-extrabold text-slate-800 leading-tight">{ad.driverName}</p>
                                   <p className="text-[9.5px] text-slate-500 font-mono mt-0.5">{ad.truckNumber}</p>
                                 </div>
                               </div>
@@ -8611,7 +8646,7 @@ MARAS Group etir Center`;
                                       );
                                       setEditingShipment({ ...editingShipment, additionalDrivers: updated });
                                     }}
-                                    className="w-24 p-1 pr-8 bg-slate-50 border border-slate-200 focus:border-slate-500 focus:bg-white rounded outline-none text-[10.5px] font-mono text-right font-bold text-slate-850"
+                                    className="w-24 p-1 pr-8 bg-slate-50 border border-slate-200 focus:border-slate-500 focus:bg-white rounded outline-none text-[10.5px] font-mono text-right font-bold text-slate-800"
                                   />
                                   <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[8.5px] text-slate-400 font-bold font-mono pointer-events-none">
                                     {editingShipment.currency || "USD"}
@@ -8623,7 +8658,7 @@ MARAS Group etir Center`;
                                     const updated = (editingShipment.additionalDrivers || []).filter((_, i) => i !== idx);
                                     setEditingShipment({ ...editingShipment, additionalDrivers: updated });
                                   }}
-                                  className="p-1 hover:bg-slate-50 rounded text-slate-400 hover:text-red-650 transition-colors focus:outline-none cursor-pointer"
+                                  className="p-1 hover:bg-slate-50 rounded text-slate-400 hover:text-red-600 transition-colors focus:outline-none cursor-pointer"
                                   title={lang === 'tr' ? "Kaldır" : "Remove"}
                                 >
                                   <X className="w-3.5 h-3.5" />
@@ -8637,7 +8672,7 @@ MARAS Group etir Center`;
                       <div className="flex gap-2">
                         <select
                           id="edit-extra-driver-select"
-                          className="p-1.5 bg-white border border-slate-205 focus:border-slate-500 rounded-lg outline-none text-xs flex-1"
+                          className="p-1.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs flex-1"
                           defaultValue=""
                           onChange={(e) => {
                             const val = e.target.value;
@@ -8693,7 +8728,7 @@ MARAS Group etir Center`;
                     </div>
 
                     {/* CUSTOMS BROKERS INFORMATION FOR ROAD DISPATCH (EDIT) */}
-                    <div className="p-4 border border-slate-150 rounded-xl space-y-4 text-left font-sans bg-slate-50/50">
+                    <div className="p-4 border border-slate-100 rounded-xl space-y-4 text-left font-sans bg-slate-50/50">
                       <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5 text-slate-800">
                         <ShieldCheck className="w-4 h-4 text-orange-600" /> {lang === 'tr' ? "Gümrük Müşaviri Bilgileri" : "Customs Broker Information"}
                       </h4>
@@ -8742,14 +8777,14 @@ MARAS Group etir Center`;
                               placeholder={lang === 'tr' ? "Müşavir Adı" : "Broker Name / Agency"}
                               value={editingShipment.destinationBrokerName || ""}
                               onChange={(e) => setEditingShipment({ ...editingShipment, destinationBrokerName: e.target.value })}
-                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-medium"
+                              className="p-2 text-xs bg-slate-50 border border-slate-100 rounded-lg outline-none font-medium"
                             />
                             <input
                               type="text"
                               placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
                               value={editingShipment.destinationBrokerPhone || ""}
                               onChange={(e) => setEditingShipment({ ...editingShipment, destinationBrokerPhone: e.target.value })}
-                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-mono"
+                              className="p-2 text-xs bg-slate-50 border border-slate-100 rounded-lg outline-none font-mono"
                             />
                           </div>
                         </div>
@@ -8797,14 +8832,14 @@ MARAS Group etir Center`;
                               placeholder={lang === 'tr' ? "Sınır Gümrükçü Adı" : "Border Broker Name / Agency"}
                               value={editingShipment.iraqBorderBrokerName || ""}
                               onChange={(e) => setEditingShipment({ ...editingShipment, iraqBorderBrokerName: e.target.value })}
-                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-medium"
+                              className="p-2 text-xs bg-slate-50 border border-slate-100 rounded-lg outline-none font-medium"
                             />
                             <input
                               type="text"
                               placeholder={lang === 'tr' ? "İletişim / Tel" : "Phone Number"}
                               value={editingShipment.iraqBorderBrokerPhone || ""}
                               onChange={(e) => setEditingShipment({ ...editingShipment, iraqBorderBrokerPhone: e.target.value })}
-                              className="p-2 text-xs bg-slate-50 border border-slate-150 rounded-lg outline-none font-mono"
+                              className="p-2 text-xs bg-slate-50 border border-slate-100 rounded-lg outline-none font-mono"
                             />
                           </div>
                         </div>
@@ -8885,7 +8920,7 @@ MARAS Group etir Center`;
                                     const updated = (editingShipment.additionalContainers || []).filter((_, i) => i !== idx);
                                     setEditingShipment({ ...editingShipment, additionalContainers: updated });
                                   }}
-                                  className="text-blue-400 hover:text-red-650 transition-colors ml-1 focus:outline-none cursor-pointer"
+                                  className="text-blue-400 hover:text-red-600 transition-colors ml-1 focus:outline-none cursor-pointer"
                                 >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
@@ -9267,11 +9302,11 @@ MARAS Group etir Center`;
 
                 {/* Status selector (Admin override) */}
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-750">Status Override / Durum Güncelle</label>
+                  <label className="text-xs font-semibold text-slate-700">Status Override / Durum Güncelle</label>
                   <select
                     value={editingShipment.status}
                     onChange={(e) => setEditingShipment({ ...editingShipment, status: e.target.value as ShipmentStatus })}
-                    className="w-full p-2.5 border border-slate-250 bg-white rounded-lg text-xs font-bold text-blue-900"
+                    className="w-full p-2.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-blue-900"
                   >
                     {(editingShipment.freightType === 'sea' 
                       ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
@@ -9317,7 +9352,7 @@ MARAS Group etir Center`;
       {/* DETAILED PRINT STATEMENT PREVIEW MODAL */}
       {isPrintPreviewOpen && selectedCostStatement && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-[999] overflow-y-auto">
-          <div className="bg-slate-900 rounded-3xl border border-slate-750 shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-slate-900 rounded-3xl border border-slate-700 shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-150">
             
             {/* Modal Header */}
             <div className="bg-slate-950 text-white p-5 flex items-center justify-between gap-4 border-b border-slate-800 shrink-0">
@@ -9337,7 +9372,7 @@ MARAS Group etir Center`;
               
               <button 
                 onClick={() => setIsPrintPreviewOpen(false)}
-                className="p-2 bg-slate-850 hover:bg-slate-800 rounded-xl text-slate-400 hover:text-white transition-all cursor-pointer border-0 outline-none"
+                className="p-2 bg-slate-800 hover:bg-slate-800 rounded-xl text-slate-400 hover:text-white transition-all cursor-pointer border-0 outline-none"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -9355,7 +9390,7 @@ MARAS Group etir Center`;
               </div>
 
               {/* simulated physical page target */}
-              <div id="printable-statement-element" className="w-full max-w-2xl bg-white border border-slate-350 shadow-xl rounded-2xl overflow-hidden p-6 md:p-8 space-y-6 font-sans relative text-slate-800 prose select-text pre-print-rendered">
+              <div id="printable-statement-element" className="w-full max-w-2xl bg-white border border-slate-400 shadow-xl rounded-2xl overflow-hidden p-6 md:p-8 space-y-6 font-sans relative text-slate-800 prose select-text pre-print-rendered">
                 
                 {/* Watermark Logo decoration */}
                 <div className="absolute inset-y-0 inset-x-y flex items-center justify-center opacity-[0.02] pointer-events-none select-none">
@@ -9380,13 +9415,13 @@ MARAS Group etir Center`;
                     <p className="text-[10px] font-bold text-slate-400 font-mono uppercase mt-0.5">Reference: MARAS-{new Date(selectedCostStatement.date || '').getFullYear() || '2026'}-{selectedCostStatement.shipmentNumber}</p>
                     <div className="mt-3 text-[10px] text-slate-500 space-y-0.5">
                       <div><strong>{lang === 'tr' ? 'İşlem Tarihi:' : 'Release Date:'}</strong> {selectedCostStatement.date}</div>
-                      <div><strong>{lang === 'tr' ? 'Statü:' : 'Calculated Status:'}</strong> <span className="font-extrabold text-slate-850 uppercase">{selectedCostStatement.paymentStatus}</span></div>
+                      <div><strong>{lang === 'tr' ? 'Statü:' : 'Calculated Status:'}</strong> <span className="font-extrabold text-slate-800 uppercase">{selectedCostStatement.paymentStatus}</span></div>
                     </div>
                   </div>
                 </div>
 
                 {/* Shipment metadata block */}
-                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-150 text-[11px] leading-relaxed">
+                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 text-[11px] leading-relaxed">
                   <div>
                     <h5 className="font-black text-slate-400 text-[9px] uppercase tracking-wider mb-2">{lang === 'tr' ? 'ALICI / İŞ ORTAĞI BİLGİSİ' : 'CARGO CLIENT INFO'}</h5>
                     <div className="font-bold text-slate-900">{selectedCostStatement.companyName}</div>
@@ -9500,7 +9535,7 @@ MARAS Group etir Center`;
               <button
                 type="button"
                 onClick={() => setIsPrintPreviewOpen(false)}
-                className="px-5 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all border-0 outline-none cursor-pointer"
+                className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all border-0 outline-none cursor-pointer"
               >
                 {lang === 'tr' ? 'İptal Et / Geri Dön' : 'Cancel / Close'}
               </button>
@@ -9510,7 +9545,7 @@ MARAS Group etir Center`;
                 onClick={() => handleDownloadPDF("printable-statement-element")}
                 className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-black shadow-lg shadow-orange-950/20 flex items-center gap-2 transition-all border-0 outline-none cursor-pointer"
               >
-                <Download className="w-4 h-4 text-orange-250 shrink-0" />
+                <Download className="w-4 h-4 text-orange-200 shrink-0" />
                 <span>{lang === 'tr' ? 'PDF İndir' : lang === 'ar' ? 'تحميل PDF الكشف' : 'Download PDF'}</span>
               </button>
 
@@ -9519,7 +9554,7 @@ MARAS Group etir Center`;
                 onClick={() => handlePrintStatement("printable-statement-element")}
                 className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-lg shadow-emerald-950/20 flex items-center gap-2 transition-all border-0 outline-none cursor-pointer"
               >
-                <Printer className="w-4 h-4 text-emerald-250 shrink-0 animate-pulse" />
+                <Printer className="w-4 h-4 text-emerald-200 shrink-0 animate-pulse" />
                 <span>{lang === 'tr' ? 'Şimdi Yazdır' : lang === 'ar' ? 'طباعة الكشف المالي' : 'Print Statement'}</span>
               </button>
             </div>
@@ -9723,25 +9758,25 @@ MARAS Group etir Center`;
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-left">
                     {/* On-Time Rate */}
                     <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-lg font-sans">
-                      <p className="text-[10px] font-extrabold text-slate-450 uppercase tracking-wider">{lang === 'tr' ? 'Zamanında Teslim' : (lang === 'ar' ? 'الالتزام بالوقت' : 'On-Time')}</p>
+                      <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">{lang === 'tr' ? 'Zamanında Teslim' : (lang === 'ar' ? 'الالتزام بالوقت' : 'On-Time')}</p>
                       <p className="text-lg font-black text-slate-800 font-mono mt-0.5">{onTimeRate}%</p>
                     </div>
 
                     {/* Safety Score */}
                     <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-lg font-sans">
-                      <p className="text-[10px] font-extrabold text-slate-450 uppercase tracking-wider">{lang === 'tr' ? 'Güvenlik Puanı' : (lang === 'ar' ? 'معدل الأمان' : 'Safety Score')}</p>
+                      <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">{lang === 'tr' ? 'Güvenlik Puanı' : (lang === 'ar' ? 'معدل الأمان' : 'Safety Score')}</p>
                       <p className="text-lg font-black text-emerald-600 font-mono mt-0.5">{safetyScore}%</p>
                     </div>
 
                     {/* Distances Logged */}
                     <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-lg font-sans">
-                      <p className="text-[10px] font-extrabold text-slate-450 uppercase tracking-wider">{lang === 'tr' ? 'Toplam Mesafe' : (lang === 'ar' ? 'المسافة الإجمالية' : 'Total Distance')}</p>
+                      <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">{lang === 'tr' ? 'Toplam Mesafe' : (lang === 'ar' ? 'المسافة الإجمالية' : 'Total Distance')}</p>
                       <p className="text-md font-black text-slate-800 font-mono mt-0.5 truncate" title={`${estDistanceValue} km`}>{estDistanceValue.toLocaleString()} km</p>
                     </div>
 
                     {/* Overall Grade */}
                     <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-lg font-sans flex flex-col justify-center">
-                      <p className="text-[10px] font-extrabold text-slate-450 uppercase tracking-wider">{lang === 'tr' ? 'Değerlendirme' : (lang === 'ar' ? 'التقييم العام' : 'Overall Grade')}</p>
+                      <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">{lang === 'tr' ? 'Değerlendirme' : (lang === 'ar' ? 'التقييم العام' : 'Overall Grade')}</p>
                       <span className="text-md font-black text-blue-600 mt-0.5">
                         {onTimeRate >= 96 ? 'A+' : onTimeRate >= 93 ? 'A' : 'B+'}
                       </span>
@@ -9779,7 +9814,7 @@ MARAS Group etir Center`;
                           </div>
                           
                           <div className="text-right space-y-1">
-                            <span className="inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase bg-blue-105 text-blue-800 border border-blue-200">
+                            <span className="inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase bg-blue-100 text-blue-800 border border-blue-200">
                               {s.status}
                             </span>
                             <p className="text-slate-400 font-mono text-[10px]">{new Date(s.createdAt).toLocaleDateString()}</p>

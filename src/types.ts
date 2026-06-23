@@ -1,6 +1,6 @@
 export type Language = 'en' | 'tr' | 'ar';
 
-export type UserRole = 'admin' | 'driver';
+export type UserRole = 'admin' | 'driver' | 'client';
 
 export type ShipmentStatus =
   | 'New'
@@ -183,7 +183,7 @@ export const TRUCK_TYPES = [
 export interface ChatMessage {
   id: string;
   shipmentId: string;
-  sender: 'admin' | 'driver';
+  sender: 'admin' | 'driver' | 'client';
   senderName: string;
   type: 'text' | 'file';
   text?: string;

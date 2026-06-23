@@ -10,8 +10,7 @@ import {
   DocumentCategory,
   TRUCK_TYPES
 } from "../types";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { storage, auth } from "../googleAuth";
+import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
@@ -145,7 +144,8 @@ function MapCustomControls({ activeShipment, lang }: MapCustomControlsProps) {
           type="button"
           onClick={handleZoomIn}
           title={lang === "tr" ? "Yakınlaştır" : lang === "ar" ? "تكبير" : "Zoom In"}
-          className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors border-b border-slate-805 cursor-pointer"
+          aria-label={lang === "tr" ? "Yakınlaştır" : lang === "ar" ? "تكبير" : "Zoom In"}
+          className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors border-b border-slate-800 cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
         </button>
@@ -153,6 +153,7 @@ function MapCustomControls({ activeShipment, lang }: MapCustomControlsProps) {
           type="button"
           onClick={handleZoomOut}
           title={lang === "tr" ? "Uzaklaştır" : lang === "ar" ? "تصغير" : "Zoom Out"}
+          aria-label={lang === "tr" ? "Uzaklaştır" : lang === "ar" ? "تصغير" : "Zoom Out"}
           className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
         >
           <Minus className="w-3.5 h-3.5" />
@@ -1189,7 +1190,11 @@ export default function DriverApplication({
       }
 
       console.log(`✅ Sync completed: ${syncedCount} GPS points synchronized!`);
-      setCachedCoords([]);
+      if (syncedCount === 0 && itemsToSync.length > 0) {
+        triggerToast("⚠️ GPS location sync failed. Your recent location updates haven't reached dispatch yet — will retry automatically.");
+      } else {
+        setCachedCoords([]);
+      }
     } catch (e) {
       console.error("GPS cache synchronization failed:", e);
     } finally {
@@ -1303,9 +1308,14 @@ export default function DriverApplication({
         setIsEditingProfile(false);
         // Refresh all data
         fetchData();
+      } else {
+        let msg = "Failed to update profile. Please try again.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (err) {
       console.error(err);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     } finally {
       setIsSavingProfile(false);
     }
@@ -1328,7 +1338,11 @@ export default function DriverApplication({
         let uploadedUrl = "";
         let uploadedViaGateway = false;
 
-        // Try the `/api/upload` endpoint first (Server-handled storage)
+        // Upload via the server, which now writes durably to Firebase
+        // Storage itself (see /api/upload in server.ts) — no separate
+        // client-side Storage fallback needed or possible anymore, since
+        // Storage now requires the server's own dedicated account
+        // (see storage.rules).
         try {
           const uploadRes = await fetch("/api/upload", {
             method: "POST",
@@ -1345,22 +1359,13 @@ export default function DriverApplication({
             console.log("Avatar uploaded successfully via server upload gateway:", uploadedUrl);
           }
         } catch (gatewayErr) {
-          console.warn("Media gateway upload failed, falling back to Firebase Storage:", gatewayErr);
+          console.warn("Avatar upload request failed:", gatewayErr);
         }
 
-        // If the server-side API failed, fallback to Firebase Storage
         if (!uploadedViaGateway) {
-          try {
-            const storageRef = ref(storage, `avatars/${selectedDriverId}/${Date.now()}_${file.name}`);
-            await uploadBytes(storageRef, file);
-            uploadedUrl = await getDownloadURL(storageRef);
-            console.log("Avatar uploaded successfully to Firebase Storage! URL: ", uploadedUrl);
-          } catch (storageErr) {
-            console.error("Firebase Storage upload also failed:", storageErr);
-            triggerToast(lang === 'tr' ? "Yükleme başarısız oldu!" : (lang === 'ar' ? "فشل رفع الصورة!" : "Failed to upload avatar image. Details: Firebase Storage permission denied."));
-            setIsUploadingAvatar(false);
-            return;
-          }
+          triggerToast(lang === 'tr' ? "Yükleme başarısız oldu!" : (lang === 'ar' ? "فشل رفع الصورة!" : "Failed to upload avatar image. Please try again."));
+          setIsUploadingAvatar(false);
+          return;
         }
 
         setProfileAvatarUrl(uploadedUrl);
@@ -1383,6 +1388,8 @@ export default function DriverApplication({
           setDrivers(prev => prev.map(d => d.id === selectedDriverId ? updated : d));
           triggerToast(lang === 'tr' ? "Profil resmi güncellendi!" : (lang === 'ar' ? "تم تحديث الصورة الشخصية!" : "Profile photo updated!"));
           fetchData();
+        } else {
+          triggerToast(lang === 'tr' ? "Resim yüklendi ama profil kaydedilemedi. Lütfen tekrar deneyin." : (lang === 'ar' ? "تم رفع الصورة لكن فشل حفظ الملف الشخصي. حاول مرة أخرى." : "Photo uploaded but couldn't save to your profile. Please try again."));
         }
         setIsUploadingAvatar(false);
       };
@@ -1456,9 +1463,14 @@ export default function DriverApplication({
         }
 
         fetchData();
+      } else {
+        let msg = "Failed to accept assignment. Please try again.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
   };
 
@@ -1478,9 +1490,14 @@ export default function DriverApplication({
       if (res.ok) {
         triggerToast(t('rejectSuccess'));
         fetchData();
+      } else {
+        let msg = "Failed to reject assignment. Please try again.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
   };
 
@@ -1503,9 +1520,14 @@ export default function DriverApplication({
         setRemarks("");
         triggerToast(t('statusUpdated'));
         fetchData();
+      } else {
+        let msg = "Failed to update status. Please try again.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
   };
 
@@ -1530,9 +1552,12 @@ export default function DriverApplication({
         setNewMessageText("");
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
+      } else {
+        triggerToast("❌ Message failed to send. Please try again.");
       }
     } catch (err) {
       console.error(err);
+      triggerToast("❌ Could not reach the server. Your message was not sent.");
     }
   };
 
@@ -1822,6 +1847,8 @@ export default function DriverApplication({
         setIsScanOpen(false);
         triggerToast("🎉 Scanned document uploaded and synchronized successfully!");
         fetchData();
+      } else {
+        triggerToast("❌ Failed to upload scanned document. Please try again.");
       }
     } catch (e) {
       console.error(e);
@@ -1884,11 +1911,10 @@ export default function DriverApplication({
 
     try {
       let finalFileUrl = simFileUrl;
+      let uploadFailed = false;
 
       if (selectedFile && simFileUrl && simFileUrl.startsWith("data:")) {
-        let uploadedViaGateway = false;
         try {
-          // 1. Try uploading to our highly available central media gateway route
           const uploadRes = await fetch("/api/upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1900,23 +1926,13 @@ export default function DriverApplication({
           if (uploadRes.ok) {
             const uploadData = await uploadRes.json();
             finalFileUrl = uploadData.url;
-            uploadedViaGateway = true;
-            console.log("File uploaded successfully via central media gateway:", finalFileUrl);
+            console.log("File uploaded successfully via media gateway:", finalFileUrl);
+          } else {
+            uploadFailed = true;
           }
         } catch (uploadGatewayErr) {
-          console.log("Local media gateway fallback triggered:", uploadGatewayErr);
-        }
-
-        // 2. If local upload didn't succeed, fallback to Firebase Storage silently
-        if (!uploadedViaGateway) {
-          try {
-            const fileRef = ref(storage, `shipments/${activeShipment.id}/${Date.now()}_${selectedFile.name}`);
-            const uploadResult = await uploadBytes(fileRef, selectedFile);
-            finalFileUrl = await getDownloadURL(uploadResult.ref);
-            console.log("File uploaded successfully to Firebase Storage! URL: ", finalFileUrl);
-          } catch (storageErr) {
-            console.log("Firebase Storage fallback also failed, retaining base64 inline encoding representation:", storageErr);
-          }
+          uploadFailed = true;
+          console.warn("Upload request failed:", uploadGatewayErr);
         }
       }
 
@@ -1941,8 +1957,14 @@ export default function DriverApplication({
         setSimFileUrl("#");
         setSelectedFile(null);
         setFileSimOpen(false);
-        triggerToast("Attachment uploaded and synchronized successfully!");
+        if (uploadFailed) {
+          triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for dispatch.");
+        } else {
+          triggerToast("Attachment uploaded and synchronized successfully!");
+        }
         fetchData();
+      } else {
+        triggerToast("❌ Failed to upload attachment. Please try again.");
       }
     } catch (e) {
       console.error(e);
@@ -2095,11 +2117,11 @@ export default function DriverApplication({
       
       {/* Simulation Trigger Controller inside screen - Desktop view only */}
       {!loggedInDriverId && !isMobileMode && (
-        <div className="w-full lg:w-80 bg-slate-905/85 backdrop-blur-md p-6 rounded-3xl border border-slate-800/70 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.65)] space-y-5 shrink-0 overflow-y-auto">
+        <div className="w-full lg:w-80 bg-slate-900/85 backdrop-blur-md p-6 rounded-3xl border border-slate-800/70 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.65)] space-y-5 shrink-0 overflow-y-auto">
           <div>
             <span className="text-[10px] uppercase font-black tracking-widest text-[#f97316] font-mono block mb-1">Developer Mode</span>
             <h3 className="font-extrabold text-white text-base tracking-tight">Driver Node Console</h3>
-            <p className="text-[11px] text-slate-450 mt-1 leading-relaxed">Select dispatcher nodes to simulate live telemetry synchronizations and offline queues.</p>
+            <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">Select dispatcher nodes to simulate live telemetry synchronizations and offline queues.</p>
           </div>
 
           <div className="space-y-1.5">
@@ -2128,9 +2150,9 @@ export default function DriverApplication({
               <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-black uppercase font-mono ${
                 isForceOffline 
                   ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' 
-                  : 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
+                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
               }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${isForceOffline ? 'bg-amber-500' : 'bg-emerald-450 animate-pulse'}`}></span>
+                <span className={`w-1.5 h-1.5 rounded-full ${isForceOffline ? 'bg-amber-500' : 'bg-emerald-400 animate-pulse'}`}></span>
                 {isForceOffline ? 'Offline' : 'Online'}
               </span>
             </div>
@@ -2141,7 +2163,7 @@ export default function DriverApplication({
               }}
               className={`w-full py-2 px-3 rounded-xl text-xs font-bold font-mono uppercase tracking-wider transition-all flex items-center justify-center gap-2 border cursor-pointer ${
                 isForceOffline
-                  ? 'bg-emerald-600/10 hover:bg-emerald-600/20 border-emerald-500/30 text-emerald-450'
+                  ? 'bg-emerald-600/10 hover:bg-emerald-600/20 border-emerald-500/30 text-emerald-400'
                   : 'bg-amber-600/10 hover:bg-amber-600/20 border-amber-500/30 text-amber-500'
               }`}
             >
@@ -2194,7 +2216,7 @@ export default function DriverApplication({
                   setShowControlsModal(false);
                 }}
                 className={`w-full py-2 bg-slate-950 border text-[10px] font-mono tracking-wider uppercase font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer ${
-                  isForceOffline ? 'border-emerald-500/30 text-emerald-450' : 'border-amber-500/30 text-amber-500'
+                  isForceOffline ? 'border-emerald-500/30 text-emerald-400' : 'border-amber-500/30 text-amber-500'
                 }`}
               >
                 <Shield className="w-3 h-3" />
@@ -2230,10 +2252,10 @@ export default function DriverApplication({
         {!isMobileMode && (
           <>
             {/* Left side mock volume keys */}
-            <div className="absolute -left-[14px] top-28 w-[4px] h-11 bg-gradient-to-r from-slate-700 to-slate-850 rounded-l-md border-r border-slate-900 shadow-md"></div>
-            <div className="absolute -left-[14px] top-42 w-[4px] h-11 bg-gradient-to-r from-slate-700 to-slate-850 rounded-l-md border-r border-slate-900 shadow-md"></div>
+            <div className="absolute -left-[14px] top-28 w-[4px] h-11 bg-gradient-to-r from-slate-700 to-slate-800 rounded-l-md border-r border-slate-900 shadow-md"></div>
+            <div className="absolute -left-[14px] top-42 w-[4px] h-11 bg-gradient-to-r from-slate-700 to-slate-800 rounded-l-md border-r border-slate-900 shadow-md"></div>
             {/* Right side mock power button toggle */}
-            <div className="absolute -right-[14px] top-34 w-[4px] h-16 bg-gradient-to-l from-slate-700 to-slate-850 rounded-r-md border-l border-slate-900 shadow-md"></div>
+            <div className="absolute -right-[14px] top-34 w-[4px] h-16 bg-gradient-to-l from-slate-700 to-slate-800 rounded-r-md border-l border-slate-900 shadow-md"></div>
           </>
         )}
 
@@ -2278,7 +2300,7 @@ export default function DriverApplication({
                   <div className="relative">
                     <div className={`absolute -inset-4 bg-orange-500/10 rounded-full blur-xl transition-all duration-1000 ${callState === 'connected' ? 'scale-125 opacity-100 animate-pulse' : 'scale-75 opacity-20'}`} />
                     <div className="w-24 h-24 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-white relative z-10 mx-auto">
-                      <div className={`w-20 h-20 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-black text-xl border-4 ${callState === 'connected' ? 'border-emerald-500 animate-pulse' : 'border-slate-850'}`}>
+                      <div className={`w-20 h-20 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-black text-xl border-4 ${callState === 'connected' ? 'border-emerald-500 animate-pulse' : 'border-slate-800'}`}>
                         HQ
                       </div>
                     </div>
@@ -2288,7 +2310,7 @@ export default function DriverApplication({
                   </div>
 
                   <div className="space-y-1">
-                    <p className={`font-mono font-bold text-xs ${callState === 'connected' ? 'text-emerald-450' : 'text-orange-400 animate-pulse'}`}>
+                    <p className={`font-mono font-bold text-xs ${callState === 'connected' ? 'text-emerald-400' : 'text-orange-400 animate-pulse'}`}>
                       {callState === 'calling' ? 'DIALING SECURE SAT-LINK...' : 'CONNECTED (VOIP)'}
                     </p>
                     {callState === 'connected' && (
@@ -2301,7 +2323,7 @@ export default function DriverApplication({
 
                 {/* Call stats / Voice waves */}
                 {callState === 'connected' ? (
-                  <div className="bg-slate-900/60 p-3 rounded-2xl border border-slate-850/45 text-[10px] text-slate-400 max-w-xs w-full mx-auto space-y-1 text-left font-mono">
+                  <div className="bg-slate-900/60 p-3 rounded-2xl border border-slate-800/45 text-[10px] text-slate-400 max-w-xs w-full mx-auto space-y-1 text-left font-mono">
                     <div className="flex justify-between font-bold">
                       <span className="text-slate-500">SIGNAL LATENCY:</span>
                       <span className="text-emerald-400">12ms (OPTIMAL)</span>
@@ -2316,7 +2338,7 @@ export default function DriverApplication({
                     </div>
                   </div>
                 ) : (
-                  <p className="text-[10px] text-slate-550 max-w-xs mx-auto italic leading-relaxed">
+                  <p className="text-[10px] text-slate-500 max-w-xs mx-auto italic leading-relaxed">
                     Connecting to closest logistics relay node. If signal is lost, coordinate cache remains stored locally.
                   </p>
                 )}
@@ -2327,6 +2349,7 @@ export default function DriverApplication({
                     onClick={handleEndCall}
                     className="w-14 h-14 bg-red-600 hover:bg-red-700 hover:scale-105 active:scale-95 text-white rounded-full flex items-center justify-center shadow-[0_4px_20px_rgba(220,38,38,0.4)] transition-all cursor-pointer border-0"
                     title="End Radio Link"
+                    aria-label="End Radio Link"
                   >
                     <X className="w-5 h-5 font-black text-white" />
                   </button>
@@ -2358,7 +2381,7 @@ export default function DriverApplication({
             </div>
 
             {/* Header Mobile Brand */}
-            <div className="p-4 bg-slate-955 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
+            <div className="p-4 bg-slate-950 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
                   <Truck className="w-4 h-4 text-orange-500" />
@@ -2489,7 +2512,7 @@ export default function DriverApplication({
                           className={`px-3 py-1.5 rounded-xl border font-mono text-[9.5px] font-bold tracking-tight whitespace-nowrap transition-all cursor-pointer ${
                             isActive
                               ? 'bg-orange-600/15 border-orange-500/40 text-orange-400 font-black'
-                              : 'bg-slate-950/40 border-slate-850 hover:border-slate-800 text-slate-450'
+                              : 'bg-slate-950/40 border-slate-800 hover:border-slate-800 text-slate-400'
                           }`}
                         >
                           {label}
@@ -2545,7 +2568,7 @@ export default function DriverApplication({
                           </div>
 
                           {/* Interactive route line design */}
-                          <div className="space-y-2.5 relative z-10 bg-slate-950/40 p-3 rounded-xl border border-slate-855/40">
+                          <div className="space-y-2.5 relative z-10 bg-slate-950/40 p-3 rounded-xl border border-slate-900/40">
                             <p className="font-bold text-xs text-slate-100 truncate">{s.cargoDescription}</p>
                             
                             {/* Route tracking line */}
@@ -2558,8 +2581,8 @@ export default function DriverApplication({
                                 <strong className="text-slate-200 text-xs truncate">{s.loadingCity}</strong>
                               </div>
 
-                              <div className="flex items-center self-center justify-center bg-slate-900 border border-slate-850 w-5 h-5 rounded-full shrink-0 z-10 group-hover:text-orange-450 group-hover:border-orange-500/30 transition-colors">
-                                <ChevronRight className="w-3 h-3 text-slate-500 group-hover:text-orange-450" />
+                              <div className="flex items-center self-center justify-center bg-slate-900 border border-slate-800 w-5 h-5 rounded-full shrink-0 z-10 group-hover:text-orange-400 group-hover:border-orange-500/30 transition-colors">
+                                <ChevronRight className="w-3 h-3 text-slate-500 group-hover:text-orange-400" />
                               </div>
 
                               <div className="flex flex-col text-right max-w-[45%]">
@@ -2569,7 +2592,7 @@ export default function DriverApplication({
                             </div>
                           </div>
 
-                          <div className="flex items-center justify-between pt-2 border-t border-slate-850/60 relative z-10 text-xs">
+                          <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 relative z-10 text-xs">
                             <div className="flex flex-col">
                               <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest font-mono">Agreed Payout</span>
                               <span className="font-extrabold text-orange-500 font-mono text-sm mt-0.5">
@@ -2598,7 +2621,7 @@ export default function DriverApplication({
 
                     {shipments.length === 0 && (
                       <div className="py-20 text-center space-y-3 bg-slate-900/40 rounded-2.5xl p-6 border border-slate-800/80">
-                        <div className="w-12 h-12 rounded-full bg-slate-950/80 border border-slate-850 flex items-center justify-center mx-auto text-slate-500">
+                        <div className="w-12 h-12 rounded-full bg-slate-950/80 border border-slate-800 flex items-center justify-center mx-auto text-slate-500">
                           <Truck className="w-6 h-6 shrink-0" />
                         </div>
                         <div>
@@ -2625,7 +2648,7 @@ export default function DriverApplication({
                   <button 
                     type="button"
                     onClick={handleStartCall}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-orange-450 hover:text-white transition-all bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/35 px-3.5 py-1.5 rounded-full cursor-pointer shadow-[0_2px_10px_rgba(249,115,22,0.15)] active:scale-95 duration-250"
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-orange-400 hover:text-white transition-all bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/35 px-3.5 py-1.5 rounded-full cursor-pointer shadow-[0_2px_10px_rgba(249,115,22,0.15)] active:scale-95 duration-250"
                   >
                     <Phone className="w-3.5 h-3.5 text-orange-500 shrink-0" />
                     <span>{lang === 'tr' ? 'Sorumluyu Ara' : (lang === 'ar' ? 'اتصال بالمسؤول' : 'Call HQ Dispatch')}</span>
@@ -2734,9 +2757,12 @@ export default function DriverApplication({
                           setGpsSimActive(true);
                           triggerToast(lang === 'tr' ? "🚀 Yolculuk Başlatıldı! GPS simülatörü aktif." : "🚀 Transit Started! GPS live transmitter activated.");
                           fetchData();
+                        } else {
+                          triggerToast("❌ Failed to start transit. Please try again.");
                         }
                       } catch (err) {
                         console.error("Quick Start transit error:", err);
+                        triggerToast("❌ Could not reach the server.");
                       }
                     }
                   };
@@ -2770,9 +2796,12 @@ export default function DriverApplication({
                         if (newSt === "In Transit") {
                           setGpsSimActive(true);
                         }
+                      } else {
+                        triggerToast("❌ Failed to update status. Please try again.");
                       }
                     } catch (err) {
                       console.error("Status check update error", err);
+                      triggerToast("❌ Could not reach the server.");
                     }
                   };
 
@@ -2849,7 +2878,7 @@ export default function DriverApplication({
                           className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all transform active:scale-95 cursor-pointer h-24 text-center ${
                             quickStatusOpen 
                               ? "bg-slate-800 text-white border-slate-600 shadow-inner" 
-                              : "bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[#f97316] hover:border-slate-750"
+                              : "bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[#f97316] hover:border-slate-700"
                           }`}
                         >
                           <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-[#f97316]">
@@ -2866,7 +2895,7 @@ export default function DriverApplication({
 
                       {/* EXPANDED INTERACTIVE HIGH-CONTRAST CHANNELS DRAWER */}
                       {quickStatusOpen && (
-                        <div className="p-4 bg-slate-950 border border-slate-850 rounded-2xl space-y-3 animate-fade-in text-left">
+                        <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-3 animate-fade-in text-left">
                           <div className="flex items-center justify-between border-b border-slate-900 pb-2">
                             <div>
                               <span className="text-[8px] font-black uppercase tracking-widest text-slate-500 block font-mono">
@@ -2899,7 +2928,7 @@ export default function DriverApplication({
                                       ? "bg-amber-500/10 text-amber-500 border-amber-500/30 font-black cursor-default"
                                       : isNext
                                       ? "bg-orange-500 text-white border-orange-600 shadow-[0_2px_12px_rgba(249,115,22,0.3)] font-black"
-                                      : "bg-slate-900 text-slate-300 border-slate-850 hover:bg-slate-850 hover:text-white"
+                                      : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white"
                                   }`}
                                 >
                                   {isNext && (
@@ -2937,7 +2966,7 @@ export default function DriverApplication({
                     <div>
                       <span className="text-slate-500 font-bold block text-[9px] uppercase tracking-wider font-mono mb-1">{t('cargoInfo')}</span>
                       <p className="font-extrabold text-slate-100 text-xs leading-normal">{activeShipment.cargoDescription}</p>
-                      <span className="inline-flex items-center gap-1.5 bg-slate-950 text-slate-400 font-mono text-[9px] font-bold mt-2 px-2 py-1 rounded-lg border border-slate-850">
+                      <span className="inline-flex items-center gap-1.5 bg-slate-950 text-slate-400 font-mono text-[9px] font-bold mt-2 px-2 py-1 rounded-lg border border-slate-800">
                         Total Weight: {(activeShipment.cargoWeight ?? 0).toLocaleString()} kg
                       </span>
                     </div>
@@ -2955,7 +2984,7 @@ export default function DriverApplication({
                       </div>
                     </div>
 
-                    <div className="border-t border-slate-800/80 pt-3 flex items-center justify-between bg-slate-950/60 p-3 rounded-2xl border border-slate-850/60">
+                    <div className="border-t border-slate-800/80 pt-3 flex items-center justify-between bg-slate-950/60 p-3 rounded-2xl border border-slate-800/60">
                       <div className="flex flex-col">
                         <span className="text-slate-500 font-bold text-[9px] uppercase tracking-widest font-mono">{t('carrierAmount')}</span>
                         <span className="text-slate-400 text-[10px] mt-0.5">Fixed carrier revenue</span>
@@ -2978,7 +3007,7 @@ export default function DriverApplication({
                 </div>
 
                 {/* Google Maps Real-time tracking progress panel */}
-                <div className="p-4 bg-slate-900 border border-slate-850 rounded-2xl space-y-3">
+                <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
                       <h4 className="text-slate-200 font-bold text-xs uppercase tracking-wider text-left">Live Transit Route Tracker</h4>
@@ -3086,7 +3115,7 @@ export default function DriverApplication({
                     </div>
                   ) : (
                     /* Elegant Setup / Instruction Splash block when Google Maps Key is not yet configured */
-                    <div className="w-full rounded-2xl border border-slate-850 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px]">
+                    <div className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px]">
                       <div className="w-12 h-12 rounded-full bg-orange-500/5 border border-orange-500/20 flex items-center justify-center shadow-inner">
                         <MapPin className="w-5 h-5 text-orange-500" />
                       </div>
@@ -3106,17 +3135,17 @@ export default function DriverApplication({
 
                   {/* Route Progress bar & telemetry metadata row */}
                   {lastGpsCoords && (
-                    <div className="bg-slate-950 border border-slate-850 p-4 rounded-2xl space-y-3.5 shadow-sm text-xs select-none">
+                    <div className="bg-slate-950 border border-slate-800 p-4 rounded-2xl space-y-3.5 shadow-sm text-xs select-none">
                       <div className="grid grid-cols-3 gap-3 text-center">
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
+                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Live Speed</span>
                           <span className="font-bold text-slate-200 font-mono text-xs">{isShipmentFinished ? 0 : gpsSpeed} km/h</span>
                         </div>
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
+                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
                           <span className="font-extrabold text-[#f97316] font-sans text-xs">{calculateDistancePercentage()}% Complete</span>
                         </div>
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-850/40">
+                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Sat Status</span>
                           {isShipmentFinished ? (
                             <span className="font-bold text-slate-500 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
@@ -3136,7 +3165,7 @@ export default function DriverApplication({
                           <span>ROUTE PROGRESS (GPS)</span>
                           <span>{calculateDistancePercentage()}%</span>
                         </div>
-                        <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-850">
+                        <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
                           <div 
                             className="bg-gradient-to-r from-orange-600 to-orange-400 h-2 rounded-full transition-all duration-1000" 
                             style={{ width: `${calculateDistancePercentage()}%` }}
@@ -3186,12 +3215,12 @@ export default function DriverApplication({
                     ) : (
                       <div className="space-y-4 animate-fade-in relative z-10 text-left">
                         {/* Handoff Checklist */}
-                        <div className="space-y-2.5 bg-slate-950 p-3.5 rounded-2xl border border-slate-850/60">
+                        <div className="space-y-2.5 bg-slate-950 p-3.5 rounded-2xl border border-slate-800/60">
                           <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
                             Handoff Verification Checklist
                           </span>
                           
-                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-350 hover:text-white">
+                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-400 hover:text-white">
                             <input
                               type="checkbox"
                               checked={podChecklist.sealIntact}
@@ -3201,7 +3230,7 @@ export default function DriverApplication({
                             <span>Confirm trailer seal is intact & matches BOL</span>
                           </label>
 
-                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-350 hover:text-white">
+                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-400 hover:text-white">
                             <input
                               type="checkbox"
                               checked={podChecklist.cargoVerified}
@@ -3390,7 +3419,7 @@ export default function DriverApplication({
                             <span className="text-[10px] font-black text-white uppercase tracking-wider font-mono block">
                               {assistT.title}
                             </span>
-                            <span className="text-[9px] text-slate-450 block truncate leading-tight mt-0.5">
+                            <span className="text-[9px] text-slate-400 block truncate leading-tight mt-0.5">
                               {assistT.subtitle}
                             </span>
                           </div>
@@ -3422,7 +3451,7 @@ export default function DriverApplication({
                             <span className="text-slate-500 text-[8px] font-bold uppercase tracking-wider font-mono block text-left">
                               {assistT.trafficScenario}
                             </span>
-                            <div className="grid grid-cols-4 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-850">
+                            <div className="grid grid-cols-4 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
                               {[
                                 { key: 'optimal', text: assistT.optimal },
                                 { key: 'moderate', text: assistT.moderate },
@@ -3448,19 +3477,19 @@ export default function DriverApplication({
                             </div>
                             
                             {/* Scenario verbal description contextual helper */}
-                            <p className="text-[10px] text-slate-440 leading-relaxed text-left border-l-2 border-orange-500/40 pl-2 py-0.5 select-text">
+                            <p className="text-[10px] text-slate-400 leading-relaxed text-left border-l-2 border-orange-500/40 pl-2 py-0.5 select-text">
                               {assistCalculations.trafficFactorDescription}
                             </p>
                           </div>
 
                           {/* Predictor Core Metric Bento Grid */}
                           <div className="grid grid-cols-3 gap-3">
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center relative overflow-hidden">
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center relative overflow-hidden">
                               <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
                                 {assistT.remDistance}
                               </span>
                               <div className="mt-1 flex items-baseline justify-center gap-0.5">
-                                <span className="font-bold text-slate-250 text-xs font-mono">
+                                <span className="font-bold text-slate-200 text-xs font-mono">
                                   {assistCalculations.processedDistance}
                                 </span>
                                 <span className="text-[8px] font-mono text-slate-500">KM</span>
@@ -3470,13 +3499,13 @@ export default function DriverApplication({
                               </span>
                             </div>
 
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center">
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center">
                               <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
                                 {assistT.estSpeed}
                               </span>
                               <div className="mt-1 flex items-baseline justify-center gap-1">
                                 <Gauge className="w-3 h-3 text-orange-400 shrink-0 self-center" />
-                                <span className="font-bold text-slate-250 text-xs font-mono">
+                                <span className="font-bold text-slate-200 text-xs font-mono">
                                   {assistCalculations.activeSpeed}
                                 </span>
                                 <span className="text-[8px] font-mono text-slate-500">KMH</span>
@@ -3486,12 +3515,12 @@ export default function DriverApplication({
                               </span>
                             </div>
 
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850/70 text-center">
+                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center">
                               <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
                                 {assistT.extraDelay}
                               </span>
                               <div className="mt-1 flex items-baseline justify-center gap-0.5">
-                                <span className={`font-bold text-xs font-mono ${assistCalculations.totalDelays > 2 ? 'text-orange-405' : 'text-slate-250'}`}>
+                                <span className={`font-bold text-xs font-mono ${assistCalculations.totalDelays > 2 ? 'text-orange-400' : 'text-slate-200'}`}>
                                   +{assistCalculations.totalDelays.toFixed(1)}
                                 </span>
                                 <span className="text-[8px] font-mono text-slate-500">HRS</span>
@@ -3537,7 +3566,7 @@ export default function DriverApplication({
                         </div>
                       ) : (
                         /* Paused Manual planning dashboard view */
-                        <div className="py-4 px-2 rounded-2xl bg-slate-950/40 border border-slate-850/60 flex flex-col items-center justify-center text-center space-y-2">
+                        <div className="py-4 px-2 rounded-2xl bg-slate-950/40 border border-slate-800/60 flex flex-col items-center justify-center text-center space-y-2">
                           <AlertTriangle className="w-7 h-7 text-slate-500" />
                           <p className="text-[10.5px] text-slate-400 max-w-xs leading-relaxed">
                             {assistT.disabledHint}
@@ -3647,9 +3676,9 @@ export default function DriverApplication({
                           setIsScanOpen(true);
                           startCamera();
                         }}
-                        className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-450 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                        className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-400 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
                       >
-                        <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-450" />
+                        <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-400" />
                         <span>Scan Document</span>
                       </button>
                     )}
@@ -3657,7 +3686,7 @@ export default function DriverApplication({
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
                     <div className="space-y-2">
                       {activeShipment.documents.map(d => (
-                        <div key={d.id} className="p-3 bg-slate-950 border border-slate-850 rounded-xl flex items-center justify-between text-xs hover:border-slate-750 transition-colors">
+                        <div key={d.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between text-xs hover:border-slate-700 transition-colors">
                           <div className="flex items-center gap-2">
                             <div className="p-1.5 rounded-lg bg-orange-500/5 border border-orange-500/20 text-orange-500 h-7 w-7 flex items-center justify-center">
                               <Paperclip className="w-3.5 h-3.5" />
@@ -3681,7 +3710,7 @@ export default function DriverApplication({
               <div className="h-full flex flex-col justify-between pt-1 text-slate-200">
                 {activeShipment ? (
                   <div className="flex-1 flex flex-col justify-between overflow-hidden h-[540px]">
-                    <div className="bg-slate-900/60 p-3.5 border-b border-slate-850 flex items-center justify-between shrink-0 select-none">
+                    <div className="bg-slate-900/60 p-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
                       <div className="flex items-center gap-2">
                         {isShipmentFinished ? (
                           <span className="relative flex h-2 w-2">
@@ -3689,7 +3718,7 @@ export default function DriverApplication({
                           </span>
                         ) : (
                           <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                           </span>
                         )}
@@ -3722,7 +3751,7 @@ export default function DriverApplication({
                             </button>
                             <button 
                               onClick={() => setFileSimOpen(true)}
-                              className="p-1 px-2.5 bg-slate-800 hover:bg-slate-750 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
+                              className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
                             >
                               <FileUp className="w-3 h-3 shrink-0" />
                               <span>Upload File</span>
@@ -3732,7 +3761,7 @@ export default function DriverApplication({
                       </div>
 
                     {/* Chat Search Input */}
-                    <div className="px-3.5 py-2 bg-slate-950 border-b border-slate-905 flex items-center gap-2 shrink-0 transition-all select-none">
+                    <div className="px-3.5 py-2 bg-slate-950 border-b border-slate-900 flex items-center gap-2 shrink-0 transition-all select-none">
                       <Search className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                       <input
                         type="text"
@@ -3879,7 +3908,7 @@ export default function DriverApplication({
                             key={index}
                             type="button"
                             onClick={() => setNewMessageText(chip.text)}
-                            className="px-3 py-1 bg-slate-900 hover:bg-slate-850 border border-slate-800/80 text-slate-300 hover:text-white rounded-lg text-[9px] font-bold whitespace-nowrap transition-all cursor-pointer shadow-sm select-none active:scale-95"
+                            className="px-3 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800/80 text-slate-300 hover:text-white rounded-lg text-[9px] font-bold whitespace-nowrap transition-all cursor-pointer shadow-sm select-none active:scale-95"
                           >
                             {chip.label}
                           </button>
@@ -3889,16 +3918,16 @@ export default function DriverApplication({
 
                     {/* Message input */}
                     {isShipmentFinished ? (
-                      <div className="p-4 bg-slate-950 border-t border-slate-905 text-center text-slate-500 font-mono text-[10px] select-none">
+                      <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 font-mono text-[10px] select-none">
                         ⚠️ Radio connection has been closed for this completed job.
                       </div>
                     ) : (
-                      <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-905 flex items-center gap-2.5 shrink-0 select-none">
+                      <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-900 flex items-center gap-2.5 shrink-0 select-none">
                         <button 
                           type="button" 
                           onClick={() => setFileSimOpen(true)}
                           title="Attach Document / Photo"
-                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
+                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
                         >
                           <Paperclip className="w-4 h-4 shrink-0" />
                         </button>
@@ -3913,6 +3942,7 @@ export default function DriverApplication({
                         <button 
                           type="submit" 
                           disabled={!newMessageText.trim()}
+                          aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                           className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
                         >
                           <Send className="w-4 h-4 shrink-0" />
@@ -3922,11 +3952,11 @@ export default function DriverApplication({
                   </div>
                 ) : (
                   <div className="py-24 text-center text-slate-500 space-y-4 px-6 select-none">
-                    <div className="w-14 h-14 bg-slate-900 border border-slate-850 rounded-2.5xl flex items-center justify-center mx-auto text-slate-600">
+                    <div className="w-14 h-14 bg-slate-900 border border-slate-800 rounded-2.5xl flex items-center justify-center mx-auto text-slate-600">
                       <MessageSquare className="w-7 h-7 mx-auto shrink-0" />
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-350">Helpline Chat Room Empty</p>
+                      <p className="text-xs font-bold text-slate-400">Helpline Chat Room Empty</p>
                       <p className="text-[10px] text-slate-500 max-w-xs mx-auto leading-relaxed">Select any active job inside your assigned shipments directory to launch direct radio channels with dispatchers.</p>
                     </div>
                   </div>
@@ -4052,7 +4082,7 @@ export default function DriverApplication({
                       </div>
 
                       {/* Personal Info Box */}
-                      <div className="p-3.5 bg-slate-900 border border-slate-850 rounded-2xl space-y-3">
+                      <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                         <span className="text-[9.5px] font-bold text-slate-400 block uppercase tracking-wider border-b border-slate-800/65 pb-1.5">{profileT.personalData}</span>
                         
                         <div className="flex items-center justify-between text-xs py-1">
@@ -4063,7 +4093,7 @@ export default function DriverApplication({
                           <strong className="text-slate-200">{profileName}</strong>
                         </div>
 
-                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-850">
+                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-800">
                           <span className="text-slate-500 font-medium flex items-center gap-1.5">
                             <Briefcase className="w-3.5 h-3.5 text-slate-500" />
                             {profileT.username}
@@ -4071,7 +4101,7 @@ export default function DriverApplication({
                           <strong className="text-slate-300 font-mono text-[10.5px]">@{profileUsername}</strong>
                         </div>
 
-                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-850">
+                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-800">
                           <span className="text-slate-500 font-medium flex items-center gap-1.5">
                             <Phone className="w-3.5 h-3.5 text-slate-500" />
                             {profileT.phone}
@@ -4081,7 +4111,7 @@ export default function DriverApplication({
                       </div>
 
                       {/* Tractor & Trailer Specifications */}
-                      <div className="p-3.5 bg-slate-900 border border-slate-850 rounded-2xl space-y-3">
+                      <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                         <span className="text-[9.5px] font-bold text-slate-400 block uppercase tracking-wider border-b border-slate-800/65 pb-1.5">{editProfileLabels.truckSpecs}</span>
                         
                         <div className="flex items-center justify-between text-xs py-1">
@@ -4092,7 +4122,7 @@ export default function DriverApplication({
                           <strong className="text-slate-200 font-mono tracking-wide">{profileTruckNumber}</strong>
                         </div>
 
-                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-850">
+                        <div className="flex items-center justify-between text-xs py-1 border-t border-slate-800">
                           <span className="text-slate-500 font-medium flex items-center gap-1.5">
                             <Activity className="w-3.5 h-3.5 text-slate-500" />
                             {profileT.truckType}
@@ -4119,13 +4149,13 @@ export default function DriverApplication({
                   ) : (
                     // EDIT FORM VIEW
                     <form onSubmit={handleUpdateProfile} className="space-y-3.5">
-                      <div className="space-y-3 p-4 bg-slate-900 border border-slate-850 rounded-2xl text-left">
+                      <div className="space-y-3 p-4 bg-slate-900 border border-slate-800 rounded-2xl text-left">
                         <span className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider border-b border-slate-800 pb-1.5">{profileT.personalData}</span>
                         
                         {/* Edit Mode Avatar Section */}
                         <div className="flex items-center gap-4 py-2 border-b border-slate-800/40 pb-3">
                           <div className="relative">
-                            <div className="w-14 h-14 rounded-full overflow-hidden flex items-center justify-center text-white font-black text-sm shadow border border-slate-800 bg-slate-850">
+                            <div className="w-14 h-14 rounded-full overflow-hidden flex items-center justify-center text-white font-black text-sm shadow border border-slate-800 bg-slate-800">
                               {isUploadingAvatar ? (
                                 <div className="flex items-center justify-center w-full h-full bg-slate-900">
                                   <span className="w-4 h-4 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
@@ -4159,7 +4189,7 @@ export default function DriverApplication({
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[9px] text-slate-550 block text-left font-black tracking-wider uppercase font-mono">{profileT.fullName}</label>
+                          <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">{profileT.fullName}</label>
                           <input 
                             type="text" 
                             required
@@ -4170,18 +4200,18 @@ export default function DriverApplication({
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[9px] text-slate-550 block text-left font-black tracking-wider uppercase font-mono">{profileT.username}</label>
+                          <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">{profileT.username}</label>
                           <input 
                             type="text" 
                             required
                             value={profileUsername}
                             onChange={(e) => setProfileUsername(e.target.value)}
-                            className="w-full p-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 rounded-xl outline-none font-mono focus:border-orange-500 transition-all text-left hover:border-slate-705"
+                            className="w-full p-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 rounded-xl outline-none font-mono focus:border-orange-500 transition-all text-left hover:border-slate-700"
                           />
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[9px] text-slate-550 block text-left font-black tracking-wider uppercase font-mono">{profileT.phone}</label>
+                          <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">{profileT.phone}</label>
                           <input 
                             type="text"
                             required 
@@ -4193,11 +4223,11 @@ export default function DriverApplication({
                       </div>
 
                       {/* Truck Details Edit fields */}
-                      <div className="space-y-4 p-4.5 bg-slate-900 border border-slate-850 rounded-2.5xl text-left">
+                      <div className="space-y-4 p-4.5 bg-slate-900 border border-slate-800 rounded-2.5xl text-left">
                         <span className="text-[10px] font-black text-white block uppercase tracking-wider border-b border-slate-800 pb-2 font-mono">{editProfileLabels.truckSpecs}</span>
 
                         <div className="space-y-1">
-                          <label className="text-[9px] text-slate-550 block text-left font-black tracking-wider uppercase font-mono">{profileT.truckNumber}</label>
+                          <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">{profileT.truckNumber}</label>
                           <input 
                             type="text" 
                             required
@@ -4208,7 +4238,7 @@ export default function DriverApplication({
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[9px] text-slate-550 block text-left font-black tracking-wider uppercase font-mono">{profileT.truckType}</label>
+                          <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">{profileT.truckType}</label>
                           <select 
                             value={profileTruckType}
                             onChange={(e) => setProfileTruckType(e.target.value)}
@@ -4264,7 +4294,7 @@ export default function DriverApplication({
                     <button 
                       type="button" 
                       onClick={onLogout}
-                      className="w-full py-2.5 bg-slate-950 hover:bg-red-950/40 border border-slate-800 hover:border-red-500/30 text-slate-400 hover:text-red-450 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer mt-1"
+                      className="w-full py-2.5 bg-slate-950 hover:bg-red-950/40 border border-slate-800 hover:border-red-500/30 text-slate-400 hover:text-red-400 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer mt-1"
                     >
                       <X className="w-4 h-4 shrink-0 text-red-500" />
                       <span>{profileT.logout}</span>
@@ -4279,7 +4309,7 @@ export default function DriverApplication({
                           setShowDriverDeleteConfirm(true);
                           setUnderstandDriverDelete(false);
                         }}
-                        className="w-full py-2 bg-red-950/10 hover:bg-red-950/30 border border-red-900/30 hover:border-red-500/30 text-red-450 font-extrabold text-[10.5px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                        className="w-full py-2 bg-red-950/10 hover:bg-red-950/30 border border-red-900/30 hover:border-red-500/30 text-red-400 font-extrabold text-[10.5px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5 shrink-0" />
                         <span>{lang === 'tr' ? "Hesabımı Tamamen Sil" : (lang === 'ar' ? "حذف الحساب نهائياً" : "Delete My Account")}</span>
@@ -4302,7 +4332,7 @@ export default function DriverApplication({
                           </div>
                         </div>
 
-                        <label className="flex items-start gap-2.5 cursor-pointer text-[10.5px] font-bold text-slate-350 hover:text-white">
+                        <label className="flex items-start gap-2.5 cursor-pointer text-[10.5px] font-bold text-slate-400 hover:text-white">
                           <input
                             type="checkbox"
                             checked={understandDriverDelete}
@@ -4323,7 +4353,7 @@ export default function DriverApplication({
                             type="button"
                             disabled={isDeletingDriverAccount}
                             onClick={() => setShowDriverDeleteConfirm(false)}
-                            className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+                            className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
                           >
                             {lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء Действие" : "Cancel")}
                           </button>
@@ -4332,7 +4362,7 @@ export default function DriverApplication({
                             type="button"
                             disabled={isDeletingDriverAccount || !understandDriverDelete}
                             onClick={handleDeleteDriverAccount}
-                            className="flex-1 py-1.5 bg-gradient-to-r from-red-650 to-red-600 hover:from-red-600 hover:to-red-700 disabled:opacity-40 text-white font-black text-[10px] rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md border-0"
+                            className="flex-1 py-1.5 bg-gradient-to-r from-red-600 to-red-600 hover:from-red-600 hover:to-red-700 disabled:opacity-40 text-white font-black text-[10px] rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md border-0"
                           >
                             {isDeletingDriverAccount ? (
                               <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
@@ -4504,14 +4534,14 @@ export default function DriverApplication({
                             <h4 className="text-xs font-black text-white uppercase tracking-tight">
                               {lang === 'tr' ? "Akıllı GPS Müzakeresi" : lang === 'ar' ? "تتبع الموقع التلقائي الذكي" : "Smart GPS Telemetry"}
                             </h4>
-                            <span className="text-[8.5px] text-emerald-450 font-mono tracking-wider font-extrabold uppercase flex items-center gap-1 mt-0.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-450 animate-ping shrink-0" />
+                            <span className="text-[8.5px] text-emerald-400 font-mono tracking-wider font-extrabold uppercase flex items-center gap-1 mt-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
                               {lang === 'tr' ? "Aktif ve Otomatik" : lang === 'ar' ? "مفعل تلقائياً" : "Active & Auto-Optimized"}
                             </span>
                           </div>
                         </div>
 
-                        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-850 text-slate-350 text-[10.5px] leading-relaxed space-y-2">
+                        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-slate-400 text-[10.5px] leading-relaxed space-y-2">
                           <p>
                             {lang === 'tr' 
                               ? "Cihazınızın konumu sevkiyat sorumlusu haritasıyla arka planda tamamen otomatik olarak senkronize edilir. Manuel müdahale veya ayar yapılması gerekmez." 
@@ -4519,7 +4549,7 @@ export default function DriverApplication({
                               ? "يتم مزامنة موقع جهازك مع خريطة المرسل بالكامل تحت الخلفية بشكل تلقائي، لا يتطلب أي تحكم يدوي."
                               : "Your position is automatically synchronized with the backend dispatcher map dynamically. No manual adjustment ever needed."}
                           </p>
-                          <div className="flex items-center justify-between text-[9px] font-mono border-t border-slate-900/85 pt-2 text-slate-550">
+                          <div className="flex items-center justify-between text-[9px] font-mono border-t border-slate-900/85 pt-2 text-slate-500">
                             <span>{lang === 'tr' ? "Sıklık:" : "Dynamic Interval:"}</span>
                             <span className="font-extrabold text-orange-400">15s In-Transit</span>
                           </div>
@@ -4528,17 +4558,17 @@ export default function DriverApplication({
 
                       {/* TOGGLE SETTINGS PANEL */}
                       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-md">
-                        <div className="flex items-center gap-2 pb-1 border-b border-slate-850">
+                        <div className="flex items-center gap-2 pb-1 border-b border-slate-800">
                           <Settings className="w-4 h-4 text-orange-500" />
                           <h4 className="text-xs font-black text-white uppercase tracking-tight">App Preferences</h4>
                         </div>
 
                         <div className="space-y-3">
                           {/* Unit Configuration preference toggle */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs">
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
                             <div className="space-y-0.5">
                               <span className="text-[11px] font-bold text-white block">{menuT.unitsLabel}</span>
-                              <span className="text-[9px] text-slate-550 block leading-tight">{menuT.unitsSub}</span>
+                              <span className="text-[9px] text-slate-500 block leading-tight">{menuT.unitsSub}</span>
                             </div>
                             <button
                               type="button"
@@ -4547,19 +4577,19 @@ export default function DriverApplication({
                                 setDistanceUnit(nextUnit);
                                 triggerToast(`Units switched to ${nextUnit.toUpperCase()}`);
                               }}
-                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all"
+                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all"
                             >
                               {distanceUnit === 'km' ? 'KM (METRIC)' : 'MI (IMPERIAL)'}
                             </button>
                           </div>
 
                           {/* Daylight/Nighttime View Theme Switcher - Now prominently in App Preferences */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs">
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
                             <div className="space-y-0.5 text-left">
                               <span className="text-[11px] font-bold text-white block">
                                 {lang === 'tr' ? "Görünürlük Kontrast Modu" : lang === 'ar' ? "وضع تباين الرؤية" : "Visibility Contrast Mode"}
                               </span>
-                              <span className="text-[9px] text-slate-550 block leading-tight">
+                              <span className="text-[9px] text-slate-500 block leading-tight">
                                 {lang === 'tr' 
                                   ? "Gündüz Işığı ile Gece Karanlığı arasında geçiş yapın" 
                                   : lang === 'ar' 
@@ -4574,7 +4604,7 @@ export default function DriverApplication({
                                 setTheme(nextTheme);
                                 triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for bright daylight visibility." : "🌙 Dark mode enabled for relaxed night driving.");
                               }}
-                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer animate-fade-in"
+                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer animate-fade-in"
                             >
                               {theme === 'dark' ? (
                                 <>
@@ -4591,10 +4621,10 @@ export default function DriverApplication({
                           </div>
 
                           {/* Sound Notification Feed preference toggle */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs">
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
                             <div className="space-y-0.5">
                               <span className="text-[11px] font-bold text-white block">{menuT.audioAlerts}</span>
-                              <span className="text-[9px] text-slate-555 block leading-tight">{menuT.audioAlertsSub}</span>
+                              <span className="text-[9px] text-slate-600 block leading-tight">{menuT.audioAlertsSub}</span>
                             </div>
                             <button
                               type="button"
@@ -4604,15 +4634,15 @@ export default function DriverApplication({
                               }}
                               className={`p-1 w-9 rounded-full cursor-pointer flex transition-all ${soundEnabled ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
                             >
-                              <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-650'}`} />
+                              <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-600'}`} />
                             </button>
                           </div>
 
                           {/* Speed advising advisor alerts */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs">
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
                             <div className="space-y-0.5">
                               <span className="text-[11px] font-bold text-white block">{menuT.speedAdvisor}</span>
-                              <span className="text-[9px] text-slate-555 block leading-tight">{menuT.speedAdvisorSub}</span>
+                              <span className="text-[9px] text-slate-600 block leading-tight">{menuT.speedAdvisorSub}</span>
                             </div>
                             <button
                               type="button"
@@ -4622,15 +4652,15 @@ export default function DriverApplication({
                               }}
                               className={`p-1 w-9 rounded-full cursor-pointer flex transition-all ${speedLimitWarn ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
                             >
-                              <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-650'}`} />
+                              <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-600'}`} />
                             </button>
                           </div>
 
                           {/* Application Selected Language Indicator Card */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-850 text-xs text-left">
+                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs text-left">
                             <div className="space-y-0.5">
                               <span className="text-[11px] font-bold text-white block">{menuT.activeLang}</span>
-                              <span className="text-[9px] text-slate-555 block leading-tight">{menuT.activeLangSub}</span>
+                              <span className="text-[9px] text-slate-600 block leading-tight">{menuT.activeLangSub}</span>
                             </div>
                             <span className="px-2.5 py-1 bg-orange-500/10 text-orange-400 font-extrabold text-[10px] rounded border border-orange-500/20 font-mono uppercase">
                               {lang === 'tr' ? "🇹🇷 Türkçe" : (lang === 'ar' ? "🇸🇦 العربية" : "🇺🇸 English")}
@@ -4673,7 +4703,7 @@ export default function DriverApplication({
                   <div className="absolute top-0 right-0 w-20 h-20 bg-orange-600/5 rounded-full blur-xl" />
                   <div className="flex items-center justify-between relative z-10">
                     <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-550/20">
+                      <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
                         <Timer className="w-4 h-4 text-orange-500" />
                       </div>
                       <div>
@@ -4697,15 +4727,15 @@ export default function DriverApplication({
                   </div>
 
                   {/* Timer Displays */}
-                  <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850 flex items-center justify-between">
+                  <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
                     <div>
-                      <span className="text-[8px] text-slate-550 block uppercase font-mono tracking-widest leading-none mb-1">Max drive time cycle</span>
-                      <strong className={`text-lg font-mono font-black ${drivingStatus === 'driving' ? 'text-orange-500' : 'text-slate-350'}`}>
+                      <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Max drive time cycle</span>
+                      <strong className={`text-lg font-mono font-black ${drivingStatus === 'driving' ? 'text-orange-500' : 'text-slate-400'}`}>
                         {formatTimer(drivingTimeLeft)}
                       </strong>
                     </div>
-                    <div className="border-l border-slate-850 pl-4 text-right">
-                      <span className="text-[8px] text-slate-550 block uppercase font-mono tracking-widest leading-none mb-1">Rest countdown</span>
+                    <div className="border-l border-slate-800 pl-4 text-right">
+                      <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Rest countdown</span>
                       <strong className={`text-lg font-mono font-black ${drivingStatus === 'resting' ? 'text-cyan-400' : 'text-slate-500'}`}>
                         {formatTimer(restingTimeLeft)}
                       </strong>
@@ -4724,7 +4754,7 @@ export default function DriverApplication({
                       className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all text-center select-none cursor-pointer ${
                         drivingStatus === 'driving'
                           ? 'bg-orange-600/20 text-orange-400 border border-orange-500/20'
-                          : 'bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-300'
+                          : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300'
                       }`}
                     >
                       Drive
@@ -4739,7 +4769,7 @@ export default function DriverApplication({
                       className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all text-center select-none cursor-pointer ${
                         drivingStatus === 'resting'
                           ? 'bg-cyan-600/20 text-cyan-400 border border-cyan-500/20'
-                          : 'bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-300'
+                          : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300'
                       }`}
                     >
                       Rest
@@ -4762,12 +4792,12 @@ export default function DriverApplication({
                 {/* MODULE 2: DYNAMIC CARGO FUEL ESTIMATOR */}
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2.5xl p-4.5 space-y-3.5 relative overflow-hidden">
                   <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-550/20">
+                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
                       <Fuel className="w-4 h-4 text-orange-500" />
                     </div>
                     <div>
                       <h4 className="text-xs font-black text-white uppercase tracking-tight">Fuel & Route Calculator</h4>
-                      <span className="text-[9px] text-slate-550 block uppercase font-mono tracking-tight">Cargo Planning Auxiliary</span>
+                      <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">Cargo Planning Auxiliary</span>
                     </div>
                   </div>
 
@@ -4816,7 +4846,7 @@ export default function DriverApplication({
                             className={`py-1.5 rounded-lg text-[9px] font-bold uppercase transition-all tracking-wider text-center cursor-pointer select-none border ${
                               calcTerrain === tType 
                                 ? 'bg-orange-600/10 text-orange-400 border-orange-500/30' 
-                                : 'bg-slate-950 border-slate-850 hover:border-slate-800 text-slate-400'
+                                : 'bg-slate-950 border-slate-800 hover:border-slate-800 text-slate-400'
                             }`}
                           >
                             {tType}
@@ -4827,8 +4857,8 @@ export default function DriverApplication({
 
                     {/* Result outputs and estimations banner */}
                     {calcResult && (
-                      <div className="bg-slate-950 p-2.5 rounded-2xl border border-slate-850/80 grid grid-cols-2 gap-2 text-center text-xs">
-                        <div className="border-r border-slate-850/80 pr-2">
+                      <div className="bg-slate-950 p-2.5 rounded-2xl border border-slate-800/80 grid grid-cols-2 gap-2 text-center text-xs">
+                        <div className="border-r border-slate-800/80 pr-2">
                           <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Fuel Needed</span>
                           <strong className="font-mono text-orange-500 font-black text-sm">{calcResult.fuel} L</strong>
                         </div>
@@ -4844,19 +4874,19 @@ export default function DriverApplication({
                 {/* MODULE 3: DETAILED DISPATCHER SETTINGS SYSTEM */}
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2.5xl p-4.5 space-y-3.5 relative">
                   <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-550/20">
+                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
                       <Settings className="w-4 h-4 text-orange-500" />
                     </div>
                     <div>
                       <h4 className="text-xs font-black text-white uppercase tracking-tight">System Configuration</h4>
-                      <span className="text-[9px] text-slate-550 block uppercase font-mono tracking-tight">Active Preferences</span>
+                      <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">Active Preferences</span>
                     </div>
                   </div>
 
                   <div className="space-y-3 text-xs">
 
                     {/* Metric Imperial Switch */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
+                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
                       <span className="text-slate-300 font-bold uppercase tracking-wider">Metric Units Override</span>
                       <button
                         type="button"
@@ -4872,7 +4902,7 @@ export default function DriverApplication({
                     </div>
 
                     {/* Daylight/Nighttime View Theme Switcher */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
+                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
                       <span className="text-slate-300 font-bold uppercase tracking-wider">Visibility Contrast Mode</span>
                       <button
                         type="button"
@@ -4898,7 +4928,7 @@ export default function DriverApplication({
                     </div>
 
                     {/* Speed Advisor Alarm Warning */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
+                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
                       <span className="text-slate-300 font-bold uppercase tracking-wider">Speed Limit Guard</span>
                       <button
                         type="button"
@@ -4908,12 +4938,12 @@ export default function DriverApplication({
                         }}
                         className={`p-1 w-10 rounded-full cursor-pointer flex transition-all ${speedLimitWarn ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
                       >
-                        <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-650'}`} />
+                        <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-600'}`} />
                       </button>
                     </div>
 
                     {/* System sound indicator parameters */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-850 text-[10px] font-mono">
+                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
                       <span className="text-slate-300 font-bold uppercase tracking-wider">Operational Audio FX</span>
                       <button
                         type="button"
@@ -4923,7 +4953,7 @@ export default function DriverApplication({
                         }}
                         className={`p-1 w-10 rounded-full cursor-pointer flex transition-all ${soundEnabled ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
                       >
-                        <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-650'}`} />
+                        <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-600'}`} />
                       </button>
                     </div>
 
@@ -4997,7 +5027,7 @@ export default function DriverApplication({
                         placeholder="e.g. CMR_DOC_BORDER_GATE_A.pdf" 
                         value={simFileName}
                         onChange={(e) => setSimFileName(e.target.value)}
-                        className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-250 rounded-xl font-mono text-xs focus:border-[#f97316] outline-none transition-all"
+                        className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl font-mono text-xs focus:border-[#f97316] outline-none transition-all"
                       />
                     </div>
 
@@ -5126,7 +5156,7 @@ export default function DriverApplication({
 
                     {/* Selector of Simulation presets to make it 100% testable in any frame */}
                     <div className="z-20 space-y-2 text-left">
-                      <div className="bg-slate-900/90 p-3 rounded-2xl border border-slate-850 backdrop-blur-md space-y-1.5">
+                      <div className="bg-slate-900/90 p-3 rounded-2xl border border-slate-800 backdrop-blur-md space-y-1.5">
                         <span className="text-[8.5px] font-bold text-slate-400 block uppercase tracking-wide">Or choose active document preset:</span>
                         <div className="grid grid-cols-2 gap-1.5">
                           {[
@@ -5158,7 +5188,7 @@ export default function DriverApplication({
                       {/* Primary Trigger Actions bar */}
                       <div className="flex items-center justify-between gap-4 pt-1 select-none">
                         {/* Custom photo uploader label alias */}
-                        <label className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-750 text-slate-350 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0">
+                        <label className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0">
                           <FileUp className="w-4 h-4" />
                           <input 
                             type="file" 
@@ -5228,7 +5258,7 @@ export default function DriverApplication({
                       
                       {/* Interactive Optimization Filter Bar */}
                       <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-550 uppercase tracking-wider font-mono">Contrast Laser Optimization</label>
+                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-wider font-mono">Contrast Laser Optimization</label>
                         <div className="grid grid-cols-3 gap-1.5">
                           {[
                             { val: "color", label: "Color Photo", desc: "Original Raw Colors" },
@@ -5242,7 +5272,7 @@ export default function DriverApplication({
                               className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
                                 scanFilter === f.val 
                                   ? 'bg-emerald-500/10 border-emerald-500/35 text-white font-extrabold shadow-sm' 
-                                  : 'bg-slate-950 border-slate-850 hover:border-slate-800 text-slate-400'
+                                  : 'bg-slate-950 border-slate-800 hover:border-slate-800 text-slate-400'
                               }`}
                             >
                               <span className="text-[10px] block font-bold leading-normal">{f.label}</span>
@@ -5254,7 +5284,7 @@ export default function DriverApplication({
 
                       {/* File Handle input */}
                       <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-550 block uppercase tracking-wider font-mono">Payload Filename</label>
+                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Payload Filename</label>
                         <input 
                           type="text" 
                           placeholder="e.g. CUSTOMS_CLEARANCE_STAMP.png" 
@@ -5297,7 +5327,7 @@ export default function DriverApplication({
                           setScanState("scanning");
                           startCamera();
                         }}
-                        className="p-3 bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                        className="p-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
                       >
                         <Trash2 className="w-4 h-4 text-red-500" />
                         <span className="font-bold text-[10px] uppercase">Retake</span>
@@ -5340,7 +5370,7 @@ export default function DriverApplication({
           </div>
 
           {/* Bottom Dock Navigation Tabs menu */}
-          <div className="grid grid-cols-4 bg-slate-950 py-3 border-t border-slate-905 mt-2 shrink-0 select-none">
+          <div className="grid grid-cols-4 bg-slate-950 py-3 border-t border-slate-900 mt-2 shrink-0 select-none">
             <button 
               onClick={() => {
                 setActiveTab('shipments');

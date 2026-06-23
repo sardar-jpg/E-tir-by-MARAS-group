@@ -8,8 +8,7 @@ import ClientDashboard from "./components/ClientDashboard";
 import LoginPage from "./components/LoginPage";
 import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
 import TermsModal from "./components/TermsModal";
-import { auth, googleSignIn, logoutGoogle, initAuth, storage } from "./googleAuth";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, MessageSquare, Globe, Laptop, Smartphone, Eye, Bell, CheckCircle2, ChevronRight, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, User, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch, getSavedBackendUrl, setSavedBackendUrl, isCustomDomainActive } from "./lib/api";
 import { onAuthStateChanged } from "firebase/auth";
@@ -21,6 +20,9 @@ interface AppSession {
   client?: any;
   loginType?: "firebase" | "local";
   lastActive?: number;
+  /** Signed session token issued by /api/login or /api/verify-session — sent
+   *  as `Authorization: Bearer <token>` on every API request by apiFetch. */
+  token?: string;
 }
 
 export default function App() {
@@ -169,7 +171,8 @@ export default function App() {
                 email: email,
                 driver: verifyData.driver,
                 loginType: "firebase",
-                lastActive: Date.now()
+                lastActive: Date.now(),
+                token: verifyData.token
               };
               localStorage.removeItem("etir_session"); // Fully purges any admin session keys
               localStorage.setItem("etir_session", JSON.stringify(cleanDriverSess));
@@ -196,7 +199,8 @@ export default function App() {
                 email: email,
                 driver: null,
                 loginType: "firebase",
-                lastActive: Date.now()
+                lastActive: Date.now(),
+                token: verifyData.token
               };
               localStorage.setItem("etir_session", JSON.stringify(cleanAdminSess));
               setSession(cleanAdminSess);
@@ -225,7 +229,7 @@ export default function App() {
 
             if (!parsedSession || parsedSession.role !== "admin") {
               console.log("Firebase Auth detected Admin. Restoring Admin session...");
-              const newSess: AppSession = { role: "admin", email: "sardar@maras.iq", driver: null, loginType: "firebase", lastActive: Date.now() };
+              const newSess: AppSession = { role: "admin", email: "sardar@maras.iq", driver: null, loginType: "firebase", lastActive: Date.now(), token: parsedSession?.token };
               localStorage.setItem("etir_session", JSON.stringify(newSess));
               setSession(newSess);
             } else {
@@ -236,37 +240,27 @@ export default function App() {
             }
           } else {
             if (!parsedSession || parsedSession.role !== "driver" || parsedSession.driver?.id !== uid) {
-              console.log("Firebase Auth detected Driver. Restoring Driver metadata...");
-              let foundDriver: Driver | null = null;
-              try {
-                const resDrivers = await apiFetch("/api/drivers");
-                if (resDrivers.ok) {
-                  const text = await resDrivers.text();
-                  if (!text.trim().startsWith("<")) {
-                    const driversList: Driver[] = JSON.parse(text);
-                    foundDriver = driversList.find(d => d.id === uid) || null;
-                  }
-                }
-              } catch (apiErr) {
-                console.warn("Could not retrieve driver metadata during automatic restore:", apiErr);
-              }
+              console.log("Firebase Auth detected Driver, but server verification was unreachable. Using locally cached/constructed profile — some actions may not work until connectivity is restored.");
+              // Don't attempt /api/drivers here — without a token from a
+              // successful verify-session call, it would just fail with
+              // 401 anyway. Reuse a previously-stored token from this
+              // device's last successful login, if any (likely the same
+              // user, just temporarily offline), rather than silently
+              // building a token-less session that will fail on every
+              // subsequent action.
+              const carriedToken = parsedSession?.token;
+              const foundDriver: Driver = {
+                id: uid,
+                name: firebaseUser.displayName || email.split("@")[0] || "Freight Driver",
+                username: email.split("@")[0] || "driver_account",
+                phone: firebaseUser.phoneNumber || "+964000000000",
+                truckNumber: "M-7733-IQ",
+                truckType: "reefer",
+                activeShipmentsCount: 0,
+                completedShipmentsCount: 0
+              };
 
-              // Graceful local profile constructor fallback on network failure
-              if (!foundDriver) {
-                console.log("Constructing reliable client-side fallback driver profile.");
-                foundDriver = {
-                  id: uid,
-                  name: firebaseUser.displayName || email.split("@")[0] || "Freight Driver",
-                  username: email.split("@")[0] || "driver_account",
-                  phone: firebaseUser.phoneNumber || "+964000000000",
-                  truckNumber: "M-7733-IQ",
-                  truckType: "reefer",
-                  activeShipmentsCount: 0,
-                  completedShipmentsCount: 0
-                };
-              }
-
-              const newSess: AppSession = { role: "driver", driver: foundDriver, loginType: "firebase", lastActive: Date.now() };
+              const newSess: AppSession = { role: "driver", driver: foundDriver, loginType: "firebase", lastActive: Date.now(), token: carriedToken };
               localStorage.removeItem("etir_session");
               localStorage.setItem("etir_session", JSON.stringify(newSess));
               setSession(newSess);
@@ -613,8 +607,8 @@ export default function App() {
             const data = await res.json();
             setChatMessages(data);
 
-            const hasUnseenFromDriver = data.some((m: any) => m.sender === 'driver' && m.status !== 'seen');
-            if (hasUnseenFromDriver) {
+            const hasUnseenFromOtherParty = data.some((m: any) => m.sender !== 'admin' && m.status !== 'seen');
+            if (hasUnseenFromOtherParty) {
               await apiFetch(`/api/shipments/${chatShipment.id}/chat/seen`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -661,11 +655,10 @@ export default function App() {
     setIsAdminUploading(true);
     try {
       let finalFileUrl = adminFileUrl;
+      let uploadFailed = false;
 
       if (adminFile && adminFileUrl && adminFileUrl.startsWith("data:")) {
-        let uploadedViaGateway = false;
         try {
-          // 1. Try uploading to our highly available central media gateway route
           const uploadRes = await apiFetch("/api/upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -677,23 +670,20 @@ export default function App() {
           if (uploadRes.ok) {
             const uploadData = await uploadRes.json();
             finalFileUrl = uploadData.url;
-            uploadedViaGateway = true;
-            console.log("Admin uploaded successfully via local media gateway:", finalFileUrl);
+            console.log("Admin uploaded successfully via media gateway:", finalFileUrl);
+          } else {
+            // No more silent client-side Firebase Storage fallback here —
+            // Storage now requires the server's own dedicated account
+            // (see storage.rules), so a browser can't write to it directly
+            // even as a backup path. The chat message below still sends
+            // with the inline base64 representation as a last resort, but
+            // the admin is told their file wasn't durably saved.
+            uploadFailed = true;
+            console.warn("Media gateway upload failed; sending with inline data only.");
           }
         } catch (uploadGatewayErr) {
-          console.log("Local media gateway fallback triggered:", uploadGatewayErr);
-        }
-
-        // 2. If local upload didn't succeed, fallback to Firebase Storage silently
-        if (!uploadedViaGateway) {
-          try {
-            const fileRef = ref(storage, `shipments/${chatShipment.id}/${Date.now()}_${adminFile.name}`);
-            const uploadResult = await uploadBytes(fileRef, adminFile);
-            finalFileUrl = await getDownloadURL(uploadResult.ref);
-            console.log("Admin uploaded successfully to Firebase Storage! URL:", finalFileUrl);
-          } catch (storageErr) {
-            console.log("Firebase Storage backup path also failed, retaining inline encoding representation:", storageErr);
-          }
+          uploadFailed = true;
+          console.warn("Media gateway upload request failed:", uploadGatewayErr);
         }
       }
 
@@ -717,9 +707,15 @@ export default function App() {
         setAdminAttachOpen(false);
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
+        if (uploadFailed) {
+          triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for the recipient.");
+        }
+      } else {
+        triggerToast("❌ Failed to send message. Please try again.");
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server.");
     } finally {
       setIsAdminUploading(false);
     }
@@ -809,7 +805,7 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="space-y-3 bg-slate-950 border border-slate-850 p-4 rounded-xl text-xs text-left">
+              <div className="space-y-3 bg-slate-950 border border-slate-800 p-4 rounded-xl text-xs text-left">
                 <p className="font-bold text-slate-200 uppercase tracking-widest text-[9px]">How does this help?</p>
                 <p className="text-slate-400 leading-normal">
                   Google AI Studio generates a temporary developer container for each session. Statically hosted custom domains can read live shipment data and simulation updates directly from this database container!
@@ -827,7 +823,7 @@ export default function App() {
                   value={bridgeUrl}
                   onChange={(e) => setBridgeUrl(e.target.value)}
                   placeholder="https://ais-dev-xxxx-xxxxx.run.app"
-                  className="w-full bg-slate-950 border border-slate-850 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
+                  className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
                 />
                 <p className="text-[10px] text-slate-500 leading-normal">
                   Enter the Sandbox URL of your active AI Studio Dev environment or Shared Preview above.
@@ -842,7 +838,7 @@ export default function App() {
                     setIsBridgeOpen(false);
                     window.location.reload();
                   }}
-                  className="px-4 py-2 border border-slate-805 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  className="px-4 py-2 border border-slate-800 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
                 >
                   Reset To Default
                 </button>
@@ -1054,7 +1050,7 @@ export default function App() {
               }}
               className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 text-xs font-black transition-all cursor-pointer border ${
                 getSavedBackendUrl() 
-                  ? 'bg-emerald-950/45 text-emerald-400 border-emerald-900/60 hover:bg-emerald-955' 
+                  ? 'bg-emerald-950/45 text-emerald-400 border-emerald-900/60 hover:bg-emerald-950' 
                   : 'bg-slate-900 text-orange-400 border-slate-800 hover:border-orange-500/30'
               }`}
               title="Configure API Gateway Sync Bridge"
@@ -1072,7 +1068,7 @@ export default function App() {
               <select
                 value={lang}
                 onChange={(e) => setLang(e.target.value as Language)}
-                className="bg-slate-900 text-white border border-slate-850 px-2 py-1 text-xs rounded-lg font-bold outline-none cursor-pointer"
+                className="bg-slate-900 text-white border border-slate-800 px-2 py-1 text-xs rounded-lg font-bold outline-none cursor-pointer"
               >
                 <option value="en">English (EN)</option>
                 <option value="tr">Türkçe (TR)</option>
@@ -1098,10 +1094,10 @@ export default function App() {
       {/* CORE VIEWPORT LAYER */}
       <main className={`flex-1 ${isMobileTestingMode ? "bg-slate-950/80 md:py-8 md:px-4 flex items-center justify-center min-h-[calc(100vh-80px)] bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:20px_20px]" : "relative"}`}>
         {isMobileTestingMode ? (
-          <div className="relative mx-auto w-full h-[calc(100vh-80px)] md:w-[375px] md:h-[812px] bg-slate-900 md:rounded-[56px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.85)] md:border-[14px] border-slate-950 overflow-hidden flex flex-col md:ring-2 md:ring-slate-850/80">
+          <div className="relative mx-auto w-full h-[calc(100vh-80px)] md:w-[375px] md:h-[812px] bg-slate-900 md:rounded-[56px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.85)] md:border-[14px] border-slate-950 overflow-hidden flex flex-col md:ring-2 md:ring-slate-800/80">
             
             {/* Simulated iPhone Status Bar - only visible on Desktop simulators */}
-            <div className="hidden md:flex h-10 bg-slate-150 relative px-6 items-center justify-between text-[11px] font-bold text-slate-800 select-none pointer-events-none z-30 shrink-0">
+            <div className="hidden md:flex h-10 bg-slate-100 relative px-6 items-center justify-between text-[11px] font-bold text-slate-800 select-none pointer-events-none z-30 shrink-0">
               <span>12:45</span>
               {/* iPhone Notch Container */}
               <div className="w-28 h-5 bg-black rounded-b-2xl absolute left-1/2 -translate-x-1/2 top-0 flex items-center justify-center shadow-inner">
@@ -1276,7 +1272,7 @@ export default function App() {
                     <Globe className="w-4 h-4 text-orange-600 animate-spin-slow" />
                     <span>Sandbox Test Mode: Simulating public view-only page of MARAS shipments without logging in.</span>
                   </div>
-                  <p className="text-[10px] text-orange-850 font-bold uppercase tracking-wider">MARAS Group Security Protocol</p>
+                  <p className="text-[10px] text-orange-800 font-bold uppercase tracking-wider">MARAS Group Security Protocol</p>
                 </div>
 
                 <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-4">
@@ -1334,7 +1330,7 @@ export default function App() {
               
               <button 
                 onClick={() => setChatShipment(null)}
-                className="p-1.5 bg-slate-900 border border-slate-850 hover:bg-slate-850 rounded-lg text-slate-300 pointer cursor-pointer"
+                className="p-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-lg text-slate-300 pointer cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1353,7 +1349,7 @@ export default function App() {
                 className={`flex-1 py-3 text-center border-b-2 hover:bg-slate-900/40 transition-all cursor-pointer ${
                   chatDrawerTab === 'messages' 
                     ? 'border-orange-500 text-orange-400 font-extrabold' 
-                    : 'border-transparent text-slate-450 hover:text-slate-350'
+                    : 'border-transparent text-slate-400 hover:text-slate-400'
                 }`}
               >
                 Support Messages
@@ -1364,12 +1360,12 @@ export default function App() {
                 className={`flex-1 py-3 text-center border-b-2 hover:bg-slate-900/40 transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                   chatDrawerTab === 'attachments' 
                     ? 'border-orange-500 text-orange-400 font-extrabold' 
-                    : 'border-transparent text-slate-450 hover:text-slate-350'
+                    : 'border-transparent text-slate-400 hover:text-slate-400'
                 }`}
               >
                 <span>Documents & Scans</span>
                 <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${
-                  chatDrawerTab === 'attachments' ? 'bg-orange-950 text-orange-405' : 'bg-slate-900 text-slate-500'
+                  chatDrawerTab === 'attachments' ? 'bg-orange-950 text-orange-400' : 'bg-slate-900 text-slate-500'
                 }`}>
                   {chatShipment.documents?.length || 0}
                 </span>
@@ -1401,7 +1397,7 @@ export default function App() {
                           
                           {msg.type === 'file' ? (
                             <div className="space-y-2">
-                              <span className={`${isAdmin ? 'bg-slate-900 text-slate-350' : 'bg-orange-850 text-orange-250'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
+                              <span className={`${isAdmin ? 'bg-slate-900 text-slate-400' : 'bg-orange-800 text-orange-200'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
                                 {msg.fileCategory}
                               </span>
                               <a 
@@ -1499,7 +1495,7 @@ export default function App() {
                 </div>
 
                 {/* Admin typing input bar */}
-                <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-855 flex items-center gap-2 relative">
+                <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-900 flex items-center gap-2 relative">
                   <button 
                     type="button" 
                     onClick={() => setAdminAttachOpen(true)}
@@ -1520,6 +1516,7 @@ export default function App() {
                   <button 
                     type="submit" 
                     disabled={!chatMessageText.trim()}
+                    aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                     className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center"
                   >
                     <Send className="w-4 h-4 shrink-0" />
@@ -1561,7 +1558,7 @@ export default function App() {
                   {chatShipment.documents && chatShipment.documents.length > 0 ? (
                     <div className="grid grid-cols-1 gap-2.5">
                       {chatShipment.documents.map((doc) => (
-                        <div key={doc.id} className="p-3 bg-slate-900/60 border border-slate-850 rounded-xl flex items-center justify-between gap-3 hover:border-slate-700 transition-all">
+                        <div key={doc.id} className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl flex items-center justify-between gap-3 hover:border-slate-700 transition-all">
                           <div className="flex items-center gap-2.5 truncate">
                             {doc.category === 'photo' ? (
                               <ImageIcon className="w-4 h-4 text-orange-400 shrink-0" />
@@ -1583,7 +1580,7 @@ export default function App() {
                                 triggerToast("Sample document downloaded");
                               }
                             }}
-                            className="p-1 px-2.5 bg-slate-850 hover:bg-slate-800 text-slate-205 border border-slate-800 hover:border-slate-700 rounded text-[10px] font-mono leading-none transition-all cursor-pointer"
+                            className="p-1 px-2.5 bg-slate-800 hover:bg-slate-800 text-slate-200 border border-slate-800 hover:border-slate-700 rounded text-[10px] font-mono leading-none transition-all cursor-pointer"
                           >
                             GET
                           </a>
@@ -1652,7 +1649,7 @@ export default function App() {
                         placeholder="e.g. CUSTOMS_RELEASE_MANIFEST.pdf" 
                         value={adminFileName}
                         onChange={(e) => setAdminFileName(e.target.value)}
-                        className="w-full p-2 bg-slate-950 border border-slate-800 text-slate-250 rounded-lg text-[11px]"
+                        className="w-full p-2 bg-slate-950 border border-slate-800 text-slate-200 rounded-lg text-[11px]"
                       />
                     </div>
 
@@ -1677,7 +1674,7 @@ export default function App() {
                       type="button"
                       onClick={handleSendAdminAttachment}
                       disabled={!adminFileName.trim() || isAdminUploading}
-                      className="w-full p-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-slate-850 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 text-[11px]"
+                      className="w-full p-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-slate-800 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 text-[11px]"
                     >
                       {isAdminUploading ? (
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -1740,7 +1737,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="space-y-3 bg-slate-950 border border-slate-850 p-4 rounded-xl text-xs text-left">
+            <div className="space-y-3 bg-slate-950 border border-slate-800 p-4 rounded-xl text-xs text-left">
               <p className="font-bold text-slate-200 uppercase tracking-widest text-[9px]">How does this help?</p>
               <p className="text-slate-400 leading-normal">
                 Google AI Studio generates a temporary developer container for each session. Statically hosted custom domains can read live shipment data and simulation updates directly from this database container!
@@ -1758,7 +1755,7 @@ export default function App() {
                 value={bridgeUrl}
                 onChange={(e) => setBridgeUrl(e.target.value)}
                 placeholder="https://ais-dev-xxxx-xxxxx.run.app"
-                className="w-full bg-slate-950 border border-slate-850 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
+                className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
               />
               <p className="text-[10px] text-slate-500 leading-normal">
                 Enter the Sandbox URL of your active AI Studio Dev environment or Shared Preview above.
@@ -1773,7 +1770,7 @@ export default function App() {
                   setIsBridgeOpen(false);
                   window.location.reload();
                 }}
-                className="px-4 py-2 border border-slate-805 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                className="px-4 py-2 border border-slate-800 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
               >
                 Reset To Default
               </button>

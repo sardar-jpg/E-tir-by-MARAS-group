@@ -8,7 +8,7 @@ import { apiFetch } from "../lib/api";
 interface LoginPageProps {
   lang: Language;
   onSetLang: (lang: Language) => void;
-  onLoginSuccess: (session: { role: "admin" | "driver" | "client"; email?: string; driver?: Driver | null; client?: any; loginType?: "firebase" | "local" }) => void;
+  onLoginSuccess: (session: { role: "admin" | "driver" | "client"; email?: string; driver?: Driver | null; client?: any; loginType?: "firebase" | "local"; token?: string }) => void;
   onViewPrivacy?: () => void;
   onViewTerms?: () => void;
 }
@@ -181,7 +181,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
               onLoginSuccess({
                 role: "client",
                 client: data.client,
-                loginType: "local"
+                loginType: "local",
+                token: data.token
               });
               return;
             }
@@ -218,18 +219,6 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       }
 
       if (checkIsAdmin) {
-        // Safe Fallback: If they enter the master admin passcode (e.g., "maras123" or "admin123"), authorize them immediately!
-        if (loginPassword === "maras123" || loginPassword === "admin123") {
-          console.log("Master administrator passcode used.");
-          onLoginSuccess({
-            role: "admin",
-            email: "sardar@maras.iq",
-            driver: null,
-            loginType: "local"
-          });
-          return;
-        }
-
         // Try authenticating through full-stack database matching
         const res = await apiFetch("/api/login", {
           method: "POST",
@@ -252,7 +241,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
             role: data.role,
             email: data.user?.email || enteredEmail,
             driver: data.driver || null,
-            loginType: "local"
+            loginType: "local",
+            token: data.token
           });
           return;
         } else {
@@ -275,12 +265,32 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 return;
               }
 
-              onLoginSuccess({
-                role: "admin",
-                email: "sardar@maras.iq",
-                driver: null,
-                loginType: "firebase"
-              });
+              // Get a real signed session token from the server now that
+              // Firebase Auth succeeded — without this, every subsequent
+              // API call would fail with 401 once auth is enforced.
+              try {
+                const verifyRes = await apiFetch("/api/verify-session", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ role: "admin", email: "sardar@maras.iq", uid: user.uid })
+                });
+                const verifyData = verifyRes.ok ? await verifyRes.json() : null;
+                onLoginSuccess({
+                  role: "admin",
+                  email: "sardar@maras.iq",
+                  driver: null,
+                  loginType: "firebase",
+                  token: verifyData?.token
+                });
+              } catch (verifyErr) {
+                console.error("Failed to obtain session token after Firebase admin login:", verifyErr);
+                onLoginSuccess({
+                  role: "admin",
+                  email: "sardar@maras.iq",
+                  driver: null,
+                  loginType: "firebase"
+                });
+              }
               return;
             }
           }
@@ -320,6 +330,25 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           return;
         }
 
+        // Get a real signed session token from the server now that Firebase
+        // Auth succeeded — needed both to fetch /api/drivers below (which
+        // now requires auth) and for every subsequent API call this driver
+        // makes for the rest of their session.
+        let sessionToken: string | undefined;
+        try {
+          const verifyRes = await apiFetch("/api/verify-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ role: "driver", uid: user.uid, driverId: user.uid })
+          });
+          if (verifyRes.ok) {
+            const verifyData = await verifyRes.json();
+            sessionToken = verifyData?.token;
+          }
+        } catch (verifyErr) {
+          console.warn("Failed to obtain session token after Firebase driver login:", verifyErr);
+        }
+
         // Normal registered driver profile lookup - wrapped safely to prevent blocking network failures
         let foundDriver: Driver | null = null;
         try {
@@ -353,7 +382,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
         onLoginSuccess({
           role: "driver",
           driver: foundDriver,
-          loginType: "firebase"
+          loginType: "firebase",
+          token: sessionToken
         });
         return;
       } catch (authErr: any) {
@@ -377,7 +407,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
               onLoginSuccess({
                 role: data.role,
                 driver: data.driver || null,
-                loginType: "local"
+                loginType: "local",
+                token: data.token
               });
               return;
             }
@@ -599,7 +630,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 className={`py-2 px-1 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
                   loginRole === "admin"
                     ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-850"
+                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
                 }`}
               >
                 <Shield className="w-3 h-3 shrink-0 text-blue-400" />
@@ -617,7 +648,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 className={`py-2 px-1 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
                   loginRole === "driver"
                     ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-850"
+                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
                 }`}
               >
                 <Truck className="w-3 h-3 shrink-0 text-blue-400" />
@@ -635,7 +666,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 className={`py-2 px-0.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
                   loginRole === "client"
                     ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-850"
+                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
                 }`}
               >
                 <User className="w-3 h-3 shrink-0 text-blue-400" />
@@ -711,7 +742,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                     placeholder={loginRole === "admin" ? "e.g. sardar@maras.iq" : loginRole === "client" ? "e.g. bahi, uruk or karwan" : "e.g. ihab"}
                     value={loginUsername}
                     onChange={(e) => setLoginUsername(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-750 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
                   />
                 </div>
               </div>
@@ -772,7 +803,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                     placeholder="••••••••"
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-750 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none transition-all text-left"
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none transition-all text-left"
                   />
                 </div>
               </div>
@@ -793,7 +824,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                     {loginRole === "driver" ? (
                       <Truck className="w-4 h-4 shrink-0 text-indigo-200" />
                     ) : (
-                      <Shield className="w-4 h-4 shrink-0 text-blue-250" />
+                      <Shield className="w-4 h-4 shrink-0 text-blue-200" />
                     )}
                     <span>
                       {loginRole === "driver"
@@ -825,11 +856,26 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
 
                       if (loginRole === "admin") {
                         if (user.email?.toLowerCase() === "sardar@maras.iq") {
+                          let sessionToken: string | undefined;
+                          try {
+                            const verifyRes = await apiFetch("/api/verify-session", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ role: "admin", email: "sardar@maras.iq", uid: user.uid })
+                            });
+                            if (verifyRes.ok) {
+                              const verifyData = await verifyRes.json();
+                              sessionToken = verifyData?.token;
+                            }
+                          } catch (verifyErr) {
+                            console.warn("Failed to obtain session token after Google admin login:", verifyErr);
+                          }
                           onLoginSuccess({
                             role: "admin",
                             email: "sardar@maras.iq",
                             driver: null,
-                            loginType: "firebase"
+                            loginType: "firebase",
+                            token: sessionToken
                           });
                         } else {
                           setLoginError("This Google account is not registered as MARAS Administrator. Please sign in with sardar@maras.iq.");
@@ -845,61 +891,54 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                         }
 
                         let foundDriver: Driver | null = null;
+                        let sessionToken: string | undefined;
+
+                        // First, see if a profile already exists under this
+                        // exact Firebase uid — verify-session both confirms
+                        // that and issues a real session token in one call.
                         try {
-                          const resDrivers = await apiFetch("/api/drivers");
-                          if (resDrivers.ok) {
-                            const text = await resDrivers.text();
-                            if (!text.trim().startsWith("<")) {
-                              const driversList: Driver[] = JSON.parse(text);
-                              foundDriver = driversList.find(d => d.id === user.uid) || null;
-                              
-                              if (!foundDriver && user.email) {
-                                // Match prefix
-                                const emailPrefix = user.email.split("@")[0].toLowerCase();
-                                foundDriver = driversList.find(d => d.username.toLowerCase() === emailPrefix) || null;
-                                if (foundDriver) {
-                                  console.log("Matching existing driver by username prefix. Updating driver ID...");
-                                  const patchRes = await apiFetch(`/api/drivers/${foundDriver.id}`, {
-                                    method: "PUT",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      name: foundDriver.name,
-                                      username: foundDriver.username,
-                                      phone: foundDriver.phone,
-                                      truckNumber: foundDriver.truckNumber,
-                                      truckType: foundDriver.truckType,
-                                      id: user.uid // Map to Google Firebase uid
-                                    })
-                                  });
-                                  if (patchRes.ok) {
-                                    foundDriver = await patchRes.json();
-                                  }
-                                }
-                              }
-                            }
+                          const verifyRes = await apiFetch("/api/verify-session", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ role: "driver", uid: user.uid, driverId: user.uid })
+                          });
+                          if (verifyRes.ok) {
+                            const verifyData = await verifyRes.json();
+                            foundDriver = verifyData?.driver || null;
+                            sessionToken = verifyData?.token;
                           }
-                        } catch (apiErr) {
-                          console.warn("Could not retrieve driver list during Google sign in:", apiErr);
+                        } catch (verifyErr) {
+                          console.warn("verify-session lookup by uid failed:", verifyErr);
                         }
 
-                        // Auto-register driver profile if not found
+                        // Not found by uid — register fresh. (The previous
+                        // version of this flow also tried matching an
+                        // existing driver by username prefix and re-keying
+                        // it to this uid, but that requires listing all
+                        // drivers, which is no longer possible without a
+                        // session token we don't have yet at this point.
+                        // An admin can still manually link a legacy account
+                        // by editing its id from the Drivers admin screen.)
                         if (!foundDriver) {
                           console.log("Auto-registering Google driver profile...");
                           try {
-                            const createRes = await apiFetch("/api/drivers", {
+                            const createRes = await apiFetch("/api/drivers/self-register", {
                               method: "POST",
                               headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({
-                                id: user.uid,
+                                uid: user.uid,
                                 name: user.displayName || user.email?.split("@")[0] || "Gmail Driver",
                                 username: user.email?.split("@")[0].replace(/[^a-zA-Z0-9]/g, "_") || `driver_${Date.now()}`,
+                                email: user.email || "",
                                 phone: user.phoneNumber || "+905320000000",
                                 truckNumber: "G-GMAIL-IQ",
                                 truckType: "reefer"
                               })
                             });
                             if (createRes.ok) {
-                              foundDriver = await createRes.json();
+                              const created = await createRes.json();
+                              foundDriver = created;
+                              sessionToken = created?.token;
                             }
                           } catch (createErr) {
                             console.error("Failed to auto-create general driver profile:", createErr);
@@ -923,7 +962,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                         onLoginSuccess({
                           role: "driver",
                           driver: foundDriver,
-                          loginType: "firebase"
+                          loginType: "firebase",
+                          token: sessionToken
                         });
                       }
                     }
@@ -938,7 +978,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                   }
                 }}
                 disabled={isLoggingIn}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-850 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                   <path
@@ -969,13 +1009,13 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
 
             </div>
 
-            <div className="border-t border-slate-850 pt-4 flex flex-col gap-2">
+            <div className="border-t border-slate-800 pt-4 flex flex-col gap-2">
               <button
                 onClick={() => {
                   setIsRegisterMode(true);
                   setRegError(null);
                 }}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-850 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-820 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <ClipboardSignature className="w-4 h-4 text-blue-400 shrink-0" />
                 <span>{t.registerBtn}</span>
@@ -998,7 +1038,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                     {lang === "tr" ? "Gizlilik Politikası" : lang === "ar" ? "سياسة الخصوصية" : "Privacy Policy"}
                   </button>
                 )}
-                {onViewPrivacy && onViewTerms && <span className="text-slate-750">|</span>}
+                {onViewPrivacy && onViewTerms && <span className="text-slate-700">|</span>}
                 {onViewTerms && (
                   <button
                     type="button"

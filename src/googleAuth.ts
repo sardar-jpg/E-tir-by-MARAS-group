@@ -9,9 +9,12 @@ export const auth = getAuth(app);
 export const storage = getStorage(app);
 
 const provider = new GoogleAuthProvider();
-// Add Google Workspace Gmail, Drive and Calendar scopes
+// Gmail send, Drive, and Calendar scopes are genuinely used — see the
+// Google Workspace tab in AdminPanel.tsx, which sends shipment status
+// emails via the Gmail API, backs up logs to Drive, and schedules
+// operations on Calendar using these exact scopes. (gmail.readonly is the
+// one exception — see note below.)
 provider.addScope("https://www.googleapis.com/auth/gmail.send");
-provider.addScope("https://www.googleapis.com/auth/gmail.readonly");
 provider.addScope("https://www.googleapis.com/auth/drive");
 provider.addScope("https://www.googleapis.com/auth/calendar");
 // Force select account to ensure they can pick the right account

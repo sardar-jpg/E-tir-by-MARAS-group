@@ -1,25 +1,11 @@
 /**
  * Safe API client for both internal Cloud Run workspace environment and external
  * custom domains (such as Hostinger, Vercel, or custom landing pages).
- * Automatically handles CORS obstacles by falling back seamlessly to direct
- * client-side Firestore operations when custom developer routing is blocked or protected.
+ * Automatically handles CORS obstacles by detecting common proxy/routing modes
+ * and reporting a clear error if the real server can't be reached — this used
+ * to fall back to direct client-side Firestore access, which has been removed
+ * for security reasons (see fetchFromFirestoreDirectly below for why).
  */
-
-import { initializeApp, getApp, getApps } from "firebase/app";
-import { 
-  getFirestore, 
-  initializeFirestore,
-  collection, 
-  doc, 
-  getDocs, 
-  getDoc, 
-  setDoc, 
-  updateDoc, 
-  deleteDoc,
-  query, 
-  where 
-} from "firebase/firestore";
-import firebaseConfig from "../../firebase-applet-config.json";
 
 // Safe, iframe-resilient localStorage fallback storage helper
 const memoryStorage: Record<string, string> = {};
@@ -49,20 +35,6 @@ export function safeRemoveItem(key: string): void {
     console.warn(`[Iframe Storage] Purge blocked for key "${key}", deleting from virtual memory`);
     delete memoryStorage[key];
   }
-}
-
-let firestoreDb: any = null;
-function getClientFirestore() {
-  if (!firestoreDb) {
-    const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    const dbId = firebaseConfig.firestoreDatabaseId;
-    if (dbId && dbId !== "(default)") {
-      firestoreDb = initializeFirestore(app, { experimentalForceLongPolling: true }, dbId);
-    } else {
-      firestoreDb = initializeFirestore(app, { experimentalForceLongPolling: true });
-    }
-  }
-  return firestoreDb;
 }
 
 type RouteMode = "local" | "pre" | "dev" | "firestore";
@@ -131,11 +103,40 @@ async function resolveRouteMode(): Promise<RouteMode> {
   return resolutionPromise;
 }
 
+function getSessionToken(): string | null {
+  try {
+    const stored = safeGetItem("etir_session");
+    if (!stored) return null;
+    const parsed = JSON.parse(stored);
+    return parsed?.token || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function apiFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   let url = typeof input === "string" ? input : input.toString();
-  
+
   if (url.startsWith("/api/")) {
     let updatedInit = init ? { ...init } : {};
+
+    // Attach the signed session token (if we have one) as a standard
+    // Authorization header. Endpoints that don't require auth simply
+    // ignore it; endpoints that do require it will reject the request
+    // with 401 if this is missing or invalid.
+    const token = getSessionToken();
+    if (token) {
+      const existingHeaders = updatedInit.headers;
+      const headerObj: Record<string, string> =
+        existingHeaders instanceof Headers
+          ? Object.fromEntries(existingHeaders.entries())
+          : Array.isArray(existingHeaders)
+            ? Object.fromEntries(existingHeaders)
+            : { ...(existingHeaders as Record<string, string> | undefined) };
+      headerObj["Authorization"] = `Bearer ${token}`;
+      updatedInit.headers = headerObj;
+    }
+
     const originalMethod = updatedInit.method ? updatedInit.method.toUpperCase() : "GET";
     
     if (originalMethod === "PUT" || originalMethod === "DELETE") {
@@ -147,19 +148,24 @@ export async function apiFetch(input: string | URL, init?: RequestInit): Promise
       let plainHeaders: Record<string, string> = {
         "X-HTTP-Method-Override": originalMethod
       };
-      
-      if (init?.headers) {
-        if (init.headers instanceof Headers) {
-          init.headers.forEach((val, key) => {
+
+      // Rebuild from updatedInit.headers (which already has Authorization
+      // attached above), not the original init.headers — otherwise the
+      // token attached just above would be silently dropped on every
+      // PUT/DELETE request.
+      const headersToCopy = updatedInit.headers;
+      if (headersToCopy) {
+        if (headersToCopy instanceof Headers) {
+          headersToCopy.forEach((val, key) => {
             plainHeaders[key] = val;
           });
-        } else if (Array.isArray(init.headers)) {
-          for (const [key, val] of init.headers) {
+        } else if (Array.isArray(headersToCopy)) {
+          for (const [key, val] of headersToCopy) {
             plainHeaders[key] = val;
           }
         } else {
           plainHeaders = {
-            ...init.headers,
+            ...headersToCopy,
             ...plainHeaders
           };
         }
@@ -265,548 +271,28 @@ export function isCustomDomainActive(): boolean {
  * completely bypassing cookie-protection proxy barriers on custom external domains.
  */
 async function fetchFromFirestoreDirectly(url: string, init?: RequestInit): Promise<Response> {
-  const method = (init?.method || "GET").toUpperCase();
-  const parsedUrl = new URL(url, typeof window !== "undefined" ? window.location.origin : "http://localhost");
-  const pathname = parsedUrl.pathname;
-  
-  const getBodyJson = () => {
-    try {
-      return init?.body ? JSON.parse(init.body as string) : {};
-    } catch {
-      return {};
-    }
-  };
-
-  const db = getClientFirestore();
-  console.log(`[Firestore Direct Fallback] Resolving client-side: ${method} ${pathname}`);
-
-  try {
-    // 1. Shipments Endpoints
-    if (pathname === "/api/shipments") {
-      if (method === "GET") {
-        const col = collection(db, "shipments");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        list.sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `ship-${Date.now()}`;
-        const finalData = { ...body, id: docId, createdAt: body.createdAt || new Date().toISOString() };
-        await setDoc(doc(db, "shipments", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-    
-    if (pathname.startsWith("/api/shipments/") && pathname.endsWith("/chat/seen")) {
-      return createMockResponse({ success: true });
-    }
-
-    if (pathname.startsWith("/api/shipments/") && pathname.endsWith("/chat")) {
-      const parts = pathname.split("/");
-      const shipmentId = parts[3];
-      
-      if (method === "GET") {
-        const col = collection(db, "chatMessages");
-        const q = query(col, where("shipmentId", "==", shipmentId));
-        const snap = await getDocs(q);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        list.sort((a: any, b: any) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime());
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `chat-${Date.now()}`;
-        const finalData = { ...body, id: docId, shipmentId, timestamp: body.timestamp || new Date().toISOString() };
-        await setDoc(doc(db, "chatMessages", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    if (pathname.startsWith("/api/shipments/") && pathname.endsWith("/documents")) {
-      const parts = pathname.split("/");
-      const shipmentId = parts[3];
-      if (method === "POST") {
-        const body = getBodyJson();
-        const docRef = doc(db, "shipments", shipmentId);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const currentData = docSnap.data() as any;
-          const documents = currentData.documents || [];
-          const newDoc = {
-            id: `doc-${Date.now()}`,
-            name: body.name || "Document",
-            type: body.type || "Other",
-            url: body.url || "",
-            uploadedAt: new Date().toISOString()
-          };
-          documents.push(newDoc);
-          await updateDoc(docRef, { documents });
-          return createMockResponse(newDoc);
-        }
-        return createMockResponse({ error: "Shipment not found" }, 404);
-      }
-    }
-
-    if (pathname.startsWith("/api/shipments/") && pathname.endsWith("/share")) {
-      return createMockResponse({ 
-        success: true, 
-        token: "mock-share-token-" + Date.now(), 
-        link: `${typeof window !== "undefined" ? window.location.origin : ""}/share/mock-share-token` 
-      });
-    }
-
-    if (pathname.startsWith("/api/shipments/")) {
-      const parts = pathname.split("/");
-      const shipmentId = parts[3];
-      
-      // Update shipment status: /api/shipments/:id/status
-      if (parts[4] === "status") {
-        const body = getBodyJson();
-        const docRef = doc(db, "shipments", shipmentId);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const currentData = docSnap.data() as any;
-          const statusHistory = currentData.statusHistory || [];
-          const status = body.status;
-          
-          const newStatusLog = {
-            status,
-            remarksDesc: body.remarksDesc || "Location updated by driver telemetry.",
-            updatedAt: new Date().toISOString(),
-            updaterName: body.updaterName || "Freight Driver",
-            role: body.role || "driver",
-            estimatedArrivalMinutes: body.estimatedArrivalMinutes || null
-          };
-          
-          statusHistory.push(newStatusLog);
-          
-          const updateObj: any = {
-            currentStatus: status,
-            statusHistory,
-            lastUpdated: new Date().toISOString()
-          };
-          
-          if (body.latitude !== undefined && body.longitude !== undefined) {
-            updateObj.currentLatitude = body.latitude;
-            updateObj.currentLongitude = body.longitude;
-          }
-          
-          await updateDoc(docRef, updateObj);
-          return createMockResponse({ ...currentData, ...updateObj });
-        }
-        return createMockResponse({ error: "Shipment not found" }, 404);
-      }
-      
-      if (method === "GET") {
-        const docSnap = await getDoc(doc(db, "shipments", shipmentId));
-        if (docSnap.exists()) {
-          return createMockResponse({ id: docSnap.id, ...docSnap.data() });
-        }
-        return createMockResponse({ error: "Shipment not found" }, 404);
-      } else {
-        const body = getBodyJson();
-        const docRef = doc(db, "shipments", shipmentId);
-        await setDoc(docRef, body, { merge: true });
-        return createMockResponse({ id: shipmentId, ...body });
-      }
-    }
-
-    if (pathname.startsWith("/api/drivers/")) {
-      const parts = pathname.split("/");
-      const driverId = parts[3];
-      const docRef = doc(db, "drivers", driverId);
-      
-      if (method === "GET") {
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          return createMockResponse({ id: docSnap.id, ...docSnap.data() });
-        }
-        return createMockResponse({ error: "Driver not found" }, 404);
-      } else {
-        const body = getBodyJson();
-        await setDoc(docRef, body, { merge: true });
-        const docSnap = await getDoc(docRef);
-        return createMockResponse({ id: driverId, ...(docSnap.data() || body) });
-      }
-    }
-
-    if (pathname === "/api/maps-key") {
-      try {
-        const docRef = doc(db, "configs", "google_maps");
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (data && data.key) {
-            return createMockResponse({ key: data.key });
-          }
-        }
-      } catch (e) {
-        console.error("Direct Firestore config lookup for maps key failed:", e);
-      }
-      return createMockResponse({ key: "" });
-    }
-
-    if (pathname.startsWith("/api/share/")) {
-      const col = collection(db, "shipments");
-      const snap = await getDocs(col);
-      if (!snap.empty) {
-        return createMockResponse({ id: snap.docs[0].id, ...snap.docs[0].data(), shareIncludeDocuments: true });
-      }
-      return createMockResponse({ error: "No shipments" }, 404);
-    }
-
-    // 1.5 Admins Endpoints
-    if (pathname === "/api/admins") {
-      if (method === "GET") {
-        const col = collection(db, "admins");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `admin-${Date.now()}`;
-        const finalData = { ...body, id: docId, createdAt: body.createdAt || new Date().toISOString() };
-        await setDoc(doc(db, "admins", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    if (pathname.startsWith("/api/admins/")) {
-      const parts = pathname.split("/");
-      const adminId = parts[3];
-      if (method === "DELETE") {
-        await deleteDoc(doc(db, "admins", adminId));
-        return createMockResponse({ success: true });
-      }
-    }
-
-    // 2. Drivers Endpoints
-    if (pathname === "/api/drivers") {
-      if (method === "GET") {
-        const col = collection(db, "drivers");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `drv-${Date.now()}`;
-        const finalData = { ...body, id: docId };
-        await setDoc(doc(db, "drivers", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    // 3. Clients Endpoints
-    if (pathname === "/api/clients") {
-      if (method === "GET") {
-        const col = collection(db, "clients");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `cli-${Date.now()}`;
-        const finalData = { ...body, id: docId };
-        await setDoc(doc(db, "clients", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    // 4. Vendors Endpoints
-    if (pathname === "/api/vendors") {
-      if (method === "GET") {
-        const col = collection(db, "vendors");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `ven-${Date.now()}`;
-        const finalData = { ...body, id: docId };
-        await setDoc(doc(db, "vendors", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    // 5. Notifications Endpoints
-    if (pathname === "/api/notifications") {
-      const col = collection(db, "notifications");
-      const snap = await getDocs(col);
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      list.sort((a: any, b: any) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
-      return createMockResponse(list);
-    }
-
-    if (pathname === "/api/notifications/clear") {
-      return createMockResponse({ success: true });
-    }
-
-    if (pathname.startsWith("/api/notifications/") && pathname.endsWith("/read")) {
-      const parts = pathname.split("/");
-      const notifId = parts[3];
-      const docRef = doc(db, "notifications", notifId);
-      await updateDoc(docRef, { read: true });
-      return createMockResponse({ success: true });
-    }
-
-    if (pathname.startsWith("/api/shipments/") && pathname.endsWith("/subscribe-customer")) {
-      const parts = pathname.split("/");
-      const shipmentId = parts[3];
-      const body = getBodyJson();
-      const email = body.email;
-      if (!email || !email.includes("@")) {
-        return createMockResponse({ error: "A valid email address is required" }, 400);
-      }
-
-      const docRef = doc(db, "shipments", shipmentId);
-      const docSnap = await getDoc(docRef);
-      if (!docSnap.exists()) {
-        return createMockResponse({ error: "Shipment not found" }, 404);
-      }
-
-      const item = docSnap.data() as any;
-      if (!item.customerEmails) {
-        item.customerEmails = [];
-      }
-
-      const cleanEmail = email.trim().toLowerCase();
-      if (!item.customerEmails.includes(cleanEmail)) {
-        item.customerEmails.push(cleanEmail);
-      }
-
-      if (!item.customerNotificationHistory) {
-        item.customerNotificationHistory = [];
-      }
-
-      const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-      item.customerNotificationHistory.push({
-        id: alertId,
-        timestamp: new Date().toISOString(),
-        type: "setup",
-        title: "Subscribed Successfully",
-        message: `Your alert subscription for shipment #${item.shipmentNumber || ""} has been successfully verified. You will receive real-time updates directly.`,
-        email: cleanEmail,
-        channel: body.channel || "email"
-      });
-
-      await setDoc(docRef, item);
-      return createMockResponse(item);
-    }
-
-    // 6. CostStatements Endpoints
-    if (pathname === "/api/cost-statements") {
-      const col = collection(db, "costStatements");
-      const snap = await getDocs(col);
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      return createMockResponse(list);
-    }
-
-    if (pathname.startsWith("/api/cost-statements/")) {
-      const parts = pathname.split("/");
-      const shipmentId = parts[3];
-      if (method === "GET") {
-        const col = collection(db, "costStatements");
-        const q = query(col, where("shipmentId", "==", shipmentId));
-        const snap = await getDocs(q);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `cost-${Date.now()}`;
-        const finalData = { ...body, id: docId, shipmentId };
-        await setDoc(doc(db, "costStatements", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    // 7. Activity Logs
-    if (pathname === "/api/logs") {
-      if (method === "GET") {
-        const col = collection(db, "activityLogs");
-        const snap = await getDocs(col);
-        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        list.sort((a: any, b: any) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
-        return createMockResponse(list);
-      } else if (method === "POST") {
-        const body = getBodyJson();
-        const docId = body.id || `log-${Date.now()}`;
-        const finalData = { ...body, id: docId, timestamp: body.timestamp || new Date().toISOString() };
-        await setDoc(doc(db, "activityLogs", docId), finalData);
-        return createMockResponse(finalData);
-      }
-    }
-
-    // 8. Chat/Unread
-    if (pathname === "/api/chat/unread") {
-      return createMockResponse([]);
-    }
-
-    // 9. Session restoration & login handlers
-    if (pathname === "/api/verify-session") {
-      const body = getBodyJson();
-      const resolvedEmail = (body.email || "").trim().toLowerCase();
-      const isAdminEmail = resolvedEmail === "sardar@maras.iq" || resolvedEmail === "sardar";
-      
-      if (body.role === "admin" || isAdminEmail) {
-        if (isAdminEmail) {
-          return createMockResponse({
-            success: true,
-            role: "admin",
-            adminType: "super",
-            user: {
-              id: "admin",
-              name: "MARAS Operations Office",
-              username: "admin",
-              phone: "+90 212 555 1234",
-              email: "sardar@maras.iq",
-              adminType: "super"
-            }
-          });
-        }
-
-        try {
-          const adminsCol = collection(db, "admins");
-          const snap = await getDocs(adminsCol);
-          const adminsList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
-          const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === resolvedEmail);
-          
-          if (subAdmin) {
-            return createMockResponse({
-              success: true,
-              role: "admin",
-              adminType: subAdmin.adminType,
-              user: {
-                id: subAdmin.id,
-                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
-                username: subAdmin.email.split("@")[0],
-                phone: subAdmin.phone || "",
-                email: subAdmin.email,
-                adminType: subAdmin.adminType
-              }
-            });
-          }
-        } catch (err) {
-          console.warn("Could not check additional admins during verify-session client fallback:", err);
-        }
-
-        return createMockResponse({
-          success: true,
-          role: "admin",
-          adminType: "super",
-          user: {
-            id: "admin",
-            name: "MARAS Operations Office",
-            username: "admin",
-            phone: "+90 212 555 1234",
-            email: "sardar@maras.iq",
-            adminType: "super"
-          }
-        });
-      } else {
-        const driverId = body.driverId || body.uid;
-        if (driverId) {
-          const docSnap = await getDoc(doc(db, "drivers", driverId));
-          if (docSnap.exists()) {
-            return createMockResponse({
-              success: true,
-              role: "driver",
-              driver: { id: docSnap.id, ...docSnap.data() }
-            });
-          }
-        }
-        return createMockResponse({ success: false, message: "Driver profile not found." }, 404);
-      }
-    }
-
-    if (pathname === "/api/login") {
-      const body = getBodyJson();
-      const username = (body.username || "").trim().toLowerCase();
-      const password = body.password || "";
-
-      const isAdminUser = 
-        username === "sardar" || 
-        username === "sardar@maras.iq";
-
-      if (isAdminUser) {
-        if (password === "maras123" || password === "admin123") {
-          return createMockResponse({
-            success: true,
-            role: "admin",
-            adminType: "super",
-            user: {
-              id: "admin",
-              name: "MARAS Operations Office",
-              username: "admin",
-              phone: "+90 212 555 1234",
-              email: "sardar@maras.iq",
-              adminType: "super"
-            }
-          });
-        }
-      }
-
-      // Check sub-admins
-      try {
-        const adminsCol = collection(db, "admins");
-        const adminsSnap = await getDocs(adminsCol);
-        const adminsList = adminsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
-        const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === username);
-
-        if (subAdmin) {
-          if (subAdmin.password === password) {
-            return createMockResponse({
-              success: true,
-              role: "admin",
-              adminType: subAdmin.adminType,
-              user: {
-                id: subAdmin.id,
-                name: subAdmin.name || (subAdmin.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin"),
-                username: subAdmin.email.split("@")[0],
-                phone: subAdmin.phone || "",
-                email: subAdmin.email,
-                adminType: subAdmin.adminType
-              }
-            });
-          } else {
-            return createMockResponse({ error: "Incorrect password for admin user." }, 401);
-          }
-        }
-      } catch (err) {
-        console.warn("Could not check additional admins collection in login client fallback:", err);
-      }
-
-      // Query drivers list from Firestore
-      const col = collection(db, "drivers");
-      const snap = await getDocs(col);
-      const driversList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
-      
-      const matchedDriver = driversList.find(d => {
-        const uMatch = (d.username || "").toLowerCase() === username;
-        const pMatch = (d.phone || "").replace(/\s+/g, "") === username.replace(/\s+/g, "");
-        const nameMatch = (d.name || "").toLowerCase() === username;
-        return uMatch || pMatch || nameMatch;
-      });
-
-      if (matchedDriver) {
-        const storedPassword = matchedDriver.password || "123456";
-        if (storedPassword === password) {
-          return createMockResponse({
-            success: true,
-            role: "driver",
-            driver: matchedDriver
-          });
-        }
-      }
-
-      return createMockResponse({ error: "Invalid username, email, phone, or password" }, 401);
-    }
-
-    return createMockResponse({ error: "Endpoint not found client-side" }, 404);
-
-  } catch (error: any) {
-    console.error("[Firestore Direct Fallback Error]", error);
-    return createMockResponse({ error: "Direct Firestore Query Failed", details: error.message }, 500);
-  }
+  // REMOVED (security fix): this function used to re-implement nearly
+  // every API endpoint directly against client-side Firestore as a
+  // fallback for when the real server was unreachable. That required
+  // firestore.rules to allow public read/write on everything, which is
+  // exactly how this app's data (including plaintext passwords) ended up
+  // readable by anyone on the internet with no login at all — see
+  // firestore.rules for the fix. It also contained a copy of the
+  // server's old hardcoded master admin passwords, shipped to every
+  // browser in the JS bundle.
+  //
+  // Now that firestore.rules only allows the server's own dedicated
+  // account to read/write, this fallback could never work even if left
+  // in place — every call would simply get a permission-denied error
+  // from Firestore. Rather than leave that broken (and still
+  // security-sensitive) code in place, this just returns a clear error
+  // so the UI can show "couldn't reach the server" instead of silently
+  // trying and failing against Firestore directly.
+  console.error(`[api] Server unreachable for ${init?.method || "GET"} ${url}, and the client-side Firestore fallback has been removed for security reasons. Check your connection and that the server is running.`);
+  return createMockResponse(
+    { error: "Could not reach the server. Please check your connection and try again." },
+    503
+  );
 }
 
 function createMockResponse(data: any, status = 200): Response {

@@ -1,102 +1,28 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper to check if id is a valid string up to 128 characters
-    function isValidId(id) {
-      return id is string && id.size() <= 128;
+
+    // SECURITY MODEL: only the server's own dedicated Firebase Auth account
+    // (created once, in Firebase Console > Authentication, never exposed to
+    // end users) may read or write anything. No other signed-in user, and
+    // no anonymous/unauthenticated request, can touch this database.
+    //
+    // Real authorization for *humans* (which admin can do what, which
+    // driver can see which shipment, etc.) is enforced in the Express
+    // server itself (see server.ts requireAuth/requireRole middleware) —
+    // this rule's only job is to make sure NOTHING can reach Firestore
+    // except through that server.
+    //
+    // Previously every collection here had `allow read: if true`, which
+    // meant anyone on the internet could read the entire database
+    // (including plaintext passwords) with no login at all. That hole is
+    // closed below.
+    function isServerAccount() {
+      return request.auth != null && request.auth.uid == "DpfqNKAi9dUOW6ksGlDVXWcCvVJ2";
     }
 
-    // Drivers Rules
-    match /drivers/{driverId} {
-      allow read: if true;
-      allow write: if isValidId(driverId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.name is string && 
-                   request.resource.data.username is string;
-    }
-
-    // Shipments Rules
-    match /shipments/{shipmentId} {
-      allow read: if true;
-      allow write: if isValidId(shipmentId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.shipmentNumber is string && 
-                   request.resource.data.status is string;
-    }
-
-    // ChatMessages Rules
-    match /chatMessages/{messageId} {
-      allow read: if true;
-      allow write: if isValidId(messageId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.shipmentId is string && 
-                   request.resource.data.senderName is string;
-    }
-
-    // Notifications Rules
-    match /notifications/{notifId} {
-      allow read: if true;
-      allow write: if isValidId(notifId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.shipmentId is string;
-    }
-
-    // ActivityLogs Rules
-    match /activityLogs/{logId} {
-      allow read: if true;
-      allow write: if isValidId(logId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.shipmentId is string;
-    }
-
-    // Clients Rules
-    match /clients/{clientId} {
-      allow read: if true;
-      allow write: if isValidId(clientId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.companyName is string && 
-                   request.resource.data.contactName is string;
-     }
-
-    // Vendors Rules
-    match /vendors/{vendorId} {
-      allow read: if true;
-      allow write: if isValidId(vendorId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.companyName is string && 
-                   request.resource.data.contactName is string;
-    }
-
-    // CostStatements Rules
-    match /costStatements/{statementId} {
-      allow read: if true;
-      allow write: if isValidId(statementId) &&
-                   request.resource.data.shipmentId is string &&
-                   request.resource.data.shipmentNumber is string &&
-                   request.resource.data.paymentStatus is string;
-    }
-
-    // Configs Rules
-    match /configs/{configId} {
-      allow read: if true;
-      allow write: if isValidId(configId) && 
-                   request.resource.data.key is string;
-    }
-
-    // Admins Rules
-    match /admins/{adminId} {
-      allow read: if true;
-      allow write: if isValidId(adminId) && 
-                   request.resource.data.id is string && 
-                   request.resource.data.email is string && 
-                   request.resource.data.password is string && 
-                   request.resource.data.adminType is string;
-    }
-
-    // Test Connection Rules
-    match /test/{docId} {
-      allow read, write: if isValidId(docId);
+    match /{document=**} {
+      allow read, write: if isServerAccount();
     }
   }
 }

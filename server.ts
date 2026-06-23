@@ -17,8 +17,21 @@ if (process.env.DD_API_KEY) {
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
+import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
+import {
+  SessionRole as AuthSessionRole,
+  SessionPayload as AuthSessionPayload,
+  SESSION_TTL_MS as AUTH_SESSION_TTL_MS,
+  signSessionToken as signSessionTokenImpl,
+  verifySessionToken as verifySessionTokenImpl,
+  hashPassword,
+  verifyPassword,
+  verifyPasswordWithMigration,
+} from "./src/lib/auth";
 import { 
   getFirestore, 
   initializeFirestore,
@@ -391,8 +404,50 @@ try {
 }
 
 // Test Firestore Connection
+// IMPORTANT: this server now authenticates as a dedicated Firebase Auth
+// account (configured via SERVER_FIREBASE_EMAIL / SERVER_FIREBASE_PASSWORD)
+// before it can read or write anything. firestore.rules denies all access
+// except from this specific account's UID — see firestore.rules for why.
+// Without successful sign-in here, every Firestore call below will be
+// rejected by the security rules and the app will run on the in-memory
+// fallback store instead (logged loudly, since silent data loss is far
+// worse than a visible startup error).
+async function authenticateServerAccount(): Promise<boolean> {
+  if (!firebaseApp) return false;
+  const email = process.env.SERVER_FIREBASE_EMAIL;
+  const password = process.env.SERVER_FIREBASE_PASSWORD;
+  if (!email || !password) {
+    console.error(
+      "[STARTUP ERROR] SERVER_FIREBASE_EMAIL / SERVER_FIREBASE_PASSWORD are not set. " +
+      "The server cannot authenticate to Firestore and firestore.rules will reject every " +
+      "request. Falling back to in-memory storage — ALL DATA WILL BE LOST ON RESTART. " +
+      "Set these two environment variables to the dedicated server account created in " +
+      "Firebase Console > Authentication."
+    );
+    return false;
+  }
+  try {
+    const auth = getAuth(firebaseApp);
+    await signInWithEmailAndPassword(auth, email, password);
+    console.log("Server authenticated to Firebase as the dedicated server account.");
+    return true;
+  } catch (err: any) {
+    console.error(
+      "[STARTUP ERROR] Server failed to authenticate to Firebase:",
+      err instanceof Error ? err.message : String(err),
+      "— falling back to in-memory storage. ALL DATA WILL BE LOST ON RESTART."
+    );
+    return false;
+  }
+}
+
 async function testConnection() {
   if (!db) {
+    useMemoryFallback = true;
+    return;
+  }
+  const authed = await authenticateServerAccount();
+  if (!authed) {
     useMemoryFallback = true;
     return;
   }
@@ -421,7 +476,7 @@ const initialClients: Client[] = [
     address: "Karrada, Baghdad, Iraq",
     notes: "Regular importer of high-end appliances and consumer electronics. Strict delivery SLAs.",
     username: "bahi",
-    password: "client123",
+    password: "pbkdf2$0ff843709b3e5a883ce174e4ac26120a$69d4034b22e818737e4429c3f303ee95e0ec74c7c6c343a79ad16da61f5656c4922225067c85348742876bf47c6cec804984b6fb2b7462473d3472a62f013947", // hashed (was plaintext "client123") — demo seed data only
     createdAt: "2026-05-01T10:00:00Z"
   },
   {
@@ -433,7 +488,7 @@ const initialClients: Client[] = [
     address: "Frankfurt, Germany",
     notes: "German-Iraqi industrial supply partner. Ships specialized machinery parts.",
     username: "uruk",
-    password: "client123",
+    password: "pbkdf2$0ff843709b3e5a883ce174e4ac26120a$69d4034b22e818737e4429c3f303ee95e0ec74c7c6c343a79ad16da61f5656c4922225067c85348742876bf47c6cec804984b6fb2b7462473d3472a62f013947", // hashed (was plaintext "client123") — demo seed data only
     createdAt: "2026-05-15T14:30:00Z"
   },
   {
@@ -445,7 +500,7 @@ const initialClients: Client[] = [
     address: "Basra, Iraq",
     notes: "Requires reefer refrigerated transport for dairy, meat, and frozen confectionery products.",
     username: "karwan",
-    password: "client123",
+    password: "pbkdf2$0ff843709b3e5a883ce174e4ac26120a$69d4034b22e818737e4429c3f303ee95e0ec74c7c6c343a79ad16da61f5656c4922225067c85348742876bf47c6cec804984b6fb2b7462473d3472a62f013947", // hashed (was plaintext "client123") — demo seed data only
     createdAt: "2026-05-20T08:15:00Z"
   }
 ];
@@ -502,7 +557,7 @@ const initialDrivers: Driver[] = [
     id: "driver-1",
     name: "Murat Yılmaz",
     username: "murat_yilmaz",
-    password: "123456",
+    password: "pbkdf2$f9b0115c5f99f2541e0ba23085e2fe04$0b6e9232efdf4d135a685751d05bc563c6dd70ba6342cfba94ec5f4cee0469f1432008c80bf116da4703d792d3c6b777f34b836154265d04cefc2e6b0e2a7559", // hashed (was plaintext "123456") — demo seed data only
     truckNumber: "34-MAR-1903",
     phone: "+90 532 111 2233",
     activeShipmentsCount: 1,
@@ -513,7 +568,7 @@ const initialDrivers: Driver[] = [
     id: "driver-2",
     name: "Ahmed Al-Fadhli",
     username: "ahmed_alfadhli",
-    password: "123456",
+    password: "pbkdf2$f9b0115c5f99f2541e0ba23085e2fe04$0b6e9232efdf4d135a685751d05bc563c6dd70ba6342cfba94ec5f4cee0469f1432008c80bf116da4703d792d3c6b777f34b836154265d04cefc2e6b0e2a7559", // hashed (was plaintext "123456") — demo seed data only
     truckNumber: "BG-98745-IQ",
     phone: "+964 770 123 4567",
     activeShipmentsCount: 1,
@@ -524,7 +579,7 @@ const initialDrivers: Driver[] = [
     id: "driver-3",
     name: "Kamal Al-Sabah",
     username: "kamal_sabah",
-    password: "123456",
+    password: "pbkdf2$f9b0115c5f99f2541e0ba23085e2fe04$0b6e9232efdf4d135a685751d05bc563c6dd70ba6342cfba94ec5f4cee0469f1432008c80bf116da4703d792d3c6b777f34b836154265d04cefc2e6b0e2a7559", // hashed (was plaintext "123456") — demo seed data only
     truckNumber: "BG-44321-IQ",
     phone: "+964 780 987 6543",
     activeShipmentsCount: 0,
@@ -535,7 +590,7 @@ const initialDrivers: Driver[] = [
     id: "driver-4",
     name: "George Haddad",
     username: "george_haddad",
-    password: "123456",
+    password: "pbkdf2$f9b0115c5f99f2541e0ba23085e2fe04$0b6e9232efdf4d135a685751d05bc563c6dd70ba6342cfba94ec5f4cee0469f1432008c80bf116da4703d792d3c6b777f34b836154265d04cefc2e6b0e2a7559", // hashed (was plaintext "123456") — demo seed data only
     truckNumber: "LEB-45210",
     phone: "+961 3 124 567",
     activeShipmentsCount: 1,
@@ -1246,6 +1301,11 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+  // Trust the first proxy hop (Cloud Run's load balancer) so req.ip reflects
+  // the real client IP, not the proxy's. Without this, the login rate
+  // limiter below would see every request as coming from the same IP.
+  app.set("trust proxy", 1);
+
   // Use JSON middleware with reasonable limits for inline file mock uploads (base64)
   app.use(express.json({ limit: "20mb" }));
 
@@ -1285,11 +1345,227 @@ async function startServer() {
     next();
   });
 
+  // ───────────────────────────────────────────────────────────────────────
+  // SESSION / AUTHORIZATION SYSTEM
+  //
+  // Previously NONE of the API endpoints below checked who was calling
+  // them — anyone who knew (or guessed) a URL like /api/admins or
+  // /api/shipments/:id could read or write anything, logged in or not.
+  // This block adds a real, signed session token (similar in spirit to a
+  // JWT, built with Node's built-in crypto so no new dependency is
+  // required) that is:
+  //   1. issued by /api/login and /api/verify-session on successful auth
+  //   2. sent back to the client, which must include it as
+  //      `Authorization: Bearer <token>` on every subsequent request
+  //   3. verified by requireAuth/requireRole on every endpoint that
+  //      shouldn't be world-readable/writable
+  //
+  // SESSION_SECRET must be set in the environment — if it's missing, the
+  // server refuses to start rather than silently running with no real
+  // protection (matching the "fail loud, not silent" principle applied
+  // to the Firestore connection above).
+  // ───────────────────────────────────────────────────────────────────────
+  const SESSION_SECRET = process.env.SESSION_SECRET || "";
+  if (!SESSION_SECRET) {
+    console.error(
+      "[FATAL] SESSION_SECRET is not set. Refusing to start without it — every API " +
+      "endpoint would otherwise be unauthenticated. Generate one with " +
+      "`openssl rand -base64 48` and set it as an environment variable."
+    );
+    process.exit(1);
+  }
+
+  type SessionRole = AuthSessionRole;
+  type SessionPayload = AuthSessionPayload;
+  const SESSION_TTL_MS = AUTH_SESSION_TTL_MS;
+
+  // Thin wrappers supplying SESSION_SECRET automatically, so the many call
+  // sites below don't need to change. The actual signing/verification logic
+  // lives in src/lib/auth.ts, where it's unit tested (npm run test) without
+  // needing to boot this whole server.
+  function signSessionToken(payload: SessionPayload): string {
+    return signSessionTokenImpl(payload, SESSION_SECRET);
+  }
+  function verifySessionToken(token: string): SessionPayload | null {
+    return verifySessionTokenImpl(token, SESSION_SECRET);
+  }
+
+  // Augment Express's Request type so handlers can read req.session
+  // and req.shipment (attached by requireShipmentAccess)
+  declare global {
+    namespace Express {
+      interface Request {
+        session?: SessionPayload;
+        shipment?: Shipment;
+      }
+    }
+  }
+
+  function getTokenFromRequest(req: express.Request): string | null {
+    const header = req.headers["authorization"];
+    if (typeof header === "string" && header.startsWith("Bearer ")) {
+      return header.slice("Bearer ".length).trim();
+    }
+    return null;
+  }
+
+  /** Attaches req.session if a valid token is present; does NOT reject the request on its own. */
+  function attachSession(req: express.Request, _res: express.Response, next: express.NextFunction) {
+    const token = getTokenFromRequest(req);
+    if (token) {
+      const payload = verifySessionToken(token);
+      if (payload) req.session = payload;
+    }
+    next();
+  }
+  app.use(attachSession);
+
+  /** Rejects the request unless a valid session of any role is present. */
+  function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    next();
+  }
+
+  /** Rejects the request unless the session role is in the allowed list. */
+  function requireRole(...roles: SessionRole[]) {
+    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (!req.session) {
+        return res.status(401).json({ error: "Authentication required." });
+      }
+      if (!roles.includes(req.session.role)) {
+        return res.status(403).json({ error: "You do not have permission to perform this action." });
+      }
+      next();
+    };
+  }
+
+  /** True if this session is an admin with adminType 'super' or 'operation' (not the cost-only 'accounts' role). */
+  function requireFullAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.adminType === "accounts") {
+      return res.status(403).json({ error: "Accounts-role admins cannot perform this action." });
+    }
+    next();
+  }
+
+  /**
+   * Simple in-memory rate limiter for login attempts, keyed by IP address +
+   * the username being attempted. Prevents unlimited password guessing
+   * against any one account. No new dependency — just a Map with manual
+   * expiry, reset on every successful login.
+   *
+   * NOTE: this is per-server-instance memory, not shared across multiple
+   * server replicas. If this app is ever deployed behind a load balancer
+   * with more than one backend instance, a shared store (Redis, or a
+   * Firestore-backed counter) would be needed for this to remain effective
+   * — a single attacker could otherwise round-robin across instances to
+   * bypass it. Fine for a single-instance deployment as-is.
+   */
+  const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  const LOGIN_MAX_ATTEMPTS = 8;
+  const loginAttempts = new Map<string, { count: number; windowStart: number }>();
+
+  function loginRateLimitKey(req: express.Request, username: string): string {
+    const ip = req.ip || req.socket?.remoteAddress || "unknown";
+    return `${ip}:${(username || "").toLowerCase().trim()}`;
+  }
+
+  function checkLoginRateLimit(req: express.Request, username: string): { allowed: boolean; retryAfterSeconds?: number } {
+    const key = loginRateLimitKey(req, username);
+    const now = Date.now();
+    const entry = loginAttempts.get(key);
+
+    if (!entry || now - entry.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
+      loginAttempts.set(key, { count: 1, windowStart: now });
+      return { allowed: true };
+    }
+
+    if (entry.count >= LOGIN_MAX_ATTEMPTS) {
+      const retryAfterSeconds = Math.ceil((LOGIN_ATTEMPT_WINDOW_MS - (now - entry.windowStart)) / 1000);
+      return { allowed: false, retryAfterSeconds };
+    }
+
+    entry.count += 1;
+    return { allowed: true };
+  }
+
+  function clearLoginRateLimit(req: express.Request, username: string): void {
+    loginAttempts.delete(loginRateLimitKey(req, username));
+  }
+
+  // Periodic cleanup so this Map doesn't grow unbounded over a long-running
+  // server process — old entries outside the window are just stale memory.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of loginAttempts.entries()) {
+      if (now - entry.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
+        loginAttempts.delete(key);
+      }
+    }
+  }, LOGIN_ATTEMPT_WINDOW_MS);
+
+  /**
+   * For any endpoint shaped /api/shipments/:id/... — verifies the session
+   * is either an admin, or a driver/client who actually owns that specific
+   * shipment, before letting the request through. Attaches the loaded
+   * shipment to req so handlers don't need to re-fetch it.
+   */
+  function requireShipmentAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    (async () => {
+      try {
+        const shipmentId = req.params.id;
+        const sDoc = await getDoc(doc(db, "shipments", shipmentId));
+        if (!sDoc.exists()) {
+          return res.status(404).json({ error: "Shipment not found" });
+        }
+        const shipment = sDoc.data() as Shipment;
+
+        if (req.session!.role === "admin") {
+          req.shipment = shipment;
+          return next();
+        }
+        if (req.session!.role === "driver") {
+          const driverId = req.session!.id;
+          const owns = shipment.assignedDriverId === driverId ||
+            (shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
+          if (!owns) return res.status(403).json({ error: "You do not have access to this shipment." });
+          req.shipment = shipment;
+          return next();
+        }
+        if (req.session!.role === "client") {
+          const clientsCol = collection(db, "clients");
+          const clientsSnap = await getDocs(clientsCol);
+          const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+          if (!myClient || shipment.companyName !== myClient.companyName) {
+            return res.status(403).json({ error: "You do not have access to this shipment." });
+          }
+          req.shipment = shipment;
+          return next();
+        }
+        return res.status(403).json({ error: "Forbidden." });
+      } catch (err) {
+        console.error("requireShipmentAccess error:", err);
+        return res.status(500).json({ error: "Failed to verify shipment access." });
+      }
+    })();
+  }
+
+  // Password hashing (hashPassword/verifyPassword/verifyPasswordWithMigration)
+  // now lives in src/lib/auth.ts, imported at the top of this file — see
+  // that module for the implementation and its unit tests.
+
   // Media uploading endpoints
-  app.post("/api/upload", (req, res) => {
+  app.post("/api/upload", requireAuth, async (req, res) => {
     try {
       const base64DataUrl = req.body.base64DataUrl || req.body.file || req.body.base64;
-      const filename = req.body.filename;
+      const filename = req.body.filename || "upload.bin";
       if (!base64DataUrl) {
         return res.status(400).json({ error: "Missing base64DataUrl or file data" });
       }
@@ -1302,24 +1578,50 @@ async function startServer() {
       const mimeType = match[1];
       const base64Data = match[2];
       const buffer = Buffer.from(base64Data, "base64");
-      const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
-      uploadedFiles.set(fileId, { filename: filename || "upload.bin", mimeType, buffer });
-      console.log(`Server-side file upload successful: ${filename} as ID ${fileId}`);
-      res.json({ url: `/api/uploads/${fileId}` });
+      if (useMemoryFallback || !firebaseApp) {
+        // No durable storage available right now — say so plainly rather
+        // than silently keeping the file in memory only, where it would
+        // vanish on the next restart with no warning to anyone.
+        console.error("[upload] Firebase unavailable — refusing upload rather than storing it only in memory where it would be silently lost.");
+        return res.status(503).json({
+          error: "File storage is temporarily unavailable. Your file was NOT saved — please try again in a moment.",
+        });
+      }
+
+      try {
+        const storage = getStorage(firebaseApp);
+        const path = `uploads/${req.session!.role}/${req.session!.id}/${Date.now()}-${Math.random().toString(36).substring(2, 9)}-${filename}`;
+        const fileRef = storageRef(storage, path);
+        await uploadBytes(fileRef, buffer, { contentType: mimeType });
+        const url = await getDownloadURL(fileRef);
+        console.log(`[upload] Stored to Firebase Storage: ${path}`);
+        res.json({ url });
+      } catch (storageErr: any) {
+        console.error("[upload] Firebase Storage write failed:", storageErr?.message || storageErr);
+        res.status(502).json({
+          error: "Could not save your file to storage. Please try again.",
+        });
+      }
     } catch (err) {
       console.error("Upload handler failed:", err);
       res.status(500).json({ error: "Upload failed" });
     }
   });
 
+  // Kept only for backward compatibility with files uploaded before this
+  // fix (old chat/document records may still reference /api/uploads/<id>
+  // URLs). New uploads no longer use this path — see /api/upload above,
+  // which now returns a real Firebase Storage URL directly. Note: any
+  // pre-fix uploads referenced here were already lost on the first server
+  // restart after they were created, since they only ever existed in
+  // memory — this just avoids a broken-link error for the link itself.
   app.get("/api/uploads/:id", (req, res) => {
     const fileId = req.params.id;
     const fileObj = uploadedFiles.get(fileId);
     if (!fileObj) {
-      return res.status(404).send("File not found");
+      return res.status(404).send("File not found (this was an older in-memory upload that didn't survive a server restart)");
     }
-    // Set appropriate content type of the uploaded file
     res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(fileObj.filename)}"`);
     res.setHeader("Content-Type", fileObj.mimeType);
     res.send(fileObj.buffer);
@@ -1328,21 +1630,31 @@ async function startServer() {
   // API Endpoints
 
   // 1. Get Shipments (from Firestore)
-  app.get("/api/shipments", async (req, res) => {
+  app.get("/api/shipments", requireAuth, async (req, res) => {
     try {
       const col = collection(db, "shipments");
       const snapshot = await getDocs(col);
       let list = snapshot.docs.map(doc => doc.data() as Shipment);
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      
-      const driverId = req.query.driverId as string;
-      if (driverId) {
-        const filtered = list.filter(s => 
-          s.assignedDriverId === driverId || 
+
+      // Scope results to the session's own role — never trust a
+      // client-supplied driverId/clientId to decide what's returned.
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        const filtered = list.filter(s =>
+          s.assignedDriverId === driverId ||
           (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId))
         );
         return res.json(filtered);
       }
+      if (req.session!.role === "client") {
+        const clientsCol = collection(db, "clients");
+        const clientsSnap = await getDocs(clientsCol);
+        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+        const filtered = myClient ? list.filter(s => s.companyName === myClient.companyName) : [];
+        return res.json(filtered);
+      }
+      // Admins see everything.
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -1351,7 +1663,7 @@ async function startServer() {
   });
 
   // 2. Create Shipment (Admin Only - writes to Firestore)
-  app.post("/api/shipments", async (req, res) => {
+  app.post("/api/shipments", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
       
@@ -1495,13 +1807,30 @@ async function startServer() {
   });
 
   // 3. Get Shipment Profile
-  app.get("/api/shipments/:id", async (req, res) => {
+  app.get("/api/shipments/:id", requireAuth, async (req, res) => {
     try {
       const sDoc = await getDoc(doc(db, "shipments", req.params.id));
       if (!sDoc.exists()) {
         return res.status(404).json({ error: "Shipment not found" });
       }
-      res.json(sDoc.data());
+      const shipment = sDoc.data() as Shipment;
+
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        const owns = shipment.assignedDriverId === driverId ||
+          (shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
+        if (!owns) return res.status(403).json({ error: "You do not have access to this shipment." });
+      } else if (req.session!.role === "client") {
+        const clientsCol = collection(db, "clients");
+        const clientsSnap = await getDocs(clientsCol);
+        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+        if (!myClient || shipment.companyName !== myClient.companyName) {
+          return res.status(403).json({ error: "You do not have access to this shipment." });
+        }
+      }
+      // Admins can view any shipment.
+
+      res.json(shipment);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to fetch shipment details" });
@@ -1509,7 +1838,7 @@ async function startServer() {
   });
 
   // 3.5. Calculate distance, duration, and estimated arrival time using Google Maps Distance Matrix API
-  app.get("/api/shipments/:id/distance-matrix", async (req, res) => {
+  app.get("/api/shipments/:id/distance-matrix", requireAuth, async (req, res) => {
     try {
       const sRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sRef);
@@ -1697,7 +2026,7 @@ async function startServer() {
   });
 
   // 4. Update Shipment Profile
-  app.put("/api/shipments/:id", async (req, res) => {
+  app.put("/api/shipments/:id", requireFullAdmin, async (req, res) => {
     try {
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
@@ -1947,7 +2276,7 @@ async function startServer() {
   });
 
   // 5. Update Status
-  app.put("/api/shipments/:id/status", async (req, res) => {
+  app.put("/api/shipments/:id/status", requireAuth, async (req, res) => {
     try {
       const { status, remarksDesc, updaterName, role } = req.body;
       const shipmentId = req.params.id;
@@ -1959,6 +2288,18 @@ async function startServer() {
       }
 
       const item = sDoc.data() as Shipment;
+
+      // Drivers may only update status on a shipment actually assigned to them.
+      // Clients have no business updating status at all.
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        const owns = item.assignedDriverId === driverId ||
+          (item.additionalDrivers && item.additionalDrivers.some((ad: any) => ad.driverId === driverId));
+        if (!owns) return res.status(403).json({ error: "You are not assigned to this shipment." });
+      } else if (req.session!.role === "client") {
+        return res.status(403).json({ error: "Clients cannot update shipment status." });
+      }
+
       const previousStatus = item.status;
       item.status = status as ShipmentStatus;
       item.updatedAt = new Date().toISOString();
@@ -2055,7 +2396,7 @@ async function startServer() {
   });
 
   // 5b. Subscribe Customer to Cargo Updates
-  app.post("/api/shipments/:id/subscribe-customer", async (req, res) => {
+  app.post("/api/shipments/:id/subscribe-customer", requireShipmentAccess, async (req, res) => {
     try {
       const { email, channel } = req.body;
       if (!email || !email.includes("@")) {
@@ -2116,7 +2457,7 @@ async function startServer() {
   });
 
   // 6. Get Chat Messages
-  app.get("/api/shipments/:id/chat", async (req, res) => {
+  app.get("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);
@@ -2137,7 +2478,7 @@ async function startServer() {
   });
 
   // 6b. Mark Chat Messages as Seen
-  app.post("/api/shipments/:id/chat/seen", async (req, res) => {
+  app.post("/api/shipments/:id/chat/seen", requireShipmentAccess, async (req, res) => {
     try {
       const shipmentId = req.params.id;
       const { viewer } = req.body; // 'admin' or 'driver'
@@ -2171,7 +2512,7 @@ async function startServer() {
   });
 
   // 7. Post Chat Message & Handle Document Savings
-  app.post("/api/shipments/:id/chat", async (req, res) => {
+  app.post("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
       const shipmentId = req.params.id;
       const { sender, senderName, type, text, fileUrl, fileName, fileCategory } = req.body;
@@ -2208,7 +2549,7 @@ async function startServer() {
           name: fileName || "unnamed_document.bin",
           url: fileUrl,
           category: fileCategory || "other",
-          uploadedBy: senderName || (sender === "admin" ? "Admin" : "Driver"),
+          uploadedBy: senderName || (sender === "admin" ? "Admin" : sender === "client" ? "Client" : "Driver"),
           uploadedAt: new Date().toISOString(),
           isSharedExternally: true
         };
@@ -2258,7 +2599,7 @@ async function startServer() {
   });
 
   // 8. Upload Document Directly (Admin Center)
-  app.post("/api/shipments/:id/documents", async (req, res) => {
+  app.post("/api/shipments/:id/documents", requireShipmentAccess, async (req, res) => {
     try {
       const shipmentId = req.params.id;
       const { name, url, category, uploadedBy, isSharedExternally } = req.body;
@@ -2301,7 +2642,7 @@ async function startServer() {
   });
 
   // 9. Toggle Document Visibility
-  app.put("/api/shipments/:id/documents/:docId/visibility", async (req, res) => {
+  app.put("/api/shipments/:id/documents/:docId/visibility", requireFullAdmin, async (req, res) => {
     try {
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
@@ -2322,7 +2663,7 @@ async function startServer() {
   });
 
   // 10. Configure Sharing Page Link
-  app.post("/api/shipments/:id/share", async (req, res) => {
+  app.post("/api/shipments/:id/share", requireShipmentAccess, async (req, res) => {
     try {
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
@@ -2356,6 +2697,11 @@ async function startServer() {
       }
 
       const secureView = {
+        // The share token itself (not the raw internal shipment id) is
+        // included so the public tracking page can prove legitimate access
+        // when calling other public-safe endpoints like subscribe-customer
+        // below — see that endpoint for how this token is checked.
+        shareToken: shipment.shareToken,
         shipmentNumber: shipment.shipmentNumber,
         status: shipment.status,
         loadingCountry: shipment.loadingCountry,
@@ -2411,23 +2757,102 @@ async function startServer() {
     }
   });
 
-  // 12. Drivers List
+  /**
+   * Public, token-keyed equivalent of subscribe-customer above, for
+   * anonymous visitors on the public tracking page (PublicTracking.tsx).
+   * That page only ever has the share token, never the shipment's
+   * internal Firestore id (which the secure /api/share/:token view
+   * deliberately doesn't expose) — so this is keyed by token instead,
+   * and only works while the shipment's link sharing is actually enabled.
+   */
+  app.post("/api/share/:token/subscribe", async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || !email.includes("@")) {
+        return res.status(400).json({ error: "A valid email address is required" });
+      }
+
+      const col = collection(db, "shipments");
+      const snapshot = await getDocs(col);
+      const list = snapshot.docs.map(doc => doc.data() as Shipment);
+      const shipment = list.find(s => s.shareToken === req.params.token);
+
+      if (!shipment || !shipment.isLinkShared) {
+        return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const customerEmails = Array.isArray(shipment.customerEmails) ? [...shipment.customerEmails] : [];
+      if (!customerEmails.includes(cleanEmail)) {
+        customerEmails.push(cleanEmail);
+      }
+
+      const customerNotificationHistory = Array.isArray(shipment.customerNotificationHistory)
+        ? [...shipment.customerNotificationHistory]
+        : [];
+      customerNotificationHistory.push({
+        id: `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        timestamp: new Date().toISOString(),
+        type: "setup",
+        title: "Subscribed Successfully",
+        message: `Your alert subscription for shipment #${shipment.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
+        email: cleanEmail,
+        channel: "email",
+      });
+
+      await setDoc(doc(db, "shipments", shipment.id), { ...shipment, customerEmails, customerNotificationHistory });
+
+      // Return the same reduced "secure view" shape the public page already
+      // expects from /api/share/:token, not the full internal record.
+      res.json({ ...shipment, customerEmails, customerNotificationHistory });
+    } catch (err) {
+      console.error("Public subscribe failed:", err);
+      res.status(500).json({ error: "Failed to subscribe to updates." });
+    }
+  });
+
+
   app.post("/api/login", async (req, res) => {
     try {
       const { username, password } = req.body;
       if (!username || !password) {
         return res.status(400).json({ error: "Username/Email/Phone and Password are required" });
       }
+      const normalizedQuery = username.toLowerCase().trim();
 
-      // 1. Admin login check
-      const isAdminUser = 
-        username.toLowerCase() === "sardar" || 
-        username.toLowerCase() === "sardar@maras.iq";
+      const rateLimit = checkLoginRateLimit(req, normalizedQuery);
+      if (!rateLimit.allowed) {
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+        return res.status(429).json({
+          error: `Too many login attempts for this account. Please try again in ${Math.ceil((rateLimit.retryAfterSeconds || 0) / 60)} minute(s).`,
+        });
+      }
 
-      if (isAdminUser) {
-        if (password === "maras123" || password === "admin123") {
+      // 1. Super-admin login (sardar@maras.iq) — root account, configured via
+      //    env vars, never hardcoded. See SERVER_FIREBASE_EMAIL note: this is
+      //    a *different* credential from the server's own Firebase account;
+      //    this one is the actual human super-admin's app login.
+      const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+      const SUPER_ADMIN_PASSWORD_HASH = process.env.SUPER_ADMIN_PASSWORD_HASH || "";
+      const isSuperAdminUser =
+        SUPER_ADMIN_EMAIL &&
+        (normalizedQuery === SUPER_ADMIN_EMAIL || normalizedQuery === SUPER_ADMIN_EMAIL.split("@")[0]);
+
+      if (isSuperAdminUser) {
+        if (!SUPER_ADMIN_PASSWORD_HASH) {
+          console.error("[login] SUPER_ADMIN_PASSWORD_HASH is not configured.");
+        } else if (verifyPassword(password, SUPER_ADMIN_PASSWORD_HASH)) {
+          clearLoginRateLimit(req, normalizedQuery);
+          const sessionPayload: SessionPayload = {
+            role: "admin",
+            id: SUPER_ADMIN_EMAIL,
+            adminType: "super",
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + SESSION_TTL_MS,
+          };
           return res.json({
             success: true,
+            token: signSessionToken(sessionPayload),
             role: "admin",
             adminType: "super",
             user: {
@@ -2435,24 +2860,37 @@ async function startServer() {
               name: "MARAS Operations Office",
               username: "admin",
               phone: "+90 212 555 1234",
-              email: "sardar@maras.iq",
+              email: SUPER_ADMIN_EMAIL,
               adminType: "super"
             }
           });
         }
+        return res.status(401).json({ error: "Incorrect password for admin user." });
       }
 
-      // Check sub-admins
+      // 2. Sub-admins (stored in the `admins` collection)
       try {
         const adminsCol = collection(db, "admins");
         const adminsSnapshot = await getDocs(adminsCol);
         const adminsList = adminsSnapshot.docs.map(doc => doc.data() as any);
-        const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === username.toLowerCase().trim());
+        const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === normalizedQuery);
 
         if (subAdmin) {
-          if (subAdmin.password === password) {
+          const matched = await verifyPasswordWithMigration(password, subAdmin.password, async (newHash) => {
+            await setDoc(doc(db, "admins", subAdmin.id), { ...subAdmin, password: newHash });
+          });
+          if (matched) {
+            clearLoginRateLimit(req, normalizedQuery);
+            const sessionPayload: SessionPayload = {
+              role: "admin",
+              id: subAdmin.id,
+              adminType: subAdmin.adminType,
+              issuedAt: Date.now(),
+              expiresAt: Date.now() + SESSION_TTL_MS,
+            };
             return res.json({
               success: true,
+              token: signSessionToken(sessionPayload),
               role: "admin",
               adminType: subAdmin.adminType,
               user: {
@@ -2464,20 +2902,18 @@ async function startServer() {
                 adminType: subAdmin.adminType
               }
             });
-          } else {
-            return res.status(401).json({ error: "Incorrect password for admin user." });
           }
+          return res.status(401).json({ error: "Incorrect password for admin user." });
         }
       } catch (err) {
         console.warn("Could not check additional admins collection in login backend:", err);
       }
 
-      // 2. Driver login check - fetch drivers list and try to match username or phone
+      // 3. Driver login — match by username, phone, or name
       const col = collection(db, "drivers");
       const snapshot = await getDocs(col);
       const driversList = snapshot.docs.map(doc => doc.data() as Driver);
-      
-      const normalizedQuery = username.toLowerCase().trim();
+
       const matchedDriver = driversList.find(d => {
         const uMatch = (d.username || "").toLowerCase() === normalizedQuery;
         const pMatch = (d.phone || "").replace(/\s+/g, "") === normalizedQuery.replace(/\s+/g, "");
@@ -2486,21 +2922,33 @@ async function startServer() {
       });
 
       if (matchedDriver) {
-        const storedPassword = matchedDriver.password || "123456";
-        if (storedPassword === password) {
+        // No more "|| '123456'" default — a driver with no password set
+        // simply cannot log in via password until an admin sets one.
+        const matched = await verifyPasswordWithMigration(password, matchedDriver.password, async (newHash) => {
+          await setDoc(doc(db, "drivers", matchedDriver.id), { ...matchedDriver, password: newHash });
+        });
+        if (matched) {
+          clearLoginRateLimit(req, normalizedQuery);
+          const sessionPayload: SessionPayload = {
+            role: "driver",
+            id: matchedDriver.id,
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + SESSION_TTL_MS,
+          };
           return res.json({
             success: true,
+            token: signSessionToken(sessionPayload),
             role: "driver",
             driver: matchedDriver
           });
         }
       }
 
-      // 3. Client login check - fetch clients list and match email or username
+      // 4. Client login — match by username, email, or company name
       const clientsCol = collection(db, "clients");
       const clientsSnapshot = await getDocs(clientsCol);
       const clientsList = clientsSnapshot.docs.map(doc => doc.data() as Client);
-      
+
       const matchedClient = clientsList.find(c => {
         const uMatch = (c.username || "").toLowerCase() === normalizedQuery;
         const eMatch = (c.email || "").toLowerCase() === normalizedQuery;
@@ -2509,10 +2957,21 @@ async function startServer() {
       });
 
       if (matchedClient) {
-        const storedPassword = matchedClient.password || "client123";
-        if (storedPassword === password) {
+        // No more "|| 'client123'" default — same reasoning as drivers above.
+        const matched = await verifyPasswordWithMigration(password, matchedClient.password, async (newHash) => {
+          await setDoc(doc(db, "clients", matchedClient.id), { ...matchedClient, password: newHash });
+        });
+        if (matched) {
+          clearLoginRateLimit(req, normalizedQuery);
+          const sessionPayload: SessionPayload = {
+            role: "client",
+            id: matchedClient.id,
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + SESSION_TTL_MS,
+          };
           return res.json({
             success: true,
+            token: signSessionToken(sessionPayload),
             role: "client",
             client: matchedClient
           });
@@ -2530,14 +2989,23 @@ async function startServer() {
   app.post("/api/verify-session", async (req, res) => {
     try {
       const { role, email, uid, driverId, clientId } = req.body;
-      
+
       const resolvedEmail = (email || "").trim().toLowerCase();
-      const isAdminEmail = resolvedEmail === "sardar@maras.iq";
-      
+      const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+      const isAdminEmail = !!SUPER_ADMIN_EMAIL && resolvedEmail === SUPER_ADMIN_EMAIL;
+
       if (role === "admin" || isAdminEmail) {
-        if (isAdminEmail || resolvedEmail === "sardar") {
-          return res.json({ 
-            success: true, 
+        if (isAdminEmail) {
+          const sessionPayload: SessionPayload = {
+            role: "admin",
+            id: SUPER_ADMIN_EMAIL,
+            adminType: "super",
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + SESSION_TTL_MS,
+          };
+          return res.json({
+            success: true,
+            token: signSessionToken(sessionPayload),
             role: "admin",
             adminType: "super",
             user: {
@@ -2545,7 +3013,7 @@ async function startServer() {
               name: "MARAS Operations Office",
               username: "admin",
               phone: "+90 212 555 1234",
-              email: "sardar@maras.iq",
+              email: SUPER_ADMIN_EMAIL,
               adminType: "super"
             }
           });
@@ -2559,8 +3027,16 @@ async function startServer() {
           const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === resolvedEmail);
 
           if (subAdmin) {
+            const sessionPayload: SessionPayload = {
+              role: "admin",
+              id: subAdmin.id,
+              adminType: subAdmin.adminType,
+              issuedAt: Date.now(),
+              expiresAt: Date.now() + SESSION_TTL_MS,
+            };
             return res.json({
               success: true,
+              token: signSessionToken(sessionPayload),
               role: "admin",
               adminType: subAdmin.adminType,
               user: {
@@ -2597,9 +3073,16 @@ async function startServer() {
         if (!foundDriver) {
           return res.status(404).json({ success: false, message: "Forbid: Driver ID not found in security system." });
         }
-        
-        return res.json({ 
-          success: true, 
+
+        const sessionPayload: SessionPayload = {
+          role: "driver",
+          id: foundDriver.id,
+          issuedAt: Date.now(),
+          expiresAt: Date.now() + SESSION_TTL_MS,
+        };
+        return res.json({
+          success: true,
+          token: signSessionToken(sessionPayload),
           role: "driver",
           driver: foundDriver
         });
@@ -2620,8 +3103,15 @@ async function startServer() {
           return res.status(404).json({ success: false, message: "Forbid: Client ID not found in security system." });
         }
 
+        const sessionPayload: SessionPayload = {
+          role: "client",
+          id: foundClient.id,
+          issuedAt: Date.now(),
+          expiresAt: Date.now() + SESSION_TTL_MS,
+        };
         return res.json({
           success: true,
+          token: signSessionToken(sessionPayload),
           role: "client",
           client: foundClient
         });
@@ -2667,11 +3157,32 @@ async function startServer() {
     });
   });
 
-  app.get("/api/admins", async (req, res) => {
+  // Surfaces the in-memory-fallback state to the admin UI. Previously this
+  // was only ever logged to server console output, which meant an admin
+  // had no way to know their data wasn't actually being saved to Firestore
+  // — it would silently vanish on the next server restart with zero
+  // warning anywhere in the app itself. Requires admin auth — see
+  // requireRole('admin') below, wired up once auth middleware is in place.
+  app.get("/api/system/storage-status", requireRole("admin"), (req, res) => {
+    res.json({
+      usingMemoryFallback: useMemoryFallback,
+      warning: useMemoryFallback
+        ? "This server is NOT connected to Firestore. All data (shipments, drivers, chat, everything) is being held in memory only and WILL BE PERMANENTLY LOST the next time the server restarts or redeploys. Check SERVER_FIREBASE_EMAIL/SERVER_FIREBASE_PASSWORD and the Firebase config."
+        : null,
+    });
+  });
+
+  app.get("/api/admins", requireFullAdmin, async (req, res) => {
     try {
       const col = collection(db, "admins");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data());
+      // Never send password hashes to the client — the frontend has no
+      // legitimate use for them, and there's no reason to expose even a
+      // hashed value beyond what's strictly necessary.
+      const list = snapshot.docs.map(doc => {
+        const { password, ...rest } = doc.data() as any;
+        return rest;
+      });
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -2679,26 +3190,30 @@ async function startServer() {
     }
   });
 
-  app.post("/api/admins", async (req, res) => {
+  app.post("/api/admins", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
+      if (!data.password || data.password.length < 8) {
+        return res.status(400).json({ error: "A password of at least 8 characters is required." });
+      }
       const newAdmin = {
         id: data.id || `admin-${Date.now()}`,
         name: data.name || "MARAS Team Member",
         email: data.email || "",
-        password: data.password || "123456",
+        password: hashPassword(data.password),
         adminType: data.adminType || "operation",
         createdAt: data.createdAt || new Date().toISOString()
       };
       await setDoc(doc(db, "admins", newAdmin.id), newAdmin);
-      res.status(201).json(newAdmin);
+      const { password, ...safeAdmin } = newAdmin;
+      res.status(201).json(safeAdmin);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create admin" });
     }
   });
 
-  app.delete("/api/admins/:id", async (req, res) => {
+  app.delete("/api/admins/:id", requireFullAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const docRef = doc(db, "admins", id);
@@ -2710,9 +3225,14 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/drivers/:id", async (req, res) => {
+  app.delete("/api/drivers/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
+      const isSelf = req.session!.role === "driver" && req.session!.id === id;
+      if (!isFullAdmin && !isSelf) {
+        return res.status(403).json({ error: "You can only delete your own account." });
+      }
       const docRef = doc(db, "drivers", id);
       await deleteDoc(docRef);
       res.json({ success: true, message: "Driver deleted successfully" });
@@ -2722,9 +3242,14 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/clients/:id", async (req, res) => {
+  app.delete("/api/clients/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
+      const isSelf = req.session!.role === "client" && req.session!.id === id;
+      if (!isFullAdmin && !isSelf) {
+        return res.status(403).json({ error: "You can only delete your own account." });
+      }
       const docRef = doc(db, "clients", id);
       await deleteDoc(docRef);
       res.json({ success: true, message: "Client deleted successfully" });
@@ -2734,11 +3259,14 @@ async function startServer() {
     }
   });
 
-  app.get("/api/drivers", async (req, res) => {
+  app.get("/api/drivers", requireAuth, async (req, res) => {
     try {
       const col = collection(db, "drivers");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as Driver);
+      const list = snapshot.docs.map(doc => {
+        const { password, ...rest } = doc.data() as any;
+        return rest as Driver;
+      });
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -2746,14 +3274,17 @@ async function startServer() {
     }
   });
 
-  app.post("/api/drivers", async (req, res) => {
+  app.post("/api/drivers", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
       const newDriver: Driver = {
         id: data.id || `driver-${Date.now()}`,
         name: data.name || "Unnamed Driver",
         username: data.username || `driver_${Date.now()}`,
-        password: data.password || "123456",
+        // Drivers without an explicit password are created with one
+        // generated for them and returned once in the response below —
+        // no hardcoded, reused default like the old "123456" fallback.
+        password: hashPassword(data.password || crypto.randomBytes(9).toString("base64url")),
         email: data.email || "",
         truckNumber: data.truckNumber || "Unassigned",
         phone: data.phone || "No phone",
@@ -2762,18 +3293,77 @@ async function startServer() {
         truckType: data.truckType || "reefer"
       };
       await setDoc(doc(db, "drivers", newDriver.id), newDriver);
-      res.status(201).json(newDriver);
+      const { password, ...safeDriver } = newDriver;
+      res.status(201).json({
+        ...safeDriver,
+        // Only returned here, once, at creation time, so the admin can
+        // hand it to the driver — never stored or logged in plaintext.
+        temporaryPassword: data.password ? undefined : "Generated — ask admin to set a password for this driver via Edit.",
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create driver" });
     }
   });
 
-  app.get("/api/clients", async (req, res) => {
+  /**
+   * Driver self-registration via Google sign-in. Deliberately separate from
+   * the admin-only POST /api/drivers above: this is the one specific,
+   * narrowly-scoped case where an otherwise-unauthenticated request is
+   * allowed to write to Firestore — a brand-new driver creating *only*
+   * their own profile, identified by their own Firebase uid. The uid claim
+   * isn't cryptographically verified (that requires Firebase Admin SDK,
+   * not available in this deployment — see SERVER_FIREBASE_EMAIL note
+   * elsewhere in this file), but this endpoint can only ever create a
+   * driver record, never read or modify anyone else's data, which bounds
+   * the impact of that residual gap.
+   */
+  app.post("/api/drivers/self-register", async (req, res) => {
+    try {
+      const data = req.body;
+      if (!data.uid) {
+        return res.status(400).json({ error: "uid is required" });
+      }
+      const existing = await getDoc(doc(db, "drivers", data.uid));
+      if (existing.exists()) {
+        return res.status(409).json({ error: "A driver profile already exists for this account." });
+      }
+      const newDriver: Driver = {
+        id: data.uid,
+        name: data.name || "Unnamed Driver",
+        username: data.username || `driver_${Date.now()}`,
+        password: hashPassword(crypto.randomBytes(9).toString("base64url")),
+        email: data.email || "",
+        truckNumber: data.truckNumber || "Unassigned",
+        phone: data.phone || "No phone",
+        activeShipmentsCount: 0,
+        completedShipmentsCount: 0,
+        truckType: data.truckType || "reefer"
+      };
+      await setDoc(doc(db, "drivers", newDriver.id), newDriver);
+
+      const sessionPayload: SessionPayload = {
+        role: "driver",
+        id: newDriver.id,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + SESSION_TTL_MS,
+      };
+      const { password, ...safeDriver } = newDriver;
+      res.status(201).json({ ...safeDriver, token: signSessionToken(sessionPayload) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to register driver" });
+    }
+  });
+
+  app.get("/api/clients", requireFullAdmin, async (req, res) => {
     try {
       const col = collection(db, "clients");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as Client);
+      const list = snapshot.docs.map(doc => {
+        const { password, ...rest } = doc.data() as any;
+        return rest as Client;
+      });
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -2781,7 +3371,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/clients", async (req, res) => {
+  app.post("/api/clients", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
       if (!data.companyName || !data.contactName) {
@@ -2795,17 +3385,19 @@ async function startServer() {
         email: data.email || "",
         address: data.address || "",
         notes: data.notes || "",
-        createdAt: data.createdAt || new Date().toISOString()
+        createdAt: data.createdAt || new Date().toISOString(),
+        ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
       await setDoc(doc(db, "clients", newClient.id), newClient);
-      res.status(201).json(newClient);
+      const { password, ...safeClient } = newClient as any;
+      res.status(201).json(safeClient);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create client" });
     }
   });
 
-  app.get("/api/vendors", async (req, res) => {
+  app.get("/api/vendors", requireFullAdmin, async (req, res) => {
     try {
       const col = collection(db, "vendors");
       const snapshot = await getDocs(col);
@@ -2817,7 +3409,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/vendors", async (req, res) => {
+  app.post("/api/vendors", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
       if (!data.companyName || !data.contactName || !data.serviceType) {
@@ -2842,8 +3434,15 @@ async function startServer() {
     }
   });
 
-  app.put("/api/drivers/:id", async (req, res) => {
+  app.put("/api/drivers/:id", requireAuth, async (req, res) => {
     try {
+      // A driver may only update their own profile; admins may update any.
+      if (req.session!.role === "driver" && req.session!.id !== req.params.id) {
+        return res.status(403).json({ error: "You can only update your own profile." });
+      }
+      if (req.session!.role === "client") {
+        return res.status(403).json({ error: "Clients cannot update driver profiles." });
+      }
       const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl } = req.body;
       const dRef = doc(db, "drivers", req.params.id);
       const dDoc = await getDoc(dRef);
@@ -2852,12 +3451,14 @@ async function startServer() {
       if (dDoc.exists()) {
         original = dDoc.data();
       } else {
-        // Auto-create base profile if not found
+        // Auto-create base profile if not found. No hardcoded password —
+        // a randomly generated, hashed one is used instead; this account
+        // can't be logged into by password until an admin sets one.
         original = {
           id: req.params.id,
           name: name || "Simulated Specialist",
           username: username || `driver_${req.params.id}`,
-          password: "123",
+          password: hashPassword(crypto.randomBytes(9).toString("base64url")),
           email: email || "",
           truckNumber: truckNumber || "TR-7733-IQ",
           phone: phone || "+96400000000",
@@ -2922,12 +3523,45 @@ async function startServer() {
   });
 
   // 13. System Notifications
-  app.get("/api/notifications", async (req, res) => {
+  app.get("/api/notifications", requireAuth, async (req, res) => {
     try {
       const col = collection(db, "notifications");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as AppNotification);
+      let list = snapshot.docs.map(doc => doc.data() as AppNotification);
       list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      // Scope to the session's own shipments for drivers/clients — same
+      // reasoning as /api/shipments above. Admins see everything.
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        const shipCol = collection(db, "shipments");
+        const shipSnap = await getDocs(shipCol);
+        const myShipmentIds = new Set(
+          shipSnap.docs
+            .map(d => d.data() as Shipment)
+            .filter(s => s.assignedDriverId === driverId || (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId)))
+            .map(s => s.id)
+        );
+        list = list.filter(n => myShipmentIds.has(n.shipmentId));
+      } else if (req.session!.role === "client") {
+        const clientsCol = collection(db, "clients");
+        const clientsSnap = await getDocs(clientsCol);
+        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+        if (myClient) {
+          const shipCol = collection(db, "shipments");
+          const shipSnap = await getDocs(shipCol);
+          const myShipmentIds = new Set(
+            shipSnap.docs
+              .map(d => d.data() as Shipment)
+              .filter(s => s.companyName === myClient.companyName)
+              .map(s => s.id)
+          );
+          list = list.filter(n => myShipmentIds.has(n.shipmentId));
+        } else {
+          list = [];
+        }
+      }
+
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -2935,7 +3569,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/notifications/clear", async (req, res) => {
+  app.post("/api/notifications/clear", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "notifications");
       const snapshot = await getDocs(col);
@@ -2953,12 +3587,37 @@ async function startServer() {
     }
   });
 
-  app.post("/api/notifications/:id/read", async (req, res) => {
+  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
     try {
       const dRef = doc(db, "notifications", req.params.id);
       const dDoc = await getDoc(dRef);
       if (dDoc.exists()) {
         const notif = dDoc.data() as AppNotification;
+
+        // Non-admins may only mark read a notification belonging to one of
+        // their own shipments.
+        if (req.session!.role !== "admin") {
+          const sDoc = await getDoc(doc(db, "shipments", notif.shipmentId));
+          if (!sDoc.exists()) {
+            return res.status(404).json({ error: "Shipment not found for this notification." });
+          }
+          const shipment = sDoc.data() as Shipment;
+          let owns = false;
+          if (req.session!.role === "driver") {
+            const driverId = req.session!.id;
+            owns = shipment.assignedDriverId === driverId ||
+              !!(shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
+          } else if (req.session!.role === "client") {
+            const clientsCol = collection(db, "clients");
+            const clientsSnap = await getDocs(clientsCol);
+            const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+            owns = !!myClient && shipment.companyName === myClient.companyName;
+          }
+          if (!owns) {
+            return res.status(403).json({ error: "You do not have access to this notification." });
+          }
+        }
+
         notif.read = true;
         await setDoc(dRef, notif);
       }
@@ -2970,7 +3629,7 @@ async function startServer() {
   });
 
   // Cost Statements APIs
-  app.get("/api/cost-statements", async (req, res) => {
+  app.get("/api/cost-statements", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "costStatements");
       const snapshot = await getDocs(col);
@@ -2982,7 +3641,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/cost-statements/:shipmentId", async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId", requireRole("admin"), async (req, res) => {
     try {
       const dRef = doc(db, "costStatements", req.params.shipmentId);
       const dDoc = await getDoc(dRef);
@@ -3020,7 +3679,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cost-statements/:shipmentId", async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId", requireFullAdmin, async (req, res) => {
     try {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
@@ -3083,7 +3742,7 @@ async function startServer() {
   });
 
   // 14. Activity Logs
-  app.get("/api/logs", async (req, res) => {
+  app.get("/api/logs", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "activityLogs");
       const snapshot = await getDocs(col);
@@ -3096,7 +3755,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/logs", async (req, res) => {
+  app.post("/api/logs", requireRole("admin"), async (req, res) => {
     try {
       const { shipmentId, shipmentNumber, actor, actionEn, actionTr, actionAr } = req.body;
       await logActivity(
@@ -3115,7 +3774,7 @@ async function startServer() {
   });
 
   // 15. Get Unread/Unseen Driver Chat Messages and counts
-  app.get("/api/chat/unread", async (req, res) => {
+  app.get("/api/chat/unread", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);

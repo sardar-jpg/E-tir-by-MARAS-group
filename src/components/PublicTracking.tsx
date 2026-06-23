@@ -125,7 +125,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     
     setIsSubmittingSubscription(true);
     try {
-      const res = await fetch(`/api/shipments/${shipment.id}/subscribe-customer`, {
+      const res = await fetch(`/api/share/${tokenFromUrl}/subscribe`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -365,7 +365,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           </div>
 
           {/* Quick Stats Ticker */}
-          <div className={`${isMobileMode ? 'hidden' : 'hidden lg:flex'} items-center gap-3 font-mono text-[10px] text-slate-450`}>
+          <div className={`${isMobileMode ? 'hidden' : 'hidden lg:flex'} items-center gap-3 font-mono text-[10px] text-slate-400`}>
             <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-sm border border-slate-800">
               <Activity className="w-3 h-3 text-emerald-400" />
               <span>RADAR STATUS:</span>
@@ -449,7 +449,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             <div className={`flex flex-col ${isMobileMode ? '' : 'sm:flex-row sm:items-center'} gap-2 w-full md:w-auto`}>
               <button 
                 onClick={handleCopyLink}
-                className="px-4 py-2 bg-slate-950 text-xs font-bold border border-slate-800 text-slate-200 hover:bg-slate-850 hover:border-slate-700 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                className="px-4 py-2 bg-slate-950 text-xs font-bold border border-slate-800 text-slate-200 hover:bg-slate-800 hover:border-slate-700 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-slate-400" />}
                 <span>{copiedLink ? (lang === 'tr' ? "Kopyalandı!" : (lang === 'ar' ? "تم النسخ!" : "Copied!")) : t('copyLink')}</span>
@@ -467,17 +467,17 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             
             <div className="md:col-span-2 space-y-1">
               <span className="text-[9.5px] font-mono text-slate-400 uppercase tracking-wider block">CURRENT EVENT EXPLANATION:</span>
-              <p className="text-xs text-slate-350 leading-relaxed font-semibold">
+              <p className="text-xs text-slate-400 leading-relaxed font-semibold">
                 {currentStatusDesc}
               </p>
             </div>
 
-            <div className="p-3 bg-slate-950/60 border border-slate-850 rounded-xl flex items-center justify-between gap-3">
+            <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl flex items-center justify-between gap-3">
               <div>
                 <span className="text-[9px] text-slate-500 font-bold block uppercase tracking-wider leading-none">PROGRESS</span>
                 <strong className="text-base font-black text-orange-500 font-mono">{progressPercent}%</strong>
               </div>
-              <div className="flex-1 max-w-[120px] bg-slate-850 h-2.5 rounded-full overflow-hidden border border-slate-800">
+              <div className="flex-1 max-w-[120px] bg-slate-800 h-2.5 rounded-full overflow-hidden border border-slate-800">
                 <div 
                   className="bg-gradient-to-r from-orange-600 to-amber-500 h-full rounded-full transition-all duration-1000"
                   style={{ width: `${progressPercent}%` }}
@@ -488,7 +488,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           </div>
 
           {/* STATUS INTEGRATED STEPS PROGRESS MATRIX */}
-          <div className="mt-6 pt-5 border-t border-slate-850/60 overflow-x-auto">
+          <div className="mt-6 pt-5 border-t border-slate-800/60 overflow-x-auto">
             <div className="flex items-center justify-between min-w-[700px] relative px-2 py-2">
               
               {statusSteps.map((step, idx) => {
@@ -516,7 +516,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                         ? 'text-orange-400 font-black' 
                         : isPassed 
                           ? 'text-slate-300' 
-                          : 'text-slate-650'
+                          : 'text-slate-600'
                     }`}>
                       {step}
                     </span>
@@ -525,7 +525,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               })}
 
               {/* Progress Line backer */}
-              <div className="absolute top-[22px] left-8 right-8 h-0.5 bg-slate-850 -z-10">
+              <div className="absolute top-[22px] left-8 right-8 h-0.5 bg-slate-800 -z-10">
                 <div 
                   className="bg-gradient-to-r from-orange-600 to-amber-500 h-full transition-all duration-1000"
                   style={{ width: `${progressPercent}%` }}
@@ -538,9 +538,9 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         </div>
 
         {/* HIGH-FIDELITY CORRIDOR ROAD MAP - PREMIUM SVG RADAR */}
-        <div className="bg-slate-900 border border-slate-805 rounded-2xl p-5 relative overflow-hidden shadow-lg">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden shadow-lg">
           
-          <div className="flex items-center justify-between border-b border-slate-805 pb-3">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2">
               <Compass className="w-4 h-4 text-orange-500 animate-spin" style={{ animationDuration: '8s' }} />
               <div>
@@ -578,7 +578,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           </div>
 
           {/* SVG Map Canvas */}
-          <div className="relative bg-slate-950 rounded-xl overflow-hidden mt-4 border border-slate-850/80">
+          <div className="relative bg-slate-950 rounded-xl overflow-hidden mt-4 border border-slate-800/80">
             <svg 
               viewBox="0 0 800 450" 
               className="w-full h-auto max-h-[380px] bg-sky-950/5 relative text-slate-400 select-none"
@@ -693,7 +693,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                 <button
                   type="button"
                   onClick={handleCopyLink}
-                  className="text-slate-405 flex items-center gap-1 transition-colors hover:text-slate-200 border-0 bg-transparent cursor-pointer p-0 font-mono text-[9.5px] md:text-[10px]"
+                  className="text-slate-400 flex items-center gap-1 transition-colors hover:text-slate-200 border-0 bg-transparent cursor-pointer p-0 font-mono text-[9.5px] md:text-[10px]"
                   title="Copy Tracking Link"
                 >
                   <Activity className="w-3 h-3 text-cyan-400 shrink-0" />
@@ -719,7 +719,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         <div className={`grid grid-cols-1 ${isMobileMode ? '' : 'md:grid-cols-2'} gap-6`}>
           
           {/* CARGO & VEHICLE SPECIFIC BENTO BOX */}
-          <div className="bg-slate-900 border border-slate-805 rounded-2xl p-5 space-y-4 shadow-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-sm">
             <h3 className="font-extrabold text-xs text-slate-100 uppercase tracking-widest border-b border-slate-800 pb-2.5 flex items-center gap-2">
               <Box className="w-4 h-4 text-orange-500 shrink-0" />
               {t('cargoInfo')}
@@ -729,31 +729,31 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               
               {shipment.freightType === 'sea' ? (
                 <>
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60 col-span-2">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60 col-span-2">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">{t('cargoInfo')}</span>
                     <p className="font-bold text-slate-200 mt-1 truncate">{shipment.cargoDescription || "Maritime Ocean Freight"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Shipping Line & Vessel</span>
                     <p className="font-bold text-blue-400 mt-1 truncate font-mono text-[11px]">{shipment.shippingLine || "-"} • {shipment.vesselName || "-"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Containers Spec Summary</span>
                     <p className="font-bold text-slate-200 mt-1 truncate font-mono text-xs">
                       {shipment.numberOfContainers || 1}x {shipment.containerType || "40GP"} ({shipment.containerNumber || "-"})
                     </p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Booking / BL Reference</span>
                     <p className="font-mono text-[10.5px] text-slate-300 mt-1 truncate">
                       BKG: {shipment.bookingNumber || "-"} | BL: {shipment.billOfLadingNumber || "-"}
                     </p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Geographical Ports of Call</span>
                     <p className="font-mono text-[10px] text-emerald-400 mt-1 truncate">
                       POL: {shipment.portOfLoading || "-"} ➔ POD: {shipment.portOfDischarge || "-"}
@@ -762,51 +762,51 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                 </>
               ) : shipment.freightType === 'air' ? (
                 <>
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60 col-span-2">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60 col-span-2">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">{t('cargoInfo')}</span>
                     <p className="font-bold text-slate-200 mt-1 truncate">{shipment.cargoDescription || "Air Freight Shipment"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Carrier Airline & Flight</span>
                     <p className="font-bold text-indigo-400 mt-1 truncate font-mono text-xs">{shipment.airline || "-"} • FLT {shipment.flightNumber || "-"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Air Waybill (AWB) #</span>
                     <p className="font-mono font-black text-xs text-orange-400 mt-1 truncate">{shipment.airWaybillNumber || "-"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Volumetric Weights</span>
                     <p className="font-mono text-[10.5px] text-slate-200 mt-1 truncate">
                       Gross: {(shipment.grossWeight || 0).toLocaleString()}kg | Chg: {(shipment.chargeableWeight || 0).toLocaleString()}kg
                     </p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Total Package Count</span>
                     <p className="font-mono font-bold text-emerald-400 text-xs mt-1">{shipment.numberOfPackages || 1} PKGS</p>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">{t('cargoInfo')}</span>
                     <p className="font-bold text-slate-200 mt-1 truncate">{shipment.cargoDescription || "General Road Cargo"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Certified Net Weight</span>
-                    <p className="font-mono font-black text-slate-105 text-sm mt-1">{(shipment.cargoWeight || 0).toLocaleString()} kg</p>
+                    <p className="font-mono font-black text-slate-100 text-sm mt-1">{(shipment.cargoWeight || 0).toLocaleString()} kg</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">Vehicle Plate Registry</span>
                     <p className="font-mono font-extrabold text-orange-400 text-sm mt-1">{shipment.truckNumber || "-"}</p>
                   </div>
 
-                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/60">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/60">
                     <span className="text-slate-500 uppercase text-[9px] font-bold block">etir Security Lock</span>
                     <div className="flex items-center gap-1 text-emerald-400 font-bold mt-1">
                       <Shield className="w-3.5 h-3.5 shrink-0" />
@@ -819,7 +819,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             </div>
 
             {/* VERIFIED CARRIER BADGE */}
-            <div className="p-3 bg-slate-950/40 border border-slate-850 rounded-xl flex items-center justify-between">
+            <div className="p-3 bg-slate-950/40 border border-slate-800 rounded-xl flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-orange-500 font-extrabold text-xs">
                   {shipment.freightType === 'sea' ? 'S' : shipment.freightType === 'air' ? 'A' : 'DR'}
@@ -828,12 +828,12 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                   <span className="text-[8.5px] text-slate-500 uppercase block tracking-wider font-bold">
                     {shipment.freightType === 'sea' ? "Responsible Shipping Line" : shipment.freightType === 'air' ? "Responsible Air Carrier" : "Assigned Transport Unit"}
                   </span>
-                  <strong className="text-xs text-slate-350">
+                  <strong className="text-xs text-slate-400">
                     {shipment.freightType === 'sea' ? (shipment.shippingLine || "Ocean Carrier Logistics") : shipment.freightType === 'air' ? (shipment.airline || "Airline Logistics Operator") : (shipment.assignedDriverName || "MARAS Specialist")}
                   </strong>
                 </div>
               </div>
-              <span className="bg-emerald-500/15 text-emerald-405 border border-emerald-500/25 text-[8.5px] text-emerald-400 font-bold px-2 py-0.5 rounded-full uppercase">
+              <span className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 text-[8.5px] text-emerald-400 font-bold px-2 py-0.5 rounded-full uppercase">
                 Active Transit
               </span>
             </div>
@@ -841,7 +841,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           </div>
 
           {/* GEOGRAPHIC ROUTE TERMINAL NODES */}
-          <div className="bg-slate-900 border border-slate-805 rounded-2xl p-5 space-y-4 shadow-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-sm">
             <h3 className="font-extrabold text-xs text-slate-100 uppercase tracking-widest border-b border-slate-800 pb-2.5 flex items-center gap-2">
               <MapPin className="w-4 h-4 text-orange-500 shrink-0" />
               {lang === 'en' ? "LOGISTICS ROUTING GATEWAYS" : (lang === 'tr' ? "LOJİSTİK GÜZERGAH NOKTALARI" : "عقد ومراكز التوجيه والدعم")}
@@ -850,7 +850,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             <div className="space-y-3">
               
               {/* Origin Terminal Node */}
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-850/60 flex items-start gap-3">
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800/60 flex items-start gap-3">
                 <span className="p-1.5 bg-orange-500/10 text-orange-400 rounded-lg text-xs font-black shrink-0 font-mono">
                   DEP
                 </span>
@@ -866,8 +866,8 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               </div>
 
               {/* Destination Terminal Node */}
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-850/60 flex items-start gap-3">
-                <span className="p-1.5 bg-cyan-500/10 text-cyan-405 rounded-lg text-xs font-black shrink-0 font-mono">
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800/60 flex items-start gap-3">
+                <span className="p-1.5 bg-cyan-500/10 text-cyan-400 rounded-lg text-xs font-black shrink-0 font-mono">
                   ARR
                 </span>
                 <div className="space-y-0.5">
@@ -888,7 +888,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         </div>
 
         {/* SECURE BLOCKCHAIN DOCUMENT VAULT PORTER */}
-        <div className="bg-slate-900 border border-slate-805 rounded-2xl p-6 space-y-4 shadow-sm">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-orange-500 shrink-0" />
@@ -900,7 +900,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               </div>
             </div>
             
-            <span className="bg-slate-950 text-slate-500 font-mono font-bold text-[9px] px-2 in-block self-start py-0.5 rounded border border-slate-850/80 uppercase">
+            <span className="bg-slate-950 text-slate-500 font-mono font-bold text-[9px] px-2 in-block self-start py-0.5 rounded border border-slate-800/80 uppercase">
               TIR SHARED CARNET VAULT
             </span>
           </div>
@@ -908,7 +908,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           {shipment.documents && shipment.documents.length > 0 ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {shipment.documents.map((doc: any) => (
-                <div key={doc.id} className="p-3 bg-slate-950 border border-slate-850 rounded-xl flex items-center justify-between gap-3 shadow-xs hover:border-slate-700 transition-all group">
+                <div key={doc.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 shadow-xs hover:border-slate-700 transition-all group">
                   <div className="flex items-center gap-2.5 truncate">
                     <div className="w-8 h-8 rounded-lg bg-orange-600/10 text-orange-400 flex items-center justify-center shrink-0">
                       <FileText className="w-4 h-4" />
@@ -927,7 +927,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                         triggerToast("Secure specimen document ready for local offline reading (Specimen file download).");
                       }
                     }}
-                    className="p-1 px-3 bg-slate-900 hover:bg-orange-650 text-slate-300 hover:text-white font-extrabold rounded text-[10px] flex items-center gap-1 transition-all cursor-pointer"
+                    className="p-1 px-3 bg-slate-900 hover:bg-orange-600 text-slate-300 hover:text-white font-extrabold rounded text-[10px] flex items-center gap-1 transition-all cursor-pointer"
                   >
                     <Download className="w-3 h-3 shrink-0" />
                     <span>Get File</span>
@@ -936,16 +936,16 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center bg-slate-950/40 rounded-xl border border-dashed border-slate-850/80">
+            <div className="py-8 text-center bg-slate-950/40 rounded-xl border border-dashed border-slate-800/80">
               <Lock className="w-6 h-6 text-slate-600 mx-auto mb-2" />
-              <p className="text-slate-450 text-xs italic">{t('noDocsForPublic')}</p>
+              <p className="text-slate-400 text-xs italic">{t('noDocsForPublic')}</p>
               <p className="text-[10px] text-slate-500 mt-0.5">{lang === 'en' ? "Authorized trade documents are hidden except those explicitly designated by terminal inspectors." : (lang === 'tr' ? "Kayıtlı gümrük belgeleri, yetkili müfettişler tarafından açıkça yetkilendirilmediği sürece gizlidir." : "جميع الوثائق محمية ومخفية عدا ما يتم تفويضه بموافقة الإدارة لمصلحة التحقق والجمارك.")}</p>
             </div>
           )}
         </div>
 
         {/* LOGISTICS TRANSIT EVENT LOGS TIMELINE */}
-        <div className="bg-slate-900 border border-slate-805 rounded-2xl p-6 space-y-4 shadow-sm">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
           <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
             <ListOrdered className="w-4 h-4 text-orange-500 shrink-0" />
             <div>
@@ -984,7 +984,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         </div>
 
         {/* 🔒 LIVE ALERTS & CUSTOMER NOTIFICATION HUB */}
-        <div className="bg-slate-900 border border-slate-805 rounded-2xl p-6 space-y-5 shadow-sm">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5 shadow-sm">
           <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
             <Bell className="w-4 h-4 text-orange-500 shrink-0" />
             <div>
@@ -1041,7 +1041,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               </h4>
               <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                 {shipment.customerNotificationHistory.map((alert: any) => (
-                  <div key={alert.id} className="p-2.5 bg-slate-950/80 border border-slate-850 rounded-xl space-y-1">
+                  <div key={alert.id} className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1">
                     <div className="flex justify-between items-center text-[9px] font-mono">
                       <span className="text-emerald-500 font-bold flex items-center gap-1">
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -1073,7 +1073,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               <button
                 type="button"
                 onClick={onViewPrivacy}
-                className="px-3 py-1.5 bg-slate-950 hover:bg-slate-850 text-slate-400 hover:text-white rounded-lg border border-slate-800 cursor-pointer transition-all text-[9.5px] uppercase font-mono tracking-widest outline-none shadow-sm font-semibold"
+                className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-800 cursor-pointer transition-all text-[9.5px] uppercase font-mono tracking-widest outline-none shadow-sm font-semibold"
               >
                 🔒 Privacy Policy / Gizlilik Politikası
               </button>
@@ -1082,7 +1082,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               <button
                 type="button"
                 onClick={onViewTerms}
-                className="px-3 py-1.5 bg-slate-950 hover:bg-slate-850 text-slate-400 hover:text-white rounded-lg border border-slate-800 cursor-pointer transition-all text-[9.5px] uppercase font-mono tracking-widest outline-none shadow-sm font-semibold"
+                className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-800 cursor-pointer transition-all text-[9.5px] uppercase font-mono tracking-widest outline-none shadow-sm font-semibold"
               >
                 ⚖️ Terms & Conditions / Kullanım Koşulları
               </button>
