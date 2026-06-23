@@ -371,6 +371,21 @@ import {
   CostStatement
 } from "./src/types";
 
+// Augment Express's Request type so handlers can read req.session
+// and req.shipment (attached by requireShipmentAccess in startServer below).
+// This must be at the top level of the module, not nested inside any
+// function — esbuild's bundler does not reliably handle a `declare global`
+// block nested inside a function body the way `tsc` does, which caused a
+// real build failure here once before.
+declare global {
+  namespace Express {
+    interface Request {
+      session?: AuthSessionPayload;
+      shipment?: Shipment;
+    }
+  }
+}
+
 // Initialize Firebase
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 let firebaseConfig: any = null;
@@ -1390,16 +1405,8 @@ async function startServer() {
     return verifySessionTokenImpl(token, SESSION_SECRET);
   }
 
-  // Augment Express's Request type so handlers can read req.session
-  // and req.shipment (attached by requireShipmentAccess)
-  declare global {
-    namespace Express {
-      interface Request {
-        session?: SessionPayload;
-        shipment?: Shipment;
-      }
-    }
-  }
+  // (Express Request type augmentation moved to top-level, outside this
+  // function — see declare global block near the top of the file.)
 
   function getTokenFromRequest(req: express.Request): string | null {
     const header = req.headers["authorization"];
