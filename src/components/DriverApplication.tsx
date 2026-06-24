@@ -2110,7 +2110,7 @@ export default function DriverApplication({
   return (
     <div 
       className={`${isMobileMode 
-        ? "w-full min-h-screen text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none" 
+        ? "w-full h-[100dvh] text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none" 
         : "p-4 md:p-8 bg-slate-950 min-h-screen text-slate-100 flex flex-col lg:flex-row gap-8 justify-center items-center bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(249,115,22,0.12),rgba(0,0,0,0))] font-sans select-none"
       } ${theme === 'light' ? 'theme-light' : ''}`}
       dir={isRtl ? 'rtl' : 'ltr'}
