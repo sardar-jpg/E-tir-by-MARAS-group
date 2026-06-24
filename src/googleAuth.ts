@@ -1,6 +1,8 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithCredential, User } from "firebase/auth";
 import { getStorage } from "firebase/storage";
+import { Capacitor } from "@capacitor/core";
+import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
 import firebaseConfig from "../firebase-applet-config.json";
 
 // Initialize Firebase client-side safely
@@ -8,15 +10,21 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 
-const provider = new GoogleAuthProvider();
+const isNative = Capacitor.isNativePlatform();
+
 // Gmail send, Drive, and Calendar scopes are genuinely used — see the
 // Google Workspace tab in AdminPanel.tsx, which sends shipment status
 // emails via the Gmail API, backs up logs to Drive, and schedules
-// operations on Calendar using these exact scopes. (gmail.readonly is the
-// one exception — see note below.)
-provider.addScope("https://www.googleapis.com/auth/gmail.send");
-provider.addScope("https://www.googleapis.com/auth/drive");
-provider.addScope("https://www.googleapis.com/auth/calendar");
+// operations on Calendar using these exact scopes. Needed on both the web
+// popup flow and the native plugin's scopes option below.
+const GOOGLE_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/calendar",
+];
+
+const provider = new GoogleAuthProvider();
+GOOGLE_SCOPES.forEach((scope) => provider.addScope(scope));
 // Force select account to ensure they can pick the right account
 provider.setCustomParameters({
   prompt: "select_account"
@@ -71,6 +79,43 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
   currentSignInPromise = (async () => {
     try {
       isSigningIn = true;
+
+      if (isNative) {
+        // Native iOS/Android: signInWithPopup does not work inside
+        // Capacitor's native WebView (this is exactly what caused Apple
+        // App Review to see an error when testing Google Sign-In on a
+        // physical device). The Capacitor Firebase Authentication plugin
+        // performs the real native Google Sign-In flow instead, then we
+        // bridge the resulting credential into the regular firebase/auth
+        // JS SDK below, so the rest of the app (which reads
+        // auth.currentUser via the normal web SDK) keeps working exactly
+        // as before, unchanged.
+        const result = await FirebaseAuthentication.signInWithGoogle({
+          scopes: GOOGLE_SCOPES,
+        });
+
+        const idToken = result.credential?.idToken;
+        const accessToken = result.credential?.accessToken;
+        if (!idToken) {
+          throw new Error("Native Google Sign-In did not return an ID token");
+        }
+        if (!accessToken) {
+          throw new Error("Failed to get google access token from native sign-in");
+        }
+
+        const jsCredential = GoogleAuthProvider.credential(idToken, accessToken);
+        const jsResult = await signInWithCredential(auth, jsCredential);
+
+        cachedAccessToken = accessToken;
+        try {
+          localStorage.setItem("gmail_access_token", cachedAccessToken);
+        } catch (e) {
+          console.warn("Failed to persist gmail token to localStorage", e);
+        }
+        return { user: jsResult.user, accessToken: cachedAccessToken };
+      }
+
+      // Web: unchanged, already-working popup-based flow.
       const result = await signInWithPopup(auth, provider);
       const credential = GoogleAuthProvider.credentialFromResult(result);
       if (!credential?.accessToken) {
@@ -107,6 +152,13 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 export const logoutGoogle = async () => {
+  if (isNative) {
+    try {
+      await FirebaseAuthentication.signOut();
+    } catch (e) {
+      console.warn("Native FirebaseAuthentication signOut failed (continuing with JS SDK signOut):", e);
+    }
+  }
   await auth.signOut();
   cachedAccessToken = null;
   try {
@@ -115,3 +167,4 @@ export const logoutGoogle = async () => {
     console.warn("Failed to remove gmail token from localStorage", e);
   }
 };
+
