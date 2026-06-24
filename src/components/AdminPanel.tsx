@@ -206,14 +206,9 @@ export default function AdminPanel({
 
   const handleDeleteAdminSelfAccount = async () => {
     if (!understandAdminSelfDelete) return;
-    const myRecord = adminsList.find((a: any) => (a.email || "").toLowerCase() === (adminEmail || "").toLowerCase());
-    if (!myRecord) {
-      triggerToast("❌ Could not find your admin record. Please refresh and try again.");
-      return;
-    }
     setIsDeletingAdminSelfAccount(true);
     try {
-      const response = await apiFetch(`/api/admins/${myRecord.id}`, { method: "DELETE" });
+      const response = await apiFetch("/api/admins/me", { method: "DELETE" });
       if (response.ok) {
         triggerToast("🗑️ Your admin account was completely deleted.");
         setTimeout(() => {

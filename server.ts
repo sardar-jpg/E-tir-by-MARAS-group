@@ -3222,7 +3222,14 @@ async function startServer() {
 
   app.delete("/api/admins/:id", requireAuth, async (req, res) => {
     try {
-      const { id } = req.params;
+      // A literal "me" resolves to the caller's own session id. This lets
+      // a sub-admin delete their own account without first fetching the
+      // full admins list (GET /api/admins is restricted to super-admin
+      // sessions, so a sub-admin could never look up their own document
+      // id that way - they need a way to target "myself" directly).
+      const rawId = req.params.id;
+      const id = rawId === "me" && req.session!.role === "admin" ? req.session!.id : rawId;
+
       const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
       // An admin (any type, including 'accounts') may always delete their
       // own record — required so every admin account created through this
