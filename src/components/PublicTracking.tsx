@@ -6,6 +6,7 @@ import {
 } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 const fetch = apiFetch;
 import { 
@@ -81,7 +82,7 @@ const statusSteps: ShipmentStatus[] = [
 ];
 
 export default function PublicTracking({ lang: initialLang, tokenFromUrl, onViewPrivacy, onViewTerms, isMobile }: PublicTrackingProps) {
-  const isMobileMode = isMobile || (typeof window !== "undefined" && window.innerWidth < 768);
+  const isMobileMode = isMobile || useIsMobile(768);
   const [lang, setLang] = useState<Language>(initialLang);
 
   useEffect(() => {

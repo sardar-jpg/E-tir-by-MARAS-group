@@ -13,6 +13,7 @@ import {
 import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 import { 
   Ship, MessageSquare, Truck, DollarSign, Bell, Send, CheckCircle2, 
@@ -237,7 +238,7 @@ export default function DriverApplication({
   onLogout,
   isMobile = false
 }: DriverApplicationProps) {
-  const isMobileMode = isMobile || (typeof window !== "undefined" && window.innerWidth < 768);
+  const isMobileMode = isMobile || useIsMobile(768);
   const [showControlsModal, setShowControlsModal] = useState(false);
   const t = (key: keyof typeof TRANSLATIONS['en']) => {
     return TRANSLATIONS[lang][key] || TRANSLATIONS['en'][key] || String(key);

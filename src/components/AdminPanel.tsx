@@ -16,6 +16,7 @@ import {
   CostItem
 } from "../types";
 import { TRANSLATIONS } from "../translations";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { 
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
   PieChart, Pie, Cell, Legend, LineChart, Line, AreaChart, Area
@@ -144,7 +145,7 @@ export default function AdminPanel({
   adminEmail = '',
   adminType = ''
 }: AdminPanelProps) {
-  const isMobileMode = isMobile || (typeof window !== "undefined" && window.innerWidth < 1024);
+  const isMobileMode = isMobile || useIsMobile(1024);
 
   const t = (key: keyof typeof TRANSLATIONS['en']) => {
     return TRANSLATIONS[lang][key] || TRANSLATIONS['en'][key] || String(key);
