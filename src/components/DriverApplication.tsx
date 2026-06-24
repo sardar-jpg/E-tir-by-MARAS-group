@@ -520,7 +520,7 @@ export default function DriverApplication({
       // 1. Upload signature image to backend media gateway
       let finalSignatureUrl = "";
       try {
-        const uploadRes = await fetch("/api/upload", {
+        const uploadRes = await apiFetch("/api/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -893,7 +893,7 @@ export default function DriverApplication({
         return JSON.parse(text);
       };
 
-      const resDrivers = await fetch("/api/drivers");
+      const resDrivers = await apiFetch("/api/drivers");
       if (resDrivers.ok) {
         let driversList = await safeJson(resDrivers);
         if (loggedInDriver && !driversList.some((d: Driver) => d.id === loggedInDriver.id)) {
@@ -977,7 +977,7 @@ export default function DriverApplication({
       }
 
       // Fetch notifications
-      const resNotifs = await fetch("/api/notifications");
+      const resNotifs = await apiFetch("/api/notifications");
       if (resNotifs.ok) {
         const rawList: AppNotification[] = await safeJson(resNotifs);
         
@@ -1344,7 +1344,7 @@ export default function DriverApplication({
         // Storage now requires the server's own dedicated account
         // (see storage.rules).
         try {
-          const uploadRes = await fetch("/api/upload", {
+          const uploadRes = await apiFetch("/api/upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1807,7 +1807,7 @@ export default function DriverApplication({
 
       // 1. Post to our highly available central media gateway route
       try {
-        const uploadRes = await fetch("/api/upload", {
+        const uploadRes = await apiFetch("/api/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1915,7 +1915,7 @@ export default function DriverApplication({
 
       if (selectedFile && simFileUrl && simFileUrl.startsWith("data:")) {
         try {
-          const uploadRes = await fetch("/api/upload", {
+          const uploadRes = await apiFetch("/api/upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
