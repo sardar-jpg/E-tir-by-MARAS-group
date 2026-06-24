@@ -849,29 +849,6 @@ export default function DriverApplication({
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [lastSyncAttemptTime, setLastSyncAttemptTime] = useState<number>(0);
 
-  const [simTime, setSimTime] = useState<string>(() => {
-    const date = new Date();
-    let hours = date.getHours();
-    const minutes = date.getMinutes().toString().padStart(2, '0');
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12;
-    hours = hours ? hours : 12; // the hour '0' should be '12'
-    return `${hours}:${minutes} ${ampm}`;
-  });
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const date = new Date();
-      let hours = date.getHours();
-      const minutes = date.getMinutes().toString().padStart(2, '0');
-      const ampm = hours >= 12 ? 'PM' : 'AM';
-      hours = hours % 12;
-      hours = hours ? hours : 12;
-      setSimTime(`${hours}:${minutes} ${ampm}`);
-    }, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
   useEffect(() => {
     try {
       localStorage.setItem(`etir_cached_gps_${selectedDriverId}`, JSON.stringify(cachedCoords));
@@ -2358,28 +2335,6 @@ export default function DriverApplication({
                 </div>
               </div>
             )}
-
-            {/* Native System Status Bar */}
-            <div className="px-5 pt-1.5 pb-1 flex items-center justify-between text-[10px] font-mono text-slate-400 bg-slate-950 z-20 select-none">
-              <span className="font-bold tracking-tight text-white">{simTime || "12:00 PM"}</span>
-              <div className="flex items-center gap-1.5">
-                {isForceOffline ? (
-                  <div className="flex items-center gap-1 text-amber-500 font-black tracking-tight animate-pulse bg-amber-500/10 px-1.5 py-0.5 rounded-md border border-amber-500/20">
-                    <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
-                    <span>SIM_OFFLINE</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1 text-emerald-400 font-extrabold tracking-tight bg-emerald-500/10 px-1.5 py-0.5 rounded-md border border-emerald-500/20 text-[9px]">
-                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
-                    <span>LTE 5G</span>
-                  </div>
-                )}
-                {/* Battery level mock */}
-                <div className="flex items-center gap-0.5 border border-slate-700 rounded-sm px-0.5 py-px w-5 h-3">
-                  <div className="bg-slate-400 h-full w-[85%] rounded-[1px]" />
-                </div>
-              </div>
-            </div>
 
             {/* Header Mobile Brand */}
             <div className="p-4 bg-slate-950 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
