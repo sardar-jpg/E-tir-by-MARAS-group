@@ -25,7 +25,7 @@ import {
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff, 
   Edit3, ArrowUpRight, ClipboardList, CheckCircle2, FileText, 
   Paperclip, Image as ImageIcon, Send, X, ExternalLink, RefreshCw, UserPlus, Phone, Mail, Check, AlertCircle, Printer,
-  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users
+  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
 import { apiFetch } from "../lib/api";
@@ -193,6 +193,46 @@ export default function AdminPanel({
   const [newAdminPassword, setNewAdminPassword] = useState("");
   const [newAdminType, setNewAdminType] = useState<"operation" | "accounts">("operation");
   const [adminFormError, setAdminFormError] = useState<string | null>(null);
+
+  // Admin (sub-admin) account deletion states — required by Apple App
+  // Store Guideline 5.1.1(v): apps that support account creation must also
+  // offer account deletion. Sub-admins are created through this app's own
+  // "Create Admin" flow, so they need self-service deletion just like
+  // drivers and clients already have. The super-admin (config-based root
+  // account, never created through the app) is intentionally excluded.
+  const [showAdminSelfDeleteConfirm, setShowAdminSelfDeleteConfirm] = useState(false);
+  const [understandAdminSelfDelete, setUnderstandAdminSelfDelete] = useState(false);
+  const [isDeletingAdminSelfAccount, setIsDeletingAdminSelfAccount] = useState(false);
+
+  const handleDeleteAdminSelfAccount = async () => {
+    if (!understandAdminSelfDelete) return;
+    const myRecord = adminsList.find((a: any) => (a.email || "").toLowerCase() === (adminEmail || "").toLowerCase());
+    if (!myRecord) {
+      triggerToast("❌ Could not find your admin record. Please refresh and try again.");
+      return;
+    }
+    setIsDeletingAdminSelfAccount(true);
+    try {
+      const response = await fetch(`/api/admins/${myRecord.id}`, { method: "DELETE" });
+      if (response.ok) {
+        triggerToast("🗑️ Your admin account was completely deleted.");
+        setTimeout(() => {
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("etir_session");
+            window.location.reload();
+          }
+        }, 1500);
+      } else {
+        triggerToast("❌ Failed to delete your admin account. Try again.");
+      }
+    } catch (err) {
+      console.error(err);
+      triggerToast("❌ Could not reach the server. Please try again.");
+    } finally {
+      setIsDeletingAdminSelfAccount(false);
+    }
+  };
+
 
   // Vendor / Supplier Management States
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -5159,6 +5199,32 @@ MARAS Group etir Center`;
                   </div>
                 </div>
 
+                {/* Self-account deletion — required by Apple Guideline 5.1.1(v).
+                    Only shown to sub-admins (adminType !== 'super'), since the
+                    super-admin is a fixed config-based root account never
+                    created through this app's own "Create Admin" flow. */}
+                {adminType !== 'super' && (
+                  <div className="bg-red-50/50 border border-red-100 rounded-xl p-5">
+                    <h3 className="text-sm font-bold text-red-700 mb-1">
+                      {lang === 'tr' ? 'Hesabımı Sil' : (lang === 'ar' ? 'حذف حسابي' : 'Delete My Account')}
+                    </h3>
+                    <p className="text-slate-500 text-xs mb-3">
+                      {lang === 'tr'
+                        ? 'Bu, yönetici hesabınızı kalıcı olarak silecektir. Bu işlem geri alınamaz.'
+                        : (lang === 'ar'
+                          ? 'سيؤدي هذا إلى حذف حساب المسؤول الخاص بك نهائياً. لا يمكن التراجع عن هذا الإجراء.'
+                          : 'This will permanently delete your own admin account. This action cannot be undone.')
+                      }
+                    </p>
+                    <button
+                      onClick={() => setShowAdminSelfDeleteConfirm(true)}
+                      className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
+                    >
+                      {lang === 'tr' ? 'Hesabımı Tamamen Sil' : (lang === 'ar' ? 'حذف حسابي نهائياً' : 'Permanently Delete My Account')}
+                    </button>
+                  </div>
+                )}
+
                 {/* Database fetched admins list */}
                 {adminsList.map((adm: any) => {
                   const isAccountAdmin = adm.adminType === 'accounts' || adm.adminType === 'account';
@@ -5215,6 +5281,76 @@ MARAS Group etir Center`;
               </div>
             </div>
           </div>
+
+          {/* Admin Self-Delete Confirmation Modal */}
+          {showAdminSelfDeleteConfirm && (
+            <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in text-left">
+              <div className="bg-gradient-to-b from-slate-900 to-slate-950 border border-red-900/40 rounded-3xl p-6 max-w-md w-full shadow-[0_20px_50px_rgba(239,68,68,0.15)] space-y-6">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-red-900/20 border border-red-800/40 flex items-center justify-center text-red-100 shrink-0 select-none">
+                    <ShieldAlert className="w-5 h-5 text-red-500 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base text-white tracking-tight uppercase font-mono">
+                      {lang === 'tr' ? "Hesabınızı Kalıcı Olarak Silin" : (lang === 'ar' ? "حذف حسابك نهائياً" : "Permanently Delete Your Account")}
+                    </h3>
+                    <p className="text-xs text-slate-400 leading-relaxed mt-1">
+                      {lang === 'tr'
+                        ? "Bu işlem yönetici hesabınızı ve panel erişiminizi kalıcı olarak siler. Geri alınamaz."
+                        : (lang === 'ar'
+                          ? "سيؤدي هذا الإجراء إلى حذف حساب المسؤول الخاص بك والوصول إلى لوحة التحكم بشكل نهائي. لا يمكن التراجع عن هذا الإجراء."
+                          : "This will permanently delete your admin account and dashboard access. This action cannot be undone.")}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-950 p-4 rounded-2xl border border-slate-900 space-y-3">
+                  <label className="flex items-start gap-3 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white">
+                    <input
+                      type="checkbox"
+                      checked={understandAdminSelfDelete}
+                      onChange={(e) => setUnderstandAdminSelfDelete(e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5"
+                    />
+                    <span className="leading-normal">
+                      {lang === 'tr'
+                        ? "Yönetici hesabımın ve tüm panel erişimlerimin kalıcı olarak kaldırılmasını kabul ediyorum."
+                        : (lang === 'ar'
+                          ? "أوافق على إزالة حساب المسؤول الخاص بي وجميع صلاحيات الوصول إلى لوحة التحكم بشكل نهائي."
+                          : "I consent to permanently remove my admin account and all dashboard access.")}
+                    </span>
+                  </label>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    disabled={isDeletingAdminSelfAccount}
+                    onClick={() => setShowAdminSelfDeleteConfirm(false)}
+                    className="flex-1 py-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+                  >
+                    {lang === 'tr' ? "İptal Et" : (lang === 'ar' ? "إلغاء الأمر" : "Cancel")}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isDeletingAdminSelfAccount || !understandAdminSelfDelete}
+                    onClick={handleDeleteAdminSelfAccount}
+                    className="flex-1 py-3 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 disabled:opacity-40 text-white font-extrabold text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(239,68,68,0.2)] active:scale-95"
+                  >
+                    {isDeletingAdminSelfAccount ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                        <span>{lang === 'tr' ? "Siliniyor..." : "Deleting..."}</span>
+                      </>
+                    ) : (
+                      <span>{lang === 'tr' ? "Kalıcı Olarak Sil" : (lang === 'ar' ? "حذف نهائياً" : "Permanently Delete")}</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* New Admin Creation Dialog Backdrop */}
           {isAddAdminOpen && (

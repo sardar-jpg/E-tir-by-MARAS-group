@@ -3220,9 +3220,27 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/admins/:id", requireFullAdmin, async (req, res) => {
+  app.delete("/api/admins/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
+      // An admin (any type, including 'accounts') may always delete their
+      // own record — required so every admin account created through this
+      // app's "Create Admin" flow can be self-deleted, per Apple Guideline
+      // 5.1.1(v). The session's `id` for an admin is their email; the
+      // Firestore document id may differ, so we look up the record by
+      // email match rather than assuming id === session.id.
+      let isSelf = false;
+      if (req.session!.role === "admin") {
+        const adminDoc = await getDoc(doc(db, "admins", id));
+        if (adminDoc.exists()) {
+          const adminData = adminDoc.data() as any;
+          isSelf = (adminData.email || "").toLowerCase() === (req.session!.id || "").toLowerCase();
+        }
+      }
+      if (!isFullAdmin && !isSelf) {
+        return res.status(403).json({ error: "You can only delete your own admin account." });
+      }
       const docRef = doc(db, "admins", id);
       await deleteDoc(docRef);
       res.json({ success: true, message: "Admin deleted successfully" });
