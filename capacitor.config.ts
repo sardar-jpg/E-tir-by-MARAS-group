@@ -13,7 +13,16 @@ const config: CapacitorConfig = {
     // opening this same URL in Safari, just wrapped natively.
     url: 'https://e-tir-by-maras-v2-282009674985.europe-west1.run.app',
     cleartext: false
-  }
+  },
+  plugins: {
+    FirebaseAuthentication: {
+      // Required for @capacitor-firebase/authentication's native
+      // signInWithGoogle() to work at all — without this, the plugin
+      // throws "Google sign-in provider is not enabled" even though the
+      // code calling it is otherwise correct.
+      providers: ['google.com'],
+    },
+  },
 };
 
 export default config;
