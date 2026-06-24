@@ -581,7 +581,7 @@ Generated securely via MARAS Group Google Workspace interface.
         
         // Log in Activity Ledger
         try {
-          await fetch("/api/logs", {
+          await apiFetch("/api/logs", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -676,7 +676,7 @@ Generated securely via MARAS Group Google Workspace interface.
 
         // Log in Activity Ledger
         try {
-          await fetch("/api/logs", {
+          await apiFetch("/api/logs", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -891,19 +891,19 @@ MARAS Group etir Center`;
     setSwrStatus('syncing');
     
     try {
-      const resShipments = await fetch("/api/shipments");
-      const resDrivers = await fetch("/api/drivers");
-      const resClients = await fetch("/api/clients");
-      const resVendors = await fetch("/api/vendors");
-      const resLogs = await fetch("/api/logs");
-      const resNotifs = await fetch("/api/notifications");
-      const resUnreadChat = await fetch("/api/chat/unread");
-      const resCostStatements = await fetch("/api/cost-statements");
+      const resShipments = await apiFetch("/api/shipments");
+      const resDrivers = await apiFetch("/api/drivers");
+      const resClients = await apiFetch("/api/clients");
+      const resVendors = await apiFetch("/api/vendors");
+      const resLogs = await apiFetch("/api/logs");
+      const resNotifs = await apiFetch("/api/notifications");
+      const resUnreadChat = await apiFetch("/api/chat/unread");
+      const resCostStatements = await apiFetch("/api/cost-statements");
 
       const resolvedAdminTypeForSWR = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
       let resAdmins: Response | null = null;
       if (resolvedAdminTypeForSWR === 'super') {
-        resAdmins = await fetch("/api/admins");
+        resAdmins = await apiFetch("/api/admins");
       }
 
       const safeJson = async (res: Response) => {
@@ -1024,7 +1024,7 @@ MARAS Group etir Center`;
     const pollShipments = async () => {
       try {
         if (typeof window !== "undefined" && !navigator.onLine) return;
-        const resShipments = await fetch("/api/shipments");
+        const resShipments = await apiFetch("/api/shipments");
         if (resShipments.ok) {
           const text = await resShipments.text();
           if (!text.trim().startsWith("<")) {
@@ -1294,7 +1294,7 @@ MARAS Group etir Center`;
         });
         setSelectedCostStatement(saved);
         triggerToast(lang === 'tr' ? "Maliyet tablosu başarıyla kaydedildi!" : (lang === 'ar' ? "تم حفظ كشف التكلفة بنجاح!" : "Cost statement saved successfully!"));
-        const resLogs = await fetch("/api/logs");
+        const resLogs = await apiFetch("/api/logs");
         if (resLogs.ok) {
           const safeJson = async (r: Response) => JSON.parse(await r.text());
           setActivityLogs(await safeJson(resLogs));
@@ -1322,7 +1322,7 @@ MARAS Group etir Center`;
       reader.onload = async () => {
         const base64Str = reader.result as string;
         try {
-          const res = await fetch("/api/upload", {
+          const res = await apiFetch("/api/upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2282,7 +2282,7 @@ MARAS Group etir Center`;
     }
     setIsSubmittingClient(true);
     try {
-      const res = await fetch("/api/clients", {
+      const res = await apiFetch("/api/clients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2328,7 +2328,7 @@ MARAS Group etir Center`;
     }
     setIsSubmittingVendor(true);
     try {
-      const res = await fetch("/api/vendors", {
+      const res = await apiFetch("/api/vendors", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2371,7 +2371,7 @@ MARAS Group etir Center`;
   const handleCreateShipment = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch("/api/shipments", {
+      const res = await apiFetch("/api/shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newShipmentData)
@@ -2475,7 +2475,7 @@ MARAS Group etir Center`;
       return;
     }
     try {
-      const res = await fetch("/api/drivers", {
+      const res = await apiFetch("/api/drivers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(this_driver_payload())
@@ -5670,7 +5670,7 @@ MARAS Group etir Center`;
                       // Log to immutable security ledger / audit log
                       try {
                         const targetShipObj = shipments.find(s => s.id === gmailSelectedShipmentId);
-                        await fetch("/api/logs", {
+                        await apiFetch("/api/logs", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
@@ -5682,7 +5682,7 @@ MARAS Group etir Center`;
                           })
                         });
                         // Refresh audit logs in background
-                        const logsRes = await fetch("/api/logs");
+                        const logsRes = await apiFetch("/api/logs");
                         if (logsRes.ok) {
                           setActivityLogs(await logsRes.json());
                         }
