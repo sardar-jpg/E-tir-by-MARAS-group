@@ -10,7 +10,7 @@ import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
 import TermsModal from "./components/TermsModal";
 import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, MessageSquare, Globe, Laptop, Smartphone, Eye, Bell, CheckCircle2, ChevronRight, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, User, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
-import { apiFetch, getSavedBackendUrl, setSavedBackendUrl, isCustomDomainActive } from "./lib/api";
+import { apiFetch } from "./lib/api";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -66,20 +66,10 @@ export default function App() {
     return null;
   });
 
-  // 2. Persona State
-  const [activePersona, setActivePersona] = useState<'admin' | 'driver' | 'public' | 'client'>('admin');
-
-  // 3. Viewport Simulation State for multi-device testing
-  const [isMobileTestingMode, setIsMobileTestingMode] = useState(false);
-
   // Track if Firebase Auth state check has initialized to prevent flickering or early logout
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
   const [isTermsOpen, setIsTermsOpen] = useState(false);
-
-  const [isBridgeOpen, setIsBridgeOpen] = useState(false);
-  const [bridgeUrl, setBridgeUrl] = useState(() => getSavedBackendUrl());
-  const isCustomDomain = isCustomDomainActive();
 
   // Monitor and validate Firebase Auth state against localStorage session on initial load
   useEffect(() => {
@@ -468,13 +458,6 @@ export default function App() {
     };
   }, [session]);
 
-  // Sync activePersona when session loads
-  useEffect(() => {
-    if (session) {
-      setActivePersona(session.role);
-    }
-  }, [session?.role, session?.email]);
-
   // Listen to Google Auth changes
   useEffect(() => {
     const unsub = initAuth(
@@ -560,7 +543,6 @@ export default function App() {
     const token = params.get("token");
     if (token) {
       setUrlToken(token);
-      setActivePersona('public');
     }
   }, []);
 
@@ -731,7 +713,7 @@ export default function App() {
   if (urlToken) {
     return (
       <>
-        <PublicTracking lang={lang} tokenFromUrl={urlToken} onViewPrivacy={() => setIsPrivacyOpen(true)} onViewTerms={() => setIsTermsOpen(true)} isMobile={isMobileTestingMode} />
+        <PublicTracking lang={lang} tokenFromUrl={urlToken} onViewPrivacy={() => setIsPrivacyOpen(true)} onViewTerms={() => setIsTermsOpen(true)} isMobile={false} />
         <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
         <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
       </>
@@ -768,94 +750,6 @@ export default function App() {
           onViewPrivacy={() => setIsPrivacyOpen(true)}
           onViewTerms={() => setIsTermsOpen(true)}
         />
-        
-        {/* Absolute Floating Badge for API Gateway setup on Login Screen */}
-        <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
-          <button
-            onClick={() => {
-              setBridgeUrl(getSavedBackendUrl() || window.location.origin);
-              setIsBridgeOpen(true);
-            }}
-            className="bg-slate-950/90 text-orange-400 hover:text-orange-300 border border-slate-800 hover:border-orange-500/40 px-3 py-1.5 rounded-xl text-xs font-black shadow-lg shadow-black/50 transition-all flex items-center gap-2 cursor-pointer"
-            title="Configure Sandbox API Gateway Sync"
-          >
-            <Globe className="w-3.5 h-3.5 text-orange-400 animate-pulse" />
-            <span>Sandbox Link</span>
-            {getSavedBackendUrl() && <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full"></span>}
-          </button>
-        </div>
-
-        {/* API GATEWAY BRIDGE SETTINGS MODAL */}
-        {isBridgeOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative space-y-4">
-              <button 
-                onClick={() => setIsBridgeOpen(false)}
-                className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-
-              <div className="space-y-1 text-left">
-                <h3 className="text-lg font-black text-white flex items-center gap-2">
-                  <span>🔗</span> Active Sandbox API Link
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Sync your custom preview domain (e.g., your website) with your active Google AI Studio development sandbox.
-                </p>
-              </div>
-
-              <div className="space-y-3 bg-slate-950 border border-slate-800 p-4 rounded-xl text-xs text-left">
-                <p className="font-bold text-slate-200 uppercase tracking-widest text-[9px]">How does this help?</p>
-                <p className="text-slate-400 leading-normal">
-                  Google AI Studio generates a temporary developer container for each session. Statically hosted custom domains can read live shipment data and simulation updates directly from this database container!
-                </p>
-                <div className="bg-slate-900/60 p-2.5 border border-slate-800/80 rounded font-mono text-[9px]/normal text-slate-300 select-all break-all overflow-y-auto max-h-[55px]">
-                  Current Active Workspace URL:<br />
-                  <strong className="text-emerald-400 font-bold">{window.location.origin}</strong>
-                </div>
-              </div>
-
-              <div className="space-y-2 text-left">
-                <label className="text-xs font-bold text-slate-300 block">Workspace API Base URL</label>
-                <input 
-                  type="text"
-                  value={bridgeUrl}
-                  onChange={(e) => setBridgeUrl(e.target.value)}
-                  placeholder="https://ais-dev-xxxx-xxxxx.run.app"
-                  className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
-                />
-                <p className="text-[10px] text-slate-500 leading-normal">
-                  Enter the Sandbox URL of your active AI Studio Dev environment or Shared Preview above.
-                </p>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  onClick={() => {
-                    setSavedBackendUrl("");
-                    setBridgeUrl("");
-                    setIsBridgeOpen(false);
-                    window.location.reload();
-                  }}
-                  className="px-4 py-2 border border-slate-800 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
-                >
-                  Reset To Default
-                </button>
-                <button
-                  onClick={() => {
-                    setSavedBackendUrl(bridgeUrl);
-                    setIsBridgeOpen(false);
-                    window.location.reload();
-                  }}
-                  className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs shadow-lg shadow-orange-500/10 transition-colors cursor-pointer"
-                >
-                  Save & Sync Connection
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
         <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
         <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
@@ -872,9 +766,9 @@ export default function App() {
         <main className="flex-1 py-6 px-4">
           <ClientDashboard 
             lang={lang}
-            clientCompanyName={session.client?.companyName || "Al-Bahi General Trading Ltd."}
-            clientEmail={session.client?.email || "baha@al-bahi-trading.com"}
-            clientId={session.client?.id || "client-1"}
+            clientCompanyName={session.client?.companyName || "Customer"}
+            clientEmail={session.client?.email || ""}
+            clientId={session.client?.id || ""}
             onLogout={handleLogout}
           />
         </main>
@@ -941,7 +835,6 @@ export default function App() {
   return (
     <div className="bg-slate-900 min-h-screen text-slate-100 font-sans flex flex-col justify-between" dir={isRtl ? "rtl" : "ltr"}>
       
-      {/* PERSISTENT WORKSPACE CONTROL HEADER */}
       <header className="bg-slate-950 border-b border-slate-800 sticky top-0 z-40 p-4">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           
@@ -952,115 +845,12 @@ export default function App() {
             </div>
             <div>
               <span className="text-[10px] uppercase font-bold text-orange-500 tracking-widest">{t('brand')}</span>
-              <h1 className="text-sm font-black text-white leading-tight tracking-tight">Active Deployment Testing Workspace</h1>
+              <h1 className="text-sm font-black text-white leading-tight tracking-tight">{t('roleAdmin')}</h1>
             </div>
           </div>
 
-          {/* Persona selector & Language switch */}
+          {/* Language switch & Logout */}
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
-            
-            {/* Viewport Simulation Mode (Desktop vs. 375px Mobile Screen) */}
-            <div className="flex bg-slate-900 border border-slate-800 p-1 rounded-xl text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => setIsMobileTestingMode(false)}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  !isMobileTestingMode ? 'bg-blue-600 text-white shadow shadow-blue-600/25' : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Desktop View Mode"
-              >
-                <Laptop className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Desktop</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsMobileTestingMode(true)}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  isMobileTestingMode ? 'bg-blue-600 text-white shadow shadow-blue-600/25' : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Simulated Mobile View (375px)"
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Mobile (375px)</span>
-              </button>
-            </div>
-
-            {/* Active Persona switches */}
-            <div className="flex bg-slate-900 border border-slate-800 p-1 rounded-xl text-xs font-semibold">
-              <button 
-                onClick={() => {
-                  setActivePersona('admin');
-                  setChatShipment(null);
-                }}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activePersona === 'admin' ? 'bg-orange-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Laptop className="w-3.5 h-3.5" />
-                <span>{t('roleAdmin')}</span>
-              </button>
-
-              <button 
-                onClick={() => {
-                  setActivePersona('driver');
-                  setChatShipment(null);
-                }}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activePersona === 'driver' ? 'bg-orange-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span>{t('roleDriver')}</span>
-              </button>
-
-              <button 
-                onClick={() => {
-                  setActivePersona('public');
-                  setChatShipment(null);
-                }}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activePersona === 'public' ? 'bg-orange-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Eye className="w-3.5 h-3.5" />
-                <span>{t('rolePublic')} Specimen</span>
-              </button>
-
-              <button 
-                onClick={() => {
-                  setActivePersona('client');
-                  setChatShipment(null);
-                }}
-                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activePersona === 'client' ? 'bg-orange-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Test Corporate Customer View"
-              >
-                <User className="w-3.5 h-3.5" />
-                <span>Customer</span>
-              </button>
-            </div>
-
-            {/* API Gateway sync connection bridge control */}
-            <button
-              onClick={() => {
-                setBridgeUrl(getSavedBackendUrl() || window.location.origin);
-                setIsBridgeOpen(true);
-              }}
-              className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 text-xs font-black transition-all cursor-pointer border ${
-                getSavedBackendUrl() 
-                  ? 'bg-emerald-950/45 text-emerald-400 border-emerald-900/60 hover:bg-emerald-950' 
-                  : 'bg-slate-900 text-orange-400 border-slate-800 hover:border-orange-500/30'
-              }`}
-              title="Configure API Gateway Sync Bridge"
-            >
-              <Globe className="w-3.5 h-3.5 text-orange-400 animate-pulse" />
-              <span className="hidden sm:inline">API Bridge</span>
-              {getSavedBackendUrl() && (
-                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></span>
-              )}
-            </button>
 
             {/* Global Language Selector Dropdown */}
             <div className="flex items-center gap-2 border-l border-slate-800 pl-3">
@@ -1092,226 +882,40 @@ export default function App() {
       </header>
 
       {/* CORE VIEWPORT LAYER */}
-      <main className={`flex-1 ${isMobileTestingMode ? "bg-slate-950/80 md:py-8 md:px-4 flex items-center justify-center min-h-[calc(100vh-80px)] bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:20px_20px]" : "relative"}`}>
-        {isMobileTestingMode ? (
-          <div className="relative mx-auto w-full h-[calc(100vh-80px)] md:w-[375px] md:h-[812px] bg-slate-900 md:rounded-[56px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.85)] md:border-[14px] border-slate-950 overflow-hidden flex flex-col md:ring-2 md:ring-slate-800/80">
-            
-            {/* Simulated iPhone Status Bar - only visible on Desktop simulators */}
-            <div className="hidden md:flex h-10 bg-slate-100 relative px-6 items-center justify-between text-[11px] font-bold text-slate-800 select-none pointer-events-none z-30 shrink-0">
-              <span>12:45</span>
-              {/* iPhone Notch Container */}
-              <div className="w-28 h-5 bg-black rounded-b-2xl absolute left-1/2 -translate-x-1/2 top-0 flex items-center justify-center shadow-inner">
-                <div className="w-12 h-1.5 bg-slate-900 rounded-full mr-2"></div>
-                <div className="w-2 h-2 rounded-full bg-blue-950"></div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[9px]">5G</span>
-                <span className="w-4 h-2.5 border border-slate-800 rounded-xs flex items-center p-0.5"><span className="w-full h-full bg-slate-800 rounded-xs"></span></span>
-              </div>
-            </div>
-
-            {/* Simulated Scrollable In-App Viewport */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-900 relative flex flex-col scrollbar-thin scrollbar-thumb-slate-800">
-              {activePersona === 'admin' ? (
-                isCurrentlyAdmin ? (
-                  <AdminPanel 
-                    lang={lang} 
-                    onSelectShipmentChat={(sh) => setChatShipment(sh)} 
-                    openDetailsId={activeDetailsId}
-                    setOpenDetailsId={setActiveDetailsId}
-                    gmailUser={gmailUser}
-                    gmailToken={gmailToken}
-                    onConnectGmail={handleConnectGmail}
-                    onDisconnectGmail={handleDisconnectGmail}
-                    isMobile={true}
-                    isConnectingGmail={isConnectingGmail}
-                    adminEmail={session?.email}
-                    adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
-                  />
-                ) : (
-                  <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
-                    <div className="w-12 h-12 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mx-auto mb-4 text-red-500">
-                      <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                      </svg>
-                    </div>
-                    <h3 className="text-base font-bold text-white mb-2">Administrative Access Restricted</h3>
-                    <p className="text-sm text-slate-400 leading-relaxed mb-6">
-                      Your credentials or session UID do not match the authorized administration officer. Administrative control panel access is strictly forbidden.
-                    </p>
-                    <button 
-                      onClick={handleLogout}
-                      className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold tracking-wide transition-all"
-                    >
-                      Sign Out / Re-authenticate
-                    </button>
-                  </div>
-                )
-              ) : activePersona === 'driver' ? (
-                <DriverApplication 
-                  lang={lang} 
-                  loggedInDriverId={session?.role === 'driver' ? session.driver?.id : null}
-                  loggedInDriver={session?.role === 'driver' ? session.driver : null}
-                  onLogout={handleLogout}
-                  isMobile={true}
-                />
-              ) : activePersona === 'client' ? (
-                <ClientDashboard
-                  lang={lang}
-                  clientCompanyName="Al-Bahi General Trading Ltd."
-                  clientEmail="baha@al-bahi-trading.com"
-                  clientId="client-1"
-                  onLogout={handleLogout}
-                />
-              ) : (
-                /* Public Tracker specimen selector (to test public views in the sandbox easily) */
-                <div className="bg-slate-50 min-h-screen text-slate-800">
-                  <div className="p-4 bg-orange-500/10 border-b border-orange-200/50 text-orange-950 font-semibold text-xs flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <Globe className="w-4 h-4 text-orange-600" />
-                      <span>Sandbox Test Mode</span>
-                    </div>
-                  </div>
-
-                  <div className="max-w-4xl mx-auto p-4 space-y-4">
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-2">
-                      <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Select Specimen:</h4>
-                      <div className="flex flex-col gap-1.5 text-xs">
-                        <button 
-                          onClick={() => setUrlToken("token-1001")}
-                          className={`px-3 py-1.5 rounded-lg border font-bold text-left ${
-                            urlToken === "token-1001" ? "bg-orange-500 text-white border-orange-500" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
-                          }`}
-                        >
-                          MAR-2026-1001
-                        </button>
-                        <button 
-                          onClick={() => setUrlToken("token-1002")}
-                          className={`px-3 py-1.5 rounded-lg border font-bold text-left ${
-                            urlToken === "token-1002" ? "bg-orange-500 text-white border-orange-500" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
-                          }`}
-                        >
-                          MAR-2026-1002
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <PublicTracking lang={lang} tokenFromUrl={urlToken || "token-1001"} onViewPrivacy={() => setIsPrivacyOpen(true)} isMobile={true} />
-                </div>
-              )}
-            </div>
-
-            {/* Simulated bottom home indicator pill - only on desktop simulators */}
-            <div className="hidden md:flex h-6 bg-slate-950 items-center justify-center shrink-0 z-30 select-none pointer-events-none">
-              <div className="w-32 h-1 bg-white/40 rounded-full"></div>
-            </div>
-
-          </div>
+      <main className="flex-1 relative">
+        {isCurrentlyAdmin ? (
+          <AdminPanel
+            lang={lang}
+            onSelectShipmentChat={(sh) => setChatShipment(sh)}
+            openDetailsId={activeDetailsId}
+            setOpenDetailsId={setActiveDetailsId}
+            gmailUser={gmailUser}
+            gmailToken={gmailToken}
+            onConnectGmail={handleConnectGmail}
+            onDisconnectGmail={handleDisconnectGmail}
+            isMobile={false}
+            isConnectingGmail={isConnectingGmail}
+            adminEmail={session?.email}
+            adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
+          />
         ) : (
-          /* STANDARD FULL DESKTOP VIEWPORT */
-          <>
-            {activePersona === 'admin' ? (
-              isCurrentlyAdmin ? (
-                <AdminPanel 
-                  lang={lang} 
-                  onSelectShipmentChat={(sh) => setChatShipment(sh)} 
-                  openDetailsId={activeDetailsId}
-                  setOpenDetailsId={setActiveDetailsId}
-                  gmailUser={gmailUser}
-                  gmailToken={gmailToken}
-                  onConnectGmail={handleConnectGmail}
-                  onDisconnectGmail={handleDisconnectGmail}
-                  isMobile={false}
-                  isConnectingGmail={isConnectingGmail}
-                  adminEmail={session?.email}
-                  adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
-                />
-              ) : (
-                <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
-                  <div className="w-12 h-12 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mx-auto mb-4 text-red-500">
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                    </svg>
-                  </div>
-                  <h3 className="text-base font-bold text-white mb-2">Administrative Access Restricted</h3>
-                  <p className="text-sm text-slate-400 leading-relaxed mb-6">
-                    Your credentials or session UID do not match the authorized administration officer. Administrative control panel access is strictly forbidden.
-                  </p>
-                  <button 
-                    onClick={handleLogout}
-                    className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold tracking-wide transition-all"
-                  >
-                    Sign Out / Re-authenticate
-                  </button>
-                </div>
-              )
-            ) : activePersona === 'driver' ? (
-              <DriverApplication 
-                lang={lang} 
-                loggedInDriverId={session?.role === 'driver' ? session.driver?.id : null}
-                loggedInDriver={session?.role === 'driver' ? session.driver : null}
-                onLogout={handleLogout}
-                isMobile={false}
-              />
-            ) : activePersona === 'client' ? (
-              <div className="w-full max-w-7xl mx-auto p-4 md:p-6 animate-fade-in">
-                <ClientDashboard
-                  lang={lang}
-                  clientCompanyName="Al-Bahi General Trading Ltd."
-                  clientEmail="baha@al-bahi-trading.com"
-                  clientId="client-1"
-                  onLogout={handleLogout}
-                />
-              </div>
-            ) : (
-              /* Public Tracker specimen selector (to test public views in the sandbox easily) */
-              <div className="bg-slate-50 min-h-screen text-slate-800">
-                <div className="p-4 bg-orange-500/10 border-b border-orange-200/50 text-orange-950 font-semibold text-xs flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Globe className="w-4 h-4 text-orange-600 animate-spin-slow" />
-                    <span>Sandbox Test Mode: Simulating public view-only page of MARAS shipments without logging in.</span>
-                  </div>
-                  <p className="text-[10px] text-orange-800 font-bold uppercase tracking-wider">MARAS Group Security Protocol</p>
-                </div>
-
-                <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-4">
-                  <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-2">
-                    <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Select active shipment token to view tracking link preview:</h4>
-                    <div className="flex flex-wrap gap-2 text-xs">
-                      <button 
-                        onClick={() => setUrlToken("token-1001")}
-                        className={`px-3.5 py-1.5 rounded-lg border font-bold ${
-                          urlToken === "token-1001" ? "bg-orange-500 text-white border-orange-500" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
-                        }`}
-                      >
-                        Shipment MAR-2026-1001
-                      </button>
-                      <button 
-                        onClick={() => setUrlToken("token-1002")}
-                        className={`px-3.5 py-1.5 rounded-lg border font-bold ${
-                          urlToken === "token-1002" ? "bg-orange-500 text-white border-orange-500" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
-                        }`}
-                      >
-                        Shipment MAR-2026-1002
-                      </button>
-                      <button 
-                        onClick={() => setUrlToken("token-1003")}
-                        className={`px-3.5 py-1.5 rounded-lg border font-bold ${
-                          urlToken === "token-1003" ? "bg-orange-500 text-white border-orange-500" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
-                        }`}
-                      >
-                        Shipment MAR-2026-1003 (Disabled Sample)
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Displaying actual public template */}
-                <PublicTracking lang={lang} tokenFromUrl={urlToken || "token-1001"} onViewPrivacy={() => setIsPrivacyOpen(true)} isMobile={isMobileTestingMode} />
-              </div>
-            )}
-          </>
+          <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
+            <div className="w-12 h-12 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mx-auto mb-4 text-red-500">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <h3 className="text-base font-bold text-white mb-2">Administrative Access Restricted</h3>
+            <p className="text-sm text-slate-400 leading-relaxed mb-6">
+              Your credentials or session UID do not match the authorized administration officer. Administrative control panel access is strictly forbidden.
+            </p>
+            <button
+              onClick={handleLogout}
+              className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold tracking-wide transition-all"
+            >
+              Sign Out / Re-authenticate
+            </button>
+          </div>
         )}
       </main>
 
@@ -1716,78 +1320,6 @@ export default function App() {
 
       <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
       <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
-
-      {/* API GATEWAY BRIDGE SETTINGS MODAL */}
-      {isBridgeOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative space-y-4">
-            <button 
-              onClick={() => setIsBridgeOpen(false)}
-              className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="space-y-1 text-left">
-              <h3 className="text-lg font-black text-white flex items-center gap-2">
-                <span>🔗</span> Active Sandbox API Link
-              </h3>
-              <p className="text-xs text-slate-400">
-                Sync your custom preview domain (e.g., your website) with your active Google AI Studio development sandbox.
-              </p>
-            </div>
-
-            <div className="space-y-3 bg-slate-950 border border-slate-800 p-4 rounded-xl text-xs text-left">
-              <p className="font-bold text-slate-200 uppercase tracking-widest text-[9px]">How does this help?</p>
-              <p className="text-slate-400 leading-normal">
-                Google AI Studio generates a temporary developer container for each session. Statically hosted custom domains can read live shipment data and simulation updates directly from this database container!
-              </p>
-              <div className="bg-slate-900/60 p-2.5 border border-slate-800/80 rounded font-mono text-[9px]/normal text-slate-300 select-all break-all overflow-y-auto max-h-[55px]">
-                Current Active Workspace URL:<br />
-                <strong className="text-emerald-400 font-bold">{window.location.origin}</strong>
-              </div>
-            </div>
-
-            <div className="space-y-2 text-left">
-              <label className="text-xs font-bold text-slate-300 block">Workspace API Base URL</label>
-              <input 
-                type="text"
-                value={bridgeUrl}
-                onChange={(e) => setBridgeUrl(e.target.value)}
-                placeholder="https://ais-dev-xxxx-xxxxx.run.app"
-                className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-xs font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
-              />
-              <p className="text-[10px] text-slate-500 leading-normal">
-                Enter the Sandbox URL of your active AI Studio Dev environment or Shared Preview above.
-              </p>
-            </div>
-
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                onClick={() => {
-                  setSavedBackendUrl("");
-                  setBridgeUrl("");
-                  setIsBridgeOpen(false);
-                  window.location.reload();
-                }}
-                className="px-4 py-2 border border-slate-800 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                Reset To Default
-              </button>
-              <button
-                onClick={() => {
-                  setSavedBackendUrl(bridgeUrl);
-                  setIsBridgeOpen(false);
-                  window.location.reload();
-                }}
-                className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs shadow-lg shadow-orange-500/10 transition-colors cursor-pointer"
-              >
-                Save & Sync Connection
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-[200] max-w-sm bg-slate-900 border border-slate-700/80 p-4 rounded-2xl shadow-[0_20px_40px_-5px_rgba(0,0,0,0.5)] flex items-center gap-3 animate-slide-in text-white text-xs font-bold leading-normal">
