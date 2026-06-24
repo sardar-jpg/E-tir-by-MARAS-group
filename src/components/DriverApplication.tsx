@@ -537,7 +537,7 @@ export default function DriverApplication({
       }
 
       // 2. Put status details
-      const response = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+      const response = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -563,7 +563,7 @@ export default function DriverApplication({
             text: `📦 Proof of Delivery (POD) Signed by: ${podReceiverName || "Authorized Receiver"}.\n- Seals Checked: ${podChecklist.sealIntact ? "YES" : "NO"}\n- Cargo Condition Verified: ${podChecklist.cargoVerified ? "YES" : "NO"}`
           };
 
-          await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+          await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(sigPayload)
@@ -776,7 +776,7 @@ export default function DriverApplication({
     const targetId = loggedInDriverId || selectedDriverId;
     try {
       // 1. Delete backing collection data
-      const response = await fetch(`/api/drivers/${targetId}`, {
+      const response = await apiFetch(`/api/drivers/${targetId}`, {
         method: "DELETE"
       });
       if (response.ok) {
@@ -903,7 +903,7 @@ export default function DriverApplication({
       }
 
       let activeShipmentsList: Shipment[] = [];
-      const resShipments = await fetch(`/api/shipments?driverId=${selectedDriverId}`);
+      const resShipments = await apiFetch(`/api/shipments?driverId=${selectedDriverId}`);
       if (resShipments.ok) {
         const list = await safeJson(resShipments);
         activeShipmentsList = list;
@@ -924,7 +924,7 @@ export default function DriverApplication({
 
       // Fetch dynamic messages
       if (activeShipment) {
-        const resChat = await fetch(`/api/shipments/${activeShipment.id}/chat`);
+        const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
         if (resChat.ok) {
           const msgs: ChatMessage[] = await safeJson(resChat);
           
@@ -1049,7 +1049,7 @@ export default function DriverApplication({
     if (activeShipment && activeTab === 'chat') {
       const fetchChatOnly = async () => {
         try {
-          const resChat = await fetch(`/api/shipments/${activeShipment.id}/chat`);
+          const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
           if (resChat.ok) {
             const txt = await resChat.text();
             if (txt.trim() && !txt.trim().startsWith("<")) {
@@ -1058,7 +1058,7 @@ export default function DriverApplication({
 
               const hasUnseenFromAdmin = msgs.some((m: any) => m.sender === 'admin' && m.status !== 'seen');
               if (hasUnseenFromAdmin) {
-                await fetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
+                await apiFetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ viewer: "driver" })
@@ -1114,7 +1114,7 @@ export default function DriverApplication({
     try {
       const dr = drivers.find(d => d.id === selectedDriverId);
       if (dr) {
-        const res = await fetch(`/api/drivers/${selectedDriverId}`, {
+        const res = await apiFetch(`/api/drivers/${selectedDriverId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1173,7 +1173,7 @@ export default function DriverApplication({
     try {
       let syncedCount = 0;
       for (const item of itemsToSync) {
-        const res = await fetch(`/api/drivers/${selectedDriverId}`, {
+        const res = await apiFetch(`/api/drivers/${selectedDriverId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1288,7 +1288,7 @@ export default function DriverApplication({
     if (!profileName.trim()) return;
     setIsSavingProfile(true);
     try {
-      const res = await fetch(`/api/drivers/${selectedDriverId}`, {
+      const res = await apiFetch(`/api/drivers/${selectedDriverId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1371,7 +1371,7 @@ export default function DriverApplication({
         setProfileAvatarUrl(uploadedUrl);
 
         // Force immediate database update to ensure instant persistence
-        const res = await fetch(`/api/drivers/${selectedDriverId}`, {
+        const res = await apiFetch(`/api/drivers/${selectedDriverId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1410,7 +1410,7 @@ export default function DriverApplication({
   // Handle Order Acceptance
   const handleAcceptAssignment = async (shipment: Shipment) => {
     try {
-      const res = await fetch(`/api/shipments/${shipment.id}/status`, {
+      const res = await apiFetch(`/api/shipments/${shipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1477,7 +1477,7 @@ export default function DriverApplication({
   // Handle Order Rejection
   const handleRejectAssignment = async (shipment: Shipment) => {
     try {
-      const res = await fetch(`/api/shipments/${shipment.id}/status`, {
+      const res = await apiFetch(`/api/shipments/${shipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1506,7 +1506,7 @@ export default function DriverApplication({
     e.preventDefault();
     if (!activeShipment) return;
     try {
-      const res = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+      const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1537,7 +1537,7 @@ export default function DriverApplication({
     if (!activeShipment || !newMessageText.trim()) return;
 
     try {
-      const res = await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1835,7 +1835,7 @@ export default function DriverApplication({
         text: `Scanned & processed official document [${scanCategory.toUpperCase()}]: ${scanDocName}`
       };
 
-      const res = await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(scanPayload)
@@ -1946,7 +1946,7 @@ export default function DriverApplication({
         text: `Sent a document [${simFileCategory.toUpperCase()}]: ${simFileName}`
       };
 
-      const res = await fetch(`/api/shipments/${activeShipment.id}/chat`, {
+      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(mockFilePayload)
@@ -2743,7 +2743,7 @@ export default function DriverApplication({
                       triggerToast(lang === 'tr' ? "ℹ️ Yolculuk zaten aktif. GPS verici düzgün çalışıyor." : "ℹ️ Transit is already active. GPS transmitter running normally.");
                     } else {
                       try {
-                        const res = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+                        const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
                           method: "PUT",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
@@ -2779,7 +2779,7 @@ export default function DriverApplication({
 
                   const handleQuickStatusSelect = async (newSt: string) => {
                     try {
-                      const res = await fetch(`/api/shipments/${activeShipment.id}/status`, {
+                      const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
                         method: "PUT",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({

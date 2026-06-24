@@ -3227,17 +3227,13 @@ async function startServer() {
       // An admin (any type, including 'accounts') may always delete their
       // own record — required so every admin account created through this
       // app's "Create Admin" flow can be self-deleted, per Apple Guideline
-      // 5.1.1(v). The session's `id` for an admin is their email; the
-      // Firestore document id may differ, so we look up the record by
-      // email match rather than assuming id === session.id.
-      let isSelf = false;
-      if (req.session!.role === "admin") {
-        const adminDoc = await getDoc(doc(db, "admins", id));
-        if (adminDoc.exists()) {
-          const adminData = adminDoc.data() as any;
-          isSelf = (adminData.email || "").toLowerCase() === (req.session!.id || "").toLowerCase();
-        }
-      }
+      // 5.1.1(v). For an admin session, req.session.id IS the Firestore
+      // document id of their own admins record (see the subAdmin.id
+      // assignment in the login and verify-session handlers above) — the
+      // super-admin is the one exception, whose session.id is their email
+      // since they have no Firestore document at all, but the super-admin
+      // already qualifies via isFullAdmin above regardless.
+      const isSelf = req.session!.role === "admin" && id === req.session!.id;
       if (!isFullAdmin && !isSelf) {
         return res.status(403).json({ error: "You can only delete your own admin account." });
       }
@@ -3247,6 +3243,47 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to delete admin" });
+    }
+  });
+
+  // Lets a sub-admin (operation or accounts type) change their own
+  // password. The super-admin's password lives in the
+  // SUPER_ADMIN_PASSWORD_HASH environment variable, not a Firestore
+  // document, so it genuinely cannot be changed through the app itself -
+  // that requires regenerating the hash and redeploying with a new env
+  // var, the same way it was originally set up.
+  app.post("/api/admins/change-password", requireAuth, async (req, res) => {
+    try {
+      if (req.session!.role !== "admin") {
+        return res.status(403).json({ error: "Only admin accounts can use this endpoint." });
+      }
+      if (req.session!.adminType === "super") {
+        return res.status(400).json({ error: "The super-admin password cannot be changed through the app." });
+      }
+      const { currentPassword, newPassword } = req.body;
+      if (!currentPassword || !newPassword || String(newPassword).length < 8) {
+        return res.status(400).json({ error: "Current password and a new password of at least 8 characters are required." });
+      }
+
+      const docRef = doc(db, "admins", req.session!.id);
+      const adminDoc = await getDoc(docRef);
+      if (!adminDoc.exists()) {
+        return res.status(404).json({ error: "Admin account not found." });
+      }
+      const adminData = adminDoc.data() as any;
+
+      const matched = await verifyPasswordWithMigration(currentPassword, adminData.password, async (migratedHash) => {
+        await setDoc(docRef, { ...adminData, password: migratedHash });
+      });
+      if (!matched) {
+        return res.status(401).json({ error: "Current password is incorrect." });
+      }
+
+      await setDoc(docRef, { ...adminData, password: hashPassword(newPassword) });
+      res.json({ success: true, message: "Password updated successfully." });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update password." });
     }
   });
 

@@ -213,7 +213,7 @@ export default function AdminPanel({
     }
     setIsDeletingAdminSelfAccount(true);
     try {
-      const response = await fetch(`/api/admins/${myRecord.id}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/admins/${myRecord.id}`, { method: "DELETE" });
       if (response.ok) {
         triggerToast("🗑️ Your admin account was completely deleted.");
         setTimeout(() => {
@@ -230,6 +230,55 @@ export default function AdminPanel({
       triggerToast("❌ Could not reach the server. Please try again.");
     } finally {
       setIsDeletingAdminSelfAccount(false);
+    }
+  };
+
+  // Change-password states for sub-admins (the super-admin's password
+  // lives in an environment variable and cannot be changed here - see
+  // POST /api/admins/change-password in server.ts).
+  const [currentPasswordInput, setCurrentPasswordInput] = useState("");
+  const [newPasswordInput, setNewPasswordInput] = useState("");
+  const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState("");
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [changePasswordError, setChangePasswordError] = useState<string | null>(null);
+
+  const handleChangeOwnPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setChangePasswordError(null);
+
+    if (!currentPasswordInput || !newPasswordInput || !confirmNewPasswordInput) {
+      setChangePasswordError(lang === 'tr' ? 'Lütfen tüm alanları doldurun' : (lang === 'ar' ? 'يرجى ملء جميع الحقول' : 'Please fill all fields'));
+      return;
+    }
+    if (newPasswordInput.length < 8) {
+      setChangePasswordError(lang === 'tr' ? 'Yeni şifre en az 8 karakter olmalıdır' : (lang === 'ar' ? 'يجب أن تتكون كلمة المرور الجديدة من 8 أحرف على الأقل' : 'New password must be at least 8 characters'));
+      return;
+    }
+    if (newPasswordInput !== confirmNewPasswordInput) {
+      setChangePasswordError(lang === 'tr' ? 'Yeni şifreler eşleşmiyor' : (lang === 'ar' ? 'كلمتا المرور الجديدتان غير متطابقتين' : 'New passwords do not match'));
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      const res = await apiFetch("/api/admins/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: currentPasswordInput, newPassword: newPasswordInput })
+      });
+      if (res.ok) {
+        setCurrentPasswordInput("");
+        setNewPasswordInput("");
+        setConfirmNewPasswordInput("");
+        triggerToast("✅ Password updated successfully.");
+      } else {
+        const errData = await res.json();
+        setChangePasswordError(errData.error || "Failed to update password.");
+      }
+    } catch (err: any) {
+      setChangePasswordError(err.message || "Could not reach the server.");
+    } finally {
+      setIsChangingPassword(false);
     }
   };
 
@@ -856,7 +905,7 @@ MARAS Group etir Center`;
 
   const handleMarkNotifRead = async (id: string) => {
     try {
-      await fetch(`/api/notifications/${id}/read`, { method: "POST" });
+      await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     } catch (err) {
       console.error(err);
@@ -865,7 +914,7 @@ MARAS Group etir Center`;
 
   const handleMarkAllNotifsRead = async () => {
     try {
-      await fetch(`/api/notifications/clear`, { method: "POST" });
+      await apiFetch(`/api/notifications/clear`, { method: "POST" });
       setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     } catch (err) {
       console.error(err);
@@ -1169,7 +1218,7 @@ MARAS Group etir Center`;
 
       const fetchDistanceMatrix = async () => {
         try {
-          const res = await fetch(`/api/shipments/${openDetailsId}/distance-matrix`);
+          const res = await apiFetch(`/api/shipments/${openDetailsId}/distance-matrix`);
           if (res.ok) {
             const data = await res.json();
             setDistanceMatrixData(data);
@@ -1196,7 +1245,7 @@ MARAS Group etir Center`;
     if (!targetDetailsShipment) return;
     setIsSubmittingStatus(true);
     try {
-      const res = await fetch(`/api/shipments/${targetDetailsShipment.id}/status`, {
+      const res = await apiFetch(`/api/shipments/${targetDetailsShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1224,7 +1273,7 @@ MARAS Group etir Center`;
   // Cost statement management handlers
   const handleSelectActiveStatement = async (shipmentId: string) => {
     try {
-      const res = await fetch(`/api/cost-statements/${shipmentId}`);
+      const res = await apiFetch(`/api/cost-statements/${shipmentId}`);
       if (res.ok) {
         const stmt = await res.json();
         setSelectedCostStatement(stmt);
@@ -1280,7 +1329,7 @@ MARAS Group etir Center`;
         updatedAt: new Date().toISOString()
       };
 
-      const res = await fetch(`/api/cost-statements/${selectedCostStatement.shipmentId}`, {
+      const res = await apiFetch(`/api/cost-statements/${selectedCostStatement.shipmentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(finalPayload)
@@ -2446,7 +2495,7 @@ MARAS Group etir Center`;
     e.preventDefault();
     if (!editingShipment) return;
     try {
-      const res = await fetch(`/api/shipments/${editingShipment.id}`, {
+      const res = await apiFetch(`/api/shipments/${editingShipment.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editingShipment)
@@ -2513,7 +2562,7 @@ MARAS Group etir Center`;
   // Quick visibility toggler for sharing page documents
   const toggleDocVisibility = async (shipmentId: string, docId: string, currentVal: boolean) => {
     try {
-      const res = await fetch(`/api/shipments/${shipmentId}/documents/${docId}/visibility`, {
+      const res = await apiFetch(`/api/shipments/${shipmentId}/documents/${docId}/visibility`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ isSharedExternally: !currentVal })
@@ -2532,7 +2581,7 @@ MARAS Group etir Center`;
   // Update shipment direct link active switch
   const handleToggleShareLink = async (shipment: Shipment, val: boolean) => {
     try {
-      const res = await fetch(`/api/shipments/${shipment.id}/share`, {
+      const res = await apiFetch(`/api/shipments/${shipment.id}/share`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ isLinkShared: val })
@@ -2551,7 +2600,7 @@ MARAS Group etir Center`;
 
   const handleToggleDocSharing = async (shipment: Shipment, key: 'shareIncludeDocuments' | 'shareIncludePhotos', val: boolean) => {
     try {
-      const res = await fetch(`/api/shipments/${shipment.id}/share`, {
+      const res = await apiFetch(`/api/shipments/${shipment.id}/share`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [key]: val })
@@ -5361,15 +5410,87 @@ MARAS Group etir Center`;
           a way to delete itself, and sub-admins can't reach the 'team' tab
           to do that, so this tab exists specifically to give them one. */}
       {activeTab === 'my_account' && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 max-w-lg">
+        <div className="space-y-6 max-w-lg">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
             <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2 mb-1">
               <User className="w-5 h-5 text-indigo-600" />
               {lang === 'tr' ? 'Hesabım' : (lang === 'ar' ? 'حسابي' : 'My Account')}
             </h2>
-            <p className="text-slate-500 text-xs mb-4">{adminEmail}</p>
+            <p className="text-slate-500 text-xs">{adminEmail}</p>
+            <span className={`inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mt-2 ${
+              adminType === 'super' ? 'text-orange-600 bg-orange-50' : adminType === 'accounts' ? 'text-teal-600 bg-teal-50' : 'text-indigo-600 bg-indigo-50'
+            }`}>
+              {adminType === 'super'
+                ? (lang === 'tr' ? 'Süper Yönetici' : (lang === 'ar' ? 'مسؤول أعلى' : 'Super Admin'))
+                : adminType === 'accounts'
+                  ? (lang === 'tr' ? 'Muhasebe Ekibi' : (lang === 'ar' ? 'فريق الحسابات' : 'Accounts Admin'))
+                  : (lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operations Admin'))}
+            </span>
+          </div>
 
-            {adminType !== 'super' ? (
+          {adminType !== 'super' ? (
+            <>
+              {/* Change Password */}
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">
+                  {lang === 'tr' ? 'Şifremi Değiştir' : (lang === 'ar' ? 'تغيير كلمة المرور' : 'Change Password')}
+                </h3>
+                <form onSubmit={handleChangeOwnPassword} className="space-y-3">
+                  {changePasswordError && (
+                    <div className="p-2.5 bg-red-50 text-red-600 rounded-lg text-xs font-semibold select-all">
+                      {changePasswordError}
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      {lang === 'tr' ? 'Mevcut Şifre' : (lang === 'ar' ? 'كلمة المرور الحالية' : 'Current Password')}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={currentPasswordInput}
+                      onChange={(e) => setCurrentPasswordInput(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      {lang === 'tr' ? 'Yeni Şifre' : (lang === 'ar' ? 'كلمة المرور الجديدة' : 'New Password')}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={newPasswordInput}
+                      onChange={(e) => setNewPasswordInput(e.target.value)}
+                      placeholder={lang === 'tr' ? 'En az 8 karakter' : (lang === 'ar' ? '8 أحرف على الأقل' : 'At least 8 characters')}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      {lang === 'tr' ? 'Yeni Şifreyi Onayla' : (lang === 'ar' ? 'تأكيد كلمة المرور الجديدة' : 'Confirm New Password')}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={confirmNewPasswordInput}
+                      onChange={(e) => setConfirmNewPasswordInput(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isChangingPassword}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
+                  >
+                    {isChangingPassword
+                      ? (lang === 'tr' ? 'Güncelleniyor...' : (lang === 'ar' ? 'جارٍ التحديث...' : 'Updating...'))
+                      : (lang === 'tr' ? 'Şifreyi Güncelle' : (lang === 'ar' ? 'تحديث كلمة المرور' : 'Update Password'))}
+                  </button>
+                </form>
+              </div>
+
+              {/* Delete Account */}
               <div className="bg-red-50/50 border border-red-100 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-red-700 mb-1">
                   {lang === 'tr' ? 'Hesabımı Sil' : (lang === 'ar' ? 'حذف حسابي' : 'Delete My Account')}
@@ -5389,16 +5510,18 @@ MARAS Group etir Center`;
                   {lang === 'tr' ? 'Hesabımı Tamamen Sil' : (lang === 'ar' ? 'حذف حسابي نهائياً' : 'Permanently Delete My Account')}
                 </button>
               </div>
-            ) : (
+            </>
+          ) : (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
               <p className="text-slate-400 text-xs italic">
                 {lang === 'tr'
-                  ? 'Süper yönetici hesabı bu uygulama üzerinden oluşturulmadığı için silinemez.'
+                  ? 'Süper yönetici şifresi ve hesabı bu uygulama üzerinden değiştirilemez veya silinemez, çünkü bu hesap uygulama içinden oluşturulmamıştır.'
                   : (lang === 'ar'
-                    ? 'لا يمكن حذف حساب المسؤول الأعلى لأنه لم يتم إنشاؤه عبر هذا التطبيق.'
-                    : 'The super-admin account cannot be deleted here, since it was not created through this app.')}
+                    ? 'لا يمكن تغيير كلمة مرور المسؤول الأعلى أو حذف حسابه عبر هذا التطبيق، لأن هذا الحساب لم يتم إنشاؤه من خلال التطبيق.'
+                    : 'The super-admin password and account cannot be changed or deleted through the app, since this account was not created through it.')}
               </p>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Admin Self-Delete Confirmation Modal */}
           {showAdminSelfDeleteConfirm && (
@@ -7348,7 +7471,7 @@ MARAS Group etir Center`;
                         setIsLoadingDistanceMatrix(true);
                         setDistanceMatrixError(null);
                         try {
-                          const res = await fetch(`/api/shipments/${targetDetailsShipment.id}/distance-matrix`);
+                          const res = await apiFetch(`/api/shipments/${targetDetailsShipment.id}/distance-matrix`);
                           if (res.ok) {
                             const data = await res.json();
                             setDistanceMatrixData(data);
