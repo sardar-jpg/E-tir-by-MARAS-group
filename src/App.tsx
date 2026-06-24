@@ -762,8 +762,8 @@ export default function App() {
   // If logged in as client, display authentic customer dashboard directly
   if (session.role === "client") {
     return (
-      <div className="bg-slate-900 min-h-screen text-slate-100 font-sans flex flex-col justify-between animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
-        <main className="flex-1 py-6 px-4">
+      <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
+        <main className="flex-1 overflow-y-auto py-6 px-4">
           <ClientDashboard 
             lang={lang}
             clientCompanyName={session.client?.companyName || "Customer"}
@@ -772,26 +772,6 @@ export default function App() {
             onLogout={handleLogout}
           />
         </main>
-        <footer className="bg-slate-950 py-4 text-center text-[10px] text-slate-500 uppercase border-t border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-sm shrink-0">
-          <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setIsPrivacyOpen(true)}
-              className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-bold tracking-widest outline-none bg-transparent border-0 p-0 text-[10px] uppercase font-mono"
-            >
-              🔒 Privacy Policy / Gizlilik Politikası
-            </button>
-            <span className="text-slate-800">|</span>
-            <button
-              type="button"
-              onClick={() => setIsTermsOpen(true)}
-              className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-bold tracking-widest outline-none bg-transparent border-0 p-0 text-[10px] uppercase font-mono"
-            >
-              ⚖️ Terms & Conditions / Kullanım Koşulları
-            </button>
-          </div>
-        </footer>
       </div>
     );
   }
@@ -799,8 +779,8 @@ export default function App() {
   // If logged in as driver, display authentic mobile driver simulator view directly
   if (session.role === "driver") {
     return (
-      <div className="bg-slate-900 min-h-screen text-slate-100 font-sans flex flex-col justify-between" dir={isRtl ? "rtl" : "ltr"}>
-        <main className="flex-1">
+      <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden" dir={isRtl ? "rtl" : "ltr"}>
+        <main className="flex-1 overflow-hidden">
           <DriverApplication 
             lang={lang} 
             loggedInDriverId={session.driver?.id} 
@@ -808,26 +788,6 @@ export default function App() {
             onLogout={handleLogout}
           />
         </main>
-        <footer className="bg-slate-950 py-4 text-center text-[10px] text-slate-500 uppercase border-t border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-sm shrink-0">
-          <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway</span>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setIsPrivacyOpen(true)}
-              className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-bold tracking-widest outline-none bg-transparent border-0 p-0 text-[10px] uppercase font-mono"
-            >
-              🔒 Privacy Policy / Gizlilik Politikası
-            </button>
-            <span className="text-slate-800">|</span>
-            <button
-              type="button"
-              onClick={() => setIsTermsOpen(true)}
-              className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-bold tracking-widest outline-none bg-transparent border-0 p-0 text-[10px] uppercase font-mono"
-            >
-              ⚖️ Terms & Conditions / Kullanım Koşulları
-            </button>
-          </div>
-        </footer>
       </div>
     );
   }
