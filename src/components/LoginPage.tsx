@@ -919,34 +919,16 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                         // session token we don't have yet at this point.
                         // An admin can still manually link a legacy account
                         // by editing its id from the Drivers admin screen.)
-                        if (!foundDriver) {
-                          console.log("Auto-registering Google driver profile...");
-                          try {
-                            const createRes = await apiFetch("/api/drivers/self-register", {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                uid: user.uid,
-                                name: user.displayName || user.email?.split("@")[0] || "Gmail Driver",
-                                username: user.email?.split("@")[0].replace(/[^a-zA-Z0-9]/g, "_") || `driver_${Date.now()}`,
-                                email: user.email || "",
-                                phone: user.phoneNumber || "+905320000000",
-                                truckNumber: "G-GMAIL-IQ",
-                                truckType: "reefer"
-                              })
-                            });
-                            if (createRes.ok) {
-                              const created = await createRes.json();
-                              foundDriver = created;
-                              sessionToken = created?.token;
-                            }
-                          } catch (createErr) {
-                            console.error("Failed to auto-create general driver profile:", createErr);
-                          }
-                        }
-
+                        // Google Sign-In intentionally does NOT auto-create
+                        // a new driver account anymore. It only works for
+                        // drivers who already exist (found above via
+                        // verify-session) - new drivers must use the real
+                        // registration form, which collects their actual
+                        // name/phone/truck info instead of guessable
+                        // placeholders, and correctly enters the pending-
+                        // approval queue.
                         if (!foundDriver || !sessionToken) {
-                          setLoginError("Could not complete driver registration. Please check your connection and try again.");
+                          setLoginError("This Google account is not linked to an existing approved driver. Please register using the driver registration form instead.");
                           await auth.signOut();
                           setIsLoggingIn(false);
                           return;
