@@ -838,6 +838,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
             </form>
 
             <div className="space-y-4">
+            {loginRole !== "admin" && (
+              <>
               <div className="relative flex py-2 items-center">
                 <div className="flex-grow border-t border-slate-900"></div>
                 <span className="flex-shrink mx-4 text-[10px] text-slate-500 font-bold uppercase tracking-wider">or sign in with</span>
@@ -980,6 +982,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                   }
                 </span>
               </button>
+              </>
+            )}
 
 
             </div>
