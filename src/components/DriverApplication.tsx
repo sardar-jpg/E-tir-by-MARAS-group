@@ -2337,7 +2337,7 @@ export default function DriverApplication({
             )}
 
             {/* Header Mobile Brand */}
-            <div className="p-4 bg-slate-950 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
+            <div className="px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
                   <Truck className="w-4 h-4 text-orange-500" />
@@ -4426,14 +4426,11 @@ export default function DriverApplication({
                   return (
                     <>
                       {/* Header Title Block */}
-                      <div className="border-b border-slate-900 pb-3 flex items-center justify-between">
+                      <div className="border-b border-slate-900 pb-3 flex items-center">
                         <div>
                           <h3 className="font-extrabold text-sm text-white tracking-tight uppercase font-mono">{menuT.title}</h3>
                           <p className="text-[10px] text-slate-500 mt-0.5">{menuT.subtitle}</p>
                         </div>
-                        <span className="bg-orange-500/10 text-orange-400 font-mono font-black text-[10px] px-2.5 py-0.5 rounded-full border border-orange-500/20">
-                          v4.5-Live
-                        </span>
                       </div>
 
                       {/* ACTIVE DRIVER COMPACT BADGE CARD */}
@@ -4473,41 +4470,6 @@ export default function DriverApplication({
                               ))}
                             </div>
                             <span className="text-[9.5px] font-extrabold text-amber-500 font-mono tracking-tight">{menuT.ratingVal}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* GPS TRACKING ACCURACY SETTING (AUTOMATED & FRIENDLY STYLE) */}
-                      <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4.5 space-y-3.5 shadow-md relative overflow-hidden group">
-                        {/* Soft ambient background glow representing live transmission signal */}
-                        <div className="absolute -top-10 -right-10 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl animate-pulse" />
-                        
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shadow-inner">
-                            <Compass className="w-4 h-4 text-emerald-400 animate-spin" style={{ animationDuration: '40s' }} />
-                          </div>
-                          <div>
-                            <h4 className="text-xs font-black text-white uppercase tracking-tight">
-                              {lang === 'tr' ? "Akıllı GPS Müzakeresi" : lang === 'ar' ? "تتبع الموقع التلقائي الذكي" : "Smart GPS Telemetry"}
-                            </h4>
-                            <span className="text-[8.5px] text-emerald-400 font-mono tracking-wider font-extrabold uppercase flex items-center gap-1 mt-0.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-                              {lang === 'tr' ? "Aktif ve Otomatik" : lang === 'ar' ? "مفعل تلقائياً" : "Active & Auto-Optimized"}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-slate-400 text-[10.5px] leading-relaxed space-y-2">
-                          <p>
-                            {lang === 'tr' 
-                              ? "Cihazınızın konumu sevkiyat sorumlusu haritasıyla arka planda tamamen otomatik olarak senkronize edilir. Manuel müdahale veya ayar yapılması gerekmez." 
-                              : lang === 'ar' 
-                              ? "يتم مزامنة موقع جهازك مع خريطة المرسل بالكامل تحت الخلفية بشكل تلقائي، لا يتطلب أي تحكم يدوي."
-                              : "Your position is automatically synchronized with the backend dispatcher map dynamically. No manual adjustment ever needed."}
-                          </p>
-                          <div className="flex items-center justify-between text-[9px] font-mono border-t border-slate-900/85 pt-2 text-slate-500">
-                            <span>{lang === 'tr' ? "Sıklık:" : "Dynamic Interval:"}</span>
-                            <span className="font-extrabold text-orange-400">15s In-Transit</span>
                           </div>
                         </div>
                       </div>
@@ -4644,14 +4606,11 @@ export default function DriverApplication({
 
                 <div className="space-y-4 pt-4 border-t border-slate-800/60 mt-4">
                 {/* Header title block */}
-                <div className="border-b border-slate-900 pb-3 flex items-center justify-between">
+                <div className="border-b border-slate-900 pb-3 flex items-center">
                   <div>
                     <h3 className="font-extrabold text-sm text-white tracking-tight uppercase font-mono">Pilot Operations</h3>
                     <p className="text-[10px] text-slate-500 mt-0.5">Control panel & active telemetry logs</p>
                   </div>
-                  <span className="bg-orange-500/10 text-orange-400 font-mono font-black text-[10px] px-2.5 py-0.5 rounded-full border border-orange-500/20">
-                    v4.5-Live
-                  </span>
                 </div>
 
                 {/* MODULE 1: SHIFT COMPLIANCE TIMER (ELD Hours of Service Tracker) */}
@@ -5326,7 +5285,7 @@ export default function DriverApplication({
           </div>
 
           {/* Bottom Dock Navigation Tabs menu */}
-          <div className="grid grid-cols-4 bg-slate-950 py-3 border-t border-slate-900 mt-2 shrink-0 select-none">
+          <div className="grid grid-cols-4 bg-slate-950 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-slate-900 mt-2 shrink-0 select-none">
             <button 
               onClick={() => {
                 setActiveTab('shipments');
