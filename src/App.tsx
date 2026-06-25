@@ -795,7 +795,7 @@ export default function App() {
   return (
     <div className="bg-slate-900 min-h-screen text-slate-100 font-sans flex flex-col justify-between" dir={isRtl ? "rtl" : "ltr"}>
       
-      <header className="bg-slate-950 border-b border-slate-800 sticky top-0 z-40 p-4">
+      <header className="bg-slate-950 border-b border-slate-800 sticky top-0 z-40 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))]">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           
           {/* Logo / Title */}
