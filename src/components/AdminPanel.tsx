@@ -278,6 +278,25 @@ export default function AdminPanel({
     }
   };
 
+  const handleDriverApproval = async (driverId: string, status: "approved" | "rejected") => {
+    try {
+      const res = await apiFetch(`/api/drivers/${driverId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+      if (res.ok) {
+        triggerToast(status === "approved" ? "Driver approved." : "Driver registration rejected.");
+        fetchData();
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to update driver status.");
+      }
+    } catch (err) {
+      triggerToast("Could not reach the server.");
+    }
+  };
+
 
   // Vendor / Supplier Management States
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -4233,6 +4252,39 @@ MARAS Group etir Center`;
       {/* 3. Driver Alliance Tab */}
       {activeTab === 'drivers' && (
         <div className="space-y-6">
+          {drivers.some(d => d.status === "pending") && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
+              <h3 className="text-sm font-bold text-amber-800 flex items-center gap-2">
+                <Bell className="w-4 h-4" />
+                Pending Driver Approvals
+              </h3>
+              <div className={`grid ${isMobileMode ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3'}`}>
+                {drivers.filter(d => d.status === "pending").map((driver) => (
+                  <div key={driver.id} className="bg-white p-4 rounded-lg border border-amber-200 shadow-sm space-y-2">
+                    <div>
+                      <p className="font-bold text-slate-900 text-sm">{driver.name}</p>
+                      <p className="text-xs text-slate-500 font-mono">@{driver.username} &middot; {driver.phone}</p>
+                      <p className="text-xs text-slate-500">{driver.truckNumber} &middot; {driver.truckType}</p>
+                    </div>
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={() => handleDriverApproval(driver.id, "approved")}
+                        className="flex-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => handleDriverApproval(driver.id, "rejected")}
+                        className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className={`grid ${isMobileMode ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'}`}>
             {drivers.map((driver) => (
               <div key={driver.id} className="bg-white p-5 rounded-xl border border-slate-200/90 shadow-sm flex flex-col justify-between hover:border-slate-400 transition-all">
@@ -4245,7 +4297,15 @@ MARAS Group etir Center`;
                     ) : (
                       <span className="p-2.5 bg-slate-100 text-slate-800 rounded-lg"><Truck className="w-5 h-5" /></span>
                     )}
-                    <span className="text-[10px] bg-slate-900 text-white font-mono px-2 py-0.5 rounded uppercase font-bold">{driver.truckNumber}</span>
+                    <div className="flex items-center gap-1.5">
+                      {driver.status === "pending" && (
+                        <span className="text-[9px] bg-amber-100 text-amber-700 font-bold px-1.5 py-0.5 rounded uppercase">Pending</span>
+                      )}
+                      {driver.status === "rejected" && (
+                        <span className="text-[9px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded uppercase">Rejected</span>
+                      )}
+                      <span className="text-[10px] bg-slate-900 text-white font-mono px-2 py-0.5 rounded uppercase font-bold">{driver.truckNumber}</span>
+                    </div>
                   </div>
                   <div>
                     <button

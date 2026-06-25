@@ -144,6 +144,7 @@ export interface Driver {
   longitude?: number;
   lastUpdated?: string;
   avatarUrl?: string;
+  status?: "pending" | "approved" | "rejected";
 }
 
 export interface Client {
@@ -215,7 +216,7 @@ export interface AppNotification {
   messageEn: string;
   messageTr: string;
   messageAr: string;
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery';
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration';
   timestamp: string;
   read: boolean;
 }

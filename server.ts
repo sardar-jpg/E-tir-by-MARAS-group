@@ -1257,7 +1257,7 @@ async function logActivity(shipmentId: string, shipmentNumber: string, actor: st
 async function pushNotification(
   shipmentId: string, 
   shipmentNumber: string, 
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery',
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration',
   titleEn: string, titleTr: string, titleAr: string,
   messageEn: string, messageTr: string, messageAr: string
 ) {
@@ -2935,6 +2935,12 @@ async function startServer() {
           await setDoc(doc(db, "drivers", matchedDriver.id), { ...matchedDriver, password: newHash });
         });
         if (matched) {
+          if (matchedDriver.status === "pending") {
+            return res.status(403).json({ error: "Your driver account is pending admin approval. Please check back soon." });
+          }
+          if (matchedDriver.status === "rejected") {
+            return res.status(403).json({ error: "Your driver registration was not approved. Please contact MARAS Group support." });
+          }
           clearLoginRateLimit(req, normalizedQuery);
           const sessionPayload: SessionPayload = {
             role: "driver",
@@ -3407,21 +3413,76 @@ async function startServer() {
         phone: data.phone || "No phone",
         activeShipmentsCount: 0,
         completedShipmentsCount: 0,
-        truckType: data.truckType || "reefer"
+        truckType: data.truckType || "reefer",
+        status: "pending"
       };
       await setDoc(doc(db, "drivers", newDriver.id), newDriver);
 
-      const sessionPayload: SessionPayload = {
-        role: "driver",
-        id: newDriver.id,
-        issuedAt: Date.now(),
-        expiresAt: Date.now() + SESSION_TTL_MS,
-      };
+      // No session token here. A self-registered driver is "pending"
+      // until an admin approves them (see PATCH /api/drivers/:id/status
+      // below) - they cannot log in until then, even though the account
+      // record already exists.
+      await pushNotification(
+        "",
+        "",
+        "driver_registration",
+        "New Driver Registration",
+        "Yeni Surucu Kaydi",
+        "تسجيل سائق جديد",
+        `${newDriver.name} (${newDriver.username}) has registered and is awaiting your approval.`,
+        `${newDriver.name} (${newDriver.username}) kayit oldu ve onayinizi bekliyor.`,
+        `قام ${newDriver.name} (${newDriver.username}) بالتسجيل وهو في انتظار موافقتك.`
+      );
+
       const { password, ...safeDriver } = newDriver;
-      res.status(201).json({ ...safeDriver, token: signSessionToken(sessionPayload) });
+      res.status(201).json({
+        ...safeDriver,
+        pendingApproval: true,
+        message: "Registration received. Your account is pending admin approval before you can sign in."
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to register driver" });
+    }
+  });
+
+  // Lets an admin approve or reject a driver who self-registered and is
+  // currently "pending". Existing drivers with no status field at all
+  // (registered before this approval workflow existed) are unaffected -
+  // this endpoint only matters for drivers actually in the pending state.
+  app.patch("/api/drivers/:id/status", requireFullAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+      if (status !== "approved" && status !== "rejected") {
+        return res.status(400).json({ error: "status must be 'approved' or 'rejected'." });
+      }
+      const docRef = doc(db, "drivers", id);
+      const driverDoc = await getDoc(docRef);
+      if (!driverDoc.exists()) {
+        return res.status(404).json({ error: "Driver not found." });
+      }
+      const driverData = driverDoc.data() as Driver;
+      await setDoc(docRef, { ...driverData, status });
+
+      if (status === "approved") {
+        await pushNotification(
+          "",
+          "",
+          "driver_registration",
+          "Driver Approved",
+          "Surucu Onaylandi",
+          "تمت الموافقة على السائق",
+          `${driverData.name} has been approved and can now sign in.`,
+          `${driverData.name} onaylandi ve artik giris yapabilir.`,
+          `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`
+        );
+      }
+
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update driver status." });
     }
   });
 
