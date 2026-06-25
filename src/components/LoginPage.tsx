@@ -945,18 +945,11 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                           }
                         }
 
-                        if (!foundDriver) {
-                          // Direct local fallback
-                          foundDriver = {
-                            id: user.uid,
-                            name: user.displayName || "Gmail Driver",
-                            username: user.email?.split("@")[0] || "gmail_driver",
-                            phone: "+905320000000",
-                            truckNumber: "G-GMAIL-IQ",
-                            truckType: "reefer",
-                            activeShipmentsCount: 0,
-                            completedShipmentsCount: 0
-                          };
+                        if (!foundDriver || !sessionToken) {
+                          setLoginError("Could not complete driver registration. Please check your connection and try again.");
+                          await auth.signOut();
+                          setIsLoggingIn(false);
+                          return;
                         }
 
                         onLoginSuccess({
