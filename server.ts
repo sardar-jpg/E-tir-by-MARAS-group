@@ -3396,18 +3396,25 @@ async function startServer() {
   app.post("/api/drivers/self-register", async (req, res) => {
     try {
       const data = req.body;
-      if (!data.uid) {
-        return res.status(400).json({ error: "uid is required" });
-      }
-      const existing = await getDoc(doc(db, "drivers", data.uid));
+      // uid is normally a real Firebase Auth uid (from the Gmail or
+      // email/password flow), but the manual registration form can
+      // reach this point with no uid at all if Firebase Auth account
+      // creation failed for some reason other than a duplicate email
+      // or weak password (the form still submits as a "fallback").
+      // Generate a stable id in that case rather than hard-rejecting.
+      const driverId: string = data.uid || `driver-${Date.now()}`;
+      const existing = await getDoc(doc(db, "drivers", driverId));
       if (existing.exists()) {
         return res.status(409).json({ error: "A driver profile already exists for this account." });
       }
       const newDriver: Driver = {
-        id: data.uid,
+        id: driverId,
         name: data.name || "Unnamed Driver",
         username: data.username || `driver_${Date.now()}`,
-        password: hashPassword(crypto.randomBytes(9).toString("base64url")),
+        // Use the password the person actually chose on the
+        // registration form if one was sent, instead of always
+        // generating a random one they'd never know.
+        password: data.password ? hashPassword(data.password) : hashPassword(crypto.randomBytes(9).toString("base64url")),
         email: data.email || "",
         truckNumber: data.truckNumber || "Unassigned",
         phone: data.phone || "No phone",

@@ -506,11 +506,11 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       }
 
       // 2. Submit driver registration with custom id set to the auth uid if available
-      const registerRes = await apiFetch("/api/drivers", {
+      const registerRes = await apiFetch("/api/drivers/self-register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: uid,
+          uid: uid,
           name: regFullName.trim(),
           username: regUsername.trim().replace(/\s+/g, "_"),
           email: email,
@@ -593,7 +593,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 {lang === "en" ? "Verify Your Email" : lang === "tr" ? "E-postanızı Doğrulayın" : "تأكيد بريدك الإلكتروني"}
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed font-semibold">
-                “We have sent you a verification email to <span className="text-blue-400 font-bold">{verificationEmail}</span>. Please verify it and log in.”
+                “We have sent you a verification email to <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is also pending admin approval - you will be able to log in once an admin approves it.”
               </p>
             </div>
 
