@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { usePushNotifications } from "./hooks/usePushNotifications";
 import { Language, Shipment, Driver } from "./types";
 import { TRANSLATIONS } from "./translations";
 import AdminPanel from "./components/AdminPanel";
@@ -70,6 +71,11 @@ export default function App() {
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
   const [isTermsOpen, setIsTermsOpen] = useState(false);
+
+  // Registers this device for push notifications whenever someone is
+  // actually logged in (any role - admin, driver, or client). Does
+  // nothing at all on web, only inside the native app.
+  usePushNotifications(!!session);
 
   // Monitor and validate Firebase Auth state against localStorage session on initial load
   useEffect(() => {

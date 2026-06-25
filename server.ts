@@ -22,6 +22,8 @@ import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
+import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "firebase-admin/app";
+import { getMessaging, Messaging } from "firebase-admin/messaging";
 import {
   SessionRole as AuthSessionRole,
   SessionPayload as AuthSessionPayload,
@@ -416,6 +418,21 @@ try {
 } catch (err: any) {
   console.warn("Firebase initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
   useMemoryFallback = true;
+}
+
+// Firebase Admin SDK, used only for sending push notifications via FCM.
+// No explicit credentials are passed - on Cloud Run this automatically
+// uses the instance's own service account (Application Default
+// Credentials), so no separate key file needs to be managed or shipped
+// in the container. This is intentionally separate from the client SDK
+// app above, which signs in as a real Firestore-rules-scoped user for
+// reading/writing data; sending pushes is an unrelated capability.
+let pushMessaging: Messaging | null = null;
+try {
+  const adminApp = getAdminApps().length ? getAdminApps()[0]! : initializeAdminApp();
+  pushMessaging = getMessaging(adminApp);
+} catch (err: any) {
+  console.warn("Firebase Admin SDK initialization failed - push notifications will be disabled. Error:", err instanceof Error ? err.message : String(err));
 }
 
 // Test Firestore Connection
@@ -1279,6 +1296,68 @@ async function pushNotification(
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
     console.error("Error writing notification: ", err);
+  }
+
+  // Actually send a real push notification, in addition to writing the
+  // in-app one above. Recipients are resolved here rather than passed
+  // in by each of this function's call sites, since this function
+  // already receives the shipmentId every call site already has on
+  // hand - reusing the same assignedDriverId / companyName lookup the
+  // GET /api/notifications endpoint already does for filtering, rather
+  // than duplicating that logic at every call site.
+  if (!pushMessaging) return;
+  try {
+    const userIds = new Set<string>();
+
+    // Always include every admin - admins see every notification with
+    // no filtering, so they should get every push too.
+    const adminTokensSnap = await getDocs(collection(db, "pushTokens"));
+    const allTokenDocs = adminTokensSnap.docs.map(d => d.data() as any);
+    for (const t of allTokenDocs) {
+      if (t.role === "admin") userIds.add(t.userId);
+    }
+
+    if (shipmentId) {
+      const shipDoc = await getDoc(doc(db, "shipments", shipmentId));
+      if (shipDoc.exists()) {
+        const ship = shipDoc.data() as Shipment;
+        if (ship.assignedDriverId) userIds.add(ship.assignedDriverId);
+        if (ship.additionalDrivers) {
+          for (const ad of ship.additionalDrivers) userIds.add(ad.driverId);
+        }
+        if (ship.companyName) {
+          const clientsSnap = await getDocs(collection(db, "clients"));
+          const matchingClient = clientsSnap.docs
+            .map(d => d.data() as Client)
+            .find(c => c.companyName === ship.companyName);
+          if (matchingClient) userIds.add(matchingClient.id);
+        }
+      }
+    }
+
+    const targetTokens = allTokenDocs
+      .filter(t => userIds.has(t.userId))
+      .map(t => t.token as string);
+
+    if (targetTokens.length === 0) return;
+
+    await pushMessaging.sendEachForMulticast({
+      tokens: targetTokens,
+      notification: {
+        title: titleEn,
+        body: messageEn
+      },
+      apns: {
+        payload: {
+          aps: { sound: "default" }
+        }
+      }
+    });
+  } catch (err) {
+    // Never let a push-sending failure break the actual notification
+    // or whatever action triggered it (e.g. assigning a shipment) -
+    // the in-app notification above already succeeded regardless.
+    console.error("Error sending push notification: ", err);
   }
 }
 
@@ -3703,6 +3782,46 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get notifications" });
+    }
+  });
+
+  // Registers (or re-registers) a device's push notification token for
+  // the currently logged-in user. One Firestore doc per token, keyed by
+  // the token itself, so re-registering the same token on app relaunch
+  // is a harmless overwrite rather than creating duplicates - and a
+  // token that moves to a different account (rare, but possible if a
+  // device is shared/reassigned) gets correctly re-pointed to whoever
+  // currently owns it.
+  app.post("/api/push-tokens", requireAuth, async (req, res) => {
+    try {
+      const { token, platform } = req.body;
+      if (!token || typeof token !== "string") {
+        return res.status(400).json({ error: "token is required." });
+      }
+      await setDoc(doc(db, "pushTokens", token), {
+        token,
+        role: req.session!.role,
+        userId: req.session!.id,
+        platform: platform || "ios",
+        updatedAt: new Date().toISOString()
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to register push token." });
+    }
+  });
+
+  // Lets the client proactively remove its own token, e.g. on logout,
+  // so a shared/reassigned device doesn't keep receiving a previous
+  // user's pushes.
+  app.delete("/api/push-tokens/:token", requireAuth, async (req, res) => {
+    try {
+      await deleteDoc(doc(db, "pushTokens", req.params.token));
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to remove push token." });
     }
   });
 
