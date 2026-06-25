@@ -461,56 +461,18 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       }
 
       const email = regEmail.trim().toLowerCase();
-      
-      let uid: string | undefined = undefined;
 
-      try {
-        // 1. Create User in Firebase Auth
-        const userCredential = await createUserWithEmailAndPassword(auth, email, regPassword);
-        uid = userCredential.user.uid;
-        
-        try {
-          await sendEmailVerification(userCredential.user);
-        } catch (verErr) {
-          console.warn("Could not send email verification on registration:", verErr);
-        }
-        await auth.signOut();
-      } catch (authErr: any) {
-        console.warn("Driver Firebase Auth creation failed, performing direct database registration fallback...", authErr);
-        if (authErr.code === "auth/email-already-in-use") {
-          setRegError(
-            <span>
-              This driver username/email is already registered in Firebase Auth.{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginUsername(regUsername.trim());
-                  setLoginRole("driver");
-                  setIsRegisterMode(false);
-                  setRegError(null);
-                }}
-                className="underline hover:text-white font-black text-blue-400 focus:outline-none cursor-pointer inline-block"
-              >
-                Click here to log in as driver with this account ({email})
-              </button>
-            </span>
-          );
-          setIsRegistering(false);
-          return;
-        } else if (authErr.code === "auth/weak-password") {
-          setRegError("Password must be at least 6 characters.");
-          setIsRegistering(false);
-          return;
-        }
-        // Proceed with database registration fallback anyway (e.g. key expired issues)
+      if (regPassword.length < 6) {
+        setRegError("Password must be at least 6 characters.");
+        setIsRegistering(false);
+        return;
       }
 
-      // 2. Submit driver registration with custom id set to the auth uid if available
       const registerRes = await apiFetch("/api/drivers/self-register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          uid: uid,
+          uid: undefined,
           name: regFullName.trim(),
           username: regUsername.trim().replace(/\s+/g, "_"),
           email: email,
@@ -590,10 +552,10 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
             
             <div className="space-y-2">
               <h3 className="text-lg font-black text-white tracking-tight">
-                {lang === "en" ? "Verify Your Email" : lang === "tr" ? "E-postanızı Doğrulayın" : "تأكيد بريدك الإلكتروني"}
+                {lang === "en" ? "Registration Received" : lang === "tr" ? "Kayıt Alındı" : "تم استلام التسجيل"}
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed font-semibold">
-                “We have sent you a verification email to <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is also pending admin approval - you will be able to log in once an admin approves it.”
+                “Registration received for <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is pending admin approval - you will be able to log in once an admin approves it.”
               </p>
             </div>
 
