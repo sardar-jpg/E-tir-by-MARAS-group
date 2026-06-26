@@ -161,7 +161,7 @@ export default function AdminPanel({
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs'>(
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account'>(
     userRole === 'accounts' ? 'costs' : 'dashboard'
   );
 
@@ -3379,7 +3379,7 @@ MARAS Group etir Center`;
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart
                       data={[
-                        { name: lang === 'tr' ? 'Karayolu' : 'Road', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "road").length },
+                        { name: lang === 'tr' ? 'Karayolu' : 'Road', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "land").length },
                         { name: lang === 'tr' ? 'Denizyolu' : 'Sea', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "sea").length },
                         { name: lang === 'tr' ? 'Havayolu' : 'Air', value: shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed" && s.freightType === "air").length }
                       ]}
@@ -3477,7 +3477,7 @@ MARAS Group etir Center`;
                 </span>
                 <div className="flex-1 overflow-hidden">
                   <div className="text-[11px] text-slate-600 font-medium truncate">
-                    {recentAlertsData[0].message}
+                    {lang === 'ar' ? recentAlertsData[0].messageAr : lang === 'tr' ? recentAlertsData[0].messageTr : recentAlertsData[0].messageEn}
                   </div>
                 </div>
                 <span className="text-[9.5px] text-slate-400 font-mono whitespace-nowrap select-none">
@@ -4757,8 +4757,6 @@ MARAS Group etir Center`;
                                                   <span className={`px-1.5 py-0.5 rounded-sm font-bold text-[10px] uppercase border ${
                                                     shipment.status === "Delivered" || shipment.status === "Closed"
                                                       ? "bg-green-50 text-green-700 border-green-200"
-                                                      : shipment.status === "Pending"
-                                                      ? "bg-blue-50 text-blue-700 border-blue-200"
                                                       : "bg-orange-50 text-orange-700 border-orange-200"
                                                   }`}>
                                                     {shipment.status}

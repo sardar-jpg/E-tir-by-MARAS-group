@@ -814,36 +814,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                     if (res) {
                       const user = res.user;
 
-                      if (loginRole === "admin") {
-                        if (user.email?.toLowerCase() === "sardar@maras.iq") {
-                          let sessionToken: string | undefined;
-                          try {
-                            const verifyRes = await apiFetch("/api/verify-session", {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ role: "admin", idToken: await user.getIdToken() })
-                            });
-                            if (verifyRes.ok) {
-                              const verifyData = await verifyRes.json();
-                              sessionToken = verifyData?.token;
-                            }
-                          } catch (verifyErr) {
-                            console.warn("Failed to obtain session token after Google admin login:", verifyErr);
-                          }
-                          onLoginSuccess({
-                            role: "admin",
-                            email: "sardar@maras.iq",
-                            driver: null,
-                            loginType: "firebase",
-                            token: sessionToken
-                          });
-                        } else {
-                          setLoginError("This Google account is not registered as MARAS Administrator. Please sign in with sardar@maras.iq.");
-                          await auth.signOut();
-                        }
-                      } else {
-                        // Sign in with Gmail for Driver
-                        if (user.email?.toLowerCase() === "sardar@maras.iq") {
+                      // Sign in with Gmail for Driver/Client
+                      if (user.email?.toLowerCase() === "sardar@maras.iq") {
                           setLoginError("This email is registered as an Administrator. Please select the Admin portal above to sign in.");
                           await auth.signOut();
                           setIsLoggingIn(false);
@@ -900,7 +872,6 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                           loginType: "firebase",
                           token: sessionToken
                         });
-                      }
                     }
                   } catch (e: any) {
                     if (e?.code === 'auth/popup-closed-by-user' || e?.message?.includes('popup-closed-by-user')) {
@@ -934,10 +905,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                   />
                 </svg>
                 <span>
-                  {loginRole === "admin"
-                    ? (lang === "tr" ? "Google Workspace İle Giriş Yap" : lang === "ar" ? "الدخول بحساب Google Workspace" : "Sign In with Google Workspace")
-                    : (lang === "tr" ? "Gmail ile Giriş Yap" : lang === "ar" ? "تسجيل الدخول عبر Gmail" : "Sign In with Gmail")
-                  }
+                  {lang === "tr" ? "Gmail ile Giriş Yap" : lang === "ar" ? "تسجيل الدخول عبر Gmail" : "Sign In with Gmail"}
                 </span>
               </button>
               </>

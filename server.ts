@@ -1674,6 +1674,7 @@ async function startServer() {
   // Media uploading endpoints
   app.post("/api/upload", requireAuth, async (req, res) => {
     try {
+      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot upload files." });
       const base64DataUrl = req.body.base64DataUrl || req.body.file || req.body.base64;
       const filename = req.body.filename || "upload.bin";
       if (!base64DataUrl) {
@@ -2508,6 +2509,7 @@ async function startServer() {
   // 5b. Subscribe Customer to Cargo Updates
   app.post("/api/shipments/:id/subscribe-customer", requireShipmentAccess, async (req, res) => {
     try {
+      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const { email, channel } = req.body;
       if (!email || !email.includes("@")) {
         return res.status(400).json({ error: "A valid email address is required" });
@@ -2624,6 +2626,7 @@ async function startServer() {
   // 7. Post Chat Message & Handle Document Savings
   app.post("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
+      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
       const { sender, senderName, type, text, fileUrl, fileName, fileCategory } = req.body;
 
@@ -2711,6 +2714,7 @@ async function startServer() {
   // 8. Upload Document Directly (Admin Center)
   app.post("/api/shipments/:id/documents", requireShipmentAccess, async (req, res) => {
     try {
+      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
       const { name, url, category, uploadedBy, isSharedExternally } = req.body;
 
@@ -2775,6 +2779,7 @@ async function startServer() {
   // 10. Configure Sharing Page Link
   app.post("/api/shipments/:id/share", requireShipmentAccess, async (req, res) => {
     try {
+      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) return res.status(404).json({ error: "Shipment not found" });
@@ -3087,11 +3092,13 @@ async function startServer() {
         });
         if (matched) {
           clearLoginRateLimit(req, normalizedQuery);
+          // isEmployee is read from the Firestore record loaded above — never from the request body.
           const sessionPayload: SessionPayload = {
             role: "client",
             id: matchedClient.id,
             issuedAt: Date.now(),
             expiresAt: Date.now() + SESSION_TTL_MS,
+            ...(matchedClient.isEmployee ? { viewOnly: true } : {}),
           };
           return res.json({
             success: true,
@@ -3667,6 +3674,7 @@ async function startServer() {
         address: data.address || "",
         notes: data.notes || "",
         createdAt: data.createdAt || new Date().toISOString(),
+        ...(data.isEmployee ? { isEmployee: true } : {}),
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
       await setDoc(doc(db, "clients", newClient.id), newClient);
@@ -3675,6 +3683,35 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create client" });
+    }
+  });
+
+  app.put("/api/clients/:id", requireFullAdmin, async (req, res) => {
+    try {
+      const clientRef = doc(db, "clients", req.params.id);
+      const clientDoc = await getDoc(clientRef);
+      if (!clientDoc.exists()) return res.status(404).json({ error: "Client not found" });
+
+      const data = req.body;
+      // companyName is intentionally excluded — re-scoping requires delete+recreate
+      const updates: Partial<Client> = {};
+      if (data.contactName !== undefined) updates.contactName = data.contactName;
+      if (data.phone !== undefined) updates.phone = data.phone;
+      if (data.email !== undefined) updates.email = data.email;
+      if (data.address !== undefined) updates.address = data.address;
+      if (data.notes !== undefined) updates.notes = data.notes;
+      if (data.isEmployee !== undefined) updates.isEmployee = Boolean(data.isEmployee);
+      if (data.username !== undefined) updates.username = data.username;
+      if (data.password !== undefined) updates.password = hashPassword(data.password);
+
+      await updateDoc(clientRef, updates as Record<string, unknown>);
+
+      const updated = { ...clientDoc.data(), ...updates } as Client;
+      const { password: _pw, ...safeClient } = updated as any;
+      res.json(safeClient);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update client" });
     }
   });
 

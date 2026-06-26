@@ -24,6 +24,7 @@ interface AppSession {
   /** Signed session token issued by /api/login or /api/verify-session — sent
    *  as `Authorization: Bearer <token>` on every API request by apiFetch. */
   token?: string;
+  adminType?: string;
 }
 
 export default function App() {

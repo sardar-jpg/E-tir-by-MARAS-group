@@ -91,6 +91,9 @@ export interface Shipment {
   shareIncludeDocuments: boolean;
   shareIncludePhotos: boolean;
   
+  // Scheduling
+  loadingDate?: string;
+
   // Sea & Air properties
   freightType?: 'land' | 'sea' | 'air';
   additionalDrivers?: Array<{ driverId: string; driverName: string; truckNumber: string; agreedAmount?: number }>;
@@ -158,6 +161,7 @@ export interface Client {
   createdAt: string;
   username?: string;
   password?: string;
+  isEmployee?: boolean;
 }
 
 export interface Vendor {

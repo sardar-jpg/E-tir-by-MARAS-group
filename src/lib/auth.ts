@@ -17,6 +17,7 @@ export interface SessionPayload {
   role: SessionRole;
   id: string; // admin email, driver id, or client id
   adminType?: string; // 'super' | 'operation' | 'accounts' — admin only
+  viewOnly?: boolean; // true for client employee accounts — set server-side from Firestore, never from client input
   issuedAt: number;
   expiresAt: number;
 }
