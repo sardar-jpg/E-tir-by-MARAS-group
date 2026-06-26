@@ -1123,22 +1123,7 @@ async function seedDatabaseIfEmpty() {
         }
       }
     } else {
-      console.log("Drivers collection already seeded. Ensuring usernames and passwords are set...");
-      for (const d of initialDrivers) {
-        try {
-          await rawSetDoc(rawDoc(db, "drivers", d.id), {
-            username: d.username,
-            password: d.password,
-            phone: d.phone,
-            name: d.name,
-            truckNumber: d.truckNumber,
-            truckType: d.truckType
-          }, { merge: true });
-          console.log(`Successfully merged credentials for driver: ${d.id} (${d.username})`);
-        } catch (subErr) {
-          console.error(`Failed to merge credentials for driver ${d.id}:`, subErr);
-        }
-      }
+      console.log("Drivers collection already seeded.");
     }
   } catch (err) {
     console.error("Error reading/seeding drivers: ", err);
@@ -1248,25 +1233,7 @@ async function seedDatabaseIfEmpty() {
         }
       }
     } else {
-      console.log("Clients collection already seeded. Ensuring usernames and passwords are set...");
-      for (const cl of initialClients) {
-        try {
-          await rawSetDoc(rawDoc(db, "clients", cl.id), {
-            username: cl.username,
-            password: cl.password,
-            email: cl.email,
-            companyName: cl.companyName,
-            contactName: cl.contactName,
-            phone: cl.phone,
-            address: cl.address,
-            notes: cl.notes,
-            createdAt: cl.createdAt
-          }, { merge: true });
-          console.log(`Successfully merged credentials for client: ${cl.id} (${cl.username})`);
-        } catch (subErr) {
-          console.error(`Failed to merge credentials for client ${cl.id}:`, subErr);
-        }
-      }
+      console.log("Clients collection already seeded.");
     }
   } catch (err) {
     console.error("Error reading/seeding clients: ", err);
