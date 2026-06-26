@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { auth } from "../googleAuth";
-import TrackingMap from "./TrackingMap";
+import ClientShipmentMap from "./ClientShipmentMap";
 
 // Local multilingual dictionary
 const t = {
@@ -804,13 +804,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                     <Globe className="w-3.5 h-3.5 text-orange-500 animate-spin-slow" />
                     <span>{curT.viewMap}</span>
                   </h4>
-                  <div className="rounded-xl overflow-hidden border border-slate-800 relative">
-                    <TrackingMap 
-                      shipments={[selectedShipment]} 
-                      lang={lang} 
-                      drivers={drivers} 
-                    />
-                  </div>
+                  <ClientShipmentMap shipment={selectedShipment} drivers={drivers} lang={lang} />
                 </div>
 
                 {/* Split layout: Timeline on left, Documents + inquiries on right */}
