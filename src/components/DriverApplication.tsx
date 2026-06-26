@@ -2582,7 +2582,7 @@ export default function DriverApplication({
                         </div>
                         <div>
                           <p className="text-xs text-slate-400 font-bold">{t('noAssignedShipments')}</p>
-                          <p className="text-[10px] text-slate-500 mt-1">Check back later or refresh simulation database</p>
+                          <p className="text-[10px] text-slate-500 mt-1">Check back later for new assignments</p>
                         </div>
                       </div>
                     )}
@@ -2972,7 +2972,7 @@ export default function DriverApplication({
                     {gpsSimActive && (
                       <span className="bg-emerald-950 text-emerald-400 border border-emerald-900 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
                         <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
-                        Simulating Transit
+                        Tracking Active
                       </span>
                     )}
                   </div>
@@ -4876,12 +4876,12 @@ export default function DriverApplication({
                     <button
                       type="button"
                       onClick={() => {
-                        triggerToast("⚡ Diagnostics: System telemetry cache cleared, re-indexed local stores successfully.");
+                        triggerToast("Local cache cleared successfully.");
                       }}
                       className="w-full py-2 bg-slate-950 hover:bg-slate-900 text-slate-400 hover:text-white font-mono uppercase font-bold text-[9px] tracking-wider border border-slate-800 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
                     >
-                      <Trash2 className="w-3.5 h-3.5 text-red-500" />
-                      <span>Re-zero Database Handshakes</span>
+                      <Trash2 className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Clear Local Cache</span>
                     </button>
                   </div>
                 </div>

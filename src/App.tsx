@@ -139,9 +139,7 @@ export default function App() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 role: checkIsAdmin ? "admin" : "driver",
-                email: email,
-                uid: uid,
-                driverId: uid
+                idToken: await firebaseUser.getIdToken()
               })
             });
 

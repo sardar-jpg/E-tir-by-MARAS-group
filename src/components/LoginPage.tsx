@@ -272,7 +272,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 const verifyRes = await apiFetch("/api/verify-session", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ role: "admin", email: "sardar@maras.iq", uid: user.uid })
+                  body: JSON.stringify({ role: "admin", idToken: await user.getIdToken() })
                 });
                 const verifyData = verifyRes.ok ? await verifyRes.json() : null;
                 onLoginSuccess({
@@ -339,7 +339,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           const verifyRes = await apiFetch("/api/verify-session", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ role: "driver", uid: user.uid, driverId: user.uid })
+            body: JSON.stringify({ role: "driver", idToken: await user.getIdToken() })
           });
           if (verifyRes.ok) {
             const verifyData = await verifyRes.json();
@@ -773,20 +773,16 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
               <button
                 type="submit"
                 disabled={isLoggingIn}
-                className={`w-full py-3 text-white font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2 ${
-                  loginRole === "driver"
-                    ? "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20"
-                    : "bg-blue-600 hover:bg-blue-700 shadow-blue-600/20"
-                }`}
+                className="w-full py-3 text-white font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2 bg-orange-600 hover:bg-orange-700 shadow-orange-600/20"
               >
                 {isLoggingIn ? (
                   <span>{t.signingIn}</span>
                 ) : (
                   <>
                     {loginRole === "driver" ? (
-                      <Truck className="w-4 h-4 shrink-0 text-indigo-200" />
+                      <Truck className="w-4 h-4 shrink-0 text-orange-100" />
                     ) : (
-                      <Shield className="w-4 h-4 shrink-0 text-blue-200" />
+                      <Shield className="w-4 h-4 shrink-0 text-orange-100" />
                     )}
                     <span>
                       {loginRole === "driver"
@@ -825,7 +821,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                             const verifyRes = await apiFetch("/api/verify-session", {
                               method: "POST",
                               headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ role: "admin", email: "sardar@maras.iq", uid: user.uid })
+                              body: JSON.stringify({ role: "admin", idToken: await user.getIdToken() })
                             });
                             if (verifyRes.ok) {
                               const verifyData = await verifyRes.json();
@@ -864,7 +860,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                           const verifyRes = await apiFetch("/api/verify-session", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ role: "driver", uid: user.uid, driverId: user.uid })
+                            body: JSON.stringify({ role: "driver", idToken: await user.getIdToken() })
                           });
                           if (verifyRes.ok) {
                             const verifyData = await verifyRes.json();

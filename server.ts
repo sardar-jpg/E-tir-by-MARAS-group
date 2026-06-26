@@ -24,6 +24,7 @@ import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "firebase-admin/app";
 import { getMessaging, Messaging } from "firebase-admin/messaging";
+import { getAuth as getAdminAuth, Auth as AdminAuth } from "firebase-admin/auth";
 import {
   SessionRole as AuthSessionRole,
   SessionPayload as AuthSessionPayload,
@@ -303,6 +304,20 @@ function cleanUndefined(obj: any): any {
   return obj;
 }
 
+// Generates an unguessable public share token. Previous tokens were
+// sequential ("token-1001", "token-1002", ...) and so could be trivially
+// enumerated to read any shared shipment without auth. A random token closes
+// that hole. Old "token-..." values are migrated to a fresh random one the
+// next time sharing is (re)configured for a shipment — see the /share route.
+function generateShareToken(): string {
+  return crypto.randomBytes(24).toString("base64url");
+}
+
+// True for the old, guessable sequential tokens that must be rotated.
+function isLegacyShareToken(token: string | undefined | null): boolean {
+  return !token || /^token-\d+$/.test(token);
+}
+
 async function setDoc(docRef: any, data: any, options?: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
@@ -428,11 +443,16 @@ try {
 // app above, which signs in as a real Firestore-rules-scoped user for
 // reading/writing data; sending pushes is an unrelated capability.
 let pushMessaging: Messaging | null = null;
+// Admin Auth instance — used to VERIFY Firebase ID tokens that clients send
+// when restoring a session. This is how /api/verify-session proves who the
+// caller actually is, instead of trusting a client-supplied id/email.
+let adminAuth: AdminAuth | null = null;
 try {
   const adminApp = getAdminApps().length ? getAdminApps()[0]! : initializeAdminApp();
   pushMessaging = getMessaging(adminApp);
+  adminAuth = getAdminAuth(adminApp);
 } catch (err: any) {
-  console.warn("Firebase Admin SDK initialization failed - push notifications will be disabled. Error:", err instanceof Error ? err.message : String(err));
+  console.warn("Firebase Admin SDK initialization failed - push notifications and server-side ID token verification will be disabled. Error:", err instanceof Error ? err.message : String(err));
 }
 
 // Test Firestore Connection
@@ -737,8 +757,8 @@ const initialShipments: Shipment[] = [
     ],
     createdAt: "2026-05-30T09:15:00Z",
     updatedAt: "2026-05-31T14:00:00Z",
-    isLinkShared: true,
-    shareToken: "token-1001",
+    isLinkShared: false,
+    shareToken: generateShareToken(),
     shareIncludeDocuments: true,
     shareIncludePhotos: true
   },
@@ -838,8 +858,8 @@ const initialShipments: Shipment[] = [
     ],
     createdAt: "2026-05-28T08:15:00Z",
     updatedAt: "2026-05-31T10:00:00Z",
-    isLinkShared: true,
-    shareToken: "token-1002",
+    isLinkShared: false,
+    shareToken: generateShareToken(),
     shareIncludeDocuments: true,
     shareIncludePhotos: false
   },
@@ -900,7 +920,7 @@ const initialShipments: Shipment[] = [
     createdAt: "2026-05-31T09:00:00Z",
     updatedAt: "2026-05-31T16:00:00Z",
     isLinkShared: false,
-    shareToken: "token-1003",
+    shareToken: generateShareToken(),
     shareIncludeDocuments: false,
     shareIncludePhotos: false
   }
@@ -1806,8 +1826,8 @@ async function startServer() {
         timeline: [initialTimeline],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        isLinkShared: true,
-        shareToken: `token-${1001 + count}`,
+        isLinkShared: false,
+        shareToken: generateShareToken(),
         shareIncludeDocuments: true,
         shareIncludePhotos: true,
         
@@ -2757,10 +2777,17 @@ async function startServer() {
 
       const shipment = sDoc.data() as Shipment;
       const { isLinkShared, shareIncludeDocuments, shareIncludePhotos } = req.body;
-      
+
       if (isLinkShared !== undefined) shipment.isLinkShared = isLinkShared;
       if (shareIncludeDocuments !== undefined) shipment.shareIncludeDocuments = shareIncludeDocuments;
       if (shareIncludePhotos !== undefined) shipment.shareIncludePhotos = shareIncludePhotos;
+
+      // Migrate away from old guessable tokens, and ensure any shipment that
+      // is (or becomes) shared has a strong, unguessable token. This rotates
+      // legacy "token-100x" values the moment an admin touches sharing.
+      if (isLegacyShareToken(shipment.shareToken)) {
+        shipment.shareToken = generateShareToken();
+      }
 
       await setDoc(sDocRef, shipment);
       res.json(shipment);
@@ -2995,16 +3022,17 @@ async function startServer() {
         console.warn("Could not check additional admins collection in login backend:", err);
       }
 
-      // 3. Driver login — match by username, phone, or name
+      // 3. Driver login — match by username, email, phone, or name
       const col = collection(db, "drivers");
       const snapshot = await getDocs(col);
       const driversList = snapshot.docs.map(doc => doc.data() as Driver);
 
       const matchedDriver = driversList.find(d => {
         const uMatch = (d.username || "").toLowerCase() === normalizedQuery;
+        const eMatch = (d.email || "").toLowerCase() === normalizedQuery;
         const pMatch = (d.phone || "").replace(/\s+/g, "") === normalizedQuery.replace(/\s+/g, "");
         const nameMatch = (d.name || "").toLowerCase() === normalizedQuery;
-        return uMatch || pMatch || nameMatch;
+        return uMatch || eMatch || pMatch || nameMatch;
       });
 
       if (matchedDriver) {
@@ -3077,17 +3105,46 @@ async function startServer() {
     }
   });
 
-  // Secure server-side session verification to authorize valid email and roles
+  // Secure server-side session verification.
+  //
+  // SECURITY: This endpoint exchanges a Firebase identity (established by the
+  // client via Google / email-password sign-in) for one of our own signed
+  // session tokens. It MUST prove the caller really is that Firebase user
+  // before issuing anything — otherwise anyone could mint a session for any
+  // user just by sending their id/email. So it requires a Firebase ID token
+  // in the request and verifies it server-side with the Admin SDK. The
+  // role/email/uid the client sends are treated as untrusted hints only; the
+  // identity that actually counts comes from the verified token.
   app.post("/api/verify-session", async (req, res) => {
     try {
-      const { role, email, uid, driverId, clientId } = req.body;
+      const { role, idToken } = req.body;
 
-      const resolvedEmail = (email || "").trim().toLowerCase();
+      if (!adminAuth) {
+        console.error("[verify-session] Admin Auth unavailable — cannot verify ID tokens.");
+        return res.status(503).json({ success: false, message: "Session verification is temporarily unavailable." });
+      }
+
+      if (!idToken || typeof idToken !== "string") {
+        return res.status(401).json({ success: false, message: "Missing Firebase ID token. Re-authenticate to restore your session." });
+      }
+
+      // Verify the token. Anything past this point can trust verifiedUid/verifiedEmail.
+      let verifiedUid: string;
+      let verifiedEmail: string;
+      try {
+        const decoded = await adminAuth.verifyIdToken(idToken);
+        verifiedUid = decoded.uid;
+        verifiedEmail = (decoded.email || "").trim().toLowerCase();
+      } catch (verifyErr: any) {
+        console.warn("[verify-session] ID token verification failed:", verifyErr?.message || verifyErr);
+        return res.status(401).json({ success: false, message: "Invalid or expired session token. Please sign in again." });
+      }
+
       const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
-      const isAdminEmail = !!SUPER_ADMIN_EMAIL && resolvedEmail === SUPER_ADMIN_EMAIL;
 
-      if (role === "admin" || isAdminEmail) {
-        if (isAdminEmail) {
+      if (role === "admin") {
+        // Super admin — only if the VERIFIED email matches.
+        if (SUPER_ADMIN_EMAIL && verifiedEmail === SUPER_ADMIN_EMAIL) {
           const sessionPayload: SessionPayload = {
             role: "admin",
             id: SUPER_ADMIN_EMAIL,
@@ -3111,12 +3168,12 @@ async function startServer() {
           });
         }
 
-        // Check sub-admins
+        // Sub-admins — matched against the VERIFIED email only.
         try {
           const adminsCol = collection(db, "admins");
           const adminsSnapshot = await getDocs(adminsCol);
           const adminsList = adminsSnapshot.docs.map(doc => doc.data() as any);
-          const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === resolvedEmail);
+          const subAdmin = adminsList.find((a: any) => (a.email || "").toLowerCase().trim() === verifiedEmail);
 
           if (subAdmin) {
             const sessionPayload: SessionPayload = {
@@ -3145,25 +3202,31 @@ async function startServer() {
           console.warn("Could not check additional admins during verify-session backend lookup:", err);
         }
 
-        return res.status(403).json({ 
-          success: false, 
-          message: "Forbid: Only authorized administrators are allowed to restore admin sessions." 
+        return res.status(403).json({
+          success: false,
+          message: "Forbid: This account is not registered as an administrator."
         });
       }
-      
+
       if (role === "driver") {
-        const idToCheck = driverId || uid;
-        if (!idToCheck) {
-          return res.status(400).json({ success: false, message: "Forbid: Missing verification credentials." });
-        }
-        
+        // Match against the VERIFIED identity: uid against the stored id, or
+        // the verified email against the stored email. Never a client-supplied id.
         const col = collection(db, "drivers");
         const snapshot = await getDocs(col);
         const driversList = snapshot.docs.map(doc => doc.data() as Driver);
-        const foundDriver = driversList.find(d => d.id === idToCheck);
-        
+        const foundDriver = driversList.find(d =>
+          d.id === verifiedUid ||
+          (!!verifiedEmail && (d.email || "").toLowerCase() === verifiedEmail)
+        );
+
         if (!foundDriver) {
-          return res.status(404).json({ success: false, message: "Forbid: Driver ID not found in security system." });
+          return res.status(404).json({ success: false, message: "Forbid: No driver account is linked to this identity." });
+        }
+        if (foundDriver.status === "pending") {
+          return res.status(403).json({ success: false, message: "Your driver account is pending admin approval." });
+        }
+        if (foundDriver.status === "rejected") {
+          return res.status(403).json({ success: false, message: "Your driver registration was not approved." });
         }
 
         const sessionPayload: SessionPayload = {
@@ -3181,18 +3244,16 @@ async function startServer() {
       }
 
       if (role === "client") {
-        const idToCheck = clientId || uid;
-        if (!idToCheck) {
-          return res.status(400).json({ success: false, message: "Forbid: Missing client credentials." });
-        }
-
         const col = collection(db, "clients");
         const snapshot = await getDocs(col);
         const clientsList = snapshot.docs.map(doc => doc.data() as Client);
-        const foundClient = clientsList.find(c => c.id === idToCheck);
+        const foundClient = clientsList.find(c =>
+          c.id === verifiedUid ||
+          (!!verifiedEmail && (c.email || "").toLowerCase() === verifiedEmail)
+        );
 
         if (!foundClient) {
-          return res.status(404).json({ success: false, message: "Forbid: Client ID not found in security system." });
+          return res.status(404).json({ success: false, message: "Forbid: No client account is linked to this identity." });
         }
 
         const sessionPayload: SessionPayload = {
@@ -3208,7 +3269,7 @@ async function startServer() {
           client: foundClient
         });
       }
-      
+
       return res.status(400).json({ success: false, message: "Invalid session role specified." });
     } catch (err: any) {
       console.error("Error verifying session server-side:", err);
