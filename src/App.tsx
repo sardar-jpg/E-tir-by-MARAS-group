@@ -25,6 +25,7 @@ interface AppSession {
    *  as `Authorization: Bearer <token>` on every API request by apiFetch. */
   token?: string;
   adminType?: string;
+  viewOnly?: boolean;
 }
 
 export default function App() {
@@ -769,12 +770,13 @@ export default function App() {
     return (
       <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
         <main className="flex-1 overflow-y-auto py-6 px-4">
-          <ClientDashboard 
+          <ClientDashboard
             lang={lang}
             clientCompanyName={session.client?.companyName || "Customer"}
             clientEmail={session.client?.email || ""}
             clientId={session.client?.id || ""}
             onLogout={handleLogout}
+            viewOnly={!!(session.client?.isEmployee)}
           />
         </main>
       </div>

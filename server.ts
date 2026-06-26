@@ -3100,11 +3100,12 @@ async function startServer() {
             expiresAt: Date.now() + SESSION_TTL_MS,
             ...(matchedClient.isEmployee ? { viewOnly: true } : {}),
           };
+          const { password: _cpw, ...safeMatchedClient } = matchedClient as any;
           return res.json({
             success: true,
             token: signSessionToken(sessionPayload),
             role: "client",
-            client: matchedClient
+            client: safeMatchedClient
           });
         }
       }

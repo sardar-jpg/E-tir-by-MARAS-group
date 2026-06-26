@@ -162,9 +162,10 @@ interface ClientDashboardProps {
   clientId: string;
   onLogout: () => void;
   isMobile?: boolean;
+  viewOnly?: boolean;
 }
 
-export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, isMobile = false }: ClientDashboardProps) {
+export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, isMobile = false, viewOnly = false }: ClientDashboardProps) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loading, setLoading] = useState(true);
@@ -486,8 +487,15 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         </div>
 
         <div className="flex items-center gap-3">
+          {viewOnly && (
+            <span className="px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-lg flex items-center gap-1.5">
+              <Eye className="w-3 h-3" />
+              View Only
+            </span>
+          )}
+
           {/* Bell Icon for Notifications */}
-          <button 
+          <button
             id="client-notification-bell"
             onClick={() => setIsNotifOpen(true)}
             className="p-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700/80 rounded-xl text-slate-300 transition-all cursor-pointer inline-flex items-center justify-center relative"
@@ -499,7 +507,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             )}
           </button>
 
-          <button 
+          <button
             onClick={fetchDashboardData}
             disabled={loading}
             className="p-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700/80 rounded-xl text-slate-300 transition-all cursor-pointer inline-flex items-center justify-center disabled:opacity-50"
@@ -507,20 +515,22 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
-          
-          <button 
-            type="button"
-            onClick={() => {
-              setShowClientDeleteConfirm(true);
-              setUnderstandClientDelete(false);
-            }}
-            className="px-4 py-2.5 bg-red-950/10 hover:bg-red-950/20 border border-red-900/30 hover:border-red-500/20 text-red-400 font-bold rounded-xl text-xs shadow transition-all cursor-pointer flex items-center gap-1 shrink-0"
-          >
-            <Trash2 className="w-3.5 h-3.5 shrink-0" />
-            <span>{lang === 'tr' ? "Hesabı Sil" : (lang === 'ar' ? "حذف الحساب" : "Delete Account")}</span>
-          </button>
-          
-          <button 
+
+          {!viewOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowClientDeleteConfirm(true);
+                setUnderstandClientDelete(false);
+              }}
+              className="px-4 py-2.5 bg-red-950/10 hover:bg-red-950/20 border border-red-900/30 hover:border-red-500/20 text-red-400 font-bold rounded-xl text-xs shadow transition-all cursor-pointer flex items-center gap-1 shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5 shrink-0" />
+              <span>{lang === 'tr' ? "Hesabı Sil" : (lang === 'ar' ? "حذف الحساب" : "Delete Account")}</span>
+            </button>
+          )}
+
+          <button
             onClick={onLogout}
             className="px-4 py-2.5 bg-red-950/20 hover:bg-red-950/40 border border-red-900/40 hover:border-red-500/30 text-red-50 px-4 text-red-400 font-bold rounded-xl text-xs shadow-lg transition-all cursor-pointer shrink-0"
           >
@@ -934,32 +944,39 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                           </div>
                         )}
 
-                        <div className="space-y-2">
-                          <textarea
-                            rows={2}
-                            value={inquiryText}
-                            onChange={(e) => setInquiryText(e.target.value)}
-                            placeholder={curT.inquiryPlaceholder}
-                            className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
-                          />
-                          
-                          {inquiryStatus === "success" && (
-                            <p className="text-[10px] text-emerald-400 font-extrabold">{curT.inquirySuccess}</p>
-                          )}
-                          {inquiryStatus === "error" && (
-                            <p className="text-[10px] text-red-400 font-extrabold">{curT.inquiryError}</p>
-                          )}
+                        {viewOnly ? (
+                          <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
+                            <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
+                            <span>{lang === 'ar' ? "حساب المشاهدة فقط — لا يمكن إرسال الرسائل." : lang === 'tr' ? "Salt görüntüleme hesabı — mesaj gönderilemiyor." : "View-only account — sending messages is disabled."}</span>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <textarea
+                              rows={2}
+                              value={inquiryText}
+                              onChange={(e) => setInquiryText(e.target.value)}
+                              placeholder={curT.inquiryPlaceholder}
+                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
+                            />
 
-                          <button
-                            type="button"
-                            onClick={() => handleSendInquiry(selectedShipment.id)}
-                            disabled={sendingInquiry || !inquiryText.trim()}
-                            className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
-                          >
-                            <Send className="w-3.5 h-3.5" />
-                            <span>{curT.submitInquiry}</span>
-                          </button>
-                        </div>
+                            {inquiryStatus === "success" && (
+                              <p className="text-[10px] text-emerald-400 font-extrabold">{curT.inquirySuccess}</p>
+                            )}
+                            {inquiryStatus === "error" && (
+                              <p className="text-[10px] text-red-400 font-extrabold">{curT.inquiryError}</p>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleSendInquiry(selectedShipment.id)}
+                              disabled={sendingInquiry || !inquiryText.trim()}
+                              className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                              <span>{curT.submitInquiry}</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
 
