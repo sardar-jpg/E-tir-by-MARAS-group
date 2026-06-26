@@ -22,8 +22,6 @@ import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "firebase-admin/app";
-import { getMessaging, Messaging } from "firebase-admin/messaging";
 import {
   SessionRole as AuthSessionRole,
   SessionPayload as AuthSessionPayload,
@@ -418,21 +416,6 @@ try {
 } catch (err: any) {
   console.warn("Firebase initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
   useMemoryFallback = true;
-}
-
-// Firebase Admin SDK, used only for sending push notifications via FCM.
-// No explicit credentials are passed - on Cloud Run this automatically
-// uses the instance's own service account (Application Default
-// Credentials), so no separate key file needs to be managed or shipped
-// in the container. This is intentionally separate from the client SDK
-// app above, which signs in as a real Firestore-rules-scoped user for
-// reading/writing data; sending pushes is an unrelated capability.
-let pushMessaging: Messaging | null = null;
-try {
-  const adminApp = getAdminApps().length ? getAdminApps()[0]! : initializeAdminApp();
-  pushMessaging = getMessaging(adminApp);
-} catch (err: any) {
-  console.warn("Firebase Admin SDK initialization failed - push notifications will be disabled. Error:", err instanceof Error ? err.message : String(err));
 }
 
 // Test Firestore Connection
@@ -1274,7 +1257,7 @@ async function logActivity(shipmentId: string, shipmentNumber: string, actor: st
 async function pushNotification(
   shipmentId: string, 
   shipmentNumber: string, 
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration',
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery',
   titleEn: string, titleTr: string, titleAr: string,
   messageEn: string, messageTr: string, messageAr: string
 ) {
@@ -1296,68 +1279,6 @@ async function pushNotification(
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
     console.error("Error writing notification: ", err);
-  }
-
-  // Actually send a real push notification, in addition to writing the
-  // in-app one above. Recipients are resolved here rather than passed
-  // in by each of this function's call sites, since this function
-  // already receives the shipmentId every call site already has on
-  // hand - reusing the same assignedDriverId / companyName lookup the
-  // GET /api/notifications endpoint already does for filtering, rather
-  // than duplicating that logic at every call site.
-  if (!pushMessaging) return;
-  try {
-    const userIds = new Set<string>();
-
-    // Always include every admin - admins see every notification with
-    // no filtering, so they should get every push too.
-    const adminTokensSnap = await getDocs(collection(db, "pushTokens"));
-    const allTokenDocs = adminTokensSnap.docs.map(d => d.data() as any);
-    for (const t of allTokenDocs) {
-      if (t.role === "admin") userIds.add(t.userId);
-    }
-
-    if (shipmentId) {
-      const shipDoc = await getDoc(doc(db, "shipments", shipmentId));
-      if (shipDoc.exists()) {
-        const ship = shipDoc.data() as Shipment;
-        if (ship.assignedDriverId) userIds.add(ship.assignedDriverId);
-        if (ship.additionalDrivers) {
-          for (const ad of ship.additionalDrivers) userIds.add(ad.driverId);
-        }
-        if (ship.companyName) {
-          const clientsSnap = await getDocs(collection(db, "clients"));
-          const matchingClient = clientsSnap.docs
-            .map(d => d.data() as Client)
-            .find(c => c.companyName === ship.companyName);
-          if (matchingClient) userIds.add(matchingClient.id);
-        }
-      }
-    }
-
-    const targetTokens = allTokenDocs
-      .filter(t => userIds.has(t.userId))
-      .map(t => t.token as string);
-
-    if (targetTokens.length === 0) return;
-
-    await pushMessaging.sendEachForMulticast({
-      tokens: targetTokens,
-      notification: {
-        title: titleEn,
-        body: messageEn
-      },
-      apns: {
-        payload: {
-          aps: { sound: "default" }
-        }
-      }
-    });
-  } catch (err) {
-    // Never let a push-sending failure break the actual notification
-    // or whatever action triggered it (e.g. assigning a shipment) -
-    // the in-app notification above already succeeded regardless.
-    console.error("Error sending push notification: ", err);
   }
 }
 
@@ -3014,12 +2935,6 @@ async function startServer() {
           await setDoc(doc(db, "drivers", matchedDriver.id), { ...matchedDriver, password: newHash });
         });
         if (matched) {
-          if (matchedDriver.status === "pending") {
-            return res.status(403).json({ error: "Your driver account is pending admin approval. Please check back soon." });
-          }
-          if (matchedDriver.status === "rejected") {
-            return res.status(403).json({ error: "Your driver registration was not approved. Please contact MARAS Group support." });
-          }
           clearLoginRateLimit(req, normalizedQuery);
           const sessionPayload: SessionPayload = {
             role: "driver",
@@ -3307,25 +3222,22 @@ async function startServer() {
 
   app.delete("/api/admins/:id", requireAuth, async (req, res) => {
     try {
-      // A literal "me" resolves to the caller's own session id. This lets
-      // a sub-admin delete their own account without first fetching the
-      // full admins list (GET /api/admins is restricted to super-admin
-      // sessions, so a sub-admin could never look up their own document
-      // id that way - they need a way to target "myself" directly).
-      const rawId = req.params.id;
-      const id = rawId === "me" && req.session!.role === "admin" ? req.session!.id : rawId;
-
+      const { id } = req.params;
       const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
       // An admin (any type, including 'accounts') may always delete their
       // own record — required so every admin account created through this
       // app's "Create Admin" flow can be self-deleted, per Apple Guideline
-      // 5.1.1(v). For an admin session, req.session.id IS the Firestore
-      // document id of their own admins record (see the subAdmin.id
-      // assignment in the login and verify-session handlers above) — the
-      // super-admin is the one exception, whose session.id is their email
-      // since they have no Firestore document at all, but the super-admin
-      // already qualifies via isFullAdmin above regardless.
-      const isSelf = req.session!.role === "admin" && id === req.session!.id;
+      // 5.1.1(v). The session's `id` for an admin is their email; the
+      // Firestore document id may differ, so we look up the record by
+      // email match rather than assuming id === session.id.
+      let isSelf = false;
+      if (req.session!.role === "admin") {
+        const adminDoc = await getDoc(doc(db, "admins", id));
+        if (adminDoc.exists()) {
+          const adminData = adminDoc.data() as any;
+          isSelf = (adminData.email || "").toLowerCase() === (req.session!.id || "").toLowerCase();
+        }
+      }
       if (!isFullAdmin && !isSelf) {
         return res.status(403).json({ error: "You can only delete your own admin account." });
       }
@@ -3335,47 +3247,6 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to delete admin" });
-    }
-  });
-
-  // Lets a sub-admin (operation or accounts type) change their own
-  // password. The super-admin's password lives in the
-  // SUPER_ADMIN_PASSWORD_HASH environment variable, not a Firestore
-  // document, so it genuinely cannot be changed through the app itself -
-  // that requires regenerating the hash and redeploying with a new env
-  // var, the same way it was originally set up.
-  app.post("/api/admins/change-password", requireAuth, async (req, res) => {
-    try {
-      if (req.session!.role !== "admin") {
-        return res.status(403).json({ error: "Only admin accounts can use this endpoint." });
-      }
-      if (req.session!.adminType === "super") {
-        return res.status(400).json({ error: "The super-admin password cannot be changed through the app." });
-      }
-      const { currentPassword, newPassword } = req.body;
-      if (!currentPassword || !newPassword || String(newPassword).length < 8) {
-        return res.status(400).json({ error: "Current password and a new password of at least 8 characters are required." });
-      }
-
-      const docRef = doc(db, "admins", req.session!.id);
-      const adminDoc = await getDoc(docRef);
-      if (!adminDoc.exists()) {
-        return res.status(404).json({ error: "Admin account not found." });
-      }
-      const adminData = adminDoc.data() as any;
-
-      const matched = await verifyPasswordWithMigration(currentPassword, adminData.password, async (migratedHash) => {
-        await setDoc(docRef, { ...adminData, password: migratedHash });
-      });
-      if (!matched) {
-        return res.status(401).json({ error: "Current password is incorrect." });
-      }
-
-      await setDoc(docRef, { ...adminData, password: hashPassword(newPassword) });
-      res.json({ success: true, message: "Password updated successfully." });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to update password." });
     }
   });
 
@@ -3475,100 +3346,38 @@ async function startServer() {
   app.post("/api/drivers/self-register", async (req, res) => {
     try {
       const data = req.body;
-      // uid is normally a real Firebase Auth uid (from the Gmail or
-      // email/password flow), but the manual registration form can
-      // reach this point with no uid at all if Firebase Auth account
-      // creation failed for some reason other than a duplicate email
-      // or weak password (the form still submits as a "fallback").
-      // Generate a stable id in that case rather than hard-rejecting.
-      const driverId: string = data.uid || `driver-${Date.now()}`;
-      const existing = await getDoc(doc(db, "drivers", driverId));
+      if (!data.uid) {
+        return res.status(400).json({ error: "uid is required" });
+      }
+      const existing = await getDoc(doc(db, "drivers", data.uid));
       if (existing.exists()) {
         return res.status(409).json({ error: "A driver profile already exists for this account." });
       }
       const newDriver: Driver = {
-        id: driverId,
+        id: data.uid,
         name: data.name || "Unnamed Driver",
         username: data.username || `driver_${Date.now()}`,
-        // Use the password the person actually chose on the
-        // registration form if one was sent, instead of always
-        // generating a random one they'd never know.
-        password: data.password ? hashPassword(data.password) : hashPassword(crypto.randomBytes(9).toString("base64url")),
+        password: hashPassword(crypto.randomBytes(9).toString("base64url")),
         email: data.email || "",
         truckNumber: data.truckNumber || "Unassigned",
         phone: data.phone || "No phone",
         activeShipmentsCount: 0,
         completedShipmentsCount: 0,
-        truckType: data.truckType || "reefer",
-        status: "pending"
+        truckType: data.truckType || "reefer"
       };
       await setDoc(doc(db, "drivers", newDriver.id), newDriver);
 
-      // No session token here. A self-registered driver is "pending"
-      // until an admin approves them (see PATCH /api/drivers/:id/status
-      // below) - they cannot log in until then, even though the account
-      // record already exists.
-      await pushNotification(
-        "",
-        "",
-        "driver_registration",
-        "New Driver Registration",
-        "Yeni Surucu Kaydi",
-        "تسجيل سائق جديد",
-        `${newDriver.name} (${newDriver.username}) has registered and is awaiting your approval.`,
-        `${newDriver.name} (${newDriver.username}) kayit oldu ve onayinizi bekliyor.`,
-        `قام ${newDriver.name} (${newDriver.username}) بالتسجيل وهو في انتظار موافقتك.`
-      );
-
+      const sessionPayload: SessionPayload = {
+        role: "driver",
+        id: newDriver.id,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + SESSION_TTL_MS,
+      };
       const { password, ...safeDriver } = newDriver;
-      res.status(201).json({
-        ...safeDriver,
-        pendingApproval: true,
-        message: "Registration received. Your account is pending admin approval before you can sign in."
-      });
+      res.status(201).json({ ...safeDriver, token: signSessionToken(sessionPayload) });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to register driver" });
-    }
-  });
-
-  // Lets an admin approve or reject a driver who self-registered and is
-  // currently "pending". Existing drivers with no status field at all
-  // (registered before this approval workflow existed) are unaffected -
-  // this endpoint only matters for drivers actually in the pending state.
-  app.patch("/api/drivers/:id/status", requireFullAdmin, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { status } = req.body;
-      if (status !== "approved" && status !== "rejected") {
-        return res.status(400).json({ error: "status must be 'approved' or 'rejected'." });
-      }
-      const docRef = doc(db, "drivers", id);
-      const driverDoc = await getDoc(docRef);
-      if (!driverDoc.exists()) {
-        return res.status(404).json({ error: "Driver not found." });
-      }
-      const driverData = driverDoc.data() as Driver;
-      await setDoc(docRef, { ...driverData, status });
-
-      if (status === "approved") {
-        await pushNotification(
-          "",
-          "",
-          "driver_registration",
-          "Driver Approved",
-          "Surucu Onaylandi",
-          "تمت الموافقة على السائق",
-          `${driverData.name} has been approved and can now sign in.`,
-          `${driverData.name} onaylandi ve artik giris yapabilir.`,
-          `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`
-        );
-      }
-
-      res.json({ success: true, status });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to update driver status." });
     }
   });
 
@@ -3782,46 +3591,6 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get notifications" });
-    }
-  });
-
-  // Registers (or re-registers) a device's push notification token for
-  // the currently logged-in user. One Firestore doc per token, keyed by
-  // the token itself, so re-registering the same token on app relaunch
-  // is a harmless overwrite rather than creating duplicates - and a
-  // token that moves to a different account (rare, but possible if a
-  // device is shared/reassigned) gets correctly re-pointed to whoever
-  // currently owns it.
-  app.post("/api/push-tokens", requireAuth, async (req, res) => {
-    try {
-      const { token, platform } = req.body;
-      if (!token || typeof token !== "string") {
-        return res.status(400).json({ error: "token is required." });
-      }
-      await setDoc(doc(db, "pushTokens", token), {
-        token,
-        role: req.session!.role,
-        userId: req.session!.id,
-        platform: platform || "ios",
-        updatedAt: new Date().toISOString()
-      });
-      res.json({ success: true });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to register push token." });
-    }
-  });
-
-  // Lets the client proactively remove its own token, e.g. on logout,
-  // so a shared/reassigned device doesn't keep receiving a previous
-  // user's pushes.
-  app.delete("/api/push-tokens/:token", requireAuth, async (req, res) => {
-    try {
-      await deleteDoc(doc(db, "pushTokens", req.params.token));
-      res.json({ success: true });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to remove push token." });
     }
   });
 
