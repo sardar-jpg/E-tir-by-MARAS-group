@@ -411,9 +411,9 @@ export default function AdminPanel({
 
     if (!s.eta) {
       return {
-        colorClass: 'bg-blue-500',
-        textColorClass: 'text-blue-700 font-bold',
-        bgBadgeClass: 'bg-blue-50/70 border border-blue-200/50',
+        colorClass: 'bg-orange-500',
+        textColorClass: 'text-orange-700 font-bold',
+        bgBadgeClass: 'bg-orange-50/70 border border-orange-200/50',
         label: lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشط' : 'Active'),
         subtext: lang === 'tr' ? 'Tahmini varış hesaplanıyor' : (lang === 'ar' ? 'جاري حساب الوقت' : 'Calculating ETA...')
       };
@@ -425,9 +425,9 @@ export default function AdminPanel({
 
     if (isNaN(etaTime)) {
       return {
-        colorClass: 'bg-blue-500',
-        textColorClass: 'text-blue-700 font-bold',
-        bgBadgeClass: 'bg-blue-50/70 border border-blue-200/50',
+        colorClass: 'bg-orange-500',
+        textColorClass: 'text-orange-700 font-bold',
+        bgBadgeClass: 'bg-orange-50/70 border border-orange-200/50',
         label: lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشط' : 'Active'),
         subtext: lang === 'tr' ? 'Tahmini varış hesaplanıyor' : (lang === 'ar' ? 'جاري حساب الوقت' : 'Calculating ETA...')
       };
@@ -3050,9 +3050,9 @@ MARAS Group etir Center`;
               className="p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg relative transition-all cursor-pointer flex items-center justify-center border-0 focus:outline-none"
               title={lang === "tr" ? "Sürücü Sohbetleri" : lang === "ar" ? "محادثات السائقين" : "Driver Support Chats"}
             >
-              <MessageSquare className={`w-5 h-5 ${unreadChatMessages.length > 0 ? "text-blue-600 animate-pulse" : "text-slate-500"}`} />
+              <MessageSquare className={`w-5 h-5 ${unreadChatMessages.length > 0 ? "text-orange-600 animate-pulse" : "text-slate-500"}`} />
               {unreadChatMessages.length > 0 && (
-                <span className="absolute -top-1 -right-1 bg-blue-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                <span className="absolute -top-1 -right-1 bg-orange-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
                   {unreadChatMessages.length}
                 </span>
               )}
@@ -3062,10 +3062,10 @@ MARAS Group etir Center`;
               <div className={`absolute top-full right-0 mt-2 w-80 md:w-96 bg-white border border-slate-200 rounded-xl shadow-2xl z-[100] p-4 text-slate-900 ${isRtl ? 'left-0 right-auto' : 'right-0 left-auto'}`}>
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
                   <div className="flex items-center gap-1.5 font-bold text-sm text-slate-800">
-                    <MessageSquare className="w-4 h-4 text-blue-600/90" />
+                    <MessageSquare className="w-4 h-4 text-orange-600/90" />
                     <span>{lang === 'tr' ? 'Sürücü Mesajları' : lang === 'ar' ? 'رسائل السائقين غير المقروءة' : 'Unread Driver Chats'}</span>
                     {unreadChatMessages.length > 0 && (
-                      <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full font-black">
+                      <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-black">
                         {unreadChatMessages.length}
                       </span>
                     )}
@@ -3083,11 +3083,11 @@ MARAS Group etir Center`;
                       return (
                         <div
                           key={msg.id}
-                          className="p-2.5 rounded-lg border border-slate-100 bg-blue-50/25 text-xs transition-all relative"
+                          className="p-2.5 rounded-lg border border-slate-100 bg-orange-50/25 text-xs transition-all relative"
                         >
                           <div className="space-y-1">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="font-extrabold text-blue-600">
+                              <span className="font-extrabold text-orange-600">
                                 {shipment ? `#${shipment.shipmentNumber}` : 'Support Thread'}
                               </span>
                               <span className="text-[10px] text-slate-400">
@@ -3111,7 +3111,7 @@ MARAS Group etir Center`;
                                     onSelectShipmentChat(shipment);
                                     setIsChatDropdownOpen(false);
                                   }}
-                                  className="text-[10px] text-blue-600 hover:text-blue-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
+                                  className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
                                 >
                                   <MessageSquare className="w-3 h-3" />
                                   <span>{lang === 'tr' ? 'Sohbete Git' : lang === 'ar' ? 'عرض المحادثة' : 'Go to Chat'}</span>
@@ -3192,7 +3192,7 @@ MARAS Group etir Center`;
                         >
                           <div className="flex gap-2">
                             <span className="mt-0.5 shrink-0">
-                              {notif.type === 'chat' && <MessageSquare className="w-4 h-4 text-blue-500" />}
+                              {notif.type === 'chat' && <MessageSquare className="w-4 h-4 text-orange-500" />}
                               {notif.type === 'doc_upload' && <FileText className="w-4 h-4 text-orange-500" />}
                               {notif.type === 'assignment' && <ClipboardList className="w-4 h-4 text-green-500" />}
                               {notif.type === 'status_update' && <RefreshCw className="w-4 h-4 text-purple-500" />}
@@ -3220,7 +3220,7 @@ MARAS Group etir Center`;
                                       setIsNotifOpen(false);
                                       if (isUnread) handleMarkNotifRead(notif.id);
                                     }}
-                                    className="text-[10px] text-blue-600 hover:text-blue-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
+                                    className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
                                   >
                                     <MessageSquare className="w-3 h-3" />
                                     <span>{lang === 'tr' ? 'Sohbeti Aç' : lang === 'ar' ? 'فتح المحادثة' : 'Open Chat'}</span>
@@ -3321,7 +3321,7 @@ MARAS Group etir Center`;
         <div className="bg-white rounded-2xl border border-slate-200 p-4.5 mb-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all duration-300">
           <div className="space-y-1">
             <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-              <span className="p-1 bg-blue-500/10 text-blue-600 rounded"><Search className="w-3.5 h-3.5" /></span>
+              <span className="p-1 bg-orange-500/10 text-orange-600 rounded"><Search className="w-3.5 h-3.5" /></span>
               <span>{lang === 'tr' ? "Sevkiyat Arama ve Hızlı Getirme" : (lang === 'ar' ? "البحث السريع واسترجاع الشحنات" : "Shipment Quick Retrieval")}</span>
             </h3>
             <p className="text-[11px] text-slate-500 font-medium">
@@ -3337,7 +3337,7 @@ MARAS Group etir Center`;
             </div>
             <input
               type="text"
-              className="block w-full pl-9 pr-10 py-2.5 bg-slate-50 hover:bg-slate-100/80 focus:bg-white text-xs text-slate-900 border border-slate-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 rounded-xl focus:outline-none transition-all placeholder:text-slate-400 font-medium font-sans"
+              className="block w-full pl-9 pr-10 py-2.5 bg-slate-50 hover:bg-slate-100/80 focus:bg-white text-xs text-slate-900 border border-slate-200 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 rounded-xl focus:outline-none transition-all placeholder:text-slate-400 font-medium font-sans"
               placeholder={lang === 'tr' 
                 ? "Sevkiyat ID, sürücü adı veya hedef şehir girin... (Sıfırlamak için Esc)" 
                 : (lang === 'ar' ? "أدخل رقم التعريف، اسم السائق، أو مدينة الوصول... (Esc للمسح)" : "Filter by shipment ID, driver name, or destination city... (Esc to clear)")}
@@ -3369,7 +3369,7 @@ MARAS Group etir Center`;
           {/* Elegant Top Welcome Header with live clock & status */}
           <div className={`bg-slate-900 text-white rounded-2xl ${isMobileMode ? 'p-4' : 'p-6'} shadow-xl relative overflow-hidden flex flex-col ${isMobileMode ? 'gap-3' : 'md:flex-row md:items-center'} justify-between gap-4 border border-slate-800`}>
             {/* Background decoration */}
-            <div className="absolute right-0 top-0 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
+            <div className="absolute right-0 top-0 w-96 h-96 bg-orange-500/10 rounded-full blur-3xl pointer-events-none" />
             <div className="absolute left-1/3 bottom-0 w-64 h-64 bg-orange-500/5 rounded-full blur-3xl pointer-events-none" />
             
             <div className="space-y-2 relative z-10">
@@ -3401,7 +3401,7 @@ MARAS Group etir Center`;
               <span className="text-[10px] text-slate-500 font-black tracking-widest uppercase mb-1">
                 {lang === 'tr' ? "HERZ DAHİLİ COĞRAFİ ZAMAN" : (lang === 'ar' ? "التوقيت العالمي الموحد" : "OPERATIONAL SYSTEM TIME (UTC)")}
               </span>
-              <div className="font-mono text-xl md:text-2xl font-black text-blue-400 leading-none tracking-tight">
+              <div className="font-mono text-xl md:text-2xl font-black text-orange-400 leading-none tracking-tight">
                 {currentTime.toLocaleTimeString(lang === 'ar' ? 'ar-EG' : (lang === 'tr' ? 'tr-TR' : 'en-US'), { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
               </div>
               <div className="text-xs text-slate-400 font-bold mt-1 text-right">
@@ -3415,7 +3415,7 @@ MARAS Group etir Center`;
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/60 pb-3">
               <div className="space-y-1">
                 <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 bg-blue-600 rounded-full animate-pulse"></span>
+                  <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-pulse"></span>
                   <span>{lang === 'tr' ? "Canlı Operasyonlar ve Belge Yönetimi" : (lang === 'ar' ? "لوحة الإحصائيات الفورية وتكامل الوثائق" : "Real-Time Operations & Document Integrity Hub")}</span>
                 </h3>
                 <p className="text-[11px] text-slate-500 font-medium">
@@ -3424,7 +3424,7 @@ MARAS Group etir Center`;
                     : (lang === 'ar' ? "تتبع توزيع الأحمال النشطة، حالة تسليم الأوراق، وتواتر التنبيهات الفورية الواردة من السائقين." : "Provides live analytics on shipments, pending digital documents (etir backups), and incoming operational alert types.")}
                 </p>
               </div>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-800 text-[10px] font-bold rounded-lg tracking-wider font-mono uppercase cursor-default self-start sm:self-auto select-none">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-orange-100 hover:bg-orange-200 text-orange-800 text-[10px] font-bold rounded-lg tracking-wider font-mono uppercase cursor-default self-start sm:self-auto select-none">
                 <TrendingUp className="w-3.5 h-3.5" />
                 <span>Live telemetry status</span>
               </span>
@@ -3441,7 +3441,7 @@ MARAS Group etir Center`;
                       <span className="text-[10px] text-slate-400 font-mono font-medium">{lang === 'tr' ? "yük yolda" : "active loads"}</span>
                     </h4>
                   </div>
-                  <span className="p-2 bg-gradient-to-tr from-blue-500/10 to-indigo-500/10 text-blue-600 rounded-lg"><Truck className="w-4 h-4" /></span>
+                  <span className="p-2 bg-orange-500/10 text-orange-600 rounded-lg"><Truck className="w-4 h-4" /></span>
                 </div>
 
                 <div className="h-28 w-full select-none">
@@ -3570,8 +3570,8 @@ MARAS Group etir Center`;
                   </span>
                 </div>
               </div>
-              <div className="p-3 bg-blue-50 text-blue-600 rounded-lg group-hover:bg-blue-100 transition-colors">
-                <RefreshCw className="w-6 h-6 animate-spin-slow text-blue-600" />
+              <div className="p-3 bg-orange-50 text-orange-600 rounded-lg group-hover:bg-orange-100 transition-colors">
+                <RefreshCw className="w-6 h-6 animate-spin-slow text-orange-600" />
               </div>
             </div>
 
@@ -3693,7 +3693,7 @@ MARAS Group etir Center`;
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between relative">
               <div>
                 <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+                  <span className="w-2.5 h-2.5 rounded-full bg-orange-500"></span>
                   <span>
                     {lang === 'tr' ? "Sevkiyat Analizi" : (lang === 'ar' ? "تحليلات الشحنات" : "Shipment Analytics")}
                   </span>
@@ -3765,7 +3765,7 @@ MARAS Group etir Center`;
 
                 <div className="text-center border-x border-slate-100">
                   <div className="flex items-center justify-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0"></span>
+                    <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0"></span>
                     <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-tight">
                       {lang === 'tr' ? 'Aktif' : (lang === 'ar' ? 'نشطة' : 'Active')}
                     </span>
@@ -3803,7 +3803,7 @@ MARAS Group etir Center`;
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div>
                     <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping"></span>
+                      <span className="w-2.5 h-2.5 rounded-full bg-orange-500 animate-ping"></span>
                       <span>{lang === 'tr' ? "Anlık Transit Takip İstasyon İzleme" : (lang === 'ar' ? "مراقبة مسار الشحنات الميدانية" : "Live Cargo Transit Monitoring")}</span>
                     </h3>
                     <p className="text-slate-500 text-xs mt-0.5 font-medium">
@@ -3986,7 +3986,7 @@ MARAS Group etir Center`;
                                   await navigator.clipboard.writeText(trackLink);
                                   triggerToast(t('copied'));
                                 }}
-                                className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all border-0 bg-transparent cursor-pointer"
+                                className="p-1.5 text-slate-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-all border-0 bg-transparent cursor-pointer"
                                 title={t('copyLink')}
                               >
                                 <Share2 className="w-3.5 h-3.5" />
@@ -4032,7 +4032,7 @@ MARAS Group etir Center`;
                   </div>
                   <button 
                     onClick={() => setActiveTab('audit')} 
-                    className="text-[10px] text-blue-600 hover:underline font-black uppercase tracking-wider bg-transparent border-0 cursor-pointer"
+                    className="text-[10px] text-orange-600 hover:underline font-black uppercase tracking-wider bg-transparent border-0 cursor-pointer"
                   >
                     {lang === 'tr' ? "Tümünü Gör" : (lang === 'ar' ? "الكل" : "Full Audit")}
                   </button>
@@ -4084,7 +4084,7 @@ MARAS Group etir Center`;
                     onClick={() => setActiveTab('clients')}
                     className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
                   >
-                    <Building2 className="w-4 h-4 text-blue-400 mb-1.5 group-hover:scale-105 transition-transform" />
+                    <Building2 className="w-4 h-4 text-orange-400 mb-1.5 group-hover:scale-105 transition-transform" />
                     <p className="font-bold text-slate-200">{lang === 'tr' ? "Müşteri Portalı" : (lang === 'ar' ? "قاعدة العملاء" : "Clients Registry")}</p>
                     <span className="text-[9px] text-slate-400 block font-normal">{clients.length} corporate partners</span>
                   </button>
@@ -4285,7 +4285,7 @@ MARAS Group etir Center`;
                       <td className="p-4 text-center space-x-1.5 whitespace-nowrap">
                         <button 
                           onClick={() => setOpenDetailsId(s.id)}
-                          className="text-blue-600 hover:underline font-bold"
+                          className="text-orange-600 hover:underline font-bold"
                         >
                           View
                         </button>
@@ -4379,7 +4379,7 @@ MARAS Group etir Center`;
                   <div>
                     <button
                       onClick={() => setSelectedPerformanceDriver(driver)}
-                      className="font-bold text-slate-900 text-base hover:text-blue-600 transition-colors text-left flex items-center gap-1.5 focus:outline-none group/btn cursor-pointer"
+                      className="font-bold text-slate-900 text-base hover:text-orange-600 transition-colors text-left flex items-center gap-1.5 focus:outline-none group/btn cursor-pointer"
                       title={lang === 'tr' ? "Performans Detaylarını Göster" : (lang === 'ar' ? "عرض تفاصيل الأداء" : "Show Performance Details")}
                     >
                       <span className="group-hover/btn:underline decoration-slate-300 underline-offset-2">{driver.name}</span>
@@ -4406,7 +4406,7 @@ MARAS Group etir Center`;
                 <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-2 text-center text-xs">
                   <div className="border-r border-slate-100">
                     <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">{t('activeShipments')}</span>
-                    <span className="text-lg font-extrabold text-blue-600 block mt-0.5">{driver.activeShipmentsCount}</span>
+                    <span className="text-lg font-extrabold text-orange-600 block mt-0.5">{driver.activeShipmentsCount}</span>
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">Completed</span>
@@ -4594,7 +4594,7 @@ MARAS Group etir Center`;
               </div>
 
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-blue-100/70 flex items-center justify-center text-blue-600 shrink-0">
+                <div className="w-10 h-10 rounded-lg bg-orange-100/70 flex items-center justify-center text-orange-600 shrink-0">
                   <TrendingUp className="w-5 h-5 font-bold" />
                 </div>
                 <div>
@@ -4765,7 +4765,7 @@ MARAS Group etir Center`;
                                 <div className="flex items-center gap-2">
                                   <span>{client.contactName}</span>
                                   {client.isEmployee && (
-                                    <span className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 text-blue-600 text-[9px] font-black uppercase rounded tracking-wider">
+                                    <span className="px-1.5 py-0.5 bg-orange-50 border border-orange-200 text-orange-600 text-[9px] font-black uppercase rounded tracking-wider">
                                       Employee
                                     </span>
                                   )}
@@ -4889,7 +4889,7 @@ MARAS Group etir Center`;
                                                     setActiveTab('gmail');
                                                     triggerToast(lang === 'tr' ? "Gmail Konsolu yüklendi!" : (lang === 'ar' ? "تم التجهيز في لوحة Gmail!" : "Loaded inside Gmail Console!"));
                                                   }}
-                                                  className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 hover:text-blue-800 rounded-md font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border-0"
+                                                  className="px-2.5 py-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 hover:text-orange-800 rounded-md font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border-0"
                                                   title={lang === 'tr' ? 'Müşteriye Gmail Gönder' : (lang === 'ar' ? 'إرسال بريد Gmail' : 'Compose Operator Gmail')}
                                                 >
                                                   <Mail className="w-3.5 h-3.5" />
@@ -4993,7 +4993,7 @@ MARAS Group etir Center`;
                         type="checkbox"
                         checked={editClientIsEmployee}
                         onChange={(e) => setEditClientIsEmployee(e.target.checked)}
-                        className="w-4 h-4 accent-blue-600 cursor-pointer"
+                        className="w-4 h-4 accent-orange-600 cursor-pointer"
                       />
                       <span className="font-bold text-slate-700 text-xs">
                         {lang === 'tr' ? "Çalışan / Salt Görüntüleme Hesabı" : (lang === 'ar' ? "حساب موظف (للمشاهدة فقط)" : "Employee / View-Only Account")}
@@ -5148,7 +5148,7 @@ MARAS Group etir Center`;
                         type="checkbox"
                         checked={newClientIsEmployee}
                         onChange={(e) => setNewClientIsEmployee(e.target.checked)}
-                        className="w-4 h-4 accent-blue-600 cursor-pointer"
+                        className="w-4 h-4 accent-orange-600 cursor-pointer"
                       />
                       <span className="font-bold text-slate-700 text-xs">
                         {lang === 'tr' ? "Çalışan / Salt Görüntüleme Hesabı" : (lang === 'ar' ? "حساب موظف (للمشاهدة فقط)" : "Employee / View-Only Account")}
@@ -5164,7 +5164,7 @@ MARAS Group etir Center`;
                           required={newClientIsEmployee}
                           value={newClientCompanyName}
                           onChange={(e) => setNewClientCompanyName(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500 text-xs font-medium bg-white"
+                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 text-xs font-medium bg-white"
                         >
                           <option value="">{lang === 'tr' ? "Şirket seçin..." : (lang === 'ar' ? "اختر الشركة..." : "Select company...")}</option>
                           {[...new Set(clients.filter(c => !c.isEmployee).map(c => c.companyName))].sort().map(name => (
@@ -5531,7 +5531,7 @@ MARAS Group etir Center`;
                 {activityLogs.map((log) => (
                   <tr key={log.id} className="hover:bg-slate-50/50">
                     <td className="p-4 font-bold text-slate-800">{log.actor}</td>
-                    <td className="p-4 text-blue-600 font-bold">#{log.shipmentNumber}</td>
+                    <td className="p-4 text-orange-600 font-bold">#{log.shipmentNumber}</td>
                     <td className="p-4 text-slate-700">
                       {lang === 'en' ? log.actionEn : (lang === 'tr' ? log.actionTr : log.actionAr)}
                     </td>
@@ -7501,7 +7501,7 @@ MARAS Group etir Center`;
                 {/* 2. Delivery Locations Panel */}
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                   <h4 className="font-bold text-slate-900 border-b border-slate-200 pb-2 flex items-center gap-2">
-                    <span className="w-1.5 h-3 bg-blue-500 rounded"></span>
+                    <span className="w-1.5 h-3 bg-orange-500 rounded"></span>
                     {t('deliveryInfo')}
                   </h4>
                   <div className="space-y-2">
@@ -7547,7 +7547,7 @@ MARAS Group etir Center`;
                           return (
                             <button
                               onClick={() => setSelectedPerformanceDriver(dr)}
-                              className="font-bold text-slate-900 hover:text-blue-600 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer flex items-center gap-1.5 mt-0.5 focus:outline-none text-left"
+                              className="font-bold text-slate-900 hover:text-orange-600 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer flex items-center gap-1.5 mt-0.5 focus:outline-none text-left"
                               title={lang === 'tr' ? "Performans Detaylarını Göster" : (lang === 'ar' ? "عرض تفاصيل الأداء" : "Show Performance Details")}
                             >
                               <span>{targetDetailsShipment.assignedDriverName}</span>
@@ -7585,7 +7585,7 @@ MARAS Group etir Center`;
                                   {dr ? (
                                     <button
                                       onClick={() => setSelectedPerformanceDriver(dr)}
-                                      className="font-bold text-slate-900 hover:text-blue-600 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer flex items-center gap-1 focus:outline-none"
+                                      className="font-bold text-slate-900 hover:text-orange-600 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer flex items-center gap-1 focus:outline-none"
                                       title={lang === 'tr' ? "Performans Detaylarını Göster" : "Show Performance Details"}
                                     >
                                       <span>{ad.driverName}</span>
@@ -7912,9 +7912,9 @@ MARAS Group etir Center`;
                 {/* 5.3 Dedicated Operations & Manual Status / Milestone Console */}
                 <div className="p-5 bg-slate-900 text-white rounded-xl space-y-4 md:col-span-2 shadow-xl border border-slate-700">
                   <div className="flex items-center gap-2 border-b border-slate-800 pb-2.5">
-                    <span className="p-1 px-2.5 text-[10px] uppercase font-bold font-mono tracking-wider bg-blue-600 text-white rounded">Manual Control</span>
-                    <h4 className="font-bold text-sm tracking-tight flex items-center gap-1.5 text-blue-300">
-                      <RefreshCw className="w-4 h-4 shrink-0 text-blue-400" />
+                    <span className="p-1 px-2.5 text-[10px] uppercase font-bold font-mono tracking-wider bg-orange-600 text-white rounded">Manual Control</span>
+                    <h4 className="font-bold text-sm tracking-tight flex items-center gap-1.5 text-orange-300">
+                      <RefreshCw className="w-4 h-4 shrink-0 text-orange-400" />
                       <span>Log Transit Milestone / Manuel İşlem Masası</span>
                     </h4>
                   </div>
@@ -7928,7 +7928,7 @@ MARAS Group etir Center`;
                       <select
                         value={manualStatus}
                         onChange={(e) => setManualStatus(e.target.value as ShipmentStatus)}
-                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
+                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg focus:ring-1 focus:ring-orange-500 outline-none cursor-pointer"
                       >
                         {(targetDetailsShipment.freightType === 'sea'
                           ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
@@ -7948,7 +7948,7 @@ MARAS Group etir Center`;
                         placeholder="e.g., Vessel departed from Port of loading, ETA intact."
                         value={manualRemarks}
                         onChange={(e) => setManualRemarks(e.target.value)}
-                        className="w-full text-xs p-2.5 bg-slate-800 border border-slate-700 text-white placeholder:text-slate-500 rounded-lg focus:ring-1 focus:ring-blue-500 outline-none"
+                        className="w-full text-xs p-2.5 bg-slate-800 border border-slate-700 text-white placeholder:text-slate-500 rounded-lg focus:ring-1 focus:ring-orange-500 outline-none"
                       />
                     </div>
                   </div>
@@ -7958,7 +7958,7 @@ MARAS Group etir Center`;
                       type="button"
                       onClick={handleManualStatusUpdate}
                       disabled={isSubmittingStatus}
-                      className="bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs py-2.5 px-5 rounded-lg inline-flex items-center gap-2 transition-all cursor-pointer border-0 shadow-md font-mono disabled:opacity-50"
+                      className="bg-orange-600 hover:bg-orange-700 text-white font-extrabold text-xs py-2.5 px-5 rounded-lg inline-flex items-center gap-2 transition-all cursor-pointer border-0 shadow-md font-mono disabled:opacity-50"
                     >
                       {isSubmittingStatus ? (
                         <>
@@ -8055,7 +8055,7 @@ MARAS Group etir Center`;
                             handlePrepopulateGmail(targetDetailsShipment.id);
                             setOpenDetailsId(null);
                           }}
-                          className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 shadow-sm cursor-pointer transition-all"
+                          className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 shadow-sm cursor-pointer transition-all"
                         >
                           <Mail className="w-4 h-4 shrink-0" />
                           <span>Gmail Alert</span>
@@ -8079,7 +8079,7 @@ MARAS Group etir Center`;
                             {doc.category === 'photo' ? (
                               <ImageIcon className="w-5 h-5 text-teal-600 shrink-0" />
                             ) : (
-                              <FileText className="w-5 h-5 text-blue-600 shrink-0" />
+                              <FileText className="w-5 h-5 text-orange-600 shrink-0" />
                             )}
                             <div className="truncate text-xs">
                               <p className="font-semibold text-slate-800 truncate">{doc.name}</p>
@@ -8311,7 +8311,7 @@ MARAS Group etir Center`;
                   {/* DELIVERY DETAILS ROW */}
                   <div className="p-4 border border-slate-100 rounded-xl space-y-4">
                     <h4 className="font-bold text-slate-950 text-xs uppercase tracking-wider flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded bg-blue-500"></span> {t('deliveryInfo')}
+                      <span className="w-2 h-2 rounded bg-orange-500"></span> {t('deliveryInfo')}
                     </h4>
 
                     <div className="grid grid-cols-2 gap-4">
@@ -8396,7 +8396,7 @@ MARAS Group etir Center`;
                       {/* Additional Drivers/Trucks Section for multi-truck dispatch support */}
                       <div className="col-span-2 border-t border-dashed border-slate-200 pt-3 mt-1 text-left">
                         <label className="text-xs font-bold text-slate-800 flex items-center gap-1 mb-1.5">
-                          <Truck className="w-3.5 h-3.5 text-blue-500" />
+                          <Truck className="w-3.5 h-3.5 text-orange-500" />
                           <span>{lang === 'tr' ? "İlave Araçlar ve Sürücüler (+)" : (lang === 'ar' ? "شاحنات وسائقين إضافيين" : "Additional Trucks / Drivers (+)")}</span>
                         </label>
                         
@@ -8791,7 +8791,7 @@ MARAS Group etir Center`;
                             onClick={() => {
                               setUseCustomPOL(!useCustomPOL);
                             }}
-                            className="text-[10px] text-blue-600 hover:underline font-bold"
+                            className="text-[10px] text-orange-600 hover:underline font-bold"
                           >
                             {useCustomPOL ? "List" : "Manual"}
                           </button>
@@ -8837,7 +8837,7 @@ MARAS Group etir Center`;
                             onClick={() => {
                               setUseCustomPOD(!useCustomPOD);
                             }}
-                            className="text-[10px] text-blue-600 hover:underline font-bold"
+                            className="text-[10px] text-orange-600 hover:underline font-bold"
                           >
                             {useCustomPOD ? "List" : "Manual"}
                           </button>
@@ -9124,7 +9124,7 @@ MARAS Group etir Center`;
                 <button type="button" onClick={() => setIsCreateOpen(false)} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
                   {t('cancel')}
                 </button>
-                <button type="submit" className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl shadow-lg transition-all">
+                <button type="submit" className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-semibold rounded-xl shadow-lg transition-all">
                   {t('save')}
                 </button>
               </div>
@@ -9244,7 +9244,7 @@ MARAS Group etir Center`;
                     {/* Additional Drivers/Trucks Section for multi-truck dispatch support */}
                     <div className="border border-dashed border-slate-200 p-3 bg-slate-50/50 rounded-xl space-y-2 text-left">
                       <label className="text-xs font-bold text-slate-800 flex items-center gap-1">
-                        <Truck className="w-3.5 h-3.5 text-blue-500" />
+                        <Truck className="w-3.5 h-3.5 text-orange-500" />
                         <span>{lang === 'tr' ? "İlave Araçlar ve Sürücüler (+)" : "Additional Trucks / Drivers (+)"}</span>
                       </label>
                       
@@ -9640,7 +9640,7 @@ MARAS Group etir Center`;
                               onClick={() => {
                                 setUseEditCustomPOL(!useEditCustomPOL);
                               }}
-                              className="text-[10px] text-blue-600 hover:underline font-bold font-sans"
+                              className="text-[10px] text-orange-600 hover:underline font-bold font-sans"
                             >
                               {useEditCustomPOL ? "List" : "Manual"}
                             </button>
@@ -9686,7 +9686,7 @@ MARAS Group etir Center`;
                               onClick={() => {
                                 setUseEditCustomPOD(!useEditCustomPOD);
                               }}
-                              className="text-[10px] text-blue-600 hover:underline font-bold font-sans"
+                              className="text-[10px] text-orange-600 hover:underline font-bold font-sans"
                             >
                               {useEditCustomPOD ? "List" : "Manual"}
                             </button>
@@ -10202,7 +10202,7 @@ MARAS Group etir Center`;
               <div className="flex items-start gap-2.5">
                 <span className="p-1.5 bg-slate-800 rounded-lg text-white shrink-0">
                   {notif.type === "chat" ? (
-                    <MessageSquare className="w-4 h-4 text-blue-400" />
+                    <MessageSquare className="w-4 h-4 text-orange-400" />
                   ) : notif.type === "doc_upload" ? (
                     <FileText className="w-4 h-4 text-orange-400" />
                   ) : (
@@ -10331,7 +10331,7 @@ MARAS Group etir Center`;
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {/* Delivery Time Metric */}
                   <div className="bg-slate-50 border border-slate-200/60 p-4 rounded-xl flex items-start gap-3.5 shadow-xs">
-                    <div className="bg-blue-100 text-blue-700 p-2.5 rounded-lg shrink-0">
+                    <div className="bg-orange-100 text-orange-700 p-2.5 rounded-lg shrink-0">
                       <Clock className="w-6 h-6" />
                     </div>
                     <div className="space-y-0.5">
@@ -10404,7 +10404,7 @@ MARAS Group etir Center`;
                     {/* Overall Grade */}
                     <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-lg font-sans flex flex-col justify-center">
                       <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">{lang === 'tr' ? 'Değerlendirme' : (lang === 'ar' ? 'التقييم العام' : 'Overall Grade')}</p>
-                      <span className="text-md font-black text-blue-600 mt-0.5">
+                      <span className="text-md font-black text-orange-600 mt-0.5">
                         {onTimeRate >= 96 ? 'A+' : onTimeRate >= 93 ? 'A' : 'B+'}
                       </span>
                     </div>
@@ -10441,7 +10441,7 @@ MARAS Group etir Center`;
                           </div>
                           
                           <div className="text-right space-y-1">
-                            <span className="inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase bg-blue-100 text-blue-800 border border-blue-200">
+                            <span className="inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase bg-orange-100 text-orange-800 border border-orange-200">
                               {s.status}
                             </span>
                             <p className="text-slate-400 font-mono text-[10px]">{new Date(s.createdAt).toLocaleDateString()}</p>
