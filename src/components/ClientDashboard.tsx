@@ -664,7 +664,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   {/* Card Status Banner indicators */}
                   <div className="flex items-center justify-between gap-2.5">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-black text-white">{ship.shipmentNumber}</span>
+                      <span className="text-xs font-black text-white selectable">{ship.shipmentNumber}</span>
                       <span className="px-2 py-0.5 bg-slate-950 border border-slate-800 text-[9px] font-black text-slate-300 rounded-lg">
                         {typeLabel}
                       </span>
@@ -721,7 +721,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   <div className="space-y-1">
                     <span className="text-[10px] uppercase font-bold text-orange-500 tracking-wider">Active Cargo Spotlight</span>
                     <h3 className="text-xl font-black text-white flex items-center gap-2">
-                      <span>{selectedShipment.shipmentNumber}</span>
+                      <span className="selectable">{selectedShipment.shipmentNumber}</span>
                     </h3>
                     <p className="text-xs text-slate-400 font-medium">
                       Cargo: <strong className="text-slate-200">{selectedShipment.cargoDescription}</strong>

@@ -3832,7 +3832,7 @@ MARAS Group etir Center`;
                                 <span className="p-1.5 bg-orange-50 text-orange-600 rounded-md" title="Land Goods"><Truck className="w-3.5 h-3.5" /></span>
                               )}
                               <div>
-                                <span className="font-mono font-bold text-slate-900 text-xs block">#{shipment.shipmentNumber}</span>
+                                <span className="font-mono font-bold text-slate-900 text-xs block selectable">#{shipment.shipmentNumber}</span>
                                 <span className="text-[9.5px] text-slate-400 capitalize font-medium">{fType} Transit</span>
                               </div>
                             </div>
@@ -4159,7 +4159,7 @@ MARAS Group etir Center`;
                 <tbody className="divide-y divide-slate-100 text-xs balance-rows">
                   {filteredShipments.map((s) => (
                     <tr key={s.id} className="hover:bg-slate-50/50">
-                      <td className="p-4 font-mono font-bold text-slate-900">{s.shipmentNumber}</td>
+                      <td className="p-4 font-mono font-bold text-slate-900 selectable">{s.shipmentNumber}</td>
                       <td className="p-4">
                         <p className="font-semibold text-slate-800">{s.companyName}</p>
                         <span className="text-[10px] text-slate-400 block mt-0.5">Created: {new Date(s.createdAt).toLocaleDateString()}</span>
@@ -4753,7 +4753,7 @@ MARAS Group etir Center`;
                                             <div key={shipment.id} className="py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
                                               <div className="space-y-1">
                                                 <div className="flex items-center gap-2">
-                                                  <span className="font-black text-slate-800 text-sm">#{shipment.shipmentNumber}</span>
+                                                  <span className="font-black text-slate-800 text-sm selectable">#{shipment.shipmentNumber}</span>
                                                   <span className={`px-1.5 py-0.5 rounded-sm font-bold text-[10px] uppercase border ${
                                                     shipment.status === "Delivered" || shipment.status === "Closed"
                                                       ? "bg-green-50 text-green-700 border-green-200"

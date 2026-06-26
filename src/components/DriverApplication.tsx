@@ -2910,7 +2910,7 @@ export default function DriverApplication({
                   <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                     <div className="flex flex-col">
                       <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest font-mono">Shipment ID</span>
-                      <span className="font-mono text-sm font-black text-white mt-0.5">{activeShipment.shipmentNumber}</span>
+                      <span className="font-mono text-sm font-black text-white mt-0.5 selectable">{activeShipment.shipmentNumber}</span>
                     </div>
                     
                     <span className="bg-orange-500/10 text-orange-400 text-[10px] font-black uppercase tracking-wider font-mono px-3 py-1 rounded-full border border-orange-500/25">

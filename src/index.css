@@ -1,5 +1,43 @@
 @import "tailwindcss";
 
+/* ── Native-feel: suppress browser-default web behaviours in Capacitor WKWebView ── */
+html, body {
+  overscroll-behavior: none;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input, textarea, select, [contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ── Keyframes for animate-fade-in / animate-slide-in used throughout the app ── */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@theme {
+  --animate-fade-in: fade-in 0.2s ease-out both;
+  --animate-slide-in: slide-in 0.25s ease-out both;
+}
+
 /* Styling for Print mount isolation */
 #print-mount-point {
   display: none;

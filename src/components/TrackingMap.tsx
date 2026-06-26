@@ -1175,7 +1175,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-mono text-xs font-extrabold text-blue-600">#{s.shipmentNumber}</p>
+                        <p className="font-mono text-xs font-extrabold text-blue-600 selectable">#{s.shipmentNumber}</p>
                         <h4 className="font-black text-[11px] text-slate-800 truncate max-w-[155px]">{s.companyName}</h4>
                       </div>
                       <span className="inline-flex items-center gap-0.5 text-[8.5px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md uppercase font-mono">
@@ -1857,7 +1857,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                   <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
                     <div className="flex items-center gap-1.5">
                       <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-ping"></span>
-                      <span className="font-mono font-black text-orange-400 text-xs">#{selectedShipment.shipmentNumber}</span>
+                      <span className="font-mono font-black text-orange-400 text-xs selectable">#{selectedShipment.shipmentNumber}</span>
                     </div>
                     <button 
                       onClick={() => setSelectedShipment(null)}
