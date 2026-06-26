@@ -823,10 +823,8 @@ export default function DriverApplication({
   const [scanDocName, setScanDocName] = useState("");
   const [flashLight, setFlashLight] = useState(false);
 
-  // GPS live simulation states
-  const [gpsSimActive, setGpsSimActive] = useState<boolean>(true);
-  const [gpsProgress, setGpsProgress] = useState<number>(35); // starts at 35% along path
-  const [gpsSpeed, setGpsSpeed] = useState<number>(82); // simulated speed in km/h
+  // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
+  const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
   const [lastGpsCoords, setLastGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
   
   // Driver Assist adaptive routing & traffic patterns states
@@ -894,7 +892,7 @@ export default function DriverApplication({
             setActiveShipment(fresh);
             const isCompleted = fresh.status === 'Delivered' || fresh.status === 'Arrived' || fresh.status === 'Closed' || fresh.status === 'Completed';
             if (isCompleted) {
-              setGpsSimActive(false);
+              setGpsAvailable(null);
             }
           }
         }
@@ -1192,74 +1190,40 @@ export default function DriverApplication({
     }
   }, [isForceOffline, cachedCoords.length, isSyncing, drivers, selectedDriverId, lastSyncAttemptTime]);
 
-  // Synchronized GPS Telemetry transmitter task loop
+  // GPS Telemetry transmitter — only runs when there is an active shipment
   useEffect(() => {
-    if (!gpsSimActive) {
-      return;
-    }
+    if (!activeShipment?.id) return;
 
-    const startLoc = CITY_COORDINATES[(activeShipment?.loadingCity || "").toLowerCase().trim()] || 
-                     CITY_COORDINATES["istanbul"];
-    const endLoc = CITY_COORDINATES[(activeShipment?.deliveryCity || "").toLowerCase().trim()] || 
-                   CITY_COORDINATES["baghdad"];
-
-    const interval = setInterval(() => {
-      const runGpsFallback = () => {
-        setGpsProgress(prev => {
-          let next = prev + 1;
-          if (next > 95) {
-            next = 10; // Reset loop
-          }
-
-          const interpolationPct = next / 100;
-          const latDrift = (Math.random() - 0.5) * 0.0015;
-          const lngDrift = (Math.random() - 0.5) * 0.0015;
-
-          const currentLat = startLoc.lat + (endLoc.lat - startLoc.lat) * interpolationPct + latDrift;
-          const currentLng = startLoc.lng + (endLoc.lng - startLoc.lng) * interpolationPct + lngDrift;
-
-          setLastGpsCoords({ lat: currentLat, lng: currentLng });
-          transmitGPS(currentLat, currentLng);
-          return next;
-        });
-      };
-
-      if (navigator.geolocation) {
-        try {
-          navigator.geolocation.getCurrentPosition(
-            (position) => {
-              const currentLat = position.coords.latitude;
-              const currentLng = position.coords.longitude;
-              setLastGpsCoords({ lat: currentLat, lng: currentLng });
-              transmitGPS(currentLat, currentLng);
-            },
-            (error) => {
-              // Geolocation failed or denied, run graceful simulation fallback path
-              runGpsFallback();
-            },
-            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-          );
-        } catch (err) {
-          console.warn("Synchronous Geolocation execution blocked or failed inside iframe:", err);
-          runGpsFallback();
-        }
-      } else {
-        runGpsFallback();
+    const poll = () => {
+      if (!navigator.geolocation) {
+        setGpsAvailable(false);
+        return;
       }
-    }, 15000);
+      try {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            setGpsAvailable(true);
+            setLastGpsCoords({ lat, lng });
+            transmitGPS(lat, lng);
+          },
+          (err) => {
+            console.warn("[GPS] Location unavailable:", err.message);
+            setGpsAvailable(false);
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        );
+      } catch (err) {
+        console.warn("[GPS] Geolocation blocked:", err);
+        setGpsAvailable(false);
+      }
+    };
 
+    poll(); // immediate first check
+    const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
-  }, [gpsSimActive, activeShipment?.id, selectedDriverId, drivers, isForceOffline]);
-
-  const handleManualTeleport = (cityName: string) => {
-    const coords = CITY_COORDINATES[(cityName || "").toLowerCase().trim()];
-    if (!coords) return;
-
-    setLastGpsCoords(coords);
-    triggerToast(`GPS Position verified at ${cityName}`);
-
-    transmitGPS(coords.lat, coords.lng);
-  };
+  }, [activeShipment?.id, selectedDriverId, drivers, isForceOffline]);
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1400,44 +1364,31 @@ export default function DriverApplication({
       });
       if (res.ok) {
         triggerToast(t('acceptSuccess'));
-        
-        // Automatically enable and sync the device GPS location data upon accepting a shipment
-        setGpsSimActive(true);
+
+        // Attempt a one-shot GPS fix on accept; the interval loop will take over from here
         if (navigator.geolocation) {
-          triggerToast("📡 Initializing hardware GPS connection... Obtaining precise coordinates.");
           try {
             navigator.geolocation.getCurrentPosition(
               (pos) => {
                 const lat = pos.coords.latitude;
                 const lng = pos.coords.longitude;
+                setGpsAvailable(true);
                 setLastGpsCoords({ lat, lng });
                 transmitGPS(lat, lng);
-                triggerToast("🚀 Hardware GPS connection synced! Location successfully broadcast to dispatcher.");
               },
               (err) => {
-                console.warn("Hardware GPS failed, using smart route simulator fallback:", err.message);
-                // Fallback immediately to simulation start location
-                const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
-                const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
-                setLastGpsCoords(startCoords);
-                transmitGPS(startCoords.lat, startCoords.lng);
-                triggerToast("📡 Simulated GPS tracking initiated in auto-mode.");
+                console.warn("[GPS] Location unavailable on accept:", err.message);
+                setGpsAvailable(false);
+                triggerToast("📡 Location unavailable — enable GPS to share your position with dispatch.");
               },
               { enableHighAccuracy: true, timeout: 5000 }
             );
           } catch (geoErr) {
-            console.warn("Synchronous Geolocation blocked or failed in iframe:", geoErr);
-            const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
-            const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
-            setLastGpsCoords(startCoords);
-            transmitGPS(startCoords.lat, startCoords.lng);
+            console.warn("[GPS] Geolocation blocked on accept:", geoErr);
+            setGpsAvailable(false);
           }
         } else {
-          // Fallback immediately to simulation start location
-          const startCity = (shipment.loadingCity || "istanbul").toLowerCase().trim();
-          const startCoords = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
-          setLastGpsCoords(startCoords);
-          transmitGPS(startCoords.lat, startCoords.lng);
+          setGpsAvailable(false);
         }
 
         fetchData();
@@ -1985,7 +1936,8 @@ export default function DriverApplication({
     
     // Road/routing layout safety factor multiplier (usually physical roads are ~25% longer than straight lines)
     const routeDistance = Math.max(120, Math.round(rawDistance * 1.25));
-    const processedDistance = Math.max(0, Math.round(routeDistance * (1 - gpsProgress / 100)));
+    const progressPct = Math.max(0, Math.min(100, calculateDistancePercentage()));
+    const processedDistance = Math.max(0, Math.round(routeDistance * (1 - progressPct / 100)));
 
     // Choose speed parameters and delay bounds based on selected traffic scenarios
     let avgSpeed = 70; // km/h
@@ -2034,12 +1986,7 @@ export default function DriverApplication({
         break;
     }
 
-    // Combine current telemetry velocity if available and simulation is active
-    let activeSpeed = avgSpeed;
-    if (gpsSimActive && gpsSpeed > 0) {
-      // average simulated telemetry with pattern
-      activeSpeed = Math.round((gpsSpeed + avgSpeed) / 2);
-    }
+    const activeSpeed = avgSpeed;
 
     // Remaining travel hours
     const netTravelHours = processedDistance / activeSpeed;
@@ -2082,7 +2029,7 @@ export default function DriverApplication({
       trafficFactorDescription,
       statusLabelEnglish
     };
-  }, [activeShipment, gpsProgress, gpsSpeed, gpsSimActive, trafficPattern, lang]);
+  }, [activeShipment, lastGpsCoords, trafficPattern, lang]);
 
   return (
     <div 
@@ -2496,10 +2443,6 @@ export default function DriverApplication({
                           onClick={() => {
                             setActiveShipment(s);
                             setSelectedStatusVal(s.status);
-                            const isCompleted = s.status === 'Delivered' || s.status === 'Arrived' || s.status === 'Closed' || s.status === 'Completed';
-                            if (isCompleted) {
-                              setGpsSimActive(false);
-                            }
                           }}
                           className="group relative bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800/80 hover:border-orange-500/40 rounded-[22px] p-4 transition-all duration-300 cursor-pointer shadow-[0_4px_25px_rgba(0,0,0,0.3)] space-y-3.5 overflow-hidden active:scale-[0.99]"
                         >
@@ -2710,8 +2653,7 @@ export default function DriverApplication({
                           })
                         });
                         if (res.ok) {
-                          setGpsSimActive(true);
-                          triggerToast(lang === 'tr' ? "🚀 Yolculuk Başlatıldı! GPS simülatörü aktif." : "🚀 Transit Started! GPS live transmitter activated.");
+                          triggerToast(lang === 'tr' ? "🚀 Yolculuk Başlatıldı!" : "🚀 Transit Started!");
                           fetchData();
                         } else {
                           triggerToast("❌ Failed to start transit. Please try again.");
@@ -2749,9 +2691,6 @@ export default function DriverApplication({
                         triggerToast(`${lang === 'tr' ? 'Durum Güncellendi:' : 'Logistics State Verified:'} ${newSt}`);
                         setQuickStatusOpen(false);
                         fetchData();
-                        if (newSt === "In Transit") {
-                          setGpsSimActive(true);
-                        }
                       } else {
                         triggerToast("❌ Failed to update status. Please try again.");
                       }
@@ -2969,10 +2908,16 @@ export default function DriverApplication({
                       <h4 className="text-slate-200 font-bold text-xs uppercase tracking-wider text-left">Live Transit Route Tracker</h4>
                       <p className="text-[10px] text-slate-500 text-left">Real-time GPS correlation on Google Maps</p>
                     </div>
-                    {gpsSimActive && (
+                    {gpsAvailable === true && (
                       <span className="bg-emerald-950 text-emerald-400 border border-emerald-900 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
                         <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
                         Tracking Active
+                      </span>
+                    )}
+                    {gpsAvailable === false && (
+                      <span className="bg-amber-950/50 text-amber-500 border border-amber-900/50 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
+                        Location Unavailable
                       </span>
                     )}
                   </div>
@@ -3095,7 +3040,7 @@ export default function DriverApplication({
                       <div className="grid grid-cols-3 gap-3 text-center">
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Live Speed</span>
-                          <span className="font-bold text-slate-200 font-mono text-xs">{isShipmentFinished ? 0 : gpsSpeed} km/h</span>
+                          <span className="font-bold text-slate-200 font-mono text-xs">{isShipmentFinished ? "—" : (gpsAvailable === true ? "Live" : "—")}</span>
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
