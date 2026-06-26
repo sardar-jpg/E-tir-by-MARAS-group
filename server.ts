@@ -64,6 +64,7 @@ function collection(dbInstance: any, pathName: string, ...pathSegments: string[]
   } catch (err) {
     console.warn("Firestore collection wrapper caught error. Switching to Memory Fallback:", err);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isCollection: true };
   }
 }
@@ -77,6 +78,7 @@ function doc(dbInstance: any, pathName: string, ...pathSegments: string[]): any 
   } catch (err) {
     console.warn("Firestore doc wrapper caught error. Switching to Memory Fallback:", err);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isDoc: true };
   }
 }
@@ -258,6 +260,7 @@ async function getDocs(queryRef: any) {
   } catch (error) {
     console.warn("Firestore getDocs failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleGetDocsMemory(queryRef);
   }
 }
@@ -271,6 +274,7 @@ async function getDoc(docRef: any) {
   } catch (error) {
     console.warn("Firestore getDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleGetDocMemory(docRef);
   }
 }
@@ -328,6 +332,7 @@ async function setDoc(docRef: any, data: any, options?: any) {
   } catch (error) {
     console.warn("Firestore setDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleSetDocMemory(docRef, cleanedData);
   }
 }
@@ -342,6 +347,7 @@ async function updateDoc(docRef: any, data: any) {
   } catch (error) {
     console.warn("Firestore updateDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleUpdateDocMemory(docRef, cleanedData);
   }
 }
@@ -355,6 +361,7 @@ async function deleteDoc(docRef: any) {
   } catch (error) {
     console.warn("Firestore deleteDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleDeleteDocMemory(docRef);
   }
 }
@@ -369,6 +376,7 @@ async function addDoc(colRef: any, data: any) {
   } catch (error) {
     console.warn("Firestore addDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
     return handleAddDocMemory(colRef, cleanedData);
   }
 }
@@ -493,28 +501,57 @@ async function authenticateServerAccount(): Promise<boolean> {
   }
 }
 
-async function testConnection() {
+// One probe attempt. Sets useMemoryFallback = false on success, returns true/false.
+async function attemptFirestoreConnect(timeoutMs: number): Promise<boolean> {
+  if (!db) return false;
+  const authed = await authenticateServerAccount();
+  if (!authed) return false;
+  try {
+    await withTimeout(rawGetDoc(rawDoc(db, "test", "connection")), timeoutMs, "Firestore connection check timed out");
+    console.log(`[Firestore] Connected to database (${initialId}).`);
+    useMemoryFallback = false;
+    return true;
+  } catch (err: any) {
+    console.warn(`[Firestore] Connection check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+// Idempotent: schedules one background retry at delayMs, doubling on each miss up to 5 min.
+let _recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleFirestoreRecovery(delayMs: number): void {
+  if (_recoveryTimer !== null) return;
+  _recoveryTimer = setTimeout(async () => {
+    _recoveryTimer = null;
+    const ok = await attemptFirestoreConnect(10_000);
+    if (ok) {
+      seedDatabaseIfEmpty().catch(err => console.warn("[Firestore] Post-recovery seeding failed:", err));
+    } else {
+      scheduleFirestoreRecovery(Math.min(delayMs * 2, 5 * 60_000));
+    }
+  }, delayMs);
+}
+
+// Startup path: 3 attempts with escalating timeouts, then hands off to background recovery.
+async function startFirestoreConnection(): Promise<void> {
   if (!db) {
     useMemoryFallback = true;
     return;
   }
-  const authed = await authenticateServerAccount();
-  if (!authed) {
-    useMemoryFallback = true;
-    return;
+  const attempts: Array<{ timeout: number; wait: number }> = [
+    { timeout: 5_000, wait: 3_000 },
+    { timeout: 10_000, wait: 5_000 },
+    { timeout: 15_000, wait: 0 },
+  ];
+  for (let i = 0; i < attempts.length; i++) {
+    if (i > 0) console.log(`[Firestore] Startup retry ${i}/${attempts.length - 1}...`);
+    const ok = await attemptFirestoreConnect(attempts[i].timeout);
+    if (ok) return;
+    if (attempts[i].wait > 0) await new Promise<void>(r => setTimeout(r, attempts[i].wait));
   }
-  try {
-    await withTimeout(
-      rawGetDoc(rawDoc(db, "test", "connection")),
-      3500,
-      "Firestore connection test timed out"
-    );
-    console.log("Successfully connected to Firestore Database (" + initialId + ").");
-    useMemoryFallback = false;
-  } catch (error: any) {
-    console.warn("Firestore test connection error for database (" + initialId + "). Active Robust Memory Fallback. Error:", error instanceof Error ? error.message : String(error));
-    useMemoryFallback = true;
-  }
+  console.warn("[Firestore] All startup connection attempts failed — serving from memory fallback. Background recovery scheduled.");
+  useMemoryFallback = true;
+  scheduleFirestoreRecovery(30_000);
 }
 
 // Initial seed datasets (in case Firestore is empty)
@@ -4132,7 +4169,7 @@ async function startServer() {
     (async () => {
       try {
         console.log("Starting async background database connection check and self-seeding...");
-        await testConnection();
+        await startFirestoreConnection();
         await seedDatabaseIfEmpty();
         console.log("Background database initialization completed successfully.");
       } catch (err) {
