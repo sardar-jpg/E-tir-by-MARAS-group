@@ -804,7 +804,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                     <Globe className="w-3.5 h-3.5 text-orange-500 animate-spin-slow" />
                     <span>{curT.viewMap}</span>
                   </h4>
-                  <div className="h-56 bg-slate-950 rounded-xl overflow-hidden border border-slate-800 relative">
+                  <div className="rounded-xl overflow-hidden border border-slate-800 relative">
                     <TrackingMap 
                       shipments={[selectedShipment]} 
                       lang={lang} 
