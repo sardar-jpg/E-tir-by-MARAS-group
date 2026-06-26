@@ -3308,7 +3308,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/maps-key", (req, res) => {
+  app.get("/api/maps-key", requireAuth, (req, res) => {
     res.json({
       key: process.env.GOOGLE_MAPS_PLATFORM_KEY || ""
     });
