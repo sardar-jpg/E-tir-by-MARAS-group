@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Language, Shipment, Driver, ShipmentDocument, LocationUpdate } from "../types";
 import { 
-  Ship, Globe, Star, Truck, Calendar, DollarSign, Eye, EyeOff, MapPin, 
-  Search, Shield, Clipboard, ArrowRight, MessageSquare, CheckCircle2, 
-  FileText, Download, Clock, ChevronRight, X, Send, HelpCircle, 
+  Ship, Globe, Star, Truck, Calendar, Eye, EyeOff, MapPin,
+  Search, Shield, Clipboard, ArrowRight, MessageSquare, CheckCircle2,
+  FileText, Download, Clock, ChevronRight, X, Send, HelpCircle,
   Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
@@ -18,8 +18,6 @@ const t = {
     statsTotal: "Total Shipments",
     statsActive: "Active In-Transit",
     statsCompleted: "Deliveries Completed",
-    statsFinancial: "Corporate Account Status",
-    activeStatus: "Operational / Active",
     noShipments: "No shipments found matching your account criteria.",
     searchPlaceholder: "Search by Shipment ID, Plate, City, or Cargo...",
     filterAll: "All Cargo Services",
@@ -65,8 +63,6 @@ const t = {
     statsTotal: "Toplam Sevkiyat",
     statsActive: "Aktif Taşıma",
     statsCompleted: "Tamamlanan Teslimat",
-    statsFinancial: "Kurumsal Hesap Durumu",
-    activeStatus: "Operasyonel / Aktif",
     noShipments: "Hesap kriterlerinize uygun sevkiyat bulunamadı.",
     searchPlaceholder: "Sevkiyat No, Plaka, Şehir veya Yük ile ara...",
     filterAll: "Tüm Kargo Hizmetleri",
@@ -112,8 +108,6 @@ const t = {
     statsTotal: "إجمالي الشحنات",
     statsActive: "الناشطة قيد النقل",
     statsCompleted: "الشحنات المستلمة كلياً",
-    statsFinancial: "الحالة المالية للحساب المؤتمن",
-    activeStatus: "في النطاق العملياتي / نشط",
     noShipments: "لم يتم العثور على أي شحنات مرتبطة ببيانات شركتكم حالياً.",
     searchPlaceholder: "البحث برقم الشحنة، اللوحة، المدينة أو نوع البضاعة...",
     filterAll: "كافة قطاعات النقل",
@@ -482,7 +476,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             {curT.welcome} <span className="text-orange-400">{clientCompanyName}</span>
           </h2>
           <p className="text-xs text-slate-400 max-w-lg font-medium">
-            Authorized Account Profile: <strong className="text-slate-200">{clientEmail}</strong> (Secure API Client-ID: {clientId})
+            Authorized Account Profile: <strong className="text-slate-200">{clientEmail}</strong>
           </p>
         </div>
 
@@ -540,7 +534,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       </div>
 
       {/* 2. Bento Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {/* Total Shipments */}
         <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
           <div className="space-y-1">
@@ -574,18 +568,6 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           </div>
         </div>
 
-        {/* Financial Status */}
-        <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
-          <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">{curT.statsFinancial}</span>
-            <span className="text-xs font-bold text-emerald-400 bg-emerald-900/20 border border-emerald-900/40 px-2 py-0.5 rounded-lg inline-block">
-              Good Credit Rating
-            </span>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-blue-400 border border-slate-800">
-            <DollarSign className="w-5 h-5" />
-          </div>
-        </div>
       </div>
 
       {/* 3. Filter Navigation & Searches */}
@@ -985,7 +967,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 </div>
                 <div className="space-y-0.5">
                   <h4 className="font-extrabold text-white block">No shipment selected</h4>
-                  <p className="text-[11px] text-slate-500">Pick an active or completed cargo service on the left stream to inspect satellite status updates, tracking documents, or file support tickets.</p>
+                  <p className="text-[11px] text-slate-500">Pick an active or completed cargo service on the left stream to inspect satellite status updates, tracking documents, or send support inquiries.</p>
                 </div>
               </div>
             )}
@@ -1012,7 +994,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   <span>{curT.notifsTitle}</span>
                 </h3>
                 <p className="text-[10px] text-slate-500 font-medium">
-                  {notifications.filter(n => !n.read).length} unread updates matching your fleet
+                  {notifications.filter(n => !n.read).length} unread updates matching your shipments
                 </p>
               </div>
               <div className="flex items-center gap-2">
