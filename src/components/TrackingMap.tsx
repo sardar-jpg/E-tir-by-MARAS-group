@@ -977,7 +977,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
         
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className="lg:col-span-4 border-r border-slate-200 flex flex-col bg-slate-50/50">
+        <div className={`lg:col-span-4 border-r border-slate-200 flex flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
           {/* Sidebar Header */}
           <div className="p-4 border-b border-slate-100 bg-white space-y-3">
@@ -1194,7 +1194,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
-          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "" : "h-[480px]"}`}>
+          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "min-h-0" : "h-[480px]"}`}>
             {inTransitShipments.length === 0 ? (
               <div className="p-6 text-center space-y-2">
                 <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto" />
@@ -1210,12 +1210,12 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
               filteredTransit.map(s => {
                 const isSelected = selectedShipment?.id === s.id;
                 return (
-                  <div 
+                  <div
                     key={s.id}
                     onClick={() => handleSelectShipment(s)}
-                    className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col gap-2 relative overflow-hidden ${
-                      isSelected 
-                        ? "bg-slate-100 border-slate-300 shadow-xs" 
+                    className={`rounded-xl border transition-all cursor-pointer flex flex-col relative overflow-hidden ${isFullscreen ? "p-2 gap-1" : "p-3 gap-2"} ${
+                      isSelected
+                        ? "bg-slate-100 border-slate-300 shadow-xs"
                         : "bg-white border-slate-100 hover:bg-slate-50"
                     }`}
                   >
@@ -1230,7 +1230,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       </span>
                     </div>
 
-                    <div className="text-[10px] text-slate-500 font-medium grid grid-cols-2 gap-1 bg-slate-50 p-1.5 rounded-lg border border-slate-100">
+                    <div className={`text-[10px] text-slate-500 font-medium grid grid-cols-2 gap-1 bg-slate-50 rounded-lg border border-slate-100 ${isFullscreen ? "p-1" : "p-1.5"}`}>
                       <div>
                         <span className="block text-[8px] text-slate-400 uppercase font-bold">{t.from}</span>
                         <span className="truncate block font-semibold text-slate-700">{s.loadingCity}</span>
@@ -1246,7 +1246,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       const loc = getShipmentVectorLocation(s);
                       const city = getNearestCity(loc.x, loc.y);
                       return (
-                        <div className="text-[10.5px] bg-emerald-50/80 text-emerald-800 font-mono p-1.5 rounded-xl border border-emerald-100 flex items-center justify-between gap-1.5">
+                        <div className={`text-[10.5px] bg-emerald-50/80 text-emerald-800 font-mono rounded-xl border border-emerald-100 flex items-center justify-between gap-1.5 ${isFullscreen ? "p-1" : "p-1.5"}`}>
                           <span className="flex items-center gap-1 font-extrabold truncate">
                             <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span className="truncate">{city}</span>
