@@ -884,7 +884,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   return (
     <div className={isFullscreen
-      ? "fixed inset-0 z-50 bg-slate-950 overflow-y-auto flex flex-col gap-4 p-4"
+      ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-4 p-4"
       : "space-y-4"
     }>
       {/* ⚠️ HIGH-DENSITY RADAR OVERVIEW DECK */}
@@ -974,7 +974,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       </div>
 
       {/* MAIN CONTAINER LAYOUT */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 min-h-[620px] max-w-full">
+      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
         
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
         <div className="lg:col-span-4 border-r border-slate-200 flex flex-col bg-slate-50/50">
@@ -1194,7 +1194,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
-          <div className="flex-1 overflow-y-auto h-[480px] p-2 space-y-2">
+          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "" : "h-[480px]"}`}>
             {inTransitShipments.length === 0 ? (
               <div className="p-6 text-center space-y-2">
                 <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto" />
@@ -1281,7 +1281,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className="lg:col-span-8 relative h-[620px] w-full min-w-[200px] bg-slate-950 flex flex-col justify-between overflow-hidden">
+        <div className={`lg:col-span-8 relative w-full min-w-[200px] bg-slate-950 flex flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[620px]"}`}>
           
           {/* Radar Ambient Weather Overlay */}
           <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2.5 py-1 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
