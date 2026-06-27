@@ -23,6 +23,8 @@ import {
   Check,
   Expand,
   Minimize,
+  Maximize2,
+  Minimize2,
   Plus,
   Minus
 } from "lucide-react";
@@ -943,7 +945,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
               : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
             className="w-8 h-8 bg-slate-950 border border-slate-800 hover:border-slate-600 rounded-xl flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0"
           >
-            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Expand className="w-4 h-4" />}
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
         </div>
       </div>
