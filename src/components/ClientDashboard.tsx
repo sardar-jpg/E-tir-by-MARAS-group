@@ -886,7 +886,8 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                       )}
                     </div>
 
-                    {/* Support inquiries block */}
+                    {/* Support inquiries block — temporarily hidden; remove {false &&} wrapper to restore */}
+                    {false && (
                     <div className="space-y-3">
                       <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
                         <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
@@ -899,9 +900,9 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         </p>
 
                         {/* Message Feed logs */}
-                        {inquiries[selectedShipment.id] && inquiries[selectedShipment.id].length > 0 && (
+                        {inquiries[selectedShipment!.id] && inquiries[selectedShipment!.id].length > 0 && (
                           <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-36 overflow-y-auto space-y-2 text-[11px]">
-                            {inquiries[selectedShipment.id].map((msg, mIdx) => {
+                            {inquiries[selectedShipment!.id].map((msg, mIdx) => {
                               const isAdminSender = msg.sender === "admin" || (msg.senderName && (msg.senderName.toLowerCase().includes("admin") || msg.senderName.toLowerCase().includes("maras")));
                               return (
                                 <div key={mIdx} className="space-y-0.5 text-left border-b border-slate-900 pb-1 last:border-0">
@@ -944,7 +945,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
 
                             <button
                               type="button"
-                              onClick={() => handleSendInquiry(selectedShipment.id)}
+                              onClick={() => handleSendInquiry(selectedShipment!.id)}
                               disabled={sendingInquiry || !inquiryText.trim()}
                               className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
@@ -955,6 +956,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         )}
                       </div>
                     </div>
+                    )}
 
                   </div>
                 </div>
