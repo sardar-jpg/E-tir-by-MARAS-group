@@ -687,6 +687,20 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     }).length;
   };
 
+  const getShipmentGpsState = (s: Shipment): "live_gps" | "dead_reckoning" | "static" => {
+    const driver = localDrivers.find(d => d.id === s.assignedDriverId);
+    if (
+      driver &&
+      typeof driver.latitude === "number" &&
+      typeof driver.longitude === "number" &&
+      driver.latitude !== 0 &&
+      driver.longitude !== 0
+    ) {
+      return "live_gps";
+    }
+    return s.status === "In Transit" ? "dead_reckoning" : "static";
+  };
+
   // Get vector graphical SVG coordinates and real GPS coordinates
   const getShipmentVectorLocation = (s: Shipment): { x: number; y: number; percentage: number; isActualGps?: boolean; lat: number; lng: number } => {
     const driver = localDrivers.find(d => d.id === s.assignedDriverId);
@@ -768,6 +782,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       lng
     };
   };
+
+  const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
 
   const getNearestCity = (x: number, y: number): string => {
     let nearestCityName = "Transit Route";
@@ -1558,10 +1574,11 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     {filteredTransit.map(s => {
                       const activeLoc = getShipmentVectorLocation(s);
                       const isSelected = selectedShipment?.id === s.id;
+                      const gpsState = getShipmentGpsState(s);
 
                       return (
-                        <g 
-                          key={s.id} 
+                        <g
+                          key={s.id}
                           className="cursor-pointer group select-none"
                           onClick={() => handleSelectShipment(s)}
                           // Beautiful CSS coordinate transition applied directly to translation matrix
@@ -1570,13 +1587,23 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                             transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)",
                           }}
                         >
-                          {/* Shimmer pulse rings on the truck */}
-                          <circle 
-                            r={isSelected ? "22" : "15"} 
-                            fill={isSelected ? "rgba(249,115,22,0.28)" : "rgba(249,115,22,0.12)"} 
-                            stroke={isSelected ? "#ea580c" : "rgba(249,115,22,0.3)"}
+                          {/* Shimmer pulse rings on the truck – colour by GPS state */}
+                          <circle
+                            r={isSelected ? "22" : "15"}
+                            fill={
+                              isSelected ? "rgba(249,115,22,0.28)"
+                              : gpsState === "live_gps" ? "rgba(34,197,94,0.18)"
+                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.12)"
+                              : "rgba(100,116,139,0.12)"
+                            }
+                            stroke={
+                              isSelected ? "#ea580c"
+                              : gpsState === "live_gps" ? "#22c55e"
+                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.3)"
+                              : "#475569"
+                            }
                             strokeWidth="1.5"
-                            className="animate-pulse" 
+                            className="animate-pulse"
                           />
 
                           {/* Truck bubble badge */}
@@ -1798,11 +1825,12 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                           const activeLoc = getShipmentVectorLocation(s);
                           const isSelected = selectedShipment?.id === s.id;
                           const truckCoords = { lat: activeLoc.lat, lng: activeLoc.lng };
+                          const gpsState = getShipmentGpsState(s);
 
                           return (
-                            <AdvancedMarker 
-                              key={s.id} 
-                              position={truckCoords} 
+                            <AdvancedMarker
+                              key={s.id}
+                              position={truckCoords}
                               title={`Shipment #${s.shipmentNumber}`}
                               onClick={() => handleSelectShipment(s)}
                             >
@@ -1813,15 +1841,28 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                                 }`}>
                                   #{s.shipmentNumber}
                                 </span>
-                                
-                                <div 
-                                  style={{ width: "36px", height: "36px" }} 
+
+                                <div
+                                  style={{ width: "36px", height: "36px" }}
                                   className={`w-9 h-9 rounded-full flex items-center justify-center border-2 shadow-lg transition-transform ${
-                                    isSelected ? "bg-orange-600 border-white" : "bg-slate-900 border-orange-500"
+                                    isSelected           ? "bg-orange-600 border-white"
+                                    : gpsState === "live_gps"       ? "bg-emerald-700 border-emerald-400"
+                                    : gpsState === "dead_reckoning" ? "bg-slate-900 border-orange-500"
+                                    :                                  "bg-slate-800 border-slate-600"
                                   }`}
                                 >
                                   <Truck className="w-4 h-4 text-white" />
                                 </div>
+
+                                {!isSelected && (
+                                  <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${
+                                    gpsState === "live_gps"       ? "text-emerald-400"
+                                    : gpsState === "dead_reckoning" ? "text-orange-400"
+                                    :                               "text-slate-500"
+                                  }`}>
+                                    {gpsState === "live_gps" ? "● GPS" : gpsState === "dead_reckoning" ? "◌ EST" : "◯"}
+                                  </span>
+                                )}
                               </div>
                             </AdvancedMarker>
                           );
@@ -1886,6 +1927,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     {(() => {
                       const loc = getShipmentVectorLocation(selectedShipment);
                       const city = getNearestCity(loc.x, loc.y);
+                      const gpsState = getShipmentGpsState(selectedShipment);
                       return (
                         <>
                           <div className="flex justify-between items-center border-t border-slate-800 pt-1 mt-1 font-extrabold">
@@ -1895,6 +1937,18 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                           <div className="flex justify-between items-center text-[7.5px] text-slate-400">
                             <span>COORDINATES:</span>
                             <span>{loc.lat.toFixed(5)}°N, {loc.lng.toFixed(5)}°E</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
+                            <span className="text-slate-500 uppercase">GPS MODE:</span>
+                            <span className={
+                              gpsState === "live_gps"       ? "text-emerald-400"
+                              : gpsState === "dead_reckoning" ? "text-orange-400"
+                              :                               "text-slate-500"
+                            }>
+                              {gpsState === "live_gps"       ? "● LIVE GPS"
+                              : gpsState === "dead_reckoning" ? "◌ DEAD RECKONING"
+                              :                               "◯ STATIC"}
+                            </span>
                           </div>
                         </>
                       );
@@ -1925,9 +1979,9 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
             {/* Simulated Live Grid Stats */}
             <div className="text-[10px] text-slate-400 font-mono flex flex-col sm:flex-row items-center justify-between shrink-0 bg-slate-900/60 p-3 rounded-xl border border-slate-900 gap-1 mt-1">
               <span>{t.operationalStats}: <strong>{inTransitShipments.length} {t.totalShipments}</strong></span>
-              <span className="text-emerald-400 glow-pulse flex items-center gap-1">
-                <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full inline-block animate-ping"></span>
-                {t.gpsAcquired}
+              <span className={`flex items-center gap-1 ${anyLiveGps ? "text-emerald-400" : "text-orange-400"}`}>
+                <span className={`w-1.5 h-1.5 rounded-full inline-block animate-ping ${anyLiveGps ? "bg-emerald-500" : "bg-orange-500"}`}></span>
+                {anyLiveGps ? t.gpsAcquired : t.simulatedGps}
               </span>
             </div>
           </div>
