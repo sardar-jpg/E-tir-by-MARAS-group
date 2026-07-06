@@ -2937,28 +2937,42 @@ export default function DriverApplication({
                   </div>
 
                   {mapsAuthError ? (
-                    <div className="w-full rounded-2xl border border-red-950 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px] select-text">
-                      <div className="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-500 animate-bounce">
-                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                        </svg>
+                    <div className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px] select-text">
+                      <div className="w-12 h-12 rounded-full bg-orange-500/5 border border-orange-500/20 flex items-center justify-center shadow-inner">
+                        <MapPin className="w-5 h-5 text-orange-500" />
                       </div>
-                      <div className="space-y-1 max-w-sm">
-                        <span className="inline-block bg-red-500/15 text-red-400 font-mono font-black text-[9px] tracking-widest px-2.5 py-0.5 rounded border border-red-500/25 uppercase">
-                          Google Maps API Auth Error
+                      <div className="space-y-1.5 max-w-sm">
+                        <span className="inline-block bg-amber-950/50 text-amber-500 font-mono font-black text-[9px] tracking-widest px-2.5 py-0.5 rounded border border-amber-900/50 uppercase">
+                          {lang === "tr" ? "Harita Geçici Olarak Kullanılamıyor" : lang === "ar" ? "الخريطة غير متاحة مؤقتاً" : "Map Temporarily Unavailable"}
                         </span>
-                        <h5 className="font-extrabold text-xs text-white uppercase tracking-tight leading-normal pt-1">
-                          RefererNotAllowedMapError
-                        </h5>
                         <p className="text-[10px] text-slate-400 leading-relaxed pt-1">
-                          Your Maps API key is configured with Website restrictions in the Google Cloud Console, but your current browser URL is not authorized yet.
+                          {lang === "tr"
+                            ? "Canlı harita şu anda yüklenemiyor, ancak seferiniz bundan etkilenmiyor."
+                            : lang === "ar"
+                            ? "لا يمكن تحميل عرض الخريطة المباشر حالياً، لكن هذا لا يؤثر على رحلتك."
+                            : "The live map view can't load right now, but your trip is not affected."}
                         </p>
-                        <div className="space-y-1.5 pt-2 text-left">
-                          <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest block">URL to authorize:</span>
-                          <div className="bg-slate-900 border border-slate-800 p-2 rounded-xl text-[10px] font-mono font-bold text-orange-400 select-all break-all text-center">
-                            {window.location.origin}/*
-                          </div>
-                        </div>
+                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                          {lang === "tr"
+                            ? "Konum izni etkinken GPS takibiniz aktif olmaya devam eder."
+                            : lang === "ar"
+                            ? "لا يزال تتبع GPS الخاص بك نشطاً طالما إذن الموقع مفعّل."
+                            : "Your GPS tracking is still active when location permission is enabled."}
+                        </p>
+                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                          {lang === "tr"
+                            ? "Lütfen sevkiyat güncellemelerinizi normal şekilde sürdürün — sevkiyat merkezi durumunuzu takip edebilmeye devam ediyor."
+                            : lang === "ar"
+                            ? "يرجى متابعة تحديثات الشحنة بشكل طبيعي — لا يزال بإمكان مركز العمليات متابعة حالتك."
+                            : "Please continue your shipment updates normally — dispatch can still follow your status."}
+                        </p>
+                        <p className="text-[10px] text-slate-500 leading-relaxed pt-1">
+                          {lang === "tr"
+                            ? "Bu durum devam ederse MARAS Operasyon ile iletişime geçin."
+                            : lang === "ar"
+                            ? "إذا استمرت هذه المشكلة، يرجى التواصل مع عمليات MARAS."
+                            : "If this continues, contact MARAS Operations."}
+                        </p>
                       </div>
                     </div>
                   ) : hasValidMapsKey ? (
@@ -3029,21 +3043,43 @@ export default function DriverApplication({
                       </APIProvider>
                     </div>
                   ) : (
-                    /* Elegant Setup / Instruction Splash block when Google Maps Key is not yet configured */
+                    /* Driver-facing fallback shown when the live map view is unavailable */
                     <div className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px]">
                       <div className="w-12 h-12 rounded-full bg-orange-500/5 border border-orange-500/20 flex items-center justify-center shadow-inner">
                         <MapPin className="w-5 h-5 text-orange-500" />
                       </div>
-                      <div className="space-y-1">
-                        <h5 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">Maps API Offline</h5>
-                        <p className="text-[10.5px] text-slate-400 max-w-xs mx-auto leading-relaxed">
-                          Provide a valid developer token to authorize live satellite tracking and driving route polyline overlays.
+                      <div className="space-y-1.5 max-w-xs mx-auto">
+                        <h5 className="font-extrabold text-xs text-white uppercase tracking-wider">
+                          {lang === "tr" ? "Harita Geçici Olarak Kullanılamıyor" : lang === "ar" ? "الخريطة غير متاحة مؤقتاً" : "Map Temporarily Unavailable"}
+                        </h5>
+                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                          {lang === "tr"
+                            ? "Canlı harita şu anda yüklenemiyor, ancak seferiniz bundan etkilenmiyor."
+                            : lang === "ar"
+                            ? "لا يمكن تحميل عرض الخريطة المباشر حالياً، لكن هذا لا يؤثر على رحلتك."
+                            : "The live map view can't load right now, but your trip is not affected."}
                         </p>
-                      </div>
-                      <div className="bg-slate-900 border border-slate-800/80 p-3.5 rounded-xl text-left text-[10px]/relaxed text-slate-400 space-y-1.5 max-w-xs w-full">
-                        <p className="text-[9px] font-black text-white uppercase tracking-wider font-mono">Authentication Instructions:</p>
-                        <p className="flex items-start gap-1"><span className="text-[#f97316] font-bold">1.</span> <span>Authorise <strong className="text-slate-200">Maps JavaScript API</strong> in GCP console.</span></p>
-                        <p className="flex items-start gap-1"><span className="text-[#f97316] font-bold">2.</span> <span>Define <strong className="text-orange-500 font-mono">GOOGLE_MAPS_PLATFORM_KEY</strong> environment hook.</span></p>
+                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                          {lang === "tr"
+                            ? "Konum izni etkinken GPS takibiniz aktif olmaya devam eder."
+                            : lang === "ar"
+                            ? "لا يزال تتبع GPS الخاص بك نشطاً طالما إذن الموقع مفعّل."
+                            : "Your GPS tracking is still active when location permission is enabled."}
+                        </p>
+                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                          {lang === "tr"
+                            ? "Lütfen sevkiyat güncellemelerinizi normal şekilde sürdürün — sevkiyat merkezi durumunuzu takip edebilmeye devam ediyor."
+                            : lang === "ar"
+                            ? "يرجى متابعة تحديثات الشحنة بشكل طبيعي — لا يزال بإمكان مركز العمليات متابعة حالتك."
+                            : "Please continue your shipment updates normally — dispatch can still follow your status."}
+                        </p>
+                        <p className="text-[10.5px] text-slate-500 leading-relaxed pt-1">
+                          {lang === "tr"
+                            ? "Bu durum devam ederse MARAS Operasyon ile iletişime geçin."
+                            : lang === "ar"
+                            ? "إذا استمرت هذه المشكلة، يرجى التواصل مع عمليات MARAS."
+                            : "If this continues, contact MARAS Operations."}
+                        </p>
                       </div>
                     </div>
                   )}
