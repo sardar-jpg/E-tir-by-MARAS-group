@@ -54,38 +54,6 @@ import {
 
 export let useMemoryFallback = false;
 
-// ── Memory-fallback data-durability controls ────────────────────────────────
-// STRICT_PERSISTENCE (default ON): when Firestore is unavailable, write
-// operations must NOT silently fall back to volatile in-process memory (which
-// is lost on the next recovery or Cloud Run instance recycle). Instead they
-// fail loudly so the caller gets a 503 and retries, rather than believing a
-// write succeeded. Set STRICT_PERSISTENCE=false to restore the old
-// best-effort-memory behavior.
-const STRICT_PERSISTENCE = process.env.STRICT_PERSISTENCE !== "false";
-// SEED_DEMO_DATA (default OFF): the in-memory fallback store is NOT pre-filled
-// with demo records, so a real production outage never serves fabricated data
-// as if it were real. Set SEED_DEMO_DATA=true for local/demo environments only.
-const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA === "true";
-
-// Thrown by the persistence wrappers when Firestore is unavailable in strict
-// mode, so a write is never silently accepted into memory.
-class ServiceUnavailableError extends Error {
-  readonly code: string;
-  readonly retryable: boolean;
-  constructor(message = "Database temporarily unavailable. Please try again.") {
-    super(message);
-    this.name = "ServiceUnavailableError";
-    this.code = "SERVICE_UNAVAILABLE";
-    this.retryable = true;
-  }
-}
-// Canonical 503 response body for the strict-persistence guard.
-const SERVICE_UNAVAILABLE_BODY = {
-  error: "Database temporarily unavailable. Please try again.",
-  code: "SERVICE_UNAVAILABLE",
-  retryable: true,
-};
-
 // Custom safe wrappers for collection and doc to prevent crash if db is null or offline
 function collection(dbInstance: any, pathName: string, ...pathSegments: string[]): any {
   if (useMemoryFallback || !dbInstance) {
@@ -161,32 +129,17 @@ let memoryStore: {
 
 function getMemoryStore() {
   if (!memoryStore) {
-    // Only pre-fill the fallback store with demo records when SEED_DEMO_DATA is
-    // explicitly enabled. In production (default) the store starts empty, so a
-    // Firestore outage never surfaces fabricated demo data as if it were real.
-    memoryStore = SEED_DEMO_DATA
-      ? {
-          drivers: [...(initialDrivers || [])],
-          shipments: [...(initialShipments || [])],
-          chatMessages: [...(initialChatMessages || [])],
-          notifications: [...(initialNotifications || [])],
-          activityLogs: [...(initialActivityLogs || [])],
-          clients: [...(initialClients || [])],
-          vendors: [...(initialVendors || [])],
-          costStatements: [],
-          test: [{ id: "connection", status: "ok" }]
-        }
-      : {
-          drivers: [],
-          shipments: [],
-          chatMessages: [],
-          notifications: [],
-          activityLogs: [],
-          clients: [],
-          vendors: [],
-          costStatements: [],
-          test: [{ id: "connection", status: "ok" }]
-        };
+    memoryStore = {
+      drivers: [...(initialDrivers || [])],
+      shipments: [...(initialShipments || [])],
+      chatMessages: [...(initialChatMessages || [])],
+      notifications: [...(initialNotifications || [])],
+      activityLogs: [...(initialActivityLogs || [])],
+      clients: [...(initialClients || [])],
+      vendors: [...(initialVendors || [])],
+      costStatements: [],
+      test: [{ id: "connection", status: "ok" }]
+    };
   }
   return memoryStore;
 }
@@ -372,7 +325,6 @@ function isLegacyShareToken(token: string | undefined | null): boolean {
 async function setDoc(docRef: any, data: any, options?: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleSetDocMemory(docRef, cleanedData);
   }
   try {
@@ -381,9 +333,6 @@ async function setDoc(docRef: any, data: any, options?: any) {
     console.warn("Firestore setDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    // Strict mode: never accept the write into volatile memory — fail loudly so
-    // the caller retries instead of assuming it was saved.
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleSetDocMemory(docRef, cleanedData);
   }
 }
@@ -391,7 +340,6 @@ async function setDoc(docRef: any, data: any, options?: any) {
 async function updateDoc(docRef: any, data: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
   }
   try {
@@ -400,16 +348,12 @@ async function updateDoc(docRef: any, data: any) {
     console.warn("Firestore updateDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    // Strict mode: never accept the write into volatile memory — fail loudly so
-    // the caller retries instead of assuming it was saved.
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
   }
 }
 
 async function deleteDoc(docRef: any) {
   if (useMemoryFallback) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
   try {
@@ -418,9 +362,6 @@ async function deleteDoc(docRef: any) {
     console.warn("Firestore deleteDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    // Strict mode: never accept the delete into volatile memory — fail loudly so
-    // the caller retries instead of assuming it was applied.
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
 }
@@ -428,7 +369,6 @@ async function deleteDoc(docRef: any) {
 async function addDoc(colRef: any, data: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleAddDocMemory(colRef, cleanedData);
   }
   try {
@@ -437,9 +377,6 @@ async function addDoc(colRef: any, data: any) {
     console.warn("Firestore addDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    // Strict mode: never accept the write into volatile memory — fail loudly so
-    // the caller retries instead of assuming it was saved.
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleAddDocMemory(colRef, cleanedData);
   }
 }
@@ -1592,28 +1529,6 @@ async function startServer() {
     next();
   }
   app.use(attachSession);
-
-  // ── Strict-persistence request guard ──────────────────────────────────────
-  // When Firestore is unavailable and STRICT_PERSISTENCE is on, reject every
-  // state-changing API request (POST/PUT/DELETE/PATCH — including /api/login and
-  // /api/verify-session, which are POSTs) with a clean, retryable 503 BEFORE the
-  // handler runs. This is the central place that guarantees:
-  //   • no write is silently accepted into volatile memory, and
-  //   • auth is never granted against demo/memory accounts during an outage.
-  // Authoritative reads are still served (from the demo-free memory store, i.e.
-  // empty rather than fabricated data) but tagged X-Data-Degraded so a client
-  // can surface a degraded-mode banner without any change here.
-  app.use((req, res, next) => {
-    if (!STRICT_PERSISTENCE || !useMemoryFallback) return next();
-    if (!req.path.startsWith("/api")) return next();
-    const method = req.method.toUpperCase();
-    const isWrite = method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH";
-    if (isWrite) {
-      return res.status(503).set("Retry-After", "30").json(SERVICE_UNAVAILABLE_BODY);
-    }
-    res.set("X-Data-Degraded", "true");
-    next();
-  });
 
   /** Rejects the request unless a valid session of any role is present. */
   function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
