@@ -35,6 +35,7 @@ import {
   verifyPassword,
   verifyPasswordWithMigration,
 } from "./src/lib/auth";
+import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import { 
   getFirestore, 
   initializeFirestore,
@@ -1790,14 +1791,14 @@ async function startServer() {
           s.assignedDriverId === driverId ||
           (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId))
         );
-        return res.json(filtered);
+        return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
       }
       if (req.session!.role === "client") {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
         const filtered = myClient ? list.filter(s => s.companyName === myClient.companyName) : [];
-        return res.json(filtered);
+        return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
       }
       // Admins see everything.
       res.json(list);
@@ -1975,7 +1976,7 @@ async function startServer() {
       }
       // Admins can view any shipment.
 
-      res.json(shipment);
+      res.json(buildShipmentViewForRole(shipment, req.session!));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to fetch shipment details" });
