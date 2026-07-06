@@ -972,13 +972,27 @@ export default function DriverApplication({
           for (const notif of list) {
             if (!knownNotificationIdsRef.current.has(notif.id)) {
               knownNotificationIdsRef.current.add(notif.id);
-              
+
+              // Chat notifications carry excludeUserId set to the sender's
+              // own session id (req.session.id at send time, i.e. this
+              // driver's own driver doc id). The backend already omits
+              // these from this driver's own GET /api/notifications
+              // response, but guard here too so this driver's own message
+              // never pops a toast for them.
+              const isOwnChatMessage =
+                notif.type === "chat" &&
+                !!notif.excludeUserId &&
+                notif.excludeUserId === loggedInDriverId;
+              if (isOwnChatMessage) {
+                continue;
+              }
+
               const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
               const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
-              
+
               // Trigger toast alert for message/doc_upload/status_update
               triggerToast(`🔔 ${title}: ${msg}`);
-              
+
               // Sound chime
               try {
                 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -990,7 +1004,7 @@ export default function DriverApplication({
                 gainNode.gain.setValueAtTime(0.04, audioCtx.currentTime);
                 oscillator.start();
                 oscillator.stop(audioCtx.currentTime + 0.15);
-                
+
                 setTimeout(() => {
                   const osc2 = audioCtx.createOscillator();
                   const gain2 = audioCtx.createGain();
