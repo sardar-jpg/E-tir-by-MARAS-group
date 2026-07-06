@@ -223,6 +223,10 @@ export interface AppNotification {
   type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration';
   timestamp: string;
   read: boolean;
+  // Session id of the user this notification should NOT be shown to (its
+  // own sender), e.g. so an admin doesn't get notified of their own chat
+  // message. Absent for notification types that don't need self-exclusion.
+  excludeUserId?: string;
 }
 
 export interface CostItem {
