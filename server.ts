@@ -3096,11 +3096,12 @@ async function startServer() {
             issuedAt: Date.now(),
             expiresAt: Date.now() + SESSION_TTL_MS,
           };
+          const { password: _dpw, ...safeDriver } = matchedDriver as any;
           return res.json({
             success: true,
             token: signSessionToken(sessionPayload),
             role: "driver",
-            driver: matchedDriver
+            driver: safeDriver
           });
         }
       }
@@ -3279,11 +3280,12 @@ async function startServer() {
           issuedAt: Date.now(),
           expiresAt: Date.now() + SESSION_TTL_MS,
         };
+        const { password: _fdpw, ...safeFoundDriver } = foundDriver as any;
         return res.json({
           success: true,
           token: signSessionToken(sessionPayload),
           role: "driver",
-          driver: foundDriver
+          driver: safeFoundDriver
         });
       }
 
@@ -3866,7 +3868,8 @@ async function startServer() {
         }
       }
 
-      res.json(updatedDriver);
+      const { password, ...safeDriver } = updatedDriver;
+      res.json(safeDriver);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update driver" });
