@@ -2651,12 +2651,66 @@ async function startServer() {
     }
   });
 
+  /**
+   * Resolves the authoritative chat sender identity from the verified
+   * session instead of trusting client-supplied sender/senderName — a
+   * caller could otherwise post a chat message claiming to be "admin" (or
+   * any other role) regardless of who they actually authenticated as.
+   */
+  async function resolveChatSenderIdentity(req: express.Request): Promise<{ sender: SessionRole; senderName: string }> {
+    const role = req.session!.role;
+
+    if (role === "admin") {
+      const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+      if (SUPER_ADMIN_EMAIL && req.session!.id === SUPER_ADMIN_EMAIL) {
+        return { sender: "admin", senderName: "MARAS Operations Office" };
+      }
+      try {
+        const adminDoc = await getDoc(doc(db, "admins", req.session!.id));
+        if (adminDoc.exists()) {
+          const adminData = adminDoc.data() as any;
+          const fallbackName = adminData.adminType === "operation" ? "MARAS Operations Admin" : "MARAS Accounts Admin";
+          return { sender: "admin", senderName: adminData.name || fallbackName };
+        }
+      } catch (err) {
+        console.warn("resolveChatSenderIdentity: failed to load admin record:", err);
+      }
+      return { sender: "admin", senderName: "MARAS Operations" };
+    }
+
+    if (role === "driver") {
+      try {
+        const driverDoc = await getDoc(doc(db, "drivers", req.session!.id));
+        if (driverDoc.exists()) {
+          const driverData = driverDoc.data() as Driver;
+          return { sender: "driver", senderName: driverData.name || "Driver" };
+        }
+      } catch (err) {
+        console.warn("resolveChatSenderIdentity: failed to load driver record:", err);
+      }
+      return { sender: "driver", senderName: "Driver" };
+    }
+
+    // client
+    try {
+      const clientDoc = await getDoc(doc(db, "clients", req.session!.id));
+      if (clientDoc.exists()) {
+        const clientData = clientDoc.data() as Client;
+        return { sender: "client", senderName: clientData.companyName || clientData.contactName || "Client" };
+      }
+    } catch (err) {
+      console.warn("resolveChatSenderIdentity: failed to load client record:", err);
+    }
+    return { sender: "client", senderName: "Client" };
+  }
+
   // 7. Post Chat Message & Handle Document Savings
   app.post("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
-      const { sender, senderName, type, text, fileUrl, fileName, fileCategory } = req.body;
+      const { type, text, fileUrl, fileName, fileCategory } = req.body;
+      const { sender, senderName } = await resolveChatSenderIdentity(req);
 
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);
