@@ -1324,11 +1324,14 @@ async function logActivity(shipmentId: string, shipmentNumber: string, actor: st
 }
 
 async function pushNotification(
-  shipmentId: string, 
-  shipmentNumber: string, 
+  shipmentId: string,
+  shipmentNumber: string,
   type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration',
   titleEn: string, titleTr: string, titleAr: string,
-  messageEn: string, messageTr: string, messageAr: string
+  messageEn: string, messageTr: string, messageAr: string,
+  // Session id to exclude from this notification's recipients, e.g. the
+  // chat sender so they don't get notified of their own message.
+  excludeUserId?: string
 ) {
   const newNotif: AppNotification = {
     id: `notif-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -1344,6 +1347,7 @@ async function pushNotification(
     timestamp: new Date().toISOString(),
     read: false
   };
+  if (excludeUserId) newNotif.excludeUserId = excludeUserId;
   try {
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
@@ -1386,6 +1390,8 @@ async function pushNotification(
         }
       }
     }
+
+    if (excludeUserId) userIds.delete(excludeUserId);
 
     const targetTokens = allTokenDocs
       .filter(t => userIds.has(t.userId))
@@ -2782,7 +2788,8 @@ async function startServer() {
           `رسالة من: ${senderName}`,
           text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
           text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا"
+          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
+          req.session!.id
         );
       }
 
@@ -3937,6 +3944,10 @@ async function startServer() {
       const snapshot = await getDocs(col);
       let list = snapshot.docs.map(doc => doc.data() as AppNotification);
       list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      // Never show a notification to the same user it was excluded for
+      // (e.g. a chat sender shouldn't be notified of their own message).
+      list = list.filter(n => n.excludeUserId !== req.session!.id);
 
       // Scope to the session's own shipments for drivers/clients — same
       // reasoning as /api/shipments above. Admins see everything.
