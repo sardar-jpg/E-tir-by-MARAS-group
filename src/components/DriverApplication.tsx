@@ -4784,8 +4784,8 @@ export default function DriverApplication({
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
                     <div>
-                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Mobile DocScan v3.1</h5>
-                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Dynamic Alignment Core</span>
+                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Document Scanner</h5>
+                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Align the document inside the frame</span>
                     </div>
                   </div>
                   <button 
@@ -4819,9 +4819,9 @@ export default function DriverApplication({
                         <div className="border border-slate-700/60 bg-slate-900/60 rounded-xl p-5.5 max-w-[240px] text-center space-y-3.5 shadow-2xl relative">
                           <Compass className="w-10 h-10 text-emerald-400 mx-auto animate-spin" style={{ animationDuration: "12s" }} />
                           <div className="space-y-1">
-                            <h6 className="font-extrabold text-slate-200 text-xs font-mono uppercase font-black">Alignment Calibration</h6>
+                            <h6 className="font-extrabold text-slate-200 text-xs font-mono uppercase font-black">Align the document inside the frame</h6>
                             <p className="text-[10px] text-slate-400 leading-normal">
-                              Align document flat in frame. Scanner automatically calibrates contrast and handles page layout warping.
+                              Place the document flat and make sure it fits within the frame.
                             </p>
                           </div>
                           {/* Live edge finder boxes */}
@@ -4847,21 +4847,18 @@ export default function DriverApplication({
                       {/* Continuous Edge confidence marker */}
                       <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 border border-emerald-400/25 text-[#10b981] rounded-full px-4 py-1.5 text-[9.5px] font-mono tracking-wider font-extrabold flex items-center gap-1.5 backdrop-blur-md">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-                        <span>DOCUMENT ALIGNED (98.3%)</span>
+                        <span>Camera ready</span>
                       </div>
                     </div>
 
                     {/* Viewfinder Controls */}
-                    <div className="z-20 flex justify-between items-center text-[10px] font-mono select-none">
-                      <span className="bg-slate-900/90 text-slate-300 px-3 py-1 rounded-full border border-slate-800">
-                        FPS: <strong className="text-emerald-400">30Hz</strong>
-                      </span>
+                    <div className="z-20 flex justify-end items-center text-[10px] font-mono select-none">
                       <button
                         type="button"
                         onClick={() => setFlashLight(!flashLight)}
                         className={`p-1.5 px-3 rounded-full flex items-center gap-1 cursor-pointer transition-all ${flashLight ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-slate-900 border border-slate-800 text-slate-300'}`}
                       >
-                        <span>🔦 FLASH: {flashLight ? "ON" : "OFF"}</span>
+                        <span>🔦 Flash</span>
                       </button>
                     </div>
 
@@ -4869,11 +4866,15 @@ export default function DriverApplication({
                       {/* Primary Trigger Actions bar */}
                       <div className="flex items-center justify-between gap-4 pt-1 select-none">
                         {/* Custom photo uploader label alias */}
-                        <label className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0">
+                        <label
+                          title="Upload a real file"
+                          aria-label="Upload a real file"
+                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0"
+                        >
                           <FileUp className="w-4 h-4" />
-                          <input 
-                            type="file" 
-                            accept="image/*" 
+                          <input
+                            type="file"
+                            accept="image/*"
                             onChange={(e) => {
                               const file = e.target.files?.[0];
                               if (file) {
@@ -4916,7 +4917,7 @@ export default function DriverApplication({
                     {/* Captured visual buffer */}
                     <div className="p-1 px-1.5 bg-slate-950 rounded-2xl border border-slate-800 shadow-inner flex flex-col items-center justify-center relative overflow-hidden min-h-[220px]">
                       <span className="absolute top-2.5 right-2.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-mono font-bold text-[8px] uppercase tracking-wider px-2 py-0.5 rounded">
-                        {scanFilter === "mono" ? "MONOCHROME FAX FILTER" : scanFilter === "grayscale" ? "GRAYSCALE INTENSE" : "ORIGINAL CHROMATIC"}
+                        {scanFilter === "mono" ? "Black & White" : scanFilter === "grayscale" ? "Grayscale" : "Original Color"}
                       </span>
                       {capturedImage && (
                         <img 
@@ -4939,12 +4940,12 @@ export default function DriverApplication({
                       
                       {/* Interactive Optimization Filter Bar */}
                       <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-wider font-mono">Contrast Laser Optimization</label>
+                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-wider font-mono">Photo Style</label>
                         <div className="grid grid-cols-3 gap-1.5">
                           {[
-                            { val: "color", label: "Color Photo", desc: "Original Raw Colors" },
-                            { val: "grayscale", label: "Grayscale", desc: "Clean Scan Copy" },
-                            { val: "mono", label: "B&W Mono", desc: "High Contrast Fax" }
+                            { val: "color", label: "Color Photo", desc: "Original colors" },
+                            { val: "grayscale", label: "Grayscale", desc: "Clean scan copy" },
+                            { val: "mono", label: "Black & White", desc: "High contrast" }
                           ].map(f => (
                             <button
                               key={f.val}
@@ -4965,7 +4966,7 @@ export default function DriverApplication({
 
                       {/* File Handle input */}
                       <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Payload Filename</label>
+                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">File Name</label>
                         <input 
                           type="text" 
                           placeholder="e.g. CUSTOMS_CLEARANCE_STAMP.png" 
@@ -5020,7 +5021,7 @@ export default function DriverApplication({
                         className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
                       >
                         <Send className="w-4 h-4 shrink-0 text-slate-950" />
-                        <span>Transmit to Dispatcher</span>
+                        <span>Send Document</span>
                       </button>
                     </div>
 
@@ -5034,9 +5035,9 @@ export default function DriverApplication({
                       <Compass className="w-7 h-7 text-emerald-400 animate-pulse" />
                     </div>
                     <div className="text-center space-y-2">
-                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Enabling Telemetry Sync</h5>
+                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Uploading Document</h5>
                       <p className="text-[10px] text-slate-400 leading-relaxed font-mono max-w-[240px] mx-auto text-center">
-                        Applying high-contrast monochrome calibration and routing encrypted PDF segment transmission to central dispatcher...
+                        Sending your document securely...
                       </p>
                     </div>
                     <div className="w-full max-w-[200px] h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800/80">
