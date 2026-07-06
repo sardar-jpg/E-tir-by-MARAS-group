@@ -2834,6 +2834,63 @@ async function startServer() {
     }
   });
 
+  // The share token itself (not the raw internal shipment id) is
+  // included so the public tracking page can prove legitimate access
+  // when calling other public-safe endpoints like subscribe-customer
+  // below — see that endpoint for how this token is checked.
+  //
+  // Shared by GET /api/share/:token and POST /api/share/:token/subscribe
+  // so neither route can accidentally leak the full internal shipment record.
+  const buildSecureShareView = (shipment: Shipment) => ({
+    shareToken: shipment.shareToken,
+    shipmentNumber: shipment.shipmentNumber,
+    status: shipment.status,
+    loadingCountry: shipment.loadingCountry,
+    loadingCity: shipment.loadingCity,
+    loadingAddress: shipment.loadingAddress,
+    loadingContactNumber: shipment.loadingContactNumber,
+    deliveryCountry: shipment.deliveryCountry,
+    deliveryCity: shipment.deliveryCity,
+    deliveryAddress: shipment.deliveryAddress,
+    deliveryContactNumber: shipment.deliveryContactNumber,
+    cargoDescription: shipment.cargoDescription,
+    cargoWeight: shipment.cargoWeight,
+    truckNumber: shipment.truckNumber,
+    timeline: shipment.timeline,
+    updatedAt: shipment.updatedAt,
+    assignedDriverName: shipment.assignedDriverName,
+
+    // Sea & Air precise properties
+    freightType: shipment.freightType || "land",
+    shippingLine: shipment.shippingLine || "",
+    vesselName: shipment.vesselName || "",
+    containerNumber: shipment.containerNumber || "",
+    bookingNumber: shipment.bookingNumber || "",
+    billOfLadingNumber: shipment.billOfLadingNumber || "",
+    portOfLoading: shipment.portOfLoading || "",
+    portOfDischarge: shipment.portOfDischarge || "",
+    finalDestination: shipment.finalDestination || "",
+    etd: shipment.etd || "",
+    eta: shipment.eta || "",
+    numberOfContainers: shipment.numberOfContainers || 0,
+    containerType: shipment.containerType || "",
+    airline: shipment.airline || "",
+    flightNumber: shipment.flightNumber || "",
+    airWaybillNumber: shipment.airWaybillNumber || "",
+    airportOfDeparture: shipment.airportOfDeparture || "",
+    airportOfArrival: shipment.airportOfArrival || "",
+    grossWeight: shipment.grossWeight || 0,
+    chargeableWeight: shipment.chargeableWeight || 0,
+    numberOfPackages: shipment.numberOfPackages || 0,
+
+    documents: shipment.shareIncludeDocuments
+      ? shipment.documents.filter(d => d.isSharedExternally && d.category !== "photo")
+      : [],
+    photos: shipment.shareIncludePhotos
+      ? shipment.documents.filter(d => d.isSharedExternally && d.category === "photo")
+      : []
+  });
+
   // 11. Public Shared Link lookups
   app.get("/api/share/:token", async (req, res) => {
     try {
@@ -2846,61 +2903,7 @@ async function startServer() {
         return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
       }
 
-      const secureView = {
-        // The share token itself (not the raw internal shipment id) is
-        // included so the public tracking page can prove legitimate access
-        // when calling other public-safe endpoints like subscribe-customer
-        // below — see that endpoint for how this token is checked.
-        shareToken: shipment.shareToken,
-        shipmentNumber: shipment.shipmentNumber,
-        status: shipment.status,
-        loadingCountry: shipment.loadingCountry,
-        loadingCity: shipment.loadingCity,
-        loadingAddress: shipment.loadingAddress,
-        loadingContactNumber: shipment.loadingContactNumber,
-        deliveryCountry: shipment.deliveryCountry,
-        deliveryCity: shipment.deliveryCity,
-        deliveryAddress: shipment.deliveryAddress,
-        deliveryContactNumber: shipment.deliveryContactNumber,
-        cargoDescription: shipment.cargoDescription,
-        cargoWeight: shipment.cargoWeight,
-        truckNumber: shipment.truckNumber,
-        timeline: shipment.timeline,
-        updatedAt: shipment.updatedAt,
-        assignedDriverName: shipment.assignedDriverName,
-        
-        // Sea & Air precise properties
-        freightType: shipment.freightType || "land",
-        shippingLine: shipment.shippingLine || "",
-        vesselName: shipment.vesselName || "",
-        containerNumber: shipment.containerNumber || "",
-        bookingNumber: shipment.bookingNumber || "",
-        billOfLadingNumber: shipment.billOfLadingNumber || "",
-        portOfLoading: shipment.portOfLoading || "",
-        portOfDischarge: shipment.portOfDischarge || "",
-        finalDestination: shipment.finalDestination || "",
-        etd: shipment.etd || "",
-        eta: shipment.eta || "",
-        numberOfContainers: shipment.numberOfContainers || 0,
-        containerType: shipment.containerType || "",
-        airline: shipment.airline || "",
-        flightNumber: shipment.flightNumber || "",
-        airWaybillNumber: shipment.airWaybillNumber || "",
-        airportOfDeparture: shipment.airportOfDeparture || "",
-        airportOfArrival: shipment.airportOfArrival || "",
-        grossWeight: shipment.grossWeight || 0,
-        chargeableWeight: shipment.chargeableWeight || 0,
-        numberOfPackages: shipment.numberOfPackages || 0,
-
-        documents: shipment.shareIncludeDocuments 
-          ? shipment.documents.filter(d => d.isSharedExternally && d.category !== "photo")
-          : [],
-        photos: shipment.shareIncludePhotos
-          ? shipment.documents.filter(d => d.isSharedExternally && d.category === "photo")
-          : []
-      };
-
-      res.json(secureView);
+      res.json(buildSecureShareView(shipment));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to look up shared tracking link" });
@@ -2950,11 +2953,12 @@ async function startServer() {
         channel: "email",
       });
 
-      await setDoc(doc(db, "shipments", shipment.id), { ...shipment, customerEmails, customerNotificationHistory });
+      const updatedShipment = { ...shipment, customerEmails, customerNotificationHistory };
+      await setDoc(doc(db, "shipments", shipment.id), updatedShipment);
 
       // Return the same reduced "secure view" shape the public page already
       // expects from /api/share/:token, not the full internal record.
-      res.json({ ...shipment, customerEmails, customerNotificationHistory });
+      res.json(buildSecureShareView(updatedShipment));
     } catch (err) {
       console.error("Public subscribe failed:", err);
       res.status(500).json({ error: "Failed to subscribe to updates." });
