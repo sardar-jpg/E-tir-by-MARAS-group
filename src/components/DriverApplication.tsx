@@ -14,12 +14,17 @@ import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { useIsMobile } from "../hooks/useIsMobile";
+import DriverBottomNav from "./driver/DriverBottomNav";
+import NotificationBell from "./driver/NotificationBell";
+import NotificationsPanel from "./driver/NotificationsPanel";
+import ShipmentCard from "./driver/ShipmentCard";
+import FileUploadModal from "./driver/FileUploadModal";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 import { 
-  Ship, MessageSquare, Truck, DollarSign, Bell, Send, CheckCircle2, 
-  X, Camera, FileUp, AlertTriangle, ChevronRight, CornerDownRight, Landmark, User,
+  Ship, MessageSquare, Truck, DollarSign, Send, CheckCircle2,
+  X, Camera, FileUp, AlertTriangle, CornerDownRight, Landmark, User,
   Edit2, Phone, Shield, Check, MapPin, Activity, Briefcase, Paperclip, Search, Languages,
-  Star, Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
+  Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
   Plus, Minus, Compass, Sun, Moon, Play, Lock
 } from 'lucide-react';
 
@@ -348,6 +353,12 @@ export default function DriverApplication({
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
 
+  // Notifications scoped to this driver's own shipments
+  const myNotifications = useMemo(() => notifications.filter(n =>
+    n.shipmentId && (shipments.some(s => s.id === n.shipmentId) || (activeShipment && activeShipment.id === n.shipmentId))
+  ), [notifications, shipments, activeShipment]);
+  const unreadNotificationCount = useMemo(() => myNotifications.filter(n => !n.read).length, [myNotifications]);
+
   // Calculate real percentage of total trip distance based on shipment start and end coordinates
   const calculateDistancePercentage = (): number => {
     if (!activeShipment) return 0;
@@ -668,73 +679,7 @@ export default function DriverApplication({
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
 
-  // Call Simulator States and Timers
-  const [callState, setCallState] = useState<'idle' | 'calling' | 'connected'>('idle');
-  const [callDuration, setCallDuration] = useState<number>(0);
   const [shipmentsFilter, setShipmentsFilter] = useState<'active' | 'completed'>('active');
-
-  useEffect(() => {
-    let interval: any;
-    if (callState === 'connected') {
-      interval = setInterval(() => {
-        setCallDuration(prev => prev + 1);
-      }, 1000);
-    } else {
-      setCallDuration(0);
-    }
-    return () => clearInterval(interval);
-  }, [callState]);
-
-  const handleStartCall = () => {
-    if (callState !== 'idle') return;
-    setCallState('calling');
-    triggerToast(lang === 'tr' ? "☎️ Güvenli sevk telsiz araması başlatılıyor..." : (lang === 'ar' ? "☎️ جاري الاتصال الهاتفي الآمن..." : "☎️ Placing encrypted VoIP radio call to Logistics HQ..."));
-    
-    // Play calling ring tones using Web Audio API
-    try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.frequency.value = 440;
-      gain.gain.setValueAtTime(0.01, audioCtx.currentTime);
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.35);
-    } catch (_) {}
-
-    setTimeout(() => {
-      setCallState('connected');
-      triggerToast(lang === 'tr' ? "🎙️ Sevk sorumlusuna bağlanıldı." : (lang === 'ar' ? "🎙️ تم الاتصال بمسؤول المتابعة." : "🎙️ Connected to Logistics Command."));
-      try {
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.frequency.value = 880;
-        gain.gain.setValueAtTime(0.02, audioCtx.currentTime);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.15);
-      } catch (_) {}
-    }, 2200);
-  };
-
-  const handleEndCall = () => {
-    setCallState('idle');
-    triggerToast(lang === 'tr' ? "📞 Sevk telsiz kanalı kapatıldı." : (lang === 'ar' ? "📞 تم إغلاق خط الاتصال." : "📞 Dispatch radio channel closed."));
-    try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.frequency.value = 220;
-      gain.gain.setValueAtTime(0.02, audioCtx.currentTime);
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.3);
-    } catch (_) {}
-  };
 
   // Input states
   const [newMessageText, setNewMessageText] = useState("");
@@ -1519,27 +1464,22 @@ export default function DriverApplication({
     setIsTranslatingId(msgId);
     setTimeout(() => {
       const cleanText = originalText.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
-      let translation = "";
 
-      // Look up in dictionary
+      // Only known dispatch phrases have a real translation. We do not
+      // fabricate a translation for arbitrary free text.
       const dictMatch = CHAT_TRANSLATIONS_DICT[cleanText];
       if (dictMatch && dictMatch[lang]) {
-        translation = dictMatch[lang];
+        setTranslatedMessages(prev => ({
+          ...prev,
+          [msgId]: dictMatch[lang]
+        }));
       } else {
-        // Dynamic fallback logic
-        if (lang === "tr") {
-          translation = `[TR Tercüme]: "${originalText}"`;
-        } else if (lang === "ar") {
-          translation = `[ترجمة AR]: "${originalText}"`;
-        } else {
-          translation = `[EN Translation]: "${originalText}"`;
-        }
+        triggerToast(
+          lang === 'tr'
+            ? "Bu mesaj için çeviri mevcut değil."
+            : (lang === 'ar' ? "لا تتوفر ترجمة لهذه الرسالة." : "Translation not available for this message.")
+        );
       }
-
-      setTranslatedMessages(prev => ({
-        ...prev,
-        [msgId]: translation
-      }));
       setIsTranslatingId(null);
     }, 450);
   };
@@ -2024,80 +1964,6 @@ export default function DriverApplication({
             }
           >
             
-            {/* CALL OVERLAY FOR SMARTPHONE INTERFACE */}
-            {callState !== 'idle' && (
-              <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-lg z-50 flex flex-col justify-between p-6 text-center select-none animate-fade-in" dir="ltr">
-                <div className="pt-10 space-y-2 flex flex-col items-center">
-                  <span className="bg-orange-500/10 text-orange-400 font-mono text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border border-orange-500/20">
-                    Encrypted Sat-Com Audio
-                  </span>
-                  <h3 className="font-extrabold text-white text-lg tracking-tight pt-2">HQ Operations Helpline</h3>
-                  <p className="text-[10px] text-slate-400 font-mono font-medium lowercase">Duty dispatcher dispatcher-hq-node-9</p>
-                </div>
-
-                {/* Pulsing visual indicator */}
-                <div className="flex flex-col items-center justify-center my-6 space-y-4">
-                  <div className="relative">
-                    <div className={`absolute -inset-4 bg-orange-500/10 rounded-full blur-xl transition-all duration-1000 ${callState === 'connected' ? 'scale-125 opacity-100 animate-pulse' : 'scale-75 opacity-20'}`} />
-                    <div className="w-24 h-24 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-white relative z-10 mx-auto">
-                      <div className={`w-20 h-20 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-black text-xl border-4 ${callState === 'connected' ? 'border-emerald-500 animate-pulse' : 'border-slate-800'}`}>
-                        HQ
-                      </div>
-                    </div>
-                    {callState === 'connected' && (
-                      <span className="absolute bottom-1 right-1 w-5 h-5 bg-emerald-500 rounded-full border-4 border-slate-950 flex items-center justify-center animate-ping" />
-                    )}
-                  </div>
-
-                  <div className="space-y-1">
-                    <p className={`font-mono font-bold text-xs ${callState === 'connected' ? 'text-emerald-400' : 'text-orange-400 animate-pulse'}`}>
-                      {callState === 'calling' ? 'DIALING SECURE SAT-LINK...' : 'CONNECTED (VOIP)'}
-                    </p>
-                    {callState === 'connected' && (
-                      <p className="font-mono text-xs font-black text-white/90">
-                        {Math.floor(callDuration / 60).toString().padStart(2, '0')}:{ (callDuration % 60).toString().padStart(2, '0') }
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Call stats / Voice waves */}
-                {callState === 'connected' ? (
-                  <div className="bg-slate-900/60 p-3 rounded-2xl border border-slate-800/45 text-[10px] text-slate-400 max-w-xs w-full mx-auto space-y-1 text-left font-mono">
-                    <div className="flex justify-between font-bold">
-                      <span className="text-slate-500">SIGNAL LATENCY:</span>
-                      <span className="text-emerald-400">12ms (OPTIMAL)</span>
-                    </div>
-                    <div className="flex justify-between font-bold">
-                      <span className="text-slate-500">SAT ENCRYPTION:</span>
-                      <span className="text-orange-400">AES-GCM-256</span>
-                    </div>
-                    <div className="flex justify-between font-bold">
-                      <span className="text-slate-500">BANDWIDTH:</span>
-                      <span className="text-white">Opus High-Def</span>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-[10px] text-slate-500 max-w-xs mx-auto italic leading-relaxed">
-                    Connecting to closest logistics relay node. If signal is lost, coordinate cache remains stored locally.
-                  </p>
-                )}
-
-                {/* Hang Up Action */}
-                <div className="pb-8 flex flex-col items-center">
-                  <button
-                    onClick={handleEndCall}
-                    className="w-14 h-14 bg-red-600 hover:bg-red-700 hover:scale-105 active:scale-95 text-white rounded-full flex items-center justify-center shadow-[0_4px_20px_rgba(220,38,38,0.4)] transition-all cursor-pointer border-0"
-                    title="End Radio Link"
-                    aria-label="End Radio Link"
-                  >
-                    <X className="w-5 h-5 font-black text-white" />
-                  </button>
-                  <span className="text-[9px] font-mono font-black text-slate-500 block uppercase tracking-widest mt-2">End helpline radio</span>
-                </div>
-              </div>
-            )}
-
             {/* Header Mobile Brand */}
             <div className="px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-900 flex items-center justify-between z-20 relative shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
               <div className="flex items-center gap-2">
@@ -2108,16 +1974,11 @@ export default function DriverApplication({
               </div>
               
               <div className="flex items-center gap-1.5">
-                <button 
-                  type="button"
+                <NotificationBell
+                  unreadCount={unreadNotificationCount}
+                  label={t('notifications')}
                   onClick={() => setActiveTab('notifications')}
-                  className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all relative cursor-pointer"
-                >
-                  <Bell className="w-4 h-4" />
-                  {notifications.some(n => !n.read) && (
-                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
-                  )}
-                </button>
+                />
               </div>
             </div>
 
@@ -2133,73 +1994,29 @@ export default function DriverApplication({
             <div className="flex-1 overflow-y-auto bg-slate-950 p-4 relative text-sm">
               
               {/* NOTIFICATION FEED POPUP PANEL */}
-              {activeTab === 'notifications' && (() => {
-                const myNotifications = notifications.filter(n => 
-                  n.shipmentId && (shipments.some(s => s.id === n.shipmentId) || (activeShipment && activeShipment.id === n.shipmentId))
-                );
-                return (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-bold text-slate-200 text-xs uppercase tracking-wide">{t('notifications')}</h3>
-                      <button onClick={() => setActiveTab('shipments')} className="text-[10px] text-slate-500 hover:text-white font-bold bg-slate-900 px-2 py-0.5 rounded">Back</button>
-                    </div>
-                    <div className="space-y-2">
-                      {myNotifications.map((n) => (
-                        <div key={n.id} className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="bg-orange-950 text-orange-400 text-[9px] font-bold px-1.5 rounded font-mono">#{n.shipmentNumber}</span>
-                            <span className="text-[9px] text-slate-500">{new Date(n.timestamp).toLocaleDateString()}</span>
-                          </div>
-                          <p className="font-bold text-slate-100 text-xs">
-                            {lang === 'en' ? n.titleEn : (lang === 'tr' ? n.titleTr : n.titleAr)}
-                          </p>
-                          <p className="text-[11px] text-slate-400 leading-tight">
-                            {lang === 'en' ? n.messageEn : (lang === 'tr' ? n.messageTr : n.messageAr)}
-                          </p>
-                        </div>
-                      ))}
-                      {myNotifications.length === 0 && (
-                        <p className="text-xs text-slate-500 italic text-center py-10">No alerts logged yet.</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
+              {activeTab === 'notifications' && (
+                <NotificationsPanel
+                  notifications={myNotifications}
+                  lang={lang}
+                  title={t('notifications')}
+                  onBack={() => setActiveTab('shipments')}
+                />
+              )}
 
               {/* SHIPMENTS LIST VIEW */}
               {activeTab === 'shipments' && !activeShipment && (
                 <div className="space-y-4.5 animate-fade-in">
                   
-                  {/* Stunning Driver stats HUD banner */}
-                  <div className="relative overflow-hidden bg-gradient-to-r from-orange-600/95 via-orange-500/90 to-amber-500/95 rounded-3xl p-4 shadow-[0_12px_24px_rgba(249,115,22,0.18)] border border-orange-400/20 text-white space-y-3 shrink-0 light-preserve">
+                  {/* Driver identity banner */}
+                  <div className="relative overflow-hidden bg-gradient-to-r from-orange-600/95 via-orange-500/90 to-amber-500/95 rounded-3xl p-4 shadow-[0_12px_24px_rgba(249,115,22,0.18)] border border-orange-400/20 text-white shrink-0 light-preserve">
                     <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full blur-2xl -mr-6 -mt-6" />
-                    <div className="flex items-center justify-between relative z-10">
-                      <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center text-[13px] font-black tracking-tighter">
-                          ★
-                        </div>
-                        <div>
-                          <h4 className="text-xs font-black tracking-tight leading-none uppercase">{getDriverName() ? getDriverName().split(" ")[0] : "Driver"}</h4>
-                          <span className="text-[9px] text-orange-100/90 font-mono tracking-tight">{getDriverTruck() || "TRUCK"}</span>
-                        </div>
-                      </div>
-                      <span className="bg-white/15 px-2 py-0.5 rounded-full font-mono font-black text-[8px] uppercase tracking-wider text-orange-50 border border-white/10">
-                        Elite Pilot
-                      </span>
-                    </div>
-                    
-                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-white/10 text-center relative z-10 text-white">
-                      <div>
-                        <span className="text-[8px] text-orange-100/75 block uppercase font-mono tracking-widest leading-none">Efficiency</span>
-                        <strong className="text-xs font-black tracking-tight">98.4%</strong>
-                      </div>
-                      <div className="border-x border-white/10">
-                        <span className="text-[8px] text-orange-100/75 block uppercase font-mono tracking-widest leading-none">Streak</span>
-                        <strong className="text-xs font-black tracking-tight">12 Days</strong>
+                    <div className="flex items-center gap-2 relative z-10">
+                      <div className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center text-[13px] font-black tracking-tighter">
+                        <Truck className="w-4 h-4" />
                       </div>
                       <div>
-                        <span className="text-[8px] text-orange-100/75 block uppercase font-mono tracking-widest leading-none">Distance</span>
-                        <strong className="text-xs font-black tracking-tight">3,124 km</strong>
+                        <h4 className="text-xs font-black tracking-tight leading-none uppercase">{getDriverName() ? getDriverName().split(" ")[0] : "Driver"}</h4>
+                        <span className="text-[9px] text-orange-100/90 font-mono tracking-tight">{getDriverTruck() || "TRUCK"}</span>
                       </div>
                     </div>
                   </div>
@@ -2247,91 +2064,17 @@ export default function DriverApplication({
                         if (shipmentsFilter === 'completed') return isFinished;
                         return true;
                       })
-                      .map((s) => {
-                      const isAssigned = s.status === 'Assigned';
-                      const isTransit = s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance';
-                      const isDelivered = s.status === 'Delivered' || s.status === 'Arrived';
-                      
-                      return (
-                        <div 
-                          key={s.id} 
+                      .map((s) => (
+                        <ShipmentCard
+                          key={s.id}
+                          shipment={s}
+                          driverId={selectedDriverId}
                           onClick={() => {
                             setActiveShipment(s);
                             setSelectedStatusVal(s.status);
                           }}
-                          className="group relative bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800/80 hover:border-orange-500/40 rounded-[22px] p-4 transition-all duration-300 cursor-pointer shadow-[0_4px_25px_rgba(0,0,0,0.3)] space-y-3.5 overflow-hidden active:scale-[0.99]"
-                        >
-                          {/* Interactive glow overlay */}
-                          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-orange-500/5 to-transparent rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                          
-                          <div className="flex items-center justify-between relative z-10">
-                            <div className="flex items-center gap-1.5">
-                              <span className="bg-slate-950 text-slate-200 font-mono font-bold px-2 py-0.5 rounded text-[10px] border border-slate-800">
-                                #{s.shipmentNumber}
-                              </span>
-                            </div>
-                            
-                            <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider font-mono border ${
-                              isAssigned ? 'bg-amber-500/10 text-amber-500 border-amber-500/20 animate-pulse' :
-                              isTransit ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' :
-                              isDelivered ? 'bg-teal-500/10 text-teal-400 border-teal-500/20' :
-                              'bg-blue-500/10 text-blue-400 border-blue-500/20'
-                            }`}>
-                              {s.status}
-                            </span>
-                          </div>
-
-                          {/* Interactive route line design */}
-                          <div className="space-y-2.5 relative z-10 bg-slate-950/40 p-3 rounded-xl border border-slate-900/40">
-                            <p className="font-bold text-xs text-slate-100 truncate">{s.cargoDescription}</p>
-                            
-                            {/* Route tracking line */}
-                            <div className="flex items-stretch justify-between gap-1 text-[11px] relative pt-1">
-                              {/* Technical dashed path line */}
-                              <div className="absolute top-3 left-[15%] right-[15%] h-px border-t border-dashed border-slate-800" />
-                              
-                              <div className="flex flex-col text-left max-w-[45%]">
-                                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono leading-none mb-1">Loading Depot</span>
-                                <strong className="text-slate-200 text-xs truncate">{s.loadingCity}</strong>
-                              </div>
-
-                              <div className="flex items-center self-center justify-center bg-slate-900 border border-slate-800 w-5 h-5 rounded-full shrink-0 z-10 group-hover:text-orange-400 group-hover:border-orange-500/30 transition-colors">
-                                <ChevronRight className="w-3 h-3 text-slate-500 group-hover:text-orange-400" />
-                              </div>
-
-                              <div className="flex flex-col text-right max-w-[45%]">
-                                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono leading-none mb-1">Delivery Point</span>
-                                <strong className="text-slate-200 text-xs truncate">{s.deliveryCity}</strong>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 relative z-10 text-xs">
-                            <div className="flex flex-col">
-                              <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest font-mono">Agreed Payout</span>
-                              <span className="font-extrabold text-orange-500 font-mono text-sm mt-0.5">
-                                {(() => {
-                                  if (s.assignedDriverId === selectedDriverId) {
-                                    return (s.agreedAmount ?? 0).toLocaleString();
-                                  }
-                                  const ad = s.additionalDrivers?.find((d: any) => d.driverId === selectedDriverId);
-                                  if (ad && ad.agreedAmount !== undefined) {
-                                    return ad.agreedAmount.toLocaleString();
-                                  }
-                                  return (s.agreedAmount ?? 0).toLocaleString();
-                                })()}{' '}
-                                <span className="text-[10px]">{s.currency}</span>
-                              </span>
-                            </div>
-                            
-                            <span className="text-[10px] font-bold text-slate-400 group-hover:text-[#f97316] flex items-center gap-1 transition-all">
-                              <span>Open Job</span>
-                              <ChevronRight className="w-3.5 h-3.5 transform group-hover:translate-x-0.5 transition-transform" />
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                        />
+                      ))}
 
                     {shipments.length === 0 && (
                       <div className="py-20 text-center space-y-3 bg-slate-900/40 rounded-2.5xl p-6 border border-slate-800/80">
@@ -2351,25 +2094,15 @@ export default function DriverApplication({
             {/* EXPANDED SHIPMENT DETAIL & CHAT / STATUS TAB PANEL */}
             {activeTab === 'shipments' && activeShipment && (
               <div className="space-y-4 pb-20">
-                {/* Back Link & Direct Call Hotline */}
-                <div className="flex items-center justify-between select-none">
-                  <button 
+                {/* Back Link */}
+                <div className="flex items-center select-none">
+                  <button
                     onClick={() => setActiveShipment(null)}
                     className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-white transition-all bg-slate-900/40 hover:bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full cursor-pointer"
                   >
                     {lang === 'en' ? '← Back to Jobs' : lang === 'tr' ? '← İşlere Geri Dön' : '← العودة إلى المهام'}
                   </button>
-                  <button 
-                    type="button"
-                    onClick={handleStartCall}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-orange-400 hover:text-white transition-all bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/35 px-3.5 py-1.5 rounded-full cursor-pointer shadow-[0_2px_10px_rgba(249,115,22,0.15)] active:scale-95 duration-250"
-                  >
-                    <Phone className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-                    <span>{lang === 'tr' ? 'Sorumluyu Ara' : (lang === 'ar' ? 'اتصال بالمسؤول' : 'Call HQ Dispatch')}</span>
-                  </button>
                 </div>
-
-
 
                 {/* ACCESSIBILITY-FIRST DRIVER QUICK ACTIONS COCKPIT GRID */}
                 {!isShipmentFinished && (() => {
@@ -3077,84 +2810,84 @@ export default function DriverApplication({
                   </div>
                 )}
 
-                {/* DRIVER ASSIST AUTOMATIC Predictive ETA & TRAFFIC PATTERNS PANEL */}
+                {/* TRIP ETA ESTIMATE PANEL (distance + driver-selected traffic condition) */}
                 {!isShipmentFinished && (() => {
                   const assistT = {
                     en: {
-                      title: "Driver Assist Core",
-                      subtitle: "Adaptive traffic & predictive ETA autopilot",
-                      modeAuto: "Auto-Predictor Live",
-                      modeManual: "Autopilot Paused",
-                      trafficScenario: "Selected Road Scenario",
+                      title: "Trip Estimate",
+                      subtitle: "Estimated arrival based on the selected road condition",
+                      modeAuto: "Estimate Shown",
+                      modeManual: "Estimate Hidden",
+                      trafficScenario: "Road Condition",
                       remDistance: "Remaining Dist.",
                       estSpeed: "Estimated Speed",
                       extraDelay: "Scheduled Delays",
-                      etaArrival: "Predicted Arrival Time",
-                      calculating: "Dynamic calculations live...",
+                      etaArrival: "Estimated Arrival Time",
+                      calculating: "Based on your selected road condition.",
                       optimal: "Optimal Flow",
                       moderate: "Normal Peak",
                       congested: "Heavy Traffic",
                       border: "Custom Backlog",
                       statusText: "Traffic conditions optimized",
                       enableHint: "Toggle off to enter manual routing planning.",
-                      disabledHint: "Adaptive driver assist is currently paused. Tap above to resume dynamic ETA prediction."
+                      disabledHint: "Trip estimate is hidden. Tap above to show the estimated arrival time."
                     },
                     tr: {
-                      title: "Sürücü Asistanı Paneli",
-                      subtitle: "Yapay zeka uyumlu trafik ve ETA hesaplama",
-                      modeAuto: "Otomatik Tahminleyici Aktif",
-                      modeManual: "Yapay Zeka Duraklatıldı",
-                      trafficScenario: "Yol ve Trafik Durumu Simülasyonu",
+                      title: "Sefer Tahmini",
+                      subtitle: "Seçilen yol durumuna göre tahmini varış süresi",
+                      modeAuto: "Tahmin Gösteriliyor",
+                      modeManual: "Tahmin Gizli",
+                      trafficScenario: "Yol Durumu",
                       remDistance: "Kalan Mesafe",
                       estSpeed: "Öngörülen Hız",
                       extraDelay: "Gümrük & Kontrol Gecikmesi",
                       etaArrival: "Tahmini Varış Süresi",
-                      calculating: "Canlı güncellenen veriler...",
+                      calculating: "Seçtiğiniz yol durumuna göre hesaplanmıştır.",
                       optimal: "Akıcı Yol",
                       moderate: "Olağan Akış",
                       congested: "Yoğun Trafik",
                       border: "Sınır Yoğunluğu",
                       statusText: "Trafik koşulları optimize edildi",
                       enableHint: "Manuel planlamaya geçmek için devredışı bırakın.",
-                      disabledHint: "Uyumlu asistan geçici olarak durduruldu. Canlı tahmini başlatmak için yukarı dokunun."
+                      disabledHint: "Sefer tahmini gizlendi. Tahmini varış süresini görmek için yukarı dokunun."
                     },
                     ar: {
-                      title: "مساعد السائق الذكي",
-                      subtitle: "حساب الوقت المقدر والازدحام التلقائي",
-                      modeAuto: "توقع تلقائي نشط",
-                      modeManual: "مساعد السائق معطل",
-                      trafficScenario: "محاكاة حالة المرور المحددة",
+                      title: "تقدير الرحلة",
+                      subtitle: "وقت الوصول المقدر بناءً على حالة الطريق المحددة",
+                      modeAuto: "التقدير معروض",
+                      modeManual: "التقدير مخفي",
+                      trafficScenario: "حالة الطريق",
                       remDistance: "المسافة المتبقية",
                       estSpeed: "السرعة المتوقعة",
                       extraDelay: "تأخيرات التفتيش والجمارك",
-                      etaArrival: "وقت الوصول المتوقع",
-                      calculating: "تحديث ذكي مستمر...",
+                      etaArrival: "وقت الوصول المقدر",
+                      calculating: "بناءً على حالة الطريق التي اخترتها.",
                       optimal: "طريق سريع",
                       moderate: "تدفق معتاد",
                       congested: "ازدحام شديد",
                       border: "طابور الحدود",
                       statusText: "تم تحسين حسابات القيادة",
                       enableHint: "قم بالإيقاف للعودة للتخطيط اليدوي.",
-                      disabledHint: "مساعد السائق معطل حاليًا. انقر أعلاه لاستئناف توقع وقت الوصول التلقائي."
+                      disabledHint: "تقدير الرحلة مخفي حاليًا. انقر أعلاه لعرض وقت الوصول المقدر."
                     }
                   }[lang as 'en' | 'tr' | 'ar'] || {
-                    title: "Driver Assist Core",
-                    subtitle: "Adaptive traffic & predictive ETA autopilot",
-                    modeAuto: "Auto-Predictor Live",
-                    modeManual: "Autopilot Paused",
-                    trafficScenario: "Selected Road Scenario",
+                    title: "Trip Estimate",
+                    subtitle: "Estimated arrival based on the selected road condition",
+                    modeAuto: "Estimate Shown",
+                    modeManual: "Estimate Hidden",
+                    trafficScenario: "Road Condition",
                     remDistance: "Remaining Dist.",
                     estSpeed: "Estimated Speed",
                     extraDelay: "Scheduled Delays",
-                    etaArrival: "Predicted Arrival Time",
-                    calculating: "Dynamic calculations live...",
+                    etaArrival: "Estimated Arrival Time",
+                    calculating: "Based on your selected road condition.",
                     optimal: "Optimal Flow",
                     moderate: "Normal Peak",
                     congested: "Heavy Traffic",
                     border: "Custom Backlog",
                     statusText: "Traffic conditions optimized",
                     enableHint: "Toggle off to enter manual routing planning.",
-                    disabledHint: "Adaptive driver assist is currently paused. Tap above to resume dynamic ETA prediction."
+                    disabledHint: "Trip estimate is hidden. Tap above to show the estimated arrival time."
                   };
 
                   return (
@@ -3183,7 +2916,7 @@ export default function DriverApplication({
                           onClick={() => {
                             const nextState = !assistActive;
                             setAssistActive(nextState);
-                            triggerToast(nextState ? "⚡ Driver Assist predictor activated!" : "⚠️ Driver Assist paused. Manual calculations set.");
+                            triggerToast(nextState ? "Trip estimate shown." : "Trip estimate hidden.");
                           }}
                           className={`px-3 py-1.5 rounded-full border text-[9px] font-black uppercase tracking-wider transition-all duration-300 inline-flex items-center gap-1.5 cursor-pointer ${
                             assistActive 
@@ -3215,7 +2948,7 @@ export default function DriverApplication({
                                   type="button"
                                   onClick={() => {
                                     setTrafficPattern(item.key as any);
-                                    triggerToast(`Driver Assist: Traffic pattern adjusted to ${item.key.toUpperCase()}`);
+                                    triggerToast(`Road condition set to ${item.key.toUpperCase()}`);
                                   }}
                                   className={`py-1 text-[8px] font-bold rounded-lg uppercase tracking-wider transition-all duration-200 cursor-pointer text-center select-none border border-transparent box-border ${
                                     trafficPattern === item.key 
@@ -4143,8 +3876,6 @@ export default function DriverApplication({
                       statusActive: "Active & Online",
                       truckId: "Truck ID",
                       typeId: "Truck Type",
-                      ratingLabel: "Safety & Performance",
-                      ratingVal: "4.98 Excellent Rating",
                       pingRateLabel: "GPS Sync Frequency",
                       pingRateSub: "Controls coordinate updates to dispatcher map",
                       pingHigh: "High Accuracy (15s)",
@@ -4169,8 +3900,6 @@ export default function DriverApplication({
                       statusActive: "Aktif ve Çevrimiçi",
                       truckId: "Araç Plaka",
                       typeId: "Araç Tipi",
-                      ratingLabel: "Güvenlik ve Performans",
-                      ratingVal: "4.98 Mükemmel Sürücü",
                       pingRateLabel: "GPS Konum Sıklığı",
                       pingRateSub: "Sevk sorumlusu haritasına konum yükleme süresi",
                       pingHigh: "Yüksek Hassasiyet (15sn)",
@@ -4195,8 +3924,6 @@ export default function DriverApplication({
                       statusActive: "نشط ومتصل بالإنترنت",
                       truckId: "رقم الشاحنة",
                       typeId: "نوع الشاحنة",
-                      ratingLabel: "الأمان والأداء",
-                      ratingVal: "٤.٩٨ تقييم ممتاز",
                       pingRateLabel: "تحديث تتبع الموقع (GPS)",
                       pingRateSub: "التحكم في سرعة مزامنة إحداثيات الموقع للمرسل",
                       pingHigh: "دقة عالية (١٥ ثانية)",
@@ -4259,14 +3986,6 @@ export default function DriverApplication({
                             <span className="text-slate-700 font-sans">•</span>
                             <span className="uppercase text-[8.5px] font-semibold text-slate-500">{profileTruckType || dr?.truckType || "reefer"}</span>
                           </p>
-                          <div className="flex items-center gap-1.5 pt-0.5">
-                            <div className="flex gap-0.5">
-                              {[1, 2, 3, 4, 5].map((s) => (
-                                <Star key={s} className="w-2.5 h-2.5 text-amber-500 fill-amber-500" />
-                              ))}
-                            </div>
-                            <span className="text-[9.5px] font-extrabold text-amber-500 font-mono tracking-tight">{menuT.ratingVal}</span>
-                          </div>
                         </div>
                       </div>
 
@@ -4667,18 +4386,6 @@ export default function DriverApplication({
                         <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-600'}`} />
                       </button>
                     </div>
-
-                    {/* Storage Diagnostics clear DB button */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerToast("Local cache cleared successfully.");
-                      }}
-                      className="w-full py-2 bg-slate-950 hover:bg-slate-900 text-slate-400 hover:text-white font-mono uppercase font-bold text-[9px] tracking-wider border border-slate-800 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 text-slate-500" />
-                      <span>Clear Local Cache</span>
-                    </button>
                   </div>
                 </div>
                 </div> {/* close hidden wrapper */}
@@ -4687,93 +4394,23 @@ export default function DriverApplication({
 
             {/* Custom simulated file uploads modal overlay inside mobile frame */}
             {fileSimOpen && (
-              <div className="absolute inset-0 bg-slate-950/90 z-50 flex items-center justify-center p-5 select-none animate-fade-in">
-                <div className="bg-slate-900 p-5.5 border border-slate-800/80 rounded-3xl w-full max-w-[320px] space-y-4 shadow-[0_15px_45px_rgba(0,0,0,0.6)] text-xs">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-                    <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Payload Transmitter</h5>
-                    <button onClick={() => setFileSimOpen(false)} className="text-slate-500 hover:text-white transition-colors cursor-pointer border-0 bg-transparent p-1"><X className="w-4 h-4" /></button>
-                  </div>
-
-                  <div className="space-y-3.5">
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Upload Dispatch Photo / PDF</label>
-                      <input 
-                        type="file" 
-                        accept="image/*,application/pdf,.doc,.docx"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            setSelectedFile(file);
-                            setSimFileName(file.name);
-                            if (file.type.startsWith("image/")) {
-                              setSimFileCategory("photo");
-                            } else if (file.name.toLowerCase().includes("cmr")) {
-                              setSimFileCategory("cmr");
-                            } else if (file.name.toLowerCase().includes("invoice")) {
-                              setSimFileCategory("invoice");
-                            } else if (file.name.toLowerCase().includes("packing")) {
-                              setSimFileCategory("packing_list");
-                            } else if (file.name.toLowerCase().includes("customs")) {
-                              setSimFileCategory("customs");
-                            } else if (file.name.toLowerCase().includes("delivery") || file.name.toLowerCase().includes("pod")) {
-                              setSimFileCategory("delivery_proof");
-                            }
-                            
-                            const reader = new FileReader();
-                            reader.onload = (evt) => {
-                              const b64 = evt.target?.result as string;
-                              setSimFileUrl(b64);
-                            };
-                            reader.readAsDataURL(file);
-                          }
-                        }}
-                        className="w-full p-2 bg-slate-950 border border-slate-800 text-slate-100 rounded-xl text-xs font-mono file:bg-slate-900 file:border-0 file:text-[9px] file:text-slate-300 file:px-2 file:py-1 file:rounded-md file:mr-2 file:cursor-pointer"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Payload Handle Identifier</label>
-                      <input 
-                        type="text" 
-                        placeholder="e.g. CMR_DOC_BORDER_GATE_A.pdf" 
-                        value={simFileName}
-                        onChange={(e) => setSimFileName(e.target.value)}
-                        className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl font-mono text-xs focus:border-[#f97316] outline-none transition-all"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Payload Category Code</label>
-                      <select
-                        value={simFileCategory}
-                        onChange={(e) => setSimFileCategory(e.target.value as DocumentCategory)}
-                        className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
-                      >
-                        <option value="cmr" className="bg-slate-950 text-white font-bold">CMR Document (Shipment Protocol)</option>
-                        <option value="invoice" className="bg-slate-950 text-white font-bold">Invoice Receipt</option>
-                        <option value="packing_list" className="bg-slate-950 text-white font-bold">Packing Sheet</option>
-                        <option value="customs" className="bg-slate-950 text-white font-bold">Customs Clearance Receipt</option>
-                        <option value="delivery_proof" className="bg-slate-950 text-white font-bold">Delivery Voucher (POD)</option>
-                        <option value="photo" className="bg-slate-950 text-white font-bold">Cargo Live Photo</option>
-                        <option value="other" className="bg-slate-950 text-white font-bold">Other PDF / Doc File</option>
-                      </select>
-                    </div>
-
-                    <button 
-                      onClick={handleSimulateUpload}
-                      disabled={!simFileName.trim() || isUploading}
-                      className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 disabled:opacity-40 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-95 border-0 shadow-[0_4px_15px_rgba(249,115,22,0.3)] mt-2"
-                    >
-                      {isUploading ? (
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      ) : (
-                        <Camera className="w-4 h-4 shrink-0" />
-                      )}
-                      <span>{isUploading ? "Uploading payload..." : "Attach Document File"}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <FileUploadModal
+                fileName={simFileName}
+                onFileNameChange={setSimFileName}
+                category={simFileCategory}
+                onCategoryChange={setSimFileCategory}
+                onFileSelected={(file, dataUrl, detectedCategory) => {
+                  setSelectedFile(file);
+                  setSimFileName(file.name);
+                  if (detectedCategory) {
+                    setSimFileCategory(detectedCategory);
+                  }
+                  setSimFileUrl(dataUrl);
+                }}
+                onClose={() => setFileSimOpen(false)}
+                onSubmit={handleSimulateUpload}
+                isUploading={isUploading}
+              />
             )}
 
             {/* Immersive Mobile Document Scanner Overlay Modal */}
@@ -5052,77 +4689,14 @@ export default function DriverApplication({
           </div>
 
           {/* Bottom Dock Navigation Tabs menu */}
-          <div className="grid grid-cols-4 bg-slate-950 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-slate-900 mt-2 shrink-0 select-none">
-            <button 
-              onClick={() => {
-                setActiveTab('shipments');
-                setFileSimOpen(false);
-              }}
-              className={`flex flex-col items-center gap-1 text-[9.5px] uppercase tracking-wider font-mono transition-all cursor-pointer ${
-                activeTab === 'shipments' ? 'text-white font-extrabold scale-105' : 'text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              <div className="relative flex flex-col items-center">
-                <Truck className={`w-4 h-4 shrink-0 transition-transform duration-300 ${activeTab === 'shipments' ? 'text-[#f97316] scale-110' : ''}`} />
-                {activeTab === 'shipments' && (
-                  <span className="absolute -bottom-2 w-4 h-0.5 bg-orange-500 rounded-full"></span>
-                )}
-              </div>
-              <span className="mt-1.5">Jobs</span>
-            </button>
-            <button 
-              onClick={() => {
-                setActiveTab('chat');
-                setFileSimOpen(false);
-              }}
-              disabled={!activeShipment}
-              className={`flex flex-col items-center gap-1 text-[9.5px] uppercase tracking-wider font-mono transition-all relative ${
-                activeTab === 'chat' ? 'text-white font-extrabold scale-105' : 'text-slate-500 hover:text-slate-300'
-              } disabled:opacity-20`}
-            >
-              <div className="relative flex flex-col items-center">
-                <MessageSquare className={`w-4 h-4 shrink-0 transition-transform duration-300 ${activeTab === 'chat' ? 'text-[#f97316] scale-110' : ''}`} />
-                {activeTab === 'chat' && (
-                  <span className="absolute -bottom-2 w-4 h-0.5 bg-orange-500 rounded-full"></span>
-                )}
-              </div>
-              <span className="mt-1.5">Chat</span>
-            </button>
-            <button 
-              onClick={() => {
-                setActiveTab('menu');
-                setFileSimOpen(false);
-              }}
-              className={`flex flex-col items-center gap-1 text-[9.5px] uppercase tracking-wider font-mono transition-all cursor-pointer ${
-                activeTab === 'menu' ? 'text-white font-extrabold scale-105' : 'text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              <div className="relative flex flex-col items-center">
-                <Settings className={`w-4 h-4 shrink-0 transition-transform duration-300 ${activeTab === 'menu' ? 'text-[#f97316] scale-110' : ''}`} />
-                {activeTab === 'menu' && (
-                  <span className="absolute -bottom-2 w-4 h-0.5 bg-orange-500 rounded-full"></span>
-                )}
-              </div>
-              <span className="mt-1.5">Menu</span>
-            </button>
-            <button 
-              onClick={() => {
-                setActiveTab('profile');
-                setFileSimOpen(false);
-              }}
-              className={`flex flex-col items-center gap-1 text-[9.5px] uppercase tracking-wider font-mono transition-all cursor-pointer ${
-                activeTab === 'profile' ? 'text-white font-extrabold scale-105' : 'text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              <div className="relative flex flex-col items-center">
-                <User className={`w-4 h-4 shrink-0 transition-transform duration-300 ${activeTab === 'profile' ? 'text-[#f97316] scale-110' : ''}`} />
-                {activeTab === 'profile' && (
-                  <span className="absolute -bottom-2 w-4 h-0.5 bg-orange-500 rounded-full"></span>
-                )}
-              </div>
-              <span className="mt-1.5">Profile</span>
-            </button>
-          </div>
+          <DriverBottomNav
+            activeTab={activeTab}
+            chatDisabled={!activeShipment}
+            onSelect={(tab) => {
+              setActiveTab(tab);
+              setFileSimOpen(false);
+            }}
+          />
 
           </div>
 
