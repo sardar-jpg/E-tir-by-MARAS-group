@@ -34,6 +34,31 @@ import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
 
+/**
+ * Decodes the `id` field out of this browser's own signed session token
+ * (see src/lib/auth.ts) — the same value the backend stamps onto a chat
+ * notification's excludeUserId (req.session.id at send time). The token's
+ * payload segment is base64url, not encrypted, so it's safe to read
+ * client-side without the signing secret. Used only to recognize "this is
+ * my own chat message" for the toast guard below — never for authorization,
+ * which stays entirely server-side.
+ */
+function getOwnSessionId(): string | null {
+  try {
+    const stored = localStorage.getItem("etir_session");
+    if (!stored) return null;
+    const token = JSON.parse(stored)?.token;
+    if (typeof token !== "string") return null;
+    const [body] = token.split(".");
+    if (!body) return null;
+    const base64 = body.replace(/-/g, "+").replace(/_/g, "/").padEnd(body.length + ((4 - (body.length % 4)) % 4), "=");
+    const payload = JSON.parse(atob(base64));
+    return typeof payload?.id === "string" ? payload.id : null;
+  } catch {
+    return null;
+  }
+}
+
 const COUNTRY_PORTS: Record<string, string[]> = {
   "Turkey": ["Port of Ambarli (Istanbul)", "Port of Mersin", "Port of Gemlik", "Port of Izmir (Alsancak)", "Port of Aliaga", "Port of Iskenderun", "Port of Derince"],
   "Türkiye": ["Ambarlı Limanı (İstanbul)", "Mersin Limanı", "Gemlik Limanı", "İzmir Limanı (Alsancak)", "Aliağa Limanı", "İskenderun Limanı", "Derince Limanı"],
@@ -1016,9 +1041,22 @@ MARAS Group etir Center`;
         } else {
           const newNotifications = nData.filter(notif => !knownNotificationIdsRef.current.has(notif.id));
           if (newNotifications.length > 0) {
+            // Chat notifications carry excludeUserId set to the sender's own
+            // session id (req.session.id at send time — the admin's email
+            // for the super-admin, or their admins/{id} doc id for a
+            // sub-admin). The backend already omits these from this admin's
+            // own GET /api/notifications response, but guard here too so
+            // this admin's own message never pops a toast for them.
+            const ownSessionId = getOwnSessionId();
             newNotifications.forEach(notif => {
               knownNotificationIdsRef.current.add(notif.id);
-              showNotificationToast(notif);
+              const isOwnChatMessage =
+                notif.type === "chat" &&
+                !!notif.excludeUserId &&
+                (notif.excludeUserId === ownSessionId || notif.excludeUserId === adminEmail);
+              if (!isOwnChatMessage) {
+                showNotificationToast(notif);
+              }
             });
           }
         }
