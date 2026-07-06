@@ -54,6 +54,26 @@ import {
 
 export let useMemoryFallback = false;
 
+// Memory-fallback data safety controls.
+// STRICT_PERSISTENCE is ON by default. When Firestore is unavailable,
+// writes must not silently fall back to volatile in-memory storage.
+const STRICT_PERSISTENCE = process.env.STRICT_PERSISTENCE !== "false";
+
+// Demo seed data is OFF by default so production outages never show
+// fabricated/demo records as real operational data.
+const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA === "true";
+
+class ServiceUnavailableError extends Error {
+  readonly code = "SERVICE_UNAVAILABLE";
+  readonly retryable = true;
+
+  constructor(message = "Database temporarily unavailable. Please try again.") {
+    super(message);
+    this.name = "ServiceUnavailableError";
+  }
+}
+
+
 // Custom safe wrappers for collection and doc to prevent crash if db is null or offline
 function collection(dbInstance: any, pathName: string, ...pathSegments: string[]): any {
   if (useMemoryFallback || !dbInstance) {
@@ -130,13 +150,13 @@ let memoryStore: {
 function getMemoryStore() {
   if (!memoryStore) {
     memoryStore = {
-      drivers: [...(initialDrivers || [])],
-      shipments: [...(initialShipments || [])],
-      chatMessages: [...(initialChatMessages || [])],
-      notifications: [...(initialNotifications || [])],
-      activityLogs: [...(initialActivityLogs || [])],
-      clients: [...(initialClients || [])],
-      vendors: [...(initialVendors || [])],
+      drivers: [...(SEED_DEMO_DATA ? (initialDrivers || []) : [])],
+      shipments: [...(SEED_DEMO_DATA ? (initialShipments || []) : [])],
+      chatMessages: [...(SEED_DEMO_DATA ? (initialChatMessages || []) : [])],
+      notifications: [...(SEED_DEMO_DATA ? (initialNotifications || []) : [])],
+      activityLogs: [...(SEED_DEMO_DATA ? (initialActivityLogs || []) : [])],
+      clients: [...(SEED_DEMO_DATA ? (initialClients || []) : [])],
+      vendors: [...(SEED_DEMO_DATA ? (initialVendors || []) : [])],
       costStatements: [],
       test: [{ id: "connection", status: "ok" }]
     };
@@ -325,6 +345,7 @@ function isLegacyShareToken(token: string | undefined | null): boolean {
 async function setDoc(docRef: any, data: any, options?: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleSetDocMemory(docRef, cleanedData);
   }
   try {
@@ -333,6 +354,7 @@ async function setDoc(docRef: any, data: any, options?: any) {
     console.warn("Firestore setDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleSetDocMemory(docRef, cleanedData);
   }
 }
@@ -340,6 +362,7 @@ async function setDoc(docRef: any, data: any, options?: any) {
 async function updateDoc(docRef: any, data: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
   }
   try {
@@ -348,12 +371,14 @@ async function updateDoc(docRef: any, data: any) {
     console.warn("Firestore updateDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
   }
 }
 
 async function deleteDoc(docRef: any) {
   if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
   try {
@@ -362,6 +387,7 @@ async function deleteDoc(docRef: any) {
     console.warn("Firestore deleteDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
 }
@@ -369,6 +395,7 @@ async function deleteDoc(docRef: any) {
 async function addDoc(colRef: any, data: any) {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleAddDocMemory(colRef, cleanedData);
   }
   try {
@@ -377,6 +404,7 @@ async function addDoc(colRef: any, data: any) {
     console.warn("Firestore addDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleAddDocMemory(colRef, cleanedData);
   }
 }
