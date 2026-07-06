@@ -10,6 +10,12 @@
  * price privately agreed between Admin and a specific driver. It must
  * never reach Client/Customer views, and a driver must never see another
  * driver's agreed amount. internalNotes is Admin-only for the same reason.
+ *
+ * companyName/customerEmails/customerNotificationHistory identify the
+ * client and must never reach the Driver App — drivers take job
+ * instructions from Admin/MARAS Operations only, never the customer
+ * directly. Clients get these back unchanged since it's their own data.
+ *
  * Admins always see the unredacted record.
  */
 import type { Shipment } from "../types";
@@ -19,9 +25,15 @@ export type ShipmentAccessSession = {
   id: string;
 };
 
-export type ShipmentView = Omit<Shipment, "agreedAmount" | "internalNotes"> & {
+export type ShipmentView = Omit<
+  Shipment,
+  "agreedAmount" | "internalNotes" | "companyName" | "customerEmails" | "customerNotificationHistory"
+> & {
   agreedAmount?: number;
   internalNotes?: string;
+  companyName?: string;
+  customerEmails?: string[];
+  customerNotificationHistory?: Shipment["customerNotificationHistory"];
 };
 
 export function buildShipmentViewForRole(
@@ -34,8 +46,18 @@ export function buildShipmentViewForRole(
 
   // Neither drivers nor clients get internalNotes (Admin-only) or the raw
   // top-level agreedAmount — a driver only earns it back below if they are
-  // this shipment's assigned primary driver.
-  const { agreedAmount: _agreedAmount, internalNotes: _internalNotes, additionalDrivers, ...rest } = shipment;
+  // this shipment's assigned primary driver. companyName/customerEmails/
+  // customerNotificationHistory are stripped here too, and only the client
+  // branch below earns them back — a driver never does.
+  const {
+    agreedAmount: _agreedAmount,
+    internalNotes: _internalNotes,
+    companyName: _companyName,
+    customerEmails: _customerEmails,
+    customerNotificationHistory: _customerNotificationHistory,
+    additionalDrivers,
+    ...rest
+  } = shipment;
 
   const redactedAdditionalDrivers = additionalDrivers?.map((ad) => {
     if (session.role === "driver" && ad.driverId === session.id) {
@@ -51,5 +73,12 @@ export function buildShipmentViewForRole(
     ...rest,
     ...(isOwnPrimaryShipment ? { agreedAmount: shipment.agreedAmount } : {}),
     ...(additionalDrivers ? { additionalDrivers: redactedAdditionalDrivers } : {}),
+    ...(session.role === "client"
+      ? {
+          companyName: shipment.companyName,
+          customerEmails: shipment.customerEmails,
+          customerNotificationHistory: shipment.customerNotificationHistory,
+        }
+      : {}),
   };
 }

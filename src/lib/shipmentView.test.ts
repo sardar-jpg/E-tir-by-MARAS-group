@@ -32,6 +32,18 @@ function makeShipment(overrides: Partial<Shipment> = {}): Shipment {
     shareToken: "tok_abc123",
     shareIncludeDocuments: true,
     shareIncludePhotos: true,
+    customerEmails: ["ops@acmetrading.example"],
+    customerNotificationHistory: [
+      {
+        id: "notif-1",
+        timestamp: "2026-01-02T00:00:00.000Z",
+        type: "status_update",
+        title: "Shipment in transit",
+        message: "Your shipment is in transit.",
+        email: "ops@acmetrading.example",
+        channel: "email",
+      },
+    ],
     additionalDrivers: [
       { driverId: "driver-2", driverName: "Baran Demir", truckNumber: "06 XYZ 456", agreedAmount: 1500 },
       { driverId: "driver-3", driverName: "Cemal Kaya", truckNumber: "16 QRS 789", agreedAmount: 1800 },
@@ -48,6 +60,9 @@ describe("buildShipmentViewForRole", () => {
     expect(view.agreedAmount).toBe(3200);
     expect(view.internalNotes).toBe("Expedite customs at Ibrahim Khalil.");
     expect(view.additionalDrivers?.[0].agreedAmount).toBe(1500);
+    expect(view.companyName).toBe("Acme Trading");
+    expect(view.customerEmails).toEqual(["ops@acmetrading.example"]);
+    expect(view.customerNotificationHistory).toHaveLength(1);
   });
 
   it("strips agreedAmount, internalNotes, and every additionalDrivers agreedAmount for a client", () => {
@@ -63,7 +78,11 @@ describe("buildShipmentViewForRole", () => {
     // Normal fields the client dashboard needs still come through.
     expect(view.shipmentNumber).toBe("MAR-2026-1001");
     expect(view.status).toBe("In Transit");
+
+    // A client sees its own identity/contact data unchanged.
     expect(view.companyName).toBe("Acme Trading");
+    expect(view.customerEmails).toEqual(["ops@acmetrading.example"]);
+    expect(view.customerNotificationHistory).toHaveLength(1);
   });
 
   it("keeps the top-level agreedAmount for the assigned primary driver, but hides other drivers' amounts", () => {
@@ -74,6 +93,14 @@ describe("buildShipmentViewForRole", () => {
     expect(view.internalNotes).toBeUndefined();
     expect(view.additionalDrivers?.find((ad) => ad.driverId === "driver-2")?.agreedAmount).toBeUndefined();
     expect(view.additionalDrivers?.find((ad) => ad.driverId === "driver-3")?.agreedAmount).toBeUndefined();
+
+    // Driver App must never receive customer/client identity or contact info.
+    expect(view.companyName).toBeUndefined();
+    expect("companyName" in view).toBe(false);
+    expect(view.customerEmails).toBeUndefined();
+    expect("customerEmails" in view).toBe(false);
+    expect(view.customerNotificationHistory).toBeUndefined();
+    expect("customerNotificationHistory" in view).toBe(false);
   });
 
   it("hides the top-level agreedAmount from a co-driver, but keeps their own additionalDrivers amount", () => {
@@ -83,6 +110,10 @@ describe("buildShipmentViewForRole", () => {
     expect(view.agreedAmount).toBeUndefined();
     expect(view.additionalDrivers?.find((ad) => ad.driverId === "driver-2")?.agreedAmount).toBe(1500);
     expect(view.additionalDrivers?.find((ad) => ad.driverId === "driver-3")?.agreedAmount).toBeUndefined();
+
+    expect("companyName" in view).toBe(false);
+    expect("customerEmails" in view).toBe(false);
+    expect("customerNotificationHistory" in view).toBe(false);
   });
 
   it("hides every agreedAmount from a driver with no relationship to the shipment", () => {
@@ -91,6 +122,10 @@ describe("buildShipmentViewForRole", () => {
 
     expect(view.agreedAmount).toBeUndefined();
     expect(view.additionalDrivers?.every((ad) => !("agreedAmount" in ad))).toBe(true);
+
+    expect("companyName" in view).toBe(false);
+    expect("customerEmails" in view).toBe(false);
+    expect("customerNotificationHistory" in view).toBe(false);
   });
 
   it("passes through shipments with no additionalDrivers array untouched", () => {
