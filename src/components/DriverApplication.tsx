@@ -19,6 +19,7 @@ import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
 import ShipmentCard from "./driver/ShipmentCard";
 import FileUploadModal from "./driver/FileUploadModal";
+import DriverHome from "./driver/DriverHome";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 import { 
   Ship, MessageSquare, Truck, DollarSign, Send, CheckCircle2,
@@ -359,6 +360,26 @@ export default function DriverApplication({
   ), [notifications, shipments, activeShipment]);
   const unreadNotificationCount = useMemo(() => myNotifications.filter(n => !n.read).length, [myNotifications]);
 
+  // Determine the primary active job to feature on the Home screen.
+  // Priority: Assigned > In Transit / Border Crossing / Customs Clearance > others (most recently updated first).
+  const homeActiveJob = useMemo(() => {
+    const FINISHED = new Set(['Delivered', 'Arrived', 'Closed', 'Completed']);
+    const active = shipments.filter(s => !FINISHED.has(s.status));
+    if (active.length === 0) return null;
+
+    const priority = (s: (typeof active)[0]): number => {
+      if (s.status === 'Assigned') return 0;
+      if (s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance') return 1;
+      return 2;
+    };
+
+    return [...active].sort((a, b) => {
+      const pd = priority(a) - priority(b);
+      if (pd !== 0) return pd;
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    })[0];
+  }, [shipments]);
+
   // Calculate real percentage of total trip distance based on shipment start and end coordinates
   const calculateDistancePercentage = (): number => {
     if (!activeShipment) return 0;
@@ -400,7 +421,7 @@ export default function DriverApplication({
     return Math.max(0, Math.min(98, Math.round(t * 100)));
   };
 
-  const [activeTab, setActiveTab] = useState<'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('shipments');
+  const [activeTab, setActiveTab] = useState<'home' | 'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('home');
 
   const [activeMapsKey, setActiveMapsKey] = useState<string>(GOOGLE_MAPS_KEY_FALLBACK);
   const hasValidMapsKey = Boolean(activeMapsKey) && activeMapsKey !== "YOUR_API_KEY";
@@ -1811,7 +1832,7 @@ export default function DriverApplication({
               onChange={(e) => {
                 setSelectedDriverId(e.target.value);
                 setActiveShipment(null);
-                setActiveTab('shipments');
+                setActiveTab('home');
               }}
               className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 text-xs font-bold rounded-xl outline-none focus:border-amber-500 transition-all cursor-pointer"
             >
@@ -1876,7 +1897,7 @@ export default function DriverApplication({
                 onChange={(e) => {
                   setSelectedDriverId(e.target.value);
                   setActiveShipment(null);
-                  setActiveTab('shipments');
+                  setActiveTab('home');
                   setShowControlsModal(false);
                 }}
                 className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 text-xs font-bold rounded-xl outline-none"
@@ -1992,14 +2013,50 @@ export default function DriverApplication({
 
             {/* Core App View Controller */}
             <div className="flex-1 overflow-y-auto bg-slate-950 p-4 relative text-sm">
-              
+
+              {/* HOME TAB */}
+              {activeTab === 'home' && (
+                <DriverHome
+                  driverName={getDriverName()}
+                  activeJob={homeActiveJob}
+                  driverId={selectedDriverId}
+                  onContinueJob={() => {
+                    if (homeActiveJob) {
+                      setActiveShipment(homeActiveJob);
+                      setSelectedStatusVal(homeActiveJob.status);
+                    }
+                    setActiveTab('shipments');
+                  }}
+                  onChatWithAdmin={() => {
+                    if (homeActiveJob) {
+                      setActiveShipment(homeActiveJob);
+                      setSelectedStatusVal(homeActiveJob.status);
+                    }
+                    setActiveTab('chat');
+                  }}
+                  onUploadDocument={() => {
+                    if (homeActiveJob) {
+                      setActiveShipment(homeActiveJob);
+                      setSelectedStatusVal(homeActiveJob.status);
+                      setSimFileName("");
+                      setSimFileCategory("cmr");
+                      setSimFileUrl("#");
+                      setSelectedFile(null);
+                      setFileSimOpen(true);
+                    }
+                  }}
+                  onViewJobs={() => setActiveTab('shipments')}
+                  lang={lang}
+                />
+              )}
+
               {/* NOTIFICATION FEED POPUP PANEL */}
               {activeTab === 'notifications' && (
                 <NotificationsPanel
                   notifications={myNotifications}
                   lang={lang}
                   title={t('notifications')}
-                  onBack={() => setActiveTab('shipments')}
+                  onBack={() => setActiveTab('home')}
                 />
               )}
 
