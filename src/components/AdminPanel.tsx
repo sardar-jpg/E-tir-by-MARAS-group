@@ -29,6 +29,7 @@ import {
   Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert, User, Pencil, Lock
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
+import AdminSidebar from "./admin/AdminSidebar";
 import { apiFetch } from "../lib/api";
 import { jsPDF } from "jspdf";
 
@@ -3005,9 +3006,57 @@ MARAS Group etir Center`;
   // Selected details modal data injection
   const targetDetailsShipment = openDetailsId ? shipments.find(s => s.id === openDetailsId) : null;
 
+  // Admin navigation tabs, filtered by admin role/type — shared by the
+  // desktop sidebar and the mobile/tablet horizontal tab bar below.
+  const filteredAdminTabs = (() => {
+    const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+    const isSuper = resolvedAdminType === 'super';
+    const isOperation = resolvedAdminType === 'operation';
+    const isAccounts = resolvedAdminType === 'accounts' || resolvedAdminType === 'account';
+
+    const rawTabs = [
+      { id: 'dashboard', label: t('dashboard'), icon: ClipboardList },
+      { id: 'shipments', label: t('shipmentManagement'), icon: Ship },
+      { id: 'tracking_map', label: lang === 'tr' ? 'GPS Takip Haritası' : (lang === 'ar' ? 'خريطة التتبع GPS' : 'GPS Tracking Map'), icon: MapIcon },
+      { id: 'drivers', label: t('driverManagement'), icon: Truck },
+      { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
+      { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
+      { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
+      { id: 'reports', label: t('reports'), icon: BarChart },
+      { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
+      { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck },
+      ...(isSuper ? [{ id: 'team', label: lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operation Team'), icon: UserPlus }] : []),
+      // Visible to every admin type, unlike 'team' above which is
+      // restricted to super-admins (team management exposes other
+      // admins' info). This tab only ever shows the current admin's
+      // own self-delete option (Apple Guideline 5.1.1v) - sub-admins
+      // need a way to reach it even though they can't see 'team'.
+      { id: 'my_account', label: lang === 'tr' ? 'Hesabım' : (lang === 'ar' ? 'حسابي' : 'My Account'), icon: User }
+    ];
+
+    return rawTabs.filter(tab => {
+      if (isSuper) return true;
+      if (isOperation) {
+        return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'clients', 'vendors', 'my_account'].includes(tab.id);
+      }
+      if (isAccounts) {
+        return ['costs', 'reports', 'clients', 'vendors', 'my_account'].includes(tab.id);
+      }
+      return false;
+    });
+  })();
+
   return (
-    <div className={`${isMobileMode ? 'p-2' : 'p-4 md:p-6'} bg-slate-50 min-h-screen text-slate-800 ${isRtl ? 'font-sans' : 'font-sans'}`} dir={isRtl ? 'rtl' : 'ltr'}>
-      
+    <div className={`flex ${isRtl ? 'flex-row-reverse' : 'flex-row'} bg-slate-50 min-h-screen text-slate-800 font-sans`} dir={isRtl ? 'rtl' : 'ltr'}>
+      <AdminSidebar
+        tabs={filteredAdminTabs}
+        activeTab={activeTab}
+        onSelectTab={(id) => setActiveTab(id as any)}
+        lang={lang}
+        isRtl={isRtl}
+      />
+      <div className={`flex-1 min-w-0 ${isMobileMode ? 'p-2' : 'p-4 md:p-6'}`}>
+
       {/* Toast Alert */}
       {toast && (
         <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-slate-900 text-white font-medium py-3 px-6 rounded-xl shadow-2xl flex items-center gap-2 z-50 animate-bounce text-sm">
@@ -3296,62 +3345,26 @@ MARAS Group etir Center`;
         </div>
       </div>
 
-      {/* Admin Module Tabs */}
-      <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200 mb-6 overflow-x-auto max-w-full">
-        {(() => {
-          const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
-          const isSuper = resolvedAdminType === 'super';
-          const isOperation = resolvedAdminType === 'operation';
-          const isAccounts = resolvedAdminType === 'accounts' || resolvedAdminType === 'account';
-
-          const rawTabs = [
-            { id: 'dashboard', label: t('dashboard'), icon: ClipboardList },
-            { id: 'shipments', label: t('shipmentManagement'), icon: Ship },
-            { id: 'tracking_map', label: lang === 'tr' ? 'GPS Takip Haritası' : (lang === 'ar' ? 'خريطة التتبع GPS' : 'GPS Tracking Map'), icon: MapIcon },
-            { id: 'drivers', label: t('driverManagement'), icon: Truck },
-            { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
-            { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
-            { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
-            { id: 'reports', label: t('reports'), icon: BarChart },
-            { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
-            { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck },
-            ...(isSuper ? [{ id: 'team', label: lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operation Team'), icon: UserPlus }] : []),
-            // Visible to every admin type, unlike 'team' above which is
-            // restricted to super-admins (team management exposes other
-            // admins' info). This tab only ever shows the current admin's
-            // own self-delete option (Apple Guideline 5.1.1v) - sub-admins
-            // need a way to reach it even though they can't see 'team'.
-            { id: 'my_account', label: lang === 'tr' ? 'Hesabım' : (lang === 'ar' ? 'حسابي' : 'My Account'), icon: User }
-          ];
-
-          return rawTabs.filter(tab => {
-            if (isSuper) return true;
-            if (isOperation) {
-              return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'clients', 'vendors', 'my_account'].includes(tab.id);
-            }
-            if (isAccounts) {
-              return ['costs', 'reports', 'clients', 'vendors', 'my_account'].includes(tab.id);
-            }
-            return false;
-          }).map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-all ${
-                  isActive 
-                    ? 'bg-slate-900 text-white shadow-sm' 
-                    : 'text-slate-600 hover:text-slate-950 hover:bg-slate-200/50'
-                }`}
-              >
-                <Icon className="w-4 h-4" />
-                <span>{tab.label}</span>
-              </button>
-            );
-          });
-        })()}
+      {/* Admin Module Tabs — mobile & tablet only; desktop uses the left sidebar */}
+      <div className="lg:hidden flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200 mb-6 overflow-x-auto max-w-full">
+        {filteredAdminTabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-all ${
+                isActive
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-950 hover:bg-slate-200/50'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR */}
@@ -10514,6 +10527,7 @@ MARAS Group etir Center`;
         );
       })()}
 
+      </div>
     </div>
   );
 }
