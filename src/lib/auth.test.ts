@@ -6,9 +6,21 @@ import {
   signSessionToken,
   verifySessionToken,
   SessionPayload,
+  GENERIC_LOGIN_ERROR,
 } from "./auth";
 
 const SECRET = "test-secret-do-not-use-in-real-env";
+
+describe("GENERIC_LOGIN_ERROR", () => {
+  it("is a single fixed message, not one that varies by failure reason", () => {
+    // BUG-10: /api/login must return this exact same string for a wrong
+    // password on a known admin AND for an unrecognized identity — a
+    // distinct message for either case would leak which emails are real
+    // admin accounts. This just pins the constant so a future edit can't
+    // silently reintroduce two different strings at the two call sites.
+    expect(GENERIC_LOGIN_ERROR).toBe("Invalid username, email, phone, or password");
+  });
+});
 
 describe("hashPassword / verifyPassword", () => {
   it("produces a hash in the expected pbkdf2$salt$hash format", () => {

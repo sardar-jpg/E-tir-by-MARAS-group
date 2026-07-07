@@ -34,6 +34,7 @@ import {
   hashPassword,
   verifyPassword,
   verifyPasswordWithMigration,
+  GENERIC_LOGIN_ERROR,
 } from "./src/lib/auth";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
@@ -45,7 +46,9 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors } from "./src/lib/adminAccess";
+import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
+import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./src/lib/documentAccess";
 import { 
   getFirestore, 
   initializeFirestore,
@@ -1567,16 +1570,35 @@ async function startServer() {
     next();
   });
 
+  // BUG-11: this used to reflect back whatever Origin header the request
+  // sent while Allow-Credentials was true — that combination lets any
+  // website read authenticated responses from this API on a logged-in
+  // user's behalf. Now backed by an explicit allowlist (see
+  // src/lib/cors.ts): default local-dev + production origins, plus
+  // anything set via APP_URL / CLIENT_URL / ALLOWED_ORIGINS /
+  // PUBLIC_APP_URL (comma-separated). Computed once at startup, not per
+  // request.
+  const corsAllowedOrigins = parseAllowedOriginsFromEnv(process.env);
+
   // Custom CORS middleware to support external frontends querying this backend
   app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      res.header("Access-Control-Allow-Origin", origin);
-    } else {
-      res.header("Access-Control-Allow-Origin", "*");
+    const rawOrigin = req.headers.origin;
+    const requestOrigin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+    const allowedOrigin = resolveCorsOrigin(requestOrigin, corsAllowedOrigins);
+
+    if (allowedOrigin) {
+      // Only ever a single allowlisted origin, never "*" — browsers reject
+      // "*" together with credentialed requests anyway, but reflecting an
+      // arbitrary origin here would be just as unsafe.
+      res.header("Access-Control-Allow-Origin", allowedOrigin);
+      res.header("Access-Control-Allow-Credentials", "true");
+      res.header("Vary", "Origin");
     }
-    res.header("Access-Control-Allow-Credentials", "true");
-    
+    // Else: no Origin header (same-origin browser request or a
+    // server-to-server call — neither sends/needs one) or an origin that
+    // isn't allowlisted. Either way, Access-Control-Allow-Origin is simply
+    // omitted rather than defaulting to "*" or the raw origin.
+
     // Dynamically allow requested headers to prevent any CORS failures, while maintaining clean fallbacks
     const reqHeaders = req.headers["access-control-request-headers"];
     if (reqHeaders) {
@@ -1584,9 +1606,9 @@ async function startServer() {
     } else {
       res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-HTTP-Method-Override");
     }
-    
+
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    
+
     if (req.method === "OPTIONS") {
       res.header("Access-Control-Max-Age", "86400"); // cache preflight for 24 hours
       return res.status(204).end();
@@ -1705,6 +1727,34 @@ async function startServer() {
     }
     if (!canViewAdminRoster(req.session.adminType)) {
       return res.status(403).json({ error: "Only the super-admin can perform this action." });
+    }
+    next();
+  }
+
+  /**
+   * BUG-09: the AdminPanel UI shows accounts admins a Clients/Vendors tab
+   * (they need the client/vendor directory to attribute costs and reports),
+   * but GET /api/clients and GET /api/vendors used requireFullAdmin, which
+   * blocks 'accounts' — a UI/server mismatch where the tab loaded to fetch
+   * errors. These allow the same three admin types the UI already shows the
+   * tab to; the write routes (POST/PUT) stay on requireFullAdmin so accounts
+   * admins remain read-only.
+   */
+  function requireCanViewClients(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canViewClients(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to view clients." });
+    }
+    next();
+  }
+  function requireCanViewVendors(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canViewVendors(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to view vendors." });
     }
     next();
   }
@@ -1852,6 +1902,19 @@ async function startServer() {
         const path = `uploads/${req.session!.role}/${req.session!.id}/${Date.now()}-${Math.random().toString(36).substring(2, 9)}-${filename}`;
         const fileRef = storageRef(storage, path);
         await uploadBytes(fileRef, buffer, { contentType: mimeType });
+        // NOTE (BUG-12): this is a real Firebase Storage getDownloadURL() —
+        // its access token is NOT revocable through anything in this app;
+        // once handed out it keeps working forever regardless of later
+        // document-visibility changes. That's fine for this authenticated
+        // endpoint, whose caller (admin/driver/client, all logged in) is
+        // meant to have access to what they themselves just uploaded. The
+        // one place this becomes unsafe is the *public*, unauthenticated
+        // share view — see buildSecureShareView and
+        // /api/share/:token/documents/:docId below, which never forward
+        // this raw URL and instead proxy through a route that re-checks
+        // visibility on every request. Any new public-facing document
+        // surface should use that same proxy pattern, not this URL
+        // directly.
         const url = await getDownloadURL(fileRef);
         console.log(`[upload] Stored to Firebase Storage: ${path}`);
         res.json({ url });
@@ -3105,11 +3168,21 @@ async function startServer() {
     chargeableWeight: shipment.chargeableWeight || 0,
     numberOfPackages: shipment.numberOfPackages || 0,
 
+    // BUG-12: never hand the public share view a raw Firebase Storage
+    // download URL — that URL's access token isn't revocable and would
+    // keep working forever even after a document's isSharedExternally is
+    // turned back off. Instead every document/photo gets a same-origin
+    // proxy path (see /api/share/:token/documents/:docId below), which
+    // re-checks isDocumentVisibleForShare on every single request.
     documents: shipment.shareIncludeDocuments
-      ? shipment.documents.filter(d => d.isSharedExternally && d.category !== "photo")
+      ? shipment.documents
+          .filter(d => isDocumentVisibleForShare(d, shipment) && d.category !== "photo")
+          .map(d => ({ ...d, url: buildPublicShareDocumentPath(shipment.shareToken, d.id) }))
       : [],
     photos: shipment.shareIncludePhotos
-      ? shipment.documents.filter(d => d.isSharedExternally && d.category === "photo")
+      ? shipment.documents
+          .filter(d => isDocumentVisibleForShare(d, shipment) && d.category === "photo")
+          .map(d => ({ ...d, url: buildPublicShareDocumentPath(shipment.shareToken, d.id) }))
       : []
   });
 
@@ -3129,6 +3202,56 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to look up shared tracking link" });
+    }
+  });
+
+  /**
+   * 11b. Public secure document download (BUG-12).
+   *
+   * buildSecureShareView above never hands out a raw Firebase Storage URL
+   * for a document — it hands out this path instead. That raw URL's access
+   * token is not revocable through this app, so once it's in a browser it
+   * would keep working forever regardless of what an admin later does with
+   * isSharedExternally. This route re-runs the exact same visibility check
+   * (isDocumentVisibleForShare, src/lib/documentAccess.ts) on every single
+   * request — by fetching the shipment fresh rather than trusting anything
+   * cached in the URL — so turning a document off actually takes effect
+   * for any link this app has issued, immediately.
+   *
+   * The file itself is fetched server-side and streamed back rather than
+   * redirecting the browser to the Storage URL, so the raw URL is never
+   * exposed to the client at all, not even in a Location header.
+   */
+  app.get("/api/share/:token/documents/:docId", async (req, res) => {
+    try {
+      const col = collection(db, "shipments");
+      const snapshot = await getDocs(col);
+      const list = snapshot.docs.map(doc => doc.data() as Shipment);
+      const shipment = list.find(s => s.shareToken === req.params.token);
+
+      if (!shipment || !shipment.isLinkShared) {
+        return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
+      }
+
+      const docItem = shipment.documents.find(d => d.id === req.params.docId);
+      if (!docItem || !isDocumentVisibleForShare(docItem, shipment)) {
+        return res.status(404).json({ error: "Document not found or no longer shared." });
+      }
+      if (!docItem.url || docItem.url === "#") {
+        return res.status(404).json({ error: "Document not available." });
+      }
+
+      const upstream = await fetch(docItem.url);
+      if (!upstream.ok || !upstream.body) {
+        return res.status(502).json({ error: "Failed to retrieve document." });
+      }
+      const arrayBuffer = await upstream.arrayBuffer();
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/octet-stream");
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(docItem.name || "document")}"`);
+      res.send(Buffer.from(arrayBuffer));
+    } catch (err) {
+      console.error("Public document download failed:", err);
+      res.status(500).json({ error: "Failed to retrieve document." });
     }
   });
 
@@ -3241,7 +3364,12 @@ async function startServer() {
             }
           });
         }
-        return res.status(401).json({ error: "Incorrect password for admin user." });
+        // BUG-10: wrong password for a known admin must look identical to an
+        // unrecognized identity (see the final generic 401 below) — logged
+        // server-side only, never in the client-facing response, which
+        // would otherwise leak that this email is a real admin account.
+        console.warn(`[login] Wrong password for super-admin account: ${SUPER_ADMIN_EMAIL}`);
+        return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
       }
 
       // 2. Sub-admins (stored in the `admins` collection)
@@ -3279,7 +3407,11 @@ async function startServer() {
               }
             });
           }
-          return res.status(401).json({ error: "Incorrect password for admin user." });
+          // BUG-10: same reasoning as the super-admin branch above — do not
+          // let the client tell a wrong-password admin apart from an
+          // unknown identity.
+          console.warn(`[login] Wrong password for admin account: ${subAdmin.email}`);
+          return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
         }
       } catch (err) {
         console.warn("Could not check additional admins collection in login backend:", err);
@@ -3365,7 +3497,7 @@ async function startServer() {
         }
       }
 
-      return res.status(401).json({ error: "Invalid username, email, phone, or password" });
+      return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Login failed" });
@@ -3935,7 +4067,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/clients", requireFullAdmin, async (req, res) => {
+  app.get("/api/clients", requireCanViewClients, async (req, res) => {
     try {
       const col = collection(db, "clients");
       const snapshot = await getDocs(col);
@@ -4006,7 +4138,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/vendors", requireFullAdmin, async (req, res) => {
+  app.get("/api/vendors", requireCanViewVendors, async (req, res) => {
     try {
       const col = collection(db, "vendors");
       const snapshot = await getDocs(col);

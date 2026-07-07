@@ -4,6 +4,10 @@ import {
   canViewShipmentRegistry,
   canViewDriverRoster,
   canViewAdminRoster,
+  canViewClients,
+  canViewVendors,
+  canManageClients,
+  canManageVendors,
 } from "./adminAccess";
 
 describe("isSuperAdmin", () => {
@@ -39,5 +43,33 @@ describe("canViewAdminRoster", () => {
     expect(canViewAdminRoster("operation")).toBe(false);
     expect(canViewAdminRoster("accounts")).toBe(false);
     expect(canViewAdminRoster(undefined)).toBe(false);
+  });
+});
+
+describe("canViewClients / canViewVendors", () => {
+  it("allows super, operation, and accounts — the AdminPanel UI shows the Clients/Vendors tabs to all three", () => {
+    expect(canViewClients("super")).toBe(true);
+    expect(canViewClients("operation")).toBe(true);
+    expect(canViewClients("accounts")).toBe(true);
+    expect(canViewClients(undefined)).toBe(false);
+
+    expect(canViewVendors("super")).toBe(true);
+    expect(canViewVendors("operation")).toBe(true);
+    expect(canViewVendors("accounts")).toBe(true);
+    expect(canViewVendors(undefined)).toBe(false);
+  });
+});
+
+describe("canManageClients / canManageVendors", () => {
+  it("allows super and operation to write, blocks accounts (read-only)", () => {
+    expect(canManageClients("super")).toBe(true);
+    expect(canManageClients("operation")).toBe(true);
+    expect(canManageClients("accounts")).toBe(false);
+    expect(canManageClients(undefined)).toBe(false);
+
+    expect(canManageVendors("super")).toBe(true);
+    expect(canManageVendors("operation")).toBe(true);
+    expect(canManageVendors("accounts")).toBe(false);
+    expect(canManageVendors(undefined)).toBe(false);
   });
 });

@@ -11,6 +11,18 @@
  */
 import crypto from "crypto";
 
+/**
+ * BUG-10: a known admin's wrong-password login used to return "Incorrect
+ * password for admin user." while an unrecognized username/email fell
+ * through to a generic message — the difference let an attacker enumerate
+ * which emails are admin accounts just by attempting a login and reading
+ * which error came back. Every failed /api/login attempt (wrong password,
+ * unknown username, or unknown admin identity) must return this exact same
+ * message and status code so the response reveals nothing about whether
+ * the account exists or what role it has.
+ */
+export const GENERIC_LOGIN_ERROR = "Invalid username, email, phone, or password";
+
 export type SessionRole = "admin" | "driver" | "client";
 
 export interface SessionPayload {
