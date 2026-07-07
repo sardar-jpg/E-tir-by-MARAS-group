@@ -36,6 +36,13 @@ import {
   verifyPasswordWithMigration,
 } from "./src/lib/auth";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
+import {
+  filterChatMessagesByRole,
+  resolveOutgoingChatChannel,
+  resolveSeenChannelFilter,
+  shouldNotifyChatParty,
+  isChatNotificationVisibleToRole
+} from "./src/lib/chatVisibility";
 import { 
   getFirestore, 
   initializeFirestore,
@@ -469,11 +476,12 @@ async function addDoc(colRef: any, data: any) {
   }
 }
 import { 
-  Shipment, 
-  Driver, 
-  ChatMessage, 
-  ActivityLog, 
-  AppNotification, 
+  Shipment,
+  Driver,
+  ChatMessage,
+  ChatChannel,
+  ActivityLog,
+  AppNotification,
   ShipmentStatus, 
   Currency,
   DocumentCategory,
@@ -1402,7 +1410,13 @@ async function pushNotification(
   messageEn: string, messageTr: string, messageAr: string,
   // Session id to exclude from this notification's recipients, e.g. the
   // chat sender so they don't get notified of their own message.
-  excludeUserId?: string
+  excludeUserId?: string,
+  // BUG-03: for type 'chat' notifications only, which audience this chat
+  // message belongs to. The title/body of a chat notification carry the
+  // sender's name and message text, so without this a client's message
+  // would page the driver's device (and vice versa) even though the chat
+  // thread itself is now partitioned by channel.
+  chatChannel?: ChatChannel
 ) {
   const newNotif: AppNotification = {
     id: `notif-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -1419,6 +1433,7 @@ async function pushNotification(
     read: false
   };
   if (excludeUserId) newNotif.excludeUserId = excludeUserId;
+  if (type === "chat" && chatChannel) newNotif.channel = chatChannel;
   try {
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
@@ -1448,11 +1463,19 @@ async function pushNotification(
       const shipDoc = await getDoc(doc(db, "shipments", shipmentId));
       if (shipDoc.exists()) {
         const ship = shipDoc.data() as Shipment;
-        if (ship.assignedDriverId) userIds.add(ship.assignedDriverId);
-        if (ship.additionalDrivers) {
-          for (const ad of ship.additionalDrivers) userIds.add(ad.driverId);
+        // BUG-03: a chat push must only reach the audience it belongs to.
+        // Non-chat notifications (assignment, status_update, etc.) are
+        // unaffected and keep going to both driver and client as before.
+        const includeDriver = shouldNotifyChatParty(type, "driver", chatChannel);
+        const includeClient = shouldNotifyChatParty(type, "client", chatChannel);
+
+        if (includeDriver) {
+          if (ship.assignedDriverId) userIds.add(ship.assignedDriverId);
+          if (ship.additionalDrivers) {
+            for (const ad of ship.additionalDrivers) userIds.add(ad.driverId);
+          }
         }
-        if (ship.companyName) {
+        if (includeClient && ship.companyName) {
           const clientsSnap = await getDocs(collection(db, "clients"));
           const matchingClient = clientsSnap.docs
             .map(d => d.data() as Client)
@@ -2674,6 +2697,19 @@ async function startServer() {
   });
 
   // 6. Get Chat Messages
+  //
+  // BUG-03: shipment chat is partitioned into two audiences —
+  // 'driver_admin' (dispatch/operational chat) and 'client_admin'
+  // (customer-service chat) — so a driver never sees a client's identity
+  // or messages and a client never sees internal driver/admin chat.
+  // Filtering happens here, server-side, based on the verified session
+  // role rather than any client-supplied parameter, so a caller can't
+  // request the other audience's channel just by changing the query string.
+  // Messages written before this field existed have no `channel` at all;
+  // those are only ever shown to admins (safe default — an untagged
+  // message could belong to either audience and might contain the other
+  // party's identity, so it's withheld from driver/client rather than
+  // guessed at).
   app.get("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
       const col = collection(db, "chatMessages");
@@ -2686,6 +2722,8 @@ async function startServer() {
         };
       });
       msgs = msgs.filter(m => m.shipmentId === req.params.id);
+      msgs = filterChatMessagesByRole(msgs, req.session!.role, req.query.channel as string | undefined);
+
       msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
       res.json(msgs);
     } catch (err) {
@@ -2698,10 +2736,20 @@ async function startServer() {
   app.post("/api/shipments/:id/chat/seen", requireShipmentAccess, async (req, res) => {
     try {
       const shipmentId = req.params.id;
-      const { viewer } = req.body; // 'admin' or 'driver'
+      const { viewer, channel: requestedChannel } = req.body; // viewer: 'admin' | 'driver' | 'client'
       if (!viewer) {
         return res.status(400).json({ error: "Viewer is required ('admin' or 'driver')" });
       }
+
+      // BUG-03: scope which messages a "seen" call can touch to the
+      // caller's own channel, using the verified session role (not the
+      // client-supplied `viewer`) — otherwise viewing one audience's
+      // thread (e.g. driver_admin) would also silently flip read-receipts
+      // on the other audience's messages (client_admin), since both used
+      // to live in one shared, unfiltered thread. Admin with no channel
+      // specified: preserve prior behavior and mark across all channels
+      // (matches the merged admin GET default).
+      const channelFilter = resolveSeenChannelFilter(req.session!.role, requestedChannel);
 
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);
@@ -2709,6 +2757,7 @@ async function startServer() {
 
       snapshot.docs.forEach((d) => {
         const msg = d.data() as ChatMessage;
+        if (channelFilter && msg.channel !== channelFilter) return;
         // If message is for this shipment, was sent by the opposite party, and is not already 'seen'
         if (msg.shipmentId === shipmentId && msg.sender !== viewer && msg.status !== "seen") {
           batchWrites.push(
@@ -2786,8 +2835,20 @@ async function startServer() {
     try {
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
-      const { type, text, fileUrl, fileName, fileCategory } = req.body;
+      const { type, text, fileUrl, fileName, fileCategory, channel: requestedChannel } = req.body;
       const { sender, senderName } = await resolveChatSenderIdentity(req);
+
+      // BUG-03: which audience (driver_admin vs client_admin) this message
+      // belongs to. Driver/client identity is already server-verified
+      // above, so their channel is forced from that and never taken from
+      // client input. Admin can message either audience, so it must say
+      // which channel explicitly — there's no existing UI signal reliable
+      // enough to infer this safely, and guessing risks broadcasting one
+      // admin reply into the wrong audience's thread.
+      const channel = resolveOutgoingChatChannel(sender, requestedChannel);
+      if (!channel) {
+        return res.status(400).json({ error: "channel is required ('driver_admin' or 'client_admin') when sending as admin" });
+      }
 
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);
@@ -2803,7 +2864,8 @@ async function startServer() {
         senderName,
         type,
         timestamp: new Date().toISOString(),
-        status: "sent"
+        status: "sent",
+        channel
       };
 
       if (text !== undefined) newMessage.text = text;
@@ -2860,7 +2922,8 @@ async function startServer() {
           text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
           text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
           text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
-          req.session!.id
+          req.session!.id,
+          channel
         );
       }
 
@@ -4033,6 +4096,11 @@ async function startServer() {
             .map(s => s.id)
         );
         list = list.filter(n => myShipmentIds.has(n.shipmentId));
+        // BUG-03: a "chat" notification's title/body carries the sender's
+        // name and message text. Only let the driver_admin channel through
+        // — legacy untagged chat notifications have no reliable audience,
+        // so they're excluded rather than risk showing a client's message.
+        list = list.filter(n => isChatNotificationVisibleToRole(n.type, "driver", n.channel));
       } else if (req.session!.role === "client") {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
@@ -4047,6 +4115,7 @@ async function startServer() {
               .map(s => s.id)
           );
           list = list.filter(n => myShipmentIds.has(n.shipmentId));
+          list = list.filter(n => isChatNotificationVisibleToRole(n.type, "client", n.channel));
         } else {
           list = [];
         }
@@ -4303,7 +4372,10 @@ async function startServer() {
     }
   });
 
-  // 15. Get Unread/Unseen Driver Chat Messages and counts
+  // 15. Get Unread/Unseen Chat Messages (driver_admin + client_admin) and counts.
+  // Admin-only (see requireRole below), so intentionally spans both
+  // channels — the BUG-03 audience partition only restricts what
+  // driver/client sessions can see, not admin.
   app.get("/api/chat/unread", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "chatMessages");

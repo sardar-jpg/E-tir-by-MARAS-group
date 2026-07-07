@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { 
-  Shipment, 
-  Driver, 
-  ChatMessage, 
-  ActivityLog, 
-  AppNotification, 
-  ShipmentStatus, 
-  Currency, 
+  Shipment,
+  Driver,
+  ChatMessage,
+  ChatChannel,
+  ActivityLog,
+  AppNotification,
+  ShipmentStatus,
+  Currency,
   DocumentCategory,
   Language,
   TRUCK_TYPES,
@@ -142,7 +143,10 @@ const getPortsForCountry = (countryName: string): string[] => {
 
 interface AdminPanelProps {
   lang: Language;
-  onSelectShipmentChat: (shipment: Shipment) => void;
+  // BUG-03: optional channel hint so opening chat from a driver_admin or
+  // client_admin message/notification lands on the right audience's
+  // thread instead of defaulting to driver_admin.
+  onSelectShipmentChat: (shipment: Shipment, channel?: ChatChannel) => void;
   openDetailsId: string | null;
   setOpenDetailsId: (id: string | null) => void;
   gmailUser?: any;
@@ -3195,7 +3199,7 @@ MARAS Group etir Center`;
                               {shipment && (
                                 <button
                                   onClick={() => {
-                                    onSelectShipmentChat(shipment);
+                                    onSelectShipmentChat(shipment, msg.channel || (msg.sender === 'client' ? 'client_admin' : 'driver_admin'));
                                     setIsChatDropdownOpen(false);
                                   }}
                                   className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
@@ -3303,7 +3307,7 @@ MARAS Group etir Center`;
                                 {shipment && (
                                   <button
                                     onClick={() => {
-                                      onSelectShipmentChat(shipment);
+                                      onSelectShipmentChat(shipment, notif.channel);
                                       setIsNotifOpen(false);
                                       if (isUnread) handleMarkNotifRead(notif.id);
                                     }}
@@ -10294,7 +10298,7 @@ MARAS Group etir Center`;
                 {shipment && (
                   <button
                     onClick={() => {
-                      onSelectShipmentChat(shipment);
+                      onSelectShipmentChat(shipment, notif.channel);
                       setActiveToasts(prev => prev.filter(t => t.id !== id));
                     }}
                     className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1 rounded-lg text-[11px] font-black shadow-md flex items-center gap-1 transition-all cursor-pointer border-0"
