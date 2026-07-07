@@ -100,6 +100,12 @@ const IS_LOCAL_DEV = process.env.NODE_ENV !== "production";
 const DEMO_ACCOUNTS = IS_LOCAL_DEV
   ? {
       admin: { email: "admin@demo.local", password: "DemoAdmin123!" },
+      // Local-only alias so the real owner email can be used to log into the
+      // memory fallback without touching SUPER_ADMIN_EMAIL/PASSWORD_HASH
+      // (the production super-admin credentials). Never a real password;
+      // only ever seeded outside production, alongside the other demo
+      // accounts above.
+      owner: { email: "sardar@maras.iq", password: "LocalOwner123!" },
       driver: { username: "demo_driver", email: "driver@demo.local", password: "DemoDriver123!" },
       client: { username: "demo_client", email: "client@demo.local", password: "DemoClient123!" },
     }
@@ -220,6 +226,14 @@ function getMemoryStore() {
         adminType: "super",
         createdAt: new Date().toISOString(),
       });
+      memoryStore.admins.push({
+        id: "demo-owner",
+        name: "Sardar (Local Owner)",
+        email: DEMO_ACCOUNTS.owner.email,
+        password: hashPassword(DEMO_ACCOUNTS.owner.password),
+        adminType: "super",
+        createdAt: new Date().toISOString(),
+      });
       memoryStore.drivers.push({
         id: "demo-driver",
         name: "Demo Driver",
@@ -246,6 +260,7 @@ function getMemoryStore() {
 
       console.log("\n[local dev] Memory fallback is active — seeded demo accounts for local login:");
       console.log(`  Admin  -> username: ${DEMO_ACCOUNTS.admin.email}   password: ${DEMO_ACCOUNTS.admin.password}`);
+      console.log(`  Owner  -> username: ${DEMO_ACCOUNTS.owner.email}   password: ${DEMO_ACCOUNTS.owner.password}`);
       console.log(`  Driver -> username: ${DEMO_ACCOUNTS.driver.username}   password: ${DEMO_ACCOUNTS.driver.password}`);
       console.log(`  Client -> username: ${DEMO_ACCOUNTS.client.username}   password: ${DEMO_ACCOUNTS.client.password}\n`);
     }
