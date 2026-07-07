@@ -185,6 +185,14 @@ export const TRUCK_TYPES = [
   { id: "tanker", en: "Tanker", tr: "Tanker", ar: "ناقلة سوائل / تانكر" }
 ];
 
+// BUG-03: which audience a chat message belongs to. Driver/admin dispatch
+// chat and client/admin customer-service chat are kept in separate
+// threads so drivers never see client identity/content and clients never
+// see internal driver/admin operational chat. Messages written before this
+// field existed have no channel — the server treats those as admin-only
+// (see server.ts chat routes) rather than guessing and risking a leak.
+export type ChatChannel = 'driver_admin' | 'client_admin';
+
 export interface ChatMessage {
   id: string;
   shipmentId: string;
@@ -197,6 +205,7 @@ export interface ChatMessage {
   fileCategory?: DocumentCategory;
   timestamp: string;
   status?: 'sent' | 'seen';
+  channel?: ChatChannel;
 }
 
 export interface ActivityLog {
@@ -227,6 +236,12 @@ export interface AppNotification {
   // own sender), e.g. so an admin doesn't get notified of their own chat
   // message. Absent for notification types that don't need self-exclusion.
   excludeUserId?: string;
+  // BUG-03: for type 'chat' notifications, which chat audience this came
+  // from (see ChatMessage.channel). Used to keep a driver from being
+  // notified of a client message (or vice versa) via the notification
+  // center/push, not just the chat thread itself. Absent for non-chat
+  // notification types.
+  channel?: ChatChannel;
 }
 
 export interface CostItem {

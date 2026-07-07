@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
-import { Language, Shipment, Driver } from "./types";
+import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 import AdminPanel from "./components/AdminPanel";
 import DriverApplication from "./components/DriverApplication";
@@ -511,9 +511,22 @@ export default function App() {
   // 3. Document/Attachment Chat context
   const [chatShipment, setChatShipment] = useState<Shipment | null>(null);
   const [chatDrawerTab, setChatDrawerTab] = useState<'messages' | 'attachments'>('messages');
+  // BUG-03: which audience thread the admin drawer is showing/replying to.
+  // Driver/admin dispatch chat and client/admin customer-service chat are
+  // separate channels server-side; this picks which one the drawer talks
+  // to. Defaults to 'driver_admin' (this drawer's original/primary use —
+  // see the "helpline"/"Active Driver" header below) unless opened from a
+  // context that already knows the message's channel (e.g. the unread
+  // chat dropdown or a chat notification).
+  const [chatChannel, setChatChannel] = useState<ChatChannel>('driver_admin');
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatMessageText, setChatMessageText] = useState("");
   const [activeDetailsId, setActiveDetailsId] = useState<string | null>(null);
+
+  const openShipmentChat = (shipment: Shipment, channel?: ChatChannel) => {
+    setChatChannel(channel || 'driver_admin');
+    setChatShipment(shipment);
+  };
 
   // Reset tab selection when drawer changes
   useEffect(() => {
@@ -590,7 +603,7 @@ export default function App() {
     if (chatShipment) {
       const fetchChat = async () => {
         try {
-          const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat`);
+          const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}`);
           if (res.ok) {
             const data = await res.json();
             setChatMessages(data);
@@ -600,7 +613,7 @@ export default function App() {
               await apiFetch(`/api/shipments/${chatShipment.id}/chat/seen`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ viewer: "admin" })
+                body: JSON.stringify({ viewer: "admin", channel: chatChannel })
               });
             }
           }
@@ -612,7 +625,7 @@ export default function App() {
       interval = setInterval(fetchChat, 3000);
     }
     return () => clearInterval(interval);
-  }, [chatShipment?.id]);
+  }, [chatShipment?.id, chatChannel]);
 
   const handleSendAdminMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -625,7 +638,8 @@ export default function App() {
           sender: "admin",
           senderName: "MARAS Operations Office",
           type: "text",
-          text: chatMessageText
+          text: chatMessageText,
+          channel: chatChannel
         })
       });
       if (res.ok) {
@@ -685,7 +699,8 @@ export default function App() {
           fileName: adminFileName,
           fileCategory: adminFileCategory,
           fileUrl: finalFileUrl || "#",
-          text: `Sent a document [${adminFileCategory.toUpperCase()}]: ${adminFileName}`
+          text: `Sent a document [${adminFileCategory.toUpperCase()}]: ${adminFileName}`,
+          channel: chatChannel
         })
       });
       if (res.ok) {
@@ -853,7 +868,7 @@ export default function App() {
         {isCurrentlyAdmin ? (
           <AdminPanel
             lang={lang}
-            onSelectShipmentChat={(sh) => setChatShipment(sh)}
+            onSelectShipmentChat={(sh, channel) => openShipmentChat(sh, channel)}
             openDetailsId={activeDetailsId}
             setOpenDetailsId={setActiveDetailsId}
             gmailUser={gmailUser}
@@ -896,14 +911,47 @@ export default function App() {
               <div>
                 <span className="text-[10px] text-orange-500 uppercase tracking-widest font-extrabold">{t('chat')}</span>
                 <h3 className="font-extrabold text-sm text-white">#{chatShipment.shipmentNumber} ➔ helpline</h3>
-                <p className="text-[10px] text-slate-400 truncate max-w-[200px]">Active Driver: {chatShipment.assignedDriverName}</p>
+                <p className="text-[10px] text-slate-400 truncate max-w-[200px]">
+                  {chatChannel === 'driver_admin'
+                    ? `Active Driver: ${chatShipment.assignedDriverName}`
+                    : `Client: ${chatShipment.companyName}`}
+                </p>
               </div>
-              
-              <button 
+
+              <button
                 onClick={() => setChatShipment(null)}
                 className="p-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-lg text-slate-300 pointer cursor-pointer"
               >
                 <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* BUG-03: Channel switch — driver_admin and client_admin are
+                separate threads server-side, so the admin explicitly picks
+                which audience they're viewing/replying to rather than a
+                single merged thread. */}
+            <div className="flex gap-2 px-5 py-2.5 border-b border-slate-800/80 bg-slate-950">
+              <button
+                type="button"
+                onClick={() => { setChatChannel('driver_admin'); setChatMessages([]); }}
+                className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${
+                  chatChannel === 'driver_admin'
+                    ? 'bg-orange-600 border-orange-500 text-white'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Driver Channel
+              </button>
+              <button
+                type="button"
+                onClick={() => { setChatChannel('client_admin'); setChatMessages([]); }}
+                className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${
+                  chatChannel === 'client_admin'
+                    ? 'bg-orange-600 border-orange-500 text-white'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Client Channel
               </button>
             </div>
 
