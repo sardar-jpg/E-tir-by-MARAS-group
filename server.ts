@@ -188,7 +188,7 @@ function getMemoryStore() {
         name: "Demo Admin",
         email: DEMO_ACCOUNTS.admin.email,
         password: hashPassword(DEMO_ACCOUNTS.admin.password),
-        adminType: "operation",
+        adminType: "super",
         createdAt: new Date().toISOString(),
       });
       memoryStore.drivers.push({
