@@ -32,6 +32,7 @@ import {
 import TrackingMap from "./TrackingMap";
 import AdminSidebar from "./admin/AdminSidebar";
 import { apiFetch } from "../lib/api";
+import { canManageClients, canManageVendors } from "../lib/adminAccess";
 import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
@@ -3010,10 +3011,19 @@ MARAS Group etir Center`;
   // Selected details modal data injection
   const targetDetailsShipment = openDetailsId ? shipments.find(s => s.id === openDetailsId) : null;
 
+  // BUG-09: accounts admins can see the Clients/Vendors tabs (server now
+  // allows them to read /api/clients and /api/vendors — see
+  // canViewClients/canViewVendors in adminAccess.ts) but must stay
+  // read-only, matching the write routes which are still super/operation
+  // only. Used below to hide the Add/Edit affordances rather than show
+  // controls that would just 403 on click.
+  const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+  const canWriteClients = canManageClients(resolvedAdminType);
+  const canWriteVendors = canManageVendors(resolvedAdminType);
+
   // Admin navigation tabs, filtered by admin role/type — shared by the
   // desktop sidebar and the mobile/tablet horizontal tab bar below.
   const filteredAdminTabs = (() => {
-    const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
     const isSuper = resolvedAdminType === 'super';
     const isOperation = resolvedAdminType === 'operation';
     const isAccounts = resolvedAdminType === 'accounts' || resolvedAdminType === 'account';
@@ -4737,13 +4747,15 @@ MARAS Group etir Center`;
                 {lang === 'tr' ? "Sistemdeki tüm kayıtlı göndericileri yönetin, siparişlerini ve takip bağlantılarını inceleyin." : (lang === 'ar' ? "إدارة شاحني البضائع المسجلين، والتحقق من طلباتهم، ومشاركة روابط التتبع." : "Manage corporate freight shippers, check order histories, and share real-time tracking links.")}
               </p>
             </div>
-            <button
-              onClick={() => setIsAddClientOpen(true)}
-              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0"
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>{lang === 'tr' ? "Yeni Müşteri Ekle" : (lang === 'ar' ? "إضافة عميل جديد" : "Add New Client")}</span>
-            </button>
+            {canWriteClients && (
+              <button
+                onClick={() => setIsAddClientOpen(true)}
+                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0"
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>{lang === 'tr' ? "Yeni Müşteri Ekle" : (lang === 'ar' ? "إضافة عميل جديد" : "Add New Client")}</span>
+              </button>
+            )}
           </div>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -4847,13 +4859,15 @@ MARAS Group etir Center`;
                               </td>
                               <td className="px-5 py-4 text-right">
                                 <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    onClick={() => openEditClient(client)}
-                                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5" />
-                                    <span>{lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}</span>
-                                  </button>
+                                  {canWriteClients && (
+                                    <button
+                                      onClick={() => openEditClient(client)}
+                                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                      <span>{lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}</span>
+                                    </button>
+                                  )}
                                   <button
                                     onClick={() => {
                                       setExpandedClientOrdersCompanyName(isExpanded ? null : client.companyName);
@@ -5292,13 +5306,15 @@ MARAS Group etir Center`;
                 {lang === 'tr' ? "Gümrük acenteleri, limanlar, armatörler ve nakliye tedarikçilerinizi yönetin, maliyet ilişkilendirmelerini inceleyin." : (lang === 'ar' ? "إدارة مخلصي الجمارك، والموانئ، وخطوط الشحن، والموردين الخارجيين مع رصد لبيانات التكلفة." : "Manage customs clearance dispatchers, harbor terminals, shipping lines, and operational trade vendors.")}
               </p>
             </div>
-            <button
-              onClick={() => setIsAddVendorOpen(true)}
-              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0 w-full sm:w-auto"
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>{lang === 'tr' ? "Yeni Tedarikçi Ekle" : (lang === 'ar' ? "إضافة مورد جديد" : "Add New Vendor")}</span>
-            </button>
+            {canWriteVendors && (
+              <button
+                onClick={() => setIsAddVendorOpen(true)}
+                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0 w-full sm:w-auto"
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>{lang === 'tr' ? "Yeni Tedarikçi Ekle" : (lang === 'ar' ? "إضافة مورد جديد" : "Add New Vendor")}</span>
+              </button>
+            )}
           </div>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

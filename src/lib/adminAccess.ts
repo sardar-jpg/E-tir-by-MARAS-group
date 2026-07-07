@@ -38,3 +38,29 @@ export function canViewDriverRoster(adminType: AdminType | undefined): boolean {
 export function canViewAdminRoster(adminType: AdminType | undefined): boolean {
   return isSuperAdmin(adminType);
 }
+
+/**
+ * BUG-09: the AdminPanel UI shows accounts admins a Clients tab (they need
+ * client names to attribute costs/reports), but GET /api/clients used
+ * requireFullAdmin, which blocks 'accounts' — so the tab loaded to a wall of
+ * fetch errors. Accounts admins may read the client/vendor directory but
+ * never write to it — see canManageClients/canManageVendors below.
+ */
+export function canViewClients(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "operation" || adminType === "accounts";
+}
+
+/** GET /api/vendors — same reasoning as canViewClients. */
+export function canViewVendors(adminType: AdminType | undefined): boolean {
+  return canViewClients(adminType);
+}
+
+/** POST/PUT/DELETE /api/clients — accounts admins are read-only here; only super/operation may create/edit/delete clients. */
+export function canManageClients(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "operation";
+}
+
+/** POST/PUT/DELETE /api/vendors — same reasoning as canManageClients. */
+export function canManageVendors(adminType: AdminType | undefined): boolean {
+  return canManageClients(adminType);
+}
