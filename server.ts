@@ -49,22 +49,31 @@ import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisib
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./src/lib/documentAccess";
-import { 
-  getFirestore, 
+import { canDeletePushToken } from "./src/lib/pushTokenAccess";
+import {
+  getFirestore,
   initializeFirestore,
-  collection as rawCollection, 
-  doc as rawDoc, 
-  getDocs as rawGetDocs, 
-  getDoc as rawGetDoc, 
-  setDoc as rawSetDoc, 
-  updateDoc as rawUpdateDoc, 
-  deleteDoc as rawDeleteDoc, 
-  addDoc as rawAddDoc, 
-  query, 
-  where, 
-  orderBy, 
+  collection as rawCollection,
+  doc as rawDoc,
+  getDocs as rawGetDocs,
+  getDoc as rawGetDoc,
+  setDoc as rawSetDoc,
+  updateDoc as rawUpdateDoc,
+  deleteDoc as rawDeleteDoc,
+  addDoc as rawAddDoc,
+  runTransaction as rawRunTransaction,
+  query,
+  where,
+  orderBy,
   limit
 } from "firebase/firestore";
+import {
+  formatShipmentNumber,
+  formatShipmentId,
+  nextSequenceFromCounterDoc,
+  InMemorySequenceCounter,
+  ShipmentSequenceCounterDoc,
+} from "./src/lib/shipmentNumbering";
 
 export let useMemoryFallback = false;
 
@@ -178,6 +187,11 @@ let memoryStore: {
   admins: any[];
   costStatements: CostStatement[];
   test: any[];
+  // BUG-15: allocates shipment sequence numbers when running on the
+  // memory fallback. Lazily created (see getShipmentSequenceCounter)
+  // rather than seeded here, since its initial value depends on how many
+  // shipments are already in memoryStore.shipments at first use.
+  shipmentSequenceCounter: InMemorySequenceCounter | null;
 } | null = null;
 
 function getMemoryStore() {
@@ -192,7 +206,8 @@ function getMemoryStore() {
       vendors: [...(SEED_DEMO_DATA ? (initialVendors || []) : [])],
       admins: [],
       costStatements: [],
-      test: [{ id: "connection", status: "ok" }]
+      test: [{ id: "connection", status: "ok" }],
+      shipmentSequenceCounter: null
     };
 
     if (DEMO_ACCOUNTS) {
@@ -479,6 +494,76 @@ async function addDoc(colRef: any, data: any) {
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleAddDocMemory(colRef, cleanedData);
+  }
+}
+
+// BUG-15: shipment number/id generation used to read the shipments
+// collection's current size, add 1001 in JS, and write the new shipment
+// with that number - with no coordination between two concurrent create
+// requests, both could read the same size and hand out the same
+// shipmentNumber/id. This replaces that read/increment/write with a
+// dedicated counter doc allocated via a Firestore transaction (or, when
+// Firestore is unavailable, the single-threaded InMemorySequenceCounter),
+// so a sequence number can only ever be handed out once.
+function getShipmentSequenceCounterMemory(): InMemorySequenceCounter {
+  const mStore = getMemoryStore();
+  if (!mStore.shipmentSequenceCounter) {
+    // Bootstraps from however many shipments already exist in the memory
+    // store, so numbering continues where the old count-based approach
+    // left off instead of restarting at 0.
+    mStore.shipmentSequenceCounter = new InMemorySequenceCounter(mStore.shipments.length);
+  }
+  return mStore.shipmentSequenceCounter;
+}
+
+async function allocateNextShipmentSequence(): Promise<number> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getShipmentSequenceCounterMemory().next();
+  }
+
+  const counterRef = rawDoc(db, "counters", "shipments");
+  try {
+    // Firestore transactions can only read individual documents, not run
+    // a collection query, so the one-time bootstrap value (how many
+    // shipments already exist) has to be read before the transaction
+    // starts. It's only used the first time this ever runs, when the
+    // counter doc doesn't exist yet; from then on the counter doc itself
+    // is authoritative and this pre-read value is discarded.
+    let bootstrapCount = 0;
+    const existingCounter = await withTimeout(rawGetDoc(counterRef), 5000, "Firestore getDoc timed out");
+    if (!existingCounter.exists()) {
+      const existingShipments = await withTimeout(
+        rawGetDocs(rawCollection(db, "shipments")),
+        5000,
+        "Firestore getDocs timed out"
+      );
+      bootstrapCount = existingShipments.size;
+    }
+
+    // The transaction is what actually makes this safe: Firestore aborts
+    // and automatically retries this callback if the counter document was
+    // modified by anyone else between the read below and the commit, so
+    // two concurrent creates can never both read the same count and
+    // successfully commit - one is always retried against the value the
+    // other just wrote, and reads the incremented value instead.
+    return await withTimeout(
+      rawRunTransaction(db, async (tx) => {
+        const snap = await tx.get(counterRef);
+        const data = snap.exists() ? (snap.data() as ShipmentSequenceCounterDoc) : undefined;
+        const { current, next } = nextSequenceFromCounterDoc(data, bootstrapCount);
+        tx.set(counterRef, next, { merge: true });
+        return current;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore shipment sequence transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getShipmentSequenceCounterMemory().next();
   }
 }
 import { 
@@ -2005,15 +2090,19 @@ async function startServer() {
   app.post("/api/shipments", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
-      
-      // Auto generate shipment number (MAR-Year-Count)
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      const count = snapshot.size;
+
+      // Auto generate shipment number (MAR-Year-Count). BUG-15: this
+      // sequence number now comes from allocateNextShipmentSequence(),
+      // which allocates it atomically (Firestore transaction, or the
+      // single-threaded in-memory counter when Firestore is unavailable)
+      // instead of reading the collection size and incrementing in JS -
+      // that pattern let two concurrent create requests read the same
+      // count and hand out the same shipmentNumber/id.
+      const count = await allocateNextShipmentSequence();
       const year = new Date().getFullYear();
-      const shipmentNumber = `MAR-${year}-${1001 + count}`;
-      const id = `shipment-${1001 + count}`;
-      
+      const shipmentNumber = formatShipmentNumber(year, count);
+      const id = formatShipmentId(count);
+
       // Load drivers to find assignee
       const driversCol = collection(db, "drivers");
       const driversSnap = await getDocs(driversCol);
@@ -4366,9 +4455,31 @@ async function startServer() {
   // Lets the client proactively remove its own token, e.g. on logout,
   // so a shared/reassigned device doesn't keep receiving a previous
   // user's pushes.
+  //
+  // BUG-18: this previously deleted whatever pushTokens/<token> doc
+  // matched the URL with no ownership check at all - any authenticated
+  // session (driver, client, or admin) could unregister ANY other user's
+  // device just by knowing/guessing their token string, silently cutting
+  // off their push notifications. Every token doc already records who
+  // registered it (userId/role, set in the POST handler above), so this
+  // now requires the caller's session to match both before deleting -
+  // same pattern as requireShipmentAccess: 404 if the token doesn't
+  // exist, 403 if it exists but belongs to someone else, so a caller
+  // can't distinguish "not yours" from "doesn't exist" beyond that.
+  // There is no admin-override route, so admins are held to the same
+  // own-token-only rule.
   app.delete("/api/push-tokens/:token", requireAuth, async (req, res) => {
     try {
-      await deleteDoc(doc(db, "pushTokens", req.params.token));
+      const tokenRef = doc(db, "pushTokens", req.params.token);
+      const tokenDoc = await getDoc(tokenRef);
+      if (!tokenDoc.exists()) {
+        return res.status(404).json({ error: "Push token not found." });
+      }
+      const record = tokenDoc.data() as { userId?: string; role?: string };
+      if (!canDeletePushToken({ id: req.session!.id, role: req.session!.role }, record)) {
+        return res.status(403).json({ error: "You do not have permission to remove this push token." });
+      }
+      await deleteDoc(tokenRef);
       res.json({ success: true });
     } catch (err) {
       console.error(err);
