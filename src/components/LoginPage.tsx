@@ -200,17 +200,18 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       }
 
       // Predefined administrative checks for direct identification
-      const checkIsAdmin = 
+      const checkIsAdmin =
         enteredEmail === "sardar@maras.iq" ||
         loginUsername.trim().toLowerCase() === "sardar" ||
         loginUsername.trim().toLowerCase() === "sardar@maras.iq" ||
         loginRole === "admin";
 
-      if (loginRole === "admin" && !checkIsAdmin) {
-        setLoginError("This account username/email is not registered as an Administrator.");
-        setIsLoggingIn(false);
-        return;
-      }
+      // BUG-20: `checkIsAdmin` is always true whenever loginRole === "admin"
+      // (it's one of the OR terms above), so a guard of the form
+      // `loginRole === "admin" && !checkIsAdmin` could never fire — it was
+      // dead code. The real admin/wrong-role decision is made server-side
+      // by /api/login below, which returns GENERIC_LOGIN_ERROR either way
+      // so this client can't be used to enumerate valid admin identities.
 
       if (loginRole === "driver" && checkIsAdmin && enteredEmail === "sardar@maras.iq") {
         setLoginError("This account is registered as an Administrator. Please select the Admin Portal above to sign in.");

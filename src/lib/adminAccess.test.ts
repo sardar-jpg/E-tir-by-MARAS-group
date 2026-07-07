@@ -8,6 +8,7 @@ import {
   canViewVendors,
   canManageClients,
   canManageVendors,
+  resolveFullAdminStatus,
 } from "./adminAccess";
 
 describe("isSuperAdmin", () => {
@@ -71,5 +72,26 @@ describe("canManageClients / canManageVendors", () => {
     expect(canManageVendors("operation")).toBe(true);
     expect(canManageVendors("accounts")).toBe(false);
     expect(canManageVendors(undefined)).toBe(false);
+  });
+});
+
+describe("resolveFullAdminStatus", () => {
+  it("returns 401 only when there is no session at all", () => {
+    expect(resolveFullAdminStatus(null)).toBe(401);
+    expect(resolveFullAdminStatus(undefined)).toBe(401);
+  });
+
+  it("returns 403 — not 401 — for an authenticated session with the wrong role", () => {
+    expect(resolveFullAdminStatus({ role: "client" })).toBe(403);
+    expect(resolveFullAdminStatus({ role: "driver" })).toBe(403);
+  });
+
+  it("returns 403 for an authenticated admin with an insufficient adminType", () => {
+    expect(resolveFullAdminStatus({ role: "admin", adminType: "accounts" })).toBe(403);
+  });
+
+  it("returns 200 for super/operation admins, leaving successful access unchanged", () => {
+    expect(resolveFullAdminStatus({ role: "admin", adminType: "super" })).toBe(200);
+    expect(resolveFullAdminStatus({ role: "admin", adminType: "operation" })).toBe(200);
   });
 });
