@@ -64,6 +64,24 @@ const STRICT_PERSISTENCE = process.env.STRICT_PERSISTENCE !== "false";
 // fabricated/demo records as real operational data.
 const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA === "true";
 
+// Local-dev login safety net: when SERVER_FIREBASE_EMAIL/PASSWORD are
+// missing, the app falls back to the in-memory store above, but nothing
+// seeds it unless SEED_DEMO_DATA=true — so a fresh `npm run dev` checkout
+// has no accounts to log in with. This is independent of SEED_DEMO_DATA
+// (which seeds a large realistic dataset): it seeds exactly one demo
+// account per role, hashed with the same pbkdf2 hashPassword() the real
+// login flow uses, and only outside production, whether or not the
+// fallback is active — getMemoryStore() is only ever reached once the
+// fallback already is.
+const IS_LOCAL_DEV = process.env.NODE_ENV !== "production";
+const DEMO_ACCOUNTS = IS_LOCAL_DEV
+  ? {
+      admin: { email: "admin@demo.local", password: "DemoAdmin123!" },
+      driver: { username: "demo_driver", email: "driver@demo.local", password: "DemoDriver123!" },
+      client: { username: "demo_client", email: "client@demo.local", password: "DemoClient123!" },
+    }
+  : null;
+
 class ServiceUnavailableError extends Error {
   readonly code = "SERVICE_UNAVAILABLE";
   readonly retryable = true;
@@ -144,6 +162,7 @@ let memoryStore: {
   activityLogs: ActivityLog[];
   clients: Client[];
   vendors: Vendor[];
+  admins: any[];
   costStatements: CostStatement[];
   test: any[];
 } | null = null;
@@ -158,9 +177,49 @@ function getMemoryStore() {
       activityLogs: [...(SEED_DEMO_DATA ? (initialActivityLogs || []) : [])],
       clients: [...(SEED_DEMO_DATA ? (initialClients || []) : [])],
       vendors: [...(SEED_DEMO_DATA ? (initialVendors || []) : [])],
+      admins: [],
       costStatements: [],
       test: [{ id: "connection", status: "ok" }]
     };
+
+    if (DEMO_ACCOUNTS) {
+      memoryStore.admins.push({
+        id: "demo-admin",
+        name: "Demo Admin",
+        email: DEMO_ACCOUNTS.admin.email,
+        password: hashPassword(DEMO_ACCOUNTS.admin.password),
+        adminType: "operation",
+        createdAt: new Date().toISOString(),
+      });
+      memoryStore.drivers.push({
+        id: "demo-driver",
+        name: "Demo Driver",
+        username: DEMO_ACCOUNTS.driver.username,
+        email: DEMO_ACCOUNTS.driver.email,
+        password: hashPassword(DEMO_ACCOUNTS.driver.password),
+        truckNumber: "DEMO-0001",
+        phone: "+1 000 000 0000",
+        activeShipmentsCount: 0,
+        completedShipmentsCount: 0,
+        status: "approved",
+      });
+      memoryStore.clients.push({
+        id: "demo-client",
+        companyName: "Demo Client Co.",
+        contactName: "Demo Client",
+        phone: "+1 000 000 0001",
+        email: DEMO_ACCOUNTS.client.email,
+        address: "N/A",
+        username: DEMO_ACCOUNTS.client.username,
+        password: hashPassword(DEMO_ACCOUNTS.client.password),
+        createdAt: new Date().toISOString(),
+      });
+
+      console.log("\n[local dev] Memory fallback is active — seeded demo accounts for local login:");
+      console.log(`  Admin  -> username: ${DEMO_ACCOUNTS.admin.email}   password: ${DEMO_ACCOUNTS.admin.password}`);
+      console.log(`  Driver -> username: ${DEMO_ACCOUNTS.driver.username}   password: ${DEMO_ACCOUNTS.driver.password}`);
+      console.log(`  Client -> username: ${DEMO_ACCOUNTS.client.username}   password: ${DEMO_ACCOUNTS.client.password}\n`);
+    }
   }
   return memoryStore;
 }
