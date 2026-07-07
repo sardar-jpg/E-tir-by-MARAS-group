@@ -27,6 +27,20 @@ const GROUPS: { key: GroupKey; ids: string[] }[] = [
   { key: 'system', ids: ['gmail', 'audit', 'team', 'my_account'] },
 ];
 
+/**
+ * BUG-24: GROUPS above is a second, hand-maintained list of tab ids that
+ * has to be kept in sync with AdminPanel's rawTabs — nothing enforced that,
+ * so a tab added to rawTabs without a matching GROUPS entry would silently
+ * vanish from the desktop sidebar (it'd still show up in the mobile tab
+ * bar, which renders straight off rawTabs). Exported so both a dev-time
+ * check and a unit test can catch that drift instead of it only surfacing
+ * as "why isn't my new tab in the sidebar".
+ */
+export function findUngroupedTabIds(tabIds: string[]): string[] {
+  const grouped = new Set(GROUPS.flatMap((group) => group.ids));
+  return tabIds.filter((id) => !grouped.has(id));
+}
+
 const GROUP_LABELS: Record<GroupKey, Record<Language, string>> = {
   operations: { en: 'Operations', tr: 'Operasyonlar', ar: 'العمليات' },
   business: { en: 'Business', tr: 'İşletme', ar: 'الأعمال' },

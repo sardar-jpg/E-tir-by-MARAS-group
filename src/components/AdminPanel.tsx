@@ -30,7 +30,7 @@ import {
   Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert, User, Pencil, Lock
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
-import AdminSidebar from "./admin/AdminSidebar";
+import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors } from "../lib/adminAccess";
 import { jsPDF } from "jspdf";
@@ -154,23 +154,21 @@ interface AdminPanelProps {
   gmailToken?: string | null;
   onConnectGmail?: () => void;
   onDisconnectGmail?: () => void;
-  userRole?: 'admin' | 'accounts';
   isMobile?: boolean;
   isConnectingGmail?: boolean;
   adminEmail?: string;
   adminType?: string;
 }
 
-export default function AdminPanel({ 
-  lang, 
-  onSelectShipmentChat, 
-  openDetailsId, 
+export default function AdminPanel({
+  lang,
+  onSelectShipmentChat,
+  openDetailsId,
   setOpenDetailsId,
   gmailUser = null,
   gmailToken = null,
   onConnectGmail,
   onDisconnectGmail,
-  userRole = 'admin',
   isMobile = false,
   isConnectingGmail = false,
   adminEmail = '',
@@ -184,6 +182,12 @@ export default function AdminPanel({
 
   const isRtl = lang === 'ar';
 
+  // BUG-16: adminType is the single source of truth for admin UI decisions —
+  // this component used to also accept a `userRole` prop, but no caller ever
+  // passed it, so its 'accounts' branch was always dead and every check that
+  // referenced it silently fell through to the 'admin'/'super' default.
+  const isAccountsAdminType = adminType === 'accounts' || adminType === 'account';
+
   // State Management
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -193,7 +197,7 @@ export default function AdminPanel({
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account'>(
-    userRole === 'accounts' ? 'costs' : 'dashboard'
+    isAccountsAdminType ? 'costs' : 'dashboard'
   );
 
   // Real-time Dashboard Clock
@@ -1009,7 +1013,7 @@ MARAS Group etir Center`;
       const resUnreadChat = await apiFetch("/api/chat/unread");
       const resCostStatements = await apiFetch("/api/cost-statements");
 
-      const resolvedAdminTypeForSWR = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+      const resolvedAdminTypeForSWR = adminType || 'super';
       let resAdmins: Response | null = null;
       if (resolvedAdminTypeForSWR === 'super') {
         resAdmins = await apiFetch("/api/admins");
@@ -2548,10 +2552,28 @@ MARAS Group etir Center`;
   const handleCreateShipment = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      // BUG-13: Sea/Air freight collect Port/Airport fields instead of a
+      // city field in this form. Never submit whatever Land's loadingCity/
+      // deliveryCity happen to hold (e.g. stale "Istanbul"/"Baghdad") for a
+      // Sea/Air shipment — derive an honest display city from the
+      // port/airport the admin actually entered, or leave it blank rather
+      // than invent one.
+      const payload = newShipmentData.freightType === "land"
+        ? newShipmentData
+        : {
+            ...newShipmentData,
+            loadingCity: newShipmentData.freightType === "sea"
+              ? newShipmentData.portOfLoading
+              : newShipmentData.airportOfDeparture,
+            deliveryCity: newShipmentData.freightType === "sea"
+              ? (newShipmentData.portOfDischarge || newShipmentData.finalDestination)
+              : newShipmentData.airportOfArrival,
+          };
+
       const res = await apiFetch("/api/shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newShipmentData)
+        body: JSON.stringify(payload)
       });
       if (res.ok) {
         setIsCreateOpen(false);
@@ -3017,7 +3039,7 @@ MARAS Group etir Center`;
   // read-only, matching the write routes which are still super/operation
   // only. Used below to hide the Add/Edit affordances rather than show
   // controls that would just 403 on click.
-  const resolvedAdminType = adminType || (userRole === 'accounts' ? 'accounts' : 'super');
+  const resolvedAdminType = adminType || 'super';
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
@@ -3060,8 +3082,21 @@ MARAS Group etir Center`;
     });
   })();
 
+  // BUG-24: catch a tab that AdminSidebar's GROUPS forgot to place — it
+  // would otherwise just silently disappear from the desktop sidebar while
+  // still showing up in the mobile tab bar below. Dev-only, no UI change.
+  if ((import.meta as any).env?.DEV) {
+    const ungrouped = findUngroupedTabIds(filteredAdminTabs.map(tab => tab.id));
+    if (ungrouped.length > 0) {
+      console.warn(`[AdminSidebar] Tab id(s) not present in any sidebar group: ${ungrouped.join(', ')}`);
+    }
+  }
+
+  // BUG-14: dir="rtl" already reverses a flex-row's visual order on its own;
+  // also forcing flex-row-reverse cancelled that back out, pushing the
+  // desktop sidebar to the wrong side in Arabic.
   return (
-    <div className={`flex ${isRtl ? 'flex-row-reverse' : 'flex-row'} bg-slate-50 min-h-screen text-slate-800 font-sans`} dir={isRtl ? 'rtl' : 'ltr'}>
+    <div className="flex flex-row bg-slate-50 min-h-screen text-slate-800 font-sans" dir={isRtl ? 'rtl' : 'ltr'}>
       <AdminSidebar
         tabs={filteredAdminTabs}
         activeTab={activeTab}
@@ -3153,7 +3188,7 @@ MARAS Group etir Center`;
             >
               <MessageSquare className={`w-5 h-5 ${unreadChatMessages.length > 0 ? "text-orange-600 animate-pulse" : "text-slate-500"}`} />
               {unreadChatMessages.length > 0 && (
-                <span className="absolute -top-1 -right-1 bg-orange-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                <span className="absolute -top-1 -end-1 bg-orange-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
                   {unreadChatMessages.length}
                 </span>
               )}
@@ -3245,7 +3280,7 @@ MARAS Group etir Center`;
                 <Bell className="w-5 h-5 text-slate-500" />
               )}
               {notifications.filter(n => !n.read).length > 0 && (
-                <span className="absolute -top-1 -right-1 bg-orange-500 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                <span className="absolute -top-1 -end-1 bg-orange-500 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
                   {notifications.filter(n => !n.read).length}
                 </span>
               )}
@@ -3347,8 +3382,8 @@ MARAS Group etir Center`;
             )}
           </div>
 
-          {(adminType === 'super' || adminType === 'operation' || userRole === 'admin') && (
-            <button 
+          {(resolvedAdminType === 'super' || resolvedAdminType === 'operation') && (
+            <button
               onClick={() => setIsCreateOpen(true)}
               className="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 shadow-lg hover:shadow-orange-200 transition-all"
             >
@@ -6619,7 +6654,10 @@ MARAS Group etir Center`;
 
       {/* 7. Active GPS Tracking Map Tab */}
       {activeTab === 'tracking_map' && (
-        <TrackingMap shipments={shipments} lang={lang} drivers={drivers} />
+        // BUG-13: this map is a Turkey<->Iraq land corridor visualization —
+        // it has no coordinate data for Sea/Air routes, so mixing them in
+        // just fell back to a fake Istanbul->Baghdad pin. Land-only here.
+        <TrackingMap shipments={shipments.filter(s => (s.freightType || "land") === "land")} lang={lang} drivers={drivers} />
       )}
 
       {/* 8. Accounts & Cost Statements Tab */}
@@ -8304,9 +8342,23 @@ MARAS Group etir Center`;
                       <button
                         key={mode.id}
                         type="button"
-                        onClick={() => setNewShipmentData({ 
-                          ...newShipmentData, 
-                          freightType: mode.id,
+                        onClick={() => setNewShipmentData(prev => {
+                          if (prev.freightType === mode.id) return prev;
+                          // BUG-13: Sea/Air don't collect loadingCity/deliveryCity in this
+                          // form (they use ports/airports instead) — switching away from
+                          // Land must not leave Land's Istanbul/Baghdad city defaults
+                          // sitting in state to be silently submitted with a Sea/Air
+                          // shipment. Restore the Land defaults only when re-selecting
+                          // Land with the fields empty.
+                          if (mode.id === 'land') {
+                            return {
+                              ...prev,
+                              freightType: mode.id,
+                              loadingCity: prev.loadingCity || "Istanbul",
+                              deliveryCity: prev.deliveryCity || "Baghdad",
+                            };
+                          }
+                          return { ...prev, freightType: mode.id, loadingCity: "", deliveryCity: "" };
                         })}
                         className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all ${
                           isSelected 

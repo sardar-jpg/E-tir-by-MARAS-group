@@ -46,7 +46,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./src/lib/documentAccess";
 import { 
@@ -1704,13 +1704,25 @@ async function startServer() {
     };
   }
 
-  /** True if this session is an admin with adminType 'super' or 'operation' (not the cost-only 'accounts' role). */
+  /**
+   * True if this session is an admin with adminType 'super' or 'operation'
+   * (not the cost-only 'accounts' role).
+   *
+   * BUG-17: 401 means "not authenticated" and 403 means "authenticated but
+   * not allowed" — a logged-in client/driver, or an accounts-type admin,
+   * belongs in the 403 bucket, not 401. See resolveFullAdminStatus for the
+   * (unit-tested) decision logic.
+   */
   function requireFullAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-    if (!req.session || req.session.role !== "admin") {
+    const status = resolveFullAdminStatus(req.session);
+    if (status === 401) {
       return res.status(401).json({ error: "Authentication required." });
     }
-    if (req.session.adminType === "accounts") {
-      return res.status(403).json({ error: "Accounts-role admins cannot perform this action." });
+    if (status === 403) {
+      const message = req.session?.adminType === "accounts"
+        ? "Accounts-role admins cannot perform this action."
+        : "You do not have permission to perform this action.";
+      return res.status(403).json({ error: message });
     }
     next();
   }
@@ -3680,7 +3692,10 @@ async function startServer() {
     }
   });
 
-  app.get("/api/system/datadog", (req, res) => {
+  // BUG-19: this exposed env/platform details (and whether DD_API_KEY is
+  // configured) to anyone, unauthenticated. Same admin-auth requirement as
+  // the sibling /api/system/storage-status route above.
+  app.get("/api/system/datadog", requireRole("admin"), (req, res) => {
     try {
       const isConfigured = !!process.env.DD_API_KEY;
       const rawKey = process.env.DD_API_KEY || "";

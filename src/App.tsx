@@ -835,7 +835,11 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
 
             {/* Global Language Selector Dropdown */}
-            <div className="flex items-center gap-2 border-l border-slate-800 pl-3">
+            {/* BUG-22: border-l/pl-3 are physical (always-left) — in RTL
+                (dir="rtl") they land on the wrong logical side of this
+                divider. border-s/ps-3 are logical and flip automatically
+                with the inherited text direction. */}
+            <div className="flex items-center gap-2 border-s border-slate-800 ps-3">
               <Globe className="w-4 h-4 text-slate-400" />
               <select
                 value={lang}

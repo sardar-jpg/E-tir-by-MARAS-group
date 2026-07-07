@@ -64,3 +64,20 @@ export function canManageClients(adminType: AdminType | undefined): boolean {
 export function canManageVendors(adminType: AdminType | undefined): boolean {
   return canManageClients(adminType);
 }
+
+/**
+ * BUG-17: requireFullAdmin (server.ts) used to fold "no session at all" and
+ * "authenticated but the wrong role/adminType" into the same 401 response.
+ * A logged-in client/driver, or an accounts-type admin, IS authenticated —
+ * they're just not allowed here, which is a 403, not a 401. Extracted as a
+ * pure function so the status-code decision is unit testable without
+ * booting the server.
+ */
+export function resolveFullAdminStatus(
+  session: { role?: string; adminType?: AdminType } | null | undefined
+): 401 | 403 | 200 {
+  if (!session) return 401;
+  if (session.role !== "admin") return 403;
+  if (session.adminType === "accounts") return 403;
+  return 200;
+}

@@ -66,10 +66,11 @@ function RouteDisplay({ origin, destination }: RouteDisplayProps) {
 }
 
 interface ZoomControlsProps {
-  shipment: Shipment;
+  origin: google.maps.LatLngLiteral;
+  destination: google.maps.LatLngLiteral;
 }
 
-function ZoomControls({ shipment }: ZoomControlsProps) {
+function ZoomControls({ origin, destination }: ZoomControlsProps) {
   const map = useMap();
 
   const zoomIn  = () => map && map.setZoom((map.getZoom() || 6) + 1);
@@ -77,11 +78,9 @@ function ZoomControls({ shipment }: ZoomControlsProps) {
 
   const center = () => {
     if (!map || typeof google === "undefined") return;
-    const o = CITY_COORDINATES[(shipment.loadingCity || "").toLowerCase().trim()] || CITY_COORDINATES["istanbul"];
-    const d = CITY_COORDINATES[(shipment.deliveryCity || "").toLowerCase().trim()] || CITY_COORDINATES["baghdad"];
     const bounds = new google.maps.LatLngBounds();
-    bounds.extend(o);
-    bounds.extend(d);
+    bounds.extend(origin);
+    bounds.extend(destination);
     map.fitBounds(bounds);
   };
 
@@ -136,8 +135,13 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
       .catch(err => console.warn("Map key fetch failed:", err.message));
   }, []);
 
-  const origin = CITY_COORDINATES[(shipment.loadingCity || "").toLowerCase().trim()] || CITY_COORDINATES["istanbul"];
-  const dest   = CITY_COORDINATES[(shipment.deliveryCity || "").toLowerCase().trim()] || CITY_COORDINATES["baghdad"];
+  // BUG-13: only draw a route when both endpoints resolve to a real,
+  // known coordinate — never fall back to a fixed Istanbul/Baghdad pin for
+  // a shipment whose city doesn't match (e.g. a Sea/Air shipment, which
+  // this form never collects a city for in the first place).
+  const origin = CITY_COORDINATES[(shipment.loadingCity || "").toLowerCase().trim()];
+  const dest   = CITY_COORDINATES[(shipment.deliveryCity || "").toLowerCase().trim()];
+  const hasKnownRoute = Boolean(origin && dest);
 
   const assignedDriver = drivers.find(d => d.id === shipment.assignedDriverId);
   const truckPos: { lat: number; lng: number } | null =
@@ -183,6 +187,28 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
     );
   }
 
+  // BUG-13: be honest when we don't have a real coordinate for this
+  // shipment's route (e.g. Sea/Air, which this app tracks by port/airport
+  // rather than city) instead of drawing a fake Istanbul->Baghdad route.
+  if (!hasKnownRoute) {
+    return (
+      <div className="w-full rounded-xl border border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-center space-y-2 min-h-[200px]">
+        <MapPin className="w-5 h-5 text-slate-600" />
+        <p className="text-[10.5px] text-slate-500 max-w-[220px] leading-relaxed px-4">
+          {lang === "ar"
+            ? "معاينة الخريطة غير متاحة لهذه الشحنة."
+            : lang === "tr"
+            ? "Bu sevkiyat için harita önizlemesi mevcut değil."
+            : "Map preview isn't available for this shipment's route."}
+        </p>
+      </div>
+    );
+  }
+
+  // Both endpoints are guaranteed defined past the hasKnownRoute check above.
+  const originCoords = origin as google.maps.LatLngLiteral;
+  const destCoords = dest as google.maps.LatLngLiteral;
+
   return (
     <div
       className="relative w-full rounded-xl overflow-hidden border border-slate-800 bg-slate-950"
@@ -191,7 +217,7 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
       <APIProvider apiKey={activeMapsKey}>
         <Map
           id="client_shipment_map"
-          defaultCenter={truckPos || origin}
+          defaultCenter={truckPos || originCoords}
           defaultZoom={6}
           gestureHandling="cooperative"
           disableDefaultUI={true}
@@ -199,11 +225,11 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
           mapId="DEMO_MAP_ID"
           style={{ width: "100%", height: "100%" }}
         >
-          <RouteDisplay origin={origin} destination={dest} />
-          <ZoomControls shipment={shipment} />
+          <RouteDisplay origin={originCoords} destination={destCoords} />
+          <ZoomControls origin={originCoords} destination={destCoords} />
 
           {/* Origin marker */}
-          <AdvancedMarker position={origin} title={`Origin: ${shipment.loadingCity}`}>
+          <AdvancedMarker position={originCoords} title={`Origin: ${shipment.loadingCity}`}>
             <div className="flex flex-col items-center">
               <span className="bg-emerald-600 border border-emerald-500 text-white font-bold text-[9px] leading-tight px-1.5 py-0.5 rounded shadow-md select-none whitespace-nowrap">
                 {shipment.loadingCity}
@@ -215,7 +241,7 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
           </AdvancedMarker>
 
           {/* Destination marker */}
-          <AdvancedMarker position={dest} title={`Destination: ${shipment.deliveryCity}`}>
+          <AdvancedMarker position={destCoords} title={`Destination: ${shipment.deliveryCity}`}>
             <div className="flex flex-col items-center">
               <span className="bg-blue-600 border border-blue-500 text-white font-bold text-[9px] leading-tight px-1.5 py-0.5 rounded shadow-md select-none whitespace-nowrap">
                 {shipment.deliveryCity}

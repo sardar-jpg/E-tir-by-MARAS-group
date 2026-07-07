@@ -497,7 +497,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           >
             <Bell className="w-4 h-4 animate-bounce" />
             {notifications.some(n => !n.read) && (
-              <span id="client-notification-bell-badge" className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-slate-950 animate-pulse"></span>
+              <span id="client-notification-bell-badge" className="absolute -top-1 -end-1 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-slate-950 animate-pulse"></span>
             )}
           </button>
 
