@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./src/lib/loadEnv";
 import tracer from "dd-trace";
 
 if (process.env.DD_API_KEY) {
