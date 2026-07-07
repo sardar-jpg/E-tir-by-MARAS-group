@@ -8,7 +8,7 @@ import { apiFetch } from "../lib/api";
 interface LoginPageProps {
   lang: Language;
   onSetLang: (lang: Language) => void;
-  onLoginSuccess: (session: { role: "admin" | "driver" | "client"; email?: string; driver?: Driver | null; client?: any; loginType?: "firebase" | "local"; token?: string }) => void;
+  onLoginSuccess: (session: { role: "admin" | "driver" | "client"; email?: string; driver?: Driver | null; client?: any; loginType?: "firebase" | "local"; token?: string; adminType?: string }) => void;
   onViewPrivacy?: () => void;
   onViewTerms?: () => void;
 }
@@ -242,7 +242,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
             email: data.user?.email || enteredEmail,
             driver: data.driver || null,
             loginType: "local",
-            token: data.token
+            token: data.token,
+            adminType: data.adminType || data.user?.adminType
           });
           return;
         } else {
@@ -280,7 +281,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                   email: "sardar@maras.iq",
                   driver: null,
                   loginType: "firebase",
-                  token: verifyData?.token
+                  token: verifyData?.token,
+                  adminType: verifyData?.adminType || verifyData?.user?.adminType
                 });
               } catch (verifyErr) {
                 console.error("Failed to obtain session token after Firebase admin login:", verifyErr);
@@ -408,7 +410,8 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                 role: data.role,
                 driver: data.driver || null,
                 loginType: "local",
-                token: data.token
+                token: data.token,
+                adminType: data.adminType || data.user?.adminType
               });
               return;
             }
