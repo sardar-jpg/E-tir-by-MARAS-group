@@ -1,9 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { 
-  Shipment, 
-  Language, 
-  ShipmentStatus 
-} from "../types";
+import { Language } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -68,19 +64,6 @@ const VECTOR_CITIES: Record<string, { x: number; y: number; labelEn: string; lab
   }
 };
 
-const statusSteps: ShipmentStatus[] = [
-  'New',
-  'Assigned',
-  'Accepted',
-  'Loading',
-  'Loaded',
-  'In Transit',
-  'Border Crossing',
-  'Customs Clearance',
-  'Arrived',
-  'Delivered'
-];
-
 export default function PublicTracking({ lang: initialLang, tokenFromUrl, onViewPrivacy, onViewTerms, isMobile }: PublicTrackingProps) {
   const isMobileMode = isMobile || useIsMobile(768);
   const [lang, setLang] = useState<Language>(initialLang);
@@ -108,13 +91,6 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
   const triggerToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 3500);
-  };
-
-  const obscureEmail = (email: string) => {
-    const [local, domain] = email.split('@');
-    if (!domain) return email;
-    if (local.length <= 2) return `${local[0]}*@${domain}`;
-    return `${local[0]}${'*'.repeat(local.length - 2)}${local[local.length - 1]}@${domain}`;
   };
 
   const handleSubscribeCustomer = async (e: React.FormEvent) => {
@@ -1017,49 +993,6 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               <span>{isSubmittingSubscription ? (lang === 'en' ? "Registering..." : "Kayıt yapılıyor...") : (lang === 'en' ? "Subscribe to Alerts" : (lang === 'tr' ? "Takip Aboneliği Başlat" : "اشترك في التنبيهات"))}</span>
             </button>
           </form>
-
-          {/* Subscribed active watchers list */}
-          {shipment.customerEmails && shipment.customerEmails.length > 0 && (
-            <div className="pt-2">
-              <h4 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest mb-1.5">
-                {lang === 'tr' ? "Aktif Alıcılar" : (lang === 'ar' ? "المشتركون النشطون" : "Active Verified Receivers")}
-              </h4>
-              <div className="flex flex-wrap gap-1.5">
-                {shipment.customerEmails.map((email: string, i: number) => (
-                  <span key={i} className="px-2 py-0.5 bg-slate-950 border border-slate-800 text-slate-300 text-[10px] font-mono rounded-md">
-                    📩 {obscureEmail(email)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Dispatched logs feed */}
-          {shipment.customerNotificationHistory && shipment.customerNotificationHistory.length > 0 && (
-            <div className="pt-4 border-t border-slate-800/60 space-y-2">
-              <h4 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest mb-1">
-                {lang === 'tr' ? "İletilen Dijital Bildirim Kayıtları" : (lang === 'ar' ? "سجل الإرسال الرقمي الفوري" : "Dispatched Alert Dispatch Logs")}
-              </h4>
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                {shipment.customerNotificationHistory.map((alert: any) => (
-                  <div key={alert.id} className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1">
-                    <div className="flex justify-between items-center text-[9px] font-mono">
-                      <span className="text-emerald-500 font-bold flex items-center gap-1">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        SMTP_DISPATCH_SUCCESS
-                      </span>
-                      <span className="text-slate-500">
-                        {new Date(alert.timestamp).toLocaleTimeString(lang === 'tr' ? 'tr' : 'en')}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-200 font-semibold">{alert.title}</p>
-                    <p className="text-[10.5px] text-slate-400 font-medium leading-relaxed">{alert.message}</p>
-                    <p className="text-[9px] text-slate-500 font-mono">Recipient: {obscureEmail(alert.email)} • Channel: {alert.channel}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
       </main>
