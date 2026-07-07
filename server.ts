@@ -43,6 +43,9 @@ import {
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole
 } from "./src/lib/chatVisibility";
+import { stripPassword } from "./src/lib/sanitize";
+import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster } from "./src/lib/adminAccess";
 import { 
   getFirestore, 
   initializeFirestore,
@@ -1691,6 +1694,22 @@ async function startServer() {
   }
 
   /**
+   * BUG-08: requireFullAdmin allows both 'super' and 'operation' through,
+   * which is too broad for routes the AdminPanel UI treats as super-only
+   * (e.g. the Team/admin roster) — an operation admin blocked only by the
+   * UI could otherwise still call the route directly.
+   */
+  function requireSuperAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canViewAdminRoster(req.session.adminType)) {
+      return res.status(403).json({ error: "Only the super-admin can perform this action." });
+    }
+    next();
+  }
+
+  /**
    * Simple in-memory rate limiter for login attempts, keyed by IP address +
    * the username being attempted. Prevents unlimited password guessing
    * against any one account. No new dependency — just a Map with manual
@@ -1871,6 +1890,12 @@ async function startServer() {
   // 1. Get Shipments (from Firestore)
   app.get("/api/shipments", requireAuth, async (req, res) => {
     try {
+      // BUG-08: accounts admins don't get the operational shipment registry —
+      // the AdminPanel UI never shows them a Shipments tab, and the server
+      // shouldn't hand it over just because the route was called directly.
+      if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
+        return res.status(403).json({ error: "Accounts-role admins cannot view the shipment registry." });
+      }
       const col = collection(db, "shipments");
       const snapshot = await getDocs(col);
       let list = snapshot.docs.map(doc => doc.data() as Shipment);
@@ -2077,15 +2102,17 @@ async function startServer() {
   });
 
   // 3.5. Calculate distance, duration, and estimated arrival time using Google Maps Distance Matrix API
-  app.get("/api/shipments/:id/distance-matrix", requireAuth, async (req, res) => {
+  // BUG-06: shipment IDs are sequential/guessable — this previously only
+  // required *some* valid session (requireAuth), letting any driver/client
+  // request the distance matrix (and trigger a billed Google Maps call)
+  // for a shipment they have nothing to do with. requireShipmentAccess
+  // enforces the same ownership rule used by every other
+  // /api/shipments/:id/... route and attaches req.shipment so this handler
+  // doesn't need to re-fetch it.
+  app.get("/api/shipments/:id/distance-matrix", requireShipmentAccess, async (req, res) => {
     try {
       const sRef = doc(db, "shipments", req.params.id);
-      const sDoc = await getDoc(sRef);
-      if (!sDoc.exists()) {
-        return res.status(404).json({ error: "Shipment not found" });
-      }
-
-      const shipment = sDoc.data() as any;
+      const shipment = req.shipment as any;
       let originStr = "";
       let destinationStr = "";
 
@@ -3503,11 +3530,14 @@ async function startServer() {
           issuedAt: Date.now(),
           expiresAt: Date.now() + SESSION_TTL_MS,
         };
+        // BUG-07: this branch previously returned foundClient as-is,
+        // including the password hash — every other verify-session branch
+        // (driver above, admin above) already strips it.
         return res.json({
           success: true,
           token: signSessionToken(sessionPayload),
           role: "client",
-          client: foundClient
+          client: stripPassword(foundClient)
         });
       }
 
@@ -3566,7 +3596,10 @@ async function startServer() {
     });
   });
 
-  app.get("/api/admins", requireFullAdmin, async (req, res) => {
+  // BUG-08: the Team/admin roster is super-only in the AdminPanel UI
+  // (filteredAdminTabs only includes 'team' when isSuper), but this route
+  // used requireFullAdmin, which also lets 'operation' admins through.
+  app.get("/api/admins", requireSuperAdmin, async (req, res) => {
     try {
       const col = collection(db, "admins");
       const snapshot = await getDocs(col);
@@ -3715,15 +3748,43 @@ async function startServer() {
     }
   });
 
+  // BUG-05/BUG-08: previously returned the entire fleet roster (phone,
+  // email, live GPS) to any logged-in client or driver, and to every admin
+  // type including accounts. Scoped via scopeDriverListForSession — see
+  // src/lib/driverVisibility.ts.
   app.get("/api/drivers", requireAuth, async (req, res) => {
     try {
+      if (req.session!.role === "admin" && !canViewDriverRoster(req.session!.adminType)) {
+        return res.status(403).json({ error: "Accounts-role admins cannot view the driver roster." });
+      }
+
       const col = collection(db, "drivers");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => {
-        const { password, ...rest } = doc.data() as any;
-        return rest as Driver;
-      });
-      res.json(list);
+      const allDrivers = snapshot.docs.map(doc => doc.data() as Driver);
+
+      if (req.session!.role === "admin") {
+        return res.json(allDrivers.map(sanitizeDriver));
+      }
+
+      // Driver/client: only fetch shipments to compute which drivers this
+      // session is actually allowed to know about — never the raw fleet list.
+      const shipmentsSnap = await getDocs(collection(db, "shipments"));
+      const allShipments = shipmentsSnap.docs.map(d => d.data() as Shipment);
+
+      let relevantShipments: Shipment[] = [];
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        relevantShipments = allShipments.filter(s =>
+          s.assignedDriverId === driverId ||
+          (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId))
+        );
+      } else if (req.session!.role === "client") {
+        const clientsSnap = await getDocs(collection(db, "clients"));
+        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+        relevantShipments = myClient ? allShipments.filter(s => s.companyName === myClient.companyName) : [];
+      }
+
+      res.json(scopeDriverListForSession(allDrivers, req.session!, relevantShipments));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to fetch drivers" });
