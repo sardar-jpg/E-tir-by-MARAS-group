@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
-import AdminPanel from "./components/AdminPanel";
-import DriverApplication from "./components/DriverApplication";
+// BUG-25: AdminPanel and DriverApplication are the two largest components
+// in the app (10k+ and 4k+ lines) but only ever needed by an admin or
+// driver session respectively — never by a public tracking visitor or a
+// client. Loading them lazily keeps them out of the initial bundle for
+// everyone else.
+const AdminPanel = lazy(() => import("./components/AdminPanel"));
+const DriverApplication = lazy(() => import("./components/DriverApplication"));
 import PublicTracking from "./components/PublicTracking";
 import ClientDashboard from "./components/ClientDashboard";
 import LoginPage from "./components/LoginPage";
@@ -26,6 +31,16 @@ interface AppSession {
   token?: string;
   adminType?: string;
   viewOnly?: boolean;
+}
+
+// Minimal fallback while a lazily-loaded route chunk (AdminPanel,
+// DriverApplication) downloads — see BUG-25 above.
+function RouteLoadingFallback() {
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+      <div className="w-8 h-8 rounded-full border-4 border-slate-800 border-t-orange-500 animate-spin" />
+    </div>
+  );
 }
 
 export default function App() {
@@ -803,12 +818,14 @@ export default function App() {
     return (
       <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden" dir={isRtl ? "rtl" : "ltr"}>
         <main className="flex-1 overflow-hidden">
-          <DriverApplication 
-            lang={lang} 
-            loggedInDriverId={session.driver?.id} 
-            loggedInDriver={session.driver} 
-            onLogout={handleLogout}
-          />
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <DriverApplication
+              lang={lang}
+              loggedInDriverId={session.driver?.id}
+              loggedInDriver={session.driver}
+              onLogout={handleLogout}
+            />
+          </Suspense>
         </main>
       </div>
     );
@@ -870,20 +887,22 @@ export default function App() {
       {/* CORE VIEWPORT LAYER */}
       <main className="flex-1 relative">
         {isCurrentlyAdmin ? (
-          <AdminPanel
-            lang={lang}
-            onSelectShipmentChat={(sh, channel) => openShipmentChat(sh, channel)}
-            openDetailsId={activeDetailsId}
-            setOpenDetailsId={setActiveDetailsId}
-            gmailUser={gmailUser}
-            gmailToken={gmailToken}
-            onConnectGmail={handleConnectGmail}
-            onDisconnectGmail={handleDisconnectGmail}
-            isMobile={false}
-            isConnectingGmail={isConnectingGmail}
-            adminEmail={session?.email}
-            adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
-          />
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <AdminPanel
+              lang={lang}
+              onSelectShipmentChat={(sh, channel) => openShipmentChat(sh, channel)}
+              openDetailsId={activeDetailsId}
+              setOpenDetailsId={setActiveDetailsId}
+              gmailUser={gmailUser}
+              gmailToken={gmailToken}
+              onConnectGmail={handleConnectGmail}
+              onDisconnectGmail={handleDisconnectGmail}
+              isMobile={false}
+              isConnectingGmail={isConnectingGmail}
+              adminEmail={session?.email}
+              adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
+            />
+          </Suspense>
         ) : (
           <div className="p-8 max-w-md mx-auto my-12 bg-slate-950 border border-red-900/40 rounded-2xl text-center shadow-2xl">
             <div className="w-12 h-12 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mx-auto mb-4 text-red-500">

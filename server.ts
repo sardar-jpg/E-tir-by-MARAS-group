@@ -48,8 +48,9 @@ import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
-import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./src/lib/documentAccess";
+import { isDocumentVisibleForShare } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
+import { buildSecureShareView } from "./src/lib/publicShareView";
 import {
   getFirestore,
   initializeFirestore,
@@ -3220,72 +3221,12 @@ async function startServer() {
     }
   });
 
-  // The share token itself (not the raw internal shipment id) is
-  // included so the public tracking page can prove legitimate access
-  // when calling other public-safe endpoints like subscribe-customer
-  // below — see that endpoint for how this token is checked.
+  // The public share payload is built by buildSecureShareView
+  // (src/lib/publicShareView.ts, BUG-21) so its field list is unit
+  // testable without booting the full server.
   //
   // Shared by GET /api/share/:token and POST /api/share/:token/subscribe
   // so neither route can accidentally leak the full internal shipment record.
-  const buildSecureShareView = (shipment: Shipment) => ({
-    shareToken: shipment.shareToken,
-    shipmentNumber: shipment.shipmentNumber,
-    status: shipment.status,
-    loadingCountry: shipment.loadingCountry,
-    loadingCity: shipment.loadingCity,
-    loadingAddress: shipment.loadingAddress,
-    loadingContactNumber: shipment.loadingContactNumber,
-    deliveryCountry: shipment.deliveryCountry,
-    deliveryCity: shipment.deliveryCity,
-    deliveryAddress: shipment.deliveryAddress,
-    deliveryContactNumber: shipment.deliveryContactNumber,
-    cargoDescription: shipment.cargoDescription,
-    cargoWeight: shipment.cargoWeight,
-    truckNumber: shipment.truckNumber,
-    timeline: shipment.timeline,
-    updatedAt: shipment.updatedAt,
-    assignedDriverName: shipment.assignedDriverName,
-
-    // Sea & Air precise properties
-    freightType: shipment.freightType || "land",
-    shippingLine: shipment.shippingLine || "",
-    vesselName: shipment.vesselName || "",
-    containerNumber: shipment.containerNumber || "",
-    bookingNumber: shipment.bookingNumber || "",
-    billOfLadingNumber: shipment.billOfLadingNumber || "",
-    portOfLoading: shipment.portOfLoading || "",
-    portOfDischarge: shipment.portOfDischarge || "",
-    finalDestination: shipment.finalDestination || "",
-    etd: shipment.etd || "",
-    eta: shipment.eta || "",
-    numberOfContainers: shipment.numberOfContainers || 0,
-    containerType: shipment.containerType || "",
-    airline: shipment.airline || "",
-    flightNumber: shipment.flightNumber || "",
-    airWaybillNumber: shipment.airWaybillNumber || "",
-    airportOfDeparture: shipment.airportOfDeparture || "",
-    airportOfArrival: shipment.airportOfArrival || "",
-    grossWeight: shipment.grossWeight || 0,
-    chargeableWeight: shipment.chargeableWeight || 0,
-    numberOfPackages: shipment.numberOfPackages || 0,
-
-    // BUG-12: never hand the public share view a raw Firebase Storage
-    // download URL — that URL's access token isn't revocable and would
-    // keep working forever even after a document's isSharedExternally is
-    // turned back off. Instead every document/photo gets a same-origin
-    // proxy path (see /api/share/:token/documents/:docId below), which
-    // re-checks isDocumentVisibleForShare on every single request.
-    documents: shipment.shareIncludeDocuments
-      ? shipment.documents
-          .filter(d => isDocumentVisibleForShare(d, shipment) && d.category !== "photo")
-          .map(d => ({ ...d, url: buildPublicShareDocumentPath(shipment.shareToken, d.id) }))
-      : [],
-    photos: shipment.shareIncludePhotos
-      ? shipment.documents
-          .filter(d => isDocumentVisibleForShare(d, shipment) && d.category === "photo")
-          .map(d => ({ ...d, url: buildPublicShareDocumentPath(shipment.shareToken, d.id) }))
-      : []
-  });
 
   // 11. Public Shared Link lookups
   app.get("/api/share/:token", async (req, res) => {
