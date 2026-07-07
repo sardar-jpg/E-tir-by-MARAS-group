@@ -1189,6 +1189,17 @@ const initialActivityLogs: ActivityLog[] = [
 
 // Seed collection items helper
 async function seedDatabaseIfEmpty() {
+  // Same safety gate as getMemoryStore() above: demo records (including
+  // accounts with known, source-visible default passwords) must never be
+  // written to a real Firestore database — which may be production —
+  // unless explicitly opted into via SEED_DEMO_DATA=true. Previously this
+  // ran unconditionally on every boot whenever Firestore was reachable and
+  // a collection was empty, which would silently plant those accounts into
+  // a genuinely fresh production database.
+  if (!SEED_DEMO_DATA) {
+    console.log("[Firestore] SEED_DEMO_DATA is not \"true\" — skipping demo-data seeding. Firestore collections will remain empty until real records are created.");
+    return;
+  }
   if (!db || useMemoryFallback) {
     console.warn("Firestore db is null or memory fallback is active. Skipping live Firestore seeding.");
     return;
@@ -2593,7 +2604,7 @@ async function startServer() {
         `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
       );
 
-      res.json(item);
+      res.json(buildShipmentViewForRole(item, req.session!));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update status" });
@@ -2655,7 +2666,7 @@ async function startServer() {
         `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
       );
 
-      res.json(item);
+      res.json(buildShipmentViewForRole(item, req.session!));
     } catch (err) {
       console.error("Error subscribing customer: ", err);
       res.status(500).json({ error: "Failed to join notification server registration scheme" });
@@ -2948,7 +2959,7 @@ async function startServer() {
       }
 
       await setDoc(sDocRef, shipment);
-      res.json(shipment);
+      res.json(buildShipmentViewForRole(shipment, req.session!));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to configure share link settings" });
