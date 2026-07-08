@@ -1,8 +1,21 @@
-import { useEffect, useState } from 'react';
-import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send } from 'lucide-react';
-import type { ChatChannel, ChatMessage, Language, Shipment } from '../../types';
+import { useEffect, useRef, useState } from 'react';
+import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, X } from 'lucide-react';
+import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
 import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment } from '../../lib/chatCenterView';
+
+// Categories offered for Internal Staff attachments (PR #35). Subset of
+// DocumentCategory — 'photo' is left out here since these are staff
+// document attachments, not the driver-facing cargo photos elsewhere in
+// the app; 'other' remains the safe default.
+const INTERNAL_FILE_CATEGORIES: DocumentCategory[] = [
+  'cmr',
+  'invoice',
+  'packing_list',
+  'delivery_proof',
+  'customs',
+  'other',
+];
 
 // 'internal_staff' (src/types.ts) is a real, admin-only chat channel — see
 // server.ts chat routes and chatVisibility.ts for the read/write gating.
@@ -43,6 +56,11 @@ const LABELS: Record<Language, {
   loading: string;
   continueInChat: string;
   send: string;
+  attach: string;
+  removeAttachment: string;
+  internalOnly: string;
+  uploadFailedInline: string;
+  category: Record<DocumentCategory, string>;
 }> = {
   en: {
     title: 'Chat Center',
@@ -62,6 +80,19 @@ const LABELS: Record<Language, {
     loading: 'Loading messages...',
     continueInChat: 'Continue in full chat',
     send: 'Send',
+    attach: 'Attach file',
+    removeAttachment: 'Remove attachment',
+    internalOnly: 'Internal Only',
+    uploadFailedInline: "Couldn't save to storage — sent with a temporary copy only.",
+    category: {
+      cmr: 'CMR',
+      invoice: 'Invoice',
+      packing_list: 'Packing List',
+      customs: 'Customs Document',
+      delivery_proof: 'Delivery Proof',
+      photo: 'Photo',
+      other: 'Other',
+    },
   },
   tr: {
     title: 'Mesaj Merkezi',
@@ -81,6 +112,19 @@ const LABELS: Record<Language, {
     loading: 'Mesajlar yükleniyor...',
     continueInChat: 'Tam sohbette devam et',
     send: 'Gönder',
+    attach: 'Dosya ekle',
+    removeAttachment: 'Eki kaldır',
+    internalOnly: 'Sadece Dahili',
+    uploadFailedInline: 'Depoya kaydedilemedi — yalnızca geçici bir kopyayla gönderildi.',
+    category: {
+      cmr: 'CMR',
+      invoice: 'Fatura',
+      packing_list: 'Çeki Listesi',
+      customs: 'Gümrük Belgesi',
+      delivery_proof: 'Teslimat Kanıtı',
+      photo: 'Fotoğraf',
+      other: 'Diğer',
+    },
   },
   ar: {
     title: 'مركز المحادثات',
@@ -100,6 +144,19 @@ const LABELS: Record<Language, {
     loading: 'جارٍ تحميل الرسائل...',
     continueInChat: 'المتابعة في المحادثة الكاملة',
     send: 'إرسال',
+    attach: 'إرفاق ملف',
+    removeAttachment: 'إزالة المرفق',
+    internalOnly: 'داخلي فقط',
+    uploadFailedInline: 'تعذر الحفظ في التخزين — تم الإرسال بنسخة مؤقتة فقط.',
+    category: {
+      cmr: 'CMR',
+      invoice: 'فاتورة',
+      packing_list: 'قائمة التعبئة',
+      customs: 'مستند جمركي',
+      delivery_proof: 'إثبات التسليم',
+      photo: 'صورة',
+      other: 'أخرى',
+    },
   },
 };
 
@@ -121,6 +178,11 @@ export default function ChatCenter({
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [internalMessageText, setInternalMessageText] = useState('');
   const [isSendingInternal, setIsSendingInternal] = useState(false);
+  const [internalFile, setInternalFile] = useState<File | null>(null);
+  const [internalFileName, setInternalFileName] = useState('');
+  const [internalFileCategory, setInternalFileCategory] = useState<DocumentCategory>('other');
+  const [internalFileDataUrl, setInternalFileDataUrl] = useState('');
+  const internalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Shortcut buttons (Shipment Details modal) preselect a shipment + channel.
   useEffect(() => {
@@ -168,24 +230,93 @@ export default function ChatCenter({
     };
   }, [selectedShipment?.id, activeChannel]);
 
+  const [attachmentWarning, setAttachmentWarning] = useState('');
+
+  const resetInternalAttachment = () => {
+    setInternalFile(null);
+    setInternalFileName('');
+    setInternalFileCategory('other');
+    setInternalFileDataUrl('');
+    if (internalFileInputRef.current) internalFileInputRef.current.value = '';
+  };
+
+  // Best-effort category guess from the filename, same heuristic used by
+  // the driver_admin/client_admin attachment flow in App.tsx.
+  const guessCategoryFromFile = (file: File): DocumentCategory => {
+    const name = file.name.toLowerCase();
+    if (file.type.startsWith('image/')) return 'photo';
+    if (name.includes('cmr')) return 'cmr';
+    if (name.includes('invoice')) return 'invoice';
+    if (name.includes('packing')) return 'packing_list';
+    if (name.includes('customs')) return 'customs';
+    if (name.includes('delivery') || name.includes('pod')) return 'delivery_proof';
+    return 'other';
+  };
+
+  const handleInternalFileSelected = (file: File) => {
+    setInternalFile(file);
+    setInternalFileName(file.name);
+    setInternalFileCategory(guessCategoryFromFile(file));
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      setInternalFileDataUrl((evt.target?.result as string) || '');
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSendInternalMessage = async () => {
     const text = internalMessageText.trim();
-    if (!selectedShipment || !text || isSendingInternal) return;
+    if (!selectedShipment || isSendingInternal) return;
+    if (!text && !internalFile) return;
     setIsSendingInternal(true);
+    setAttachmentWarning('');
     try {
+      let uploadFailed = false;
+      const body: Record<string, unknown> = { channel: 'internal_staff' };
+
+      if (internalFile && internalFileDataUrl) {
+        let finalFileUrl = internalFileDataUrl;
+        try {
+          const uploadRes = await apiFetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base64DataUrl: internalFileDataUrl, filename: internalFileName }),
+          });
+          if (uploadRes.ok) {
+            const uploadData = await uploadRes.json();
+            finalFileUrl = uploadData.url;
+          } else {
+            uploadFailed = true;
+          }
+        } catch {
+          uploadFailed = true;
+        }
+
+        body.type = 'file';
+        body.fileName = internalFileName;
+        body.fileCategory = internalFileCategory;
+        body.fileUrl = finalFileUrl;
+        if (text) body.text = text;
+      } else {
+        body.type = 'text';
+        body.text = text;
+      }
+
       const res = await apiFetch(`/api/shipments/${selectedShipment.id}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'text', text, channel: 'internal_staff' }),
+        body: JSON.stringify(body),
       });
       if (res.ok) {
         const msg = await res.json();
         setChannelMessages((prev) => [...prev, msg]);
         setInternalMessageText('');
+        resetInternalAttachment();
+        if (uploadFailed) setAttachmentWarning(label.uploadFailedInline);
       }
     } catch {
-      // Swallow — the message simply won't appear; the input keeps the
-      // draft text so the admin can retry.
+      // Swallow — the message simply won't appear; the input/attachment
+      // stay in place so the admin can retry.
     } finally {
       setIsSendingInternal(false);
     }
@@ -322,9 +453,34 @@ export default function ChatCenter({
                   return (
                     <div key={msg.id} className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                       <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                      <div className={`px-3 py-2 rounded-xl text-xs ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
-                        {msg.type === 'file' ? (msg.fileName || 'Attachment') : msg.text}
-                      </div>
+                      {msg.type === 'file' ? (
+                        <div className="flex flex-col gap-1.5">
+                          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs border ${isAdmin ? 'bg-orange-500 border-orange-500 text-white' : 'bg-white border-slate-200 text-slate-700'}`}>
+                            <FileText className="w-4 h-4 shrink-0" />
+                            <div className="min-w-0">
+                              <p className="font-bold truncate">{msg.fileName || 'Attachment'}</p>
+                              <span className={`text-[9px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
+                                {label.category[msg.fileCategory ?? 'other']}
+                              </span>
+                            </div>
+                            {msg.channel === 'internal_staff' && (
+                              <span className="shrink-0 flex items-center gap-1 text-[9px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
+                                <Lock className="w-2.5 h-2.5" />
+                                {label.internalOnly}
+                              </span>
+                            )}
+                          </div>
+                          {msg.text && (
+                            <div className={`px-3 py-2 rounded-xl text-xs ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                              {msg.text}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className={`px-3 py-2 rounded-xl text-xs ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                          {msg.text}
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -332,29 +488,77 @@ export default function ChatCenter({
             </div>
 
             {activeChannel === 'internal_staff' && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSendInternalMessage();
-                }}
-                className="p-3 border-t border-slate-200 flex items-center gap-2"
-              >
-                <input
-                  type="text"
-                  value={internalMessageText}
-                  onChange={(e) => setInternalMessageText(e.target.value)}
-                  placeholder={label.internalInputPlaceholder}
-                  className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-                />
-                <button
-                  type="submit"
-                  disabled={!internalMessageText.trim() || isSendingInternal}
-                  className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-2 rounded-lg transition-colors"
+              <div className="border-t border-slate-200">
+                {attachmentWarning && (
+                  <p className="px-3 pt-2 text-[10px] font-bold text-amber-600">{attachmentWarning}</p>
+                )}
+                {internalFile && (
+                  <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
+                    <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                    <span className="flex-1 truncate font-semibold text-slate-700">{internalFileName}</span>
+                    <select
+                      value={internalFileCategory}
+                      onChange={(e) => setInternalFileCategory(e.target.value as DocumentCategory)}
+                      className="text-[11px] border border-slate-200 rounded-md px-1.5 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+                    >
+                      {INTERNAL_FILE_CATEGORIES.map((cat) => (
+                        <option key={cat} value={cat}>{label.category[cat]}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={resetInternalAttachment}
+                      aria-label={label.removeAttachment}
+                      title={label.removeAttachment}
+                      className="p-1 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleSendInternalMessage();
+                  }}
+                  className="p-3 flex items-center gap-2"
                 >
-                  <Send className="w-3.5 h-3.5" />
-                  {label.send}
-                </button>
-              </form>
+                  <input
+                    ref={internalFileInputRef}
+                    type="file"
+                    accept="image/*,application/pdf,.doc,.docx"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleInternalFileSelected(file);
+                    }}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => internalFileInputRef.current?.click()}
+                    title={label.attach}
+                    aria-label={label.attach}
+                    className="p-2.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shrink-0"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </button>
+                  <input
+                    type="text"
+                    value={internalMessageText}
+                    onChange={(e) => setInternalMessageText(e.target.value)}
+                    placeholder={label.internalInputPlaceholder}
+                    className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+                  />
+                  <button
+                    type="submit"
+                    disabled={(!internalMessageText.trim() && !internalFile) || isSendingInternal}
+                    className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-2 rounded-lg transition-colors"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    {label.send}
+                  </button>
+                </form>
+              </div>
             )}
           </>
         )}

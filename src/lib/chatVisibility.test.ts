@@ -6,6 +6,7 @@ import {
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
+  shouldSaveChatFileAsShipmentDocument,
 } from "./chatVisibility";
 import type { ChatChannel } from "../types";
 
@@ -17,6 +18,22 @@ function msgs(): Msg[] {
     { id: "client-1", channel: "client_admin" },
     { id: "internal-1", channel: "internal_staff" },
     { id: "legacy-1" }, // pre-BUG-03 message with no channel tag
+  ];
+}
+
+type FileMsg = {
+  id: string;
+  channel?: ChatChannel;
+  type: "text" | "file";
+  fileName?: string;
+  fileUrl?: string;
+};
+
+function fileMsgs(): FileMsg[] {
+  return [
+    { id: "driver-file", channel: "driver_admin", type: "file", fileName: "pod.pdf", fileUrl: "https://storage/pod.pdf" },
+    { id: "client-file", channel: "client_admin", type: "file", fileName: "invoice.pdf", fileUrl: "https://storage/invoice.pdf" },
+    { id: "internal-file", channel: "internal_staff", type: "file", fileName: "internal-note.pdf", fileUrl: "https://storage/internal-note.pdf" },
   ];
 }
 
@@ -98,6 +115,38 @@ describe("resolveSeenChannelFilter", () => {
     expect(resolveSeenChannelFilter("admin", "driver_admin")).toBe("driver_admin");
     expect(resolveSeenChannelFilter("admin", "internal_staff")).toBe("internal_staff");
     expect(resolveSeenChannelFilter("admin")).toBeNull();
+  });
+});
+
+describe("filterChatMessagesByRole with file attachments (PR #35)", () => {
+  it("keeps an internal_staff attachment message out of driver's and client's results", () => {
+    expect(filterChatMessagesByRole(fileMsgs(), "driver").map((m) => m.id)).toEqual(["driver-file"]);
+    expect(filterChatMessagesByRole(fileMsgs(), "client").map((m) => m.id)).toEqual(["client-file"]);
+  });
+
+  it("does not mix internal_staff attachment messages into driver_admin/client_admin admin queries", () => {
+    expect(filterChatMessagesByRole(fileMsgs(), "admin", "driver_admin").map((m) => m.id)).toEqual(["driver-file"]);
+    expect(filterChatMessagesByRole(fileMsgs(), "admin", "client_admin").map((m) => m.id)).toEqual(["client-file"]);
+  });
+
+  it("gives admin the internal_staff attachment only when explicitly requesting that channel", () => {
+    expect(filterChatMessagesByRole(fileMsgs(), "admin", "internal_staff").map((m) => m.id)).toEqual(["internal-file"]);
+  });
+
+  it("still rejects a driver/client explicitly requesting internal_staff attachments", () => {
+    expect(filterChatMessagesByRole(fileMsgs(), "driver", "internal_staff").map((m) => m.id)).toEqual(["driver-file"]);
+    expect(filterChatMessagesByRole(fileMsgs(), "client", "internal_staff").map((m) => m.id)).toEqual(["client-file"]);
+  });
+});
+
+describe("shouldSaveChatFileAsShipmentDocument", () => {
+  it("saves driver_admin and client_admin attachments as shipment documents", () => {
+    expect(shouldSaveChatFileAsShipmentDocument("driver_admin")).toBe(true);
+    expect(shouldSaveChatFileAsShipmentDocument("client_admin")).toBe(true);
+  });
+
+  it("never saves an internal_staff attachment as a shipment document", () => {
+    expect(shouldSaveChatFileAsShipmentDocument("internal_staff")).toBe(false);
   });
 });
 
