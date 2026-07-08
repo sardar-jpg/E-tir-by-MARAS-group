@@ -134,3 +134,20 @@ export function isChatNotificationVisibleToRole(
 export function canAccessInternalStaffChannel(role: ChatRole): boolean {
   return role === "admin";
 }
+
+/**
+ * PR #35: whether posting a chat file attachment on this channel should
+ * also create a shipment.documents entry (+ its "doc_upload" notification).
+ * shipment.documents is returned unfiltered to driver/client
+ * (buildShipmentViewForRole, src/lib/shipmentView.ts) and, once
+ * isSharedExternally/shareIncludeDocuments allow it, to the public share
+ * view (publicShareView.ts) — neither of those checks the chat channel a
+ * document came from. So an internal_staff attachment saved there would
+ * leak straight past the channel-based chat filtering above. Only
+ * driver_admin/client_admin attachments (already customer/driver-facing
+ * documents) get mirrored into shipment.documents; internal_staff
+ * attachments stay chat-only.
+ */
+export function shouldSaveChatFileAsShipmentDocument(channel?: ChatChannel): boolean {
+  return channel !== "internal_staff";
+}

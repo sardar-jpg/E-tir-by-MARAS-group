@@ -43,7 +43,8 @@ import {
   resolveSeenChannelFilter,
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
-  canAccessInternalStaffChannel
+  canAccessInternalStaffChannel,
+  shouldSaveChatFileAsShipmentDocument
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
@@ -3101,7 +3102,7 @@ async function startServer() {
       await setDoc(doc(db, "chatMessages", newMessage.id), newMessage);
 
       // Save file inside shipment documents
-      if (type === "file" && fileUrl) {
+      if (type === "file" && fileUrl && shouldSaveChatFileAsShipmentDocument(channel)) {
         const docId = `doc-${Date.now()}`;
         const newDoc = {
           id: docId,
@@ -3135,6 +3136,25 @@ async function startServer() {
           `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
           `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
           `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`
+        );
+      } else if (type === "file" && fileUrl) {
+        // internal_staff attachment: chat-only (see
+        // shouldSaveChatFileAsShipmentDocument) — never saved to
+        // shipment.documents, and notified via the same channel-gated
+        // "chat" notification path as a text message rather than the
+        // unfiltered "doc_upload" notification.
+        await pushNotification(
+          shipmentId,
+          shipmentItem.shipmentNumber,
+          "chat",
+          `Message: ${senderName}`,
+          `Mesaj: ${senderName}`,
+          `رسالة من: ${senderName}`,
+          "sent an attachment",
+          "dosya gönderildi",
+          "أرسل ملفًا جديًا",
+          req.session!.id,
+          channel
         );
       } else {
         await pushNotification(
