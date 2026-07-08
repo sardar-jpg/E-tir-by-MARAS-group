@@ -47,6 +47,48 @@ export function toClientSafeDriver(driver: Driver): ClientSafeDriver {
   };
 }
 
+/** Shared English label for a shipment's freight mode, used across the driver cards, detail panel, and shipment list. */
+export const FREIGHT_TYPE_LABELS: Record<"land" | "sea" | "air", string> = {
+  land: "Land Freight",
+  sea: "Sea Freight",
+  air: "Air Freight",
+};
+
+/**
+ * A driver's own agreed amount for a shipment — null if this driver has
+ * none recorded (never falls back to another driver's amount or a fake
+ * 0). Shared by the driver shipment list, active-job card, and shipment
+ * detail panel so all three agree on when "Not available" is shown
+ * instead of a stale/wrong figure.
+ */
+export function resolveDriverAgreedAmount(
+  shipment: Pick<Shipment, "assignedDriverId" | "agreedAmount" | "additionalDrivers">,
+  driverId: string
+): number | null {
+  if (shipment.assignedDriverId === driverId) {
+    return shipment.agreedAmount !== undefined ? shipment.agreedAmount : null;
+  }
+  const ad = shipment.additionalDrivers?.find((d) => d.driverId === driverId);
+  return ad && ad.agreedAmount !== undefined ? ad.agreedAmount : null;
+}
+
+/**
+ * A driver's own truck for a shipment — null if not recorded. The
+ * shipment-level `truckNumber` belongs to the primary assigned driver, so
+ * a co-driver must see their own `additionalDrivers[].truckNumber` entry
+ * instead, never someone else's plate.
+ */
+export function resolveDriverTruckNumber(
+  shipment: Pick<Shipment, "assignedDriverId" | "truckNumber" | "additionalDrivers">,
+  driverId: string
+): string | null {
+  if (shipment.assignedDriverId === driverId) {
+    return shipment.truckNumber || null;
+  }
+  const ad = shipment.additionalDrivers?.find((d) => d.driverId === driverId);
+  return ad?.truckNumber || null;
+}
+
 type ShipmentAssignment = Pick<Shipment, "assignedDriverId" | "additionalDrivers">;
 
 function assignedDriverIds(shipments: ShipmentAssignment[]): Set<string> {

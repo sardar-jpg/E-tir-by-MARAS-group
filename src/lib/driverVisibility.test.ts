@@ -3,6 +3,8 @@ import {
   sanitizeDriver,
   toClientSafeDriver,
   scopeDriverListForSession,
+  resolveDriverAgreedAmount,
+  resolveDriverTruckNumber,
 } from "./driverVisibility";
 import type { Driver, Shipment } from "../types";
 
@@ -149,5 +151,52 @@ describe("scopeDriverListForSession", () => {
       []
     );
     expect(result).toEqual([]);
+  });
+});
+
+describe("resolveDriverAgreedAmount", () => {
+  it("returns the primary driver's own agreedAmount", () => {
+    const shipment = makeShipment({ assignedDriverId: "driver-1", agreedAmount: 1500 });
+    expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-1")).toBe(1500);
+  });
+
+  it("returns a co-driver's own agreedAmount, never the primary driver's", () => {
+    const shipment = makeShipment({
+      assignedDriverId: "driver-1",
+      agreedAmount: 1500,
+      additionalDrivers: [{ driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456", agreedAmount: 400 }],
+    });
+    expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-2")).toBe(400);
+  });
+
+  it("returns null (never 0 or the primary amount) for a driver with no recorded amount", () => {
+    const shipment = makeShipment({
+      assignedDriverId: "driver-1",
+      agreedAmount: 1500,
+      additionalDrivers: [{ driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" }],
+    });
+    expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-2")).toBeNull();
+    expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-3")).toBeNull();
+  });
+});
+
+describe("resolveDriverTruckNumber", () => {
+  it("returns the primary driver's own shipment-level truck", () => {
+    const shipment = makeShipment({ assignedDriverId: "driver-1", truckNumber: "34 ABC 123" });
+    expect(resolveDriverTruckNumber(shipment as Shipment, "driver-1")).toBe("34 ABC 123");
+  });
+
+  it("returns a co-driver's own truck, never the primary driver's plate", () => {
+    const shipment = makeShipment({
+      assignedDriverId: "driver-1",
+      truckNumber: "34 ABC 123",
+      additionalDrivers: [{ driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" }],
+    });
+    expect(resolveDriverTruckNumber(shipment as Shipment, "driver-2")).toBe("06 XYZ 456");
+  });
+
+  it("returns null for a driver with no recorded truck", () => {
+    const shipment = makeShipment({ assignedDriverId: "driver-1", truckNumber: "34 ABC 123" });
+    expect(resolveDriverTruckNumber(shipment as Shipment, "driver-3")).toBeNull();
   });
 });

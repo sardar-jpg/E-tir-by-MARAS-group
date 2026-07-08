@@ -13,6 +13,7 @@ import {
 import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
+import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -2450,58 +2451,83 @@ export default function DriverApplication({
                 {/* Driver views parameters */}
                 <div className="p-5 bg-slate-900 border border-slate-800/80 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)] relative overflow-hidden group">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
-                  
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <div className="flex flex-col">
-                      <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest font-mono">Shipment ID</span>
-                      <span className="font-mono text-sm font-black text-white mt-0.5 selectable">{activeShipment.shipmentNumber}</span>
+
+                  {/* JOB OVERVIEW */}
+                  <div>
+                    <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block mb-2">Job Overview</span>
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div className="flex flex-col">
+                        <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest font-mono">Shipment ID</span>
+                        <span className="font-mono text-sm font-black text-white mt-0.5 selectable">{activeShipment.shipmentNumber}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="bg-slate-950 text-slate-400 text-[9px] font-black uppercase tracking-wider font-mono px-2.5 py-1 rounded-full border border-slate-800">
+                          {FREIGHT_TYPE_LABELS[activeShipment.freightType || 'land']}
+                        </span>
+                        <span className="bg-orange-500/10 text-orange-400 text-[10px] font-black uppercase tracking-wider font-mono px-3 py-1 rounded-full border border-orange-500/25">
+                          {activeShipment.status}
+                        </span>
+                      </div>
                     </div>
-                    
-                    <span className="bg-orange-500/10 text-orange-400 text-[10px] font-black uppercase tracking-wider font-mono px-3 py-1 rounded-full border border-orange-500/25">
-                      {activeShipment.status}
-                    </span>
                   </div>
 
                   <div className="space-y-3.5 text-xs">
+                    {/* ROUTE */}
                     <div>
-                      <span className="text-slate-500 font-bold block text-[9px] uppercase tracking-wider font-mono mb-1">{t('cargoInfo')}</span>
+                      <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block mb-1.5">Route</span>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <span className="text-slate-500 text-[9px] font-bold uppercase tracking-wider font-mono block">Loading Depot</span>
+                          <p className="font-extrabold text-slate-200 mt-1">{activeShipment.loadingCity || "Unassigned"}</p>
+                          <p className="text-[10px] text-slate-500 font-mono mt-0.5">{activeShipment.loadingCountry || ""}</p>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 text-[9px] font-bold uppercase tracking-wider font-mono block">Delivery Point</span>
+                          <p className="font-extrabold text-slate-200 mt-1">{activeShipment.deliveryCity || "Unassigned"}</p>
+                          <p className="text-[10px] text-slate-500 font-mono mt-0.5">{activeShipment.deliveryCountry || ""}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* CARGO / FREIGHT */}
+                    <div className="border-t border-slate-800/80 pt-3">
+                      <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block mb-1.5">Cargo / Freight</span>
                       <p className="font-extrabold text-slate-100 text-xs leading-normal">{activeShipment.cargoDescription}</p>
-                      <span className="inline-flex items-center gap-1.5 bg-slate-950 text-slate-400 font-mono text-[9px] font-bold mt-2 px-2 py-1 rounded-lg border border-slate-800">
-                        Total Weight: {(activeShipment.cargoWeight ?? 0).toLocaleString()} kg
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 border-t border-slate-800/80 pt-3">
-                      <div>
-                        <span className="text-slate-500 text-[9px] font-bold uppercase tracking-wider font-mono block">Loading Depot</span>
-                        <p className="font-extrabold text-slate-200 mt-1">{activeShipment.loadingCity || "Unassigned"}</p>
-                        <p className="text-[10px] text-slate-500 font-mono mt-0.5">{activeShipment.loadingCountry || ""}</p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 text-[9px] font-bold uppercase tracking-wider font-mono block font-mono">Consignee City</span>
-                        <p className="font-extrabold text-slate-200 mt-1">{activeShipment.deliveryCity || "Unassigned"}</p>
-                        <p className="text-[10px] text-slate-500 font-mono mt-0.5">{activeShipment.deliveryCountry || ""}</p>
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <span className="inline-flex items-center gap-1.5 bg-slate-950 text-slate-400 font-mono text-[9px] font-bold px-2 py-1 rounded-lg border border-slate-800">
+                          Total Weight: {(activeShipment.cargoWeight ?? 0).toLocaleString()} kg
+                        </span>
+                        {resolveDriverTruckNumber(activeShipment, selectedDriverId) && (
+                          <span className="inline-flex items-center gap-1.5 bg-slate-950 text-slate-400 font-mono text-[9px] font-bold px-2 py-1 rounded-lg border border-slate-800">
+                            Truck: {resolveDriverTruckNumber(activeShipment, selectedDriverId)}
+                          </span>
+                        )}
                       </div>
                     </div>
 
-                    <div className="border-t border-slate-800/80 pt-3 flex items-center justify-between bg-slate-950/60 p-3 rounded-2xl border border-slate-800/60">
-                      <div className="flex flex-col">
-                        <span className="text-slate-500 font-bold text-[9px] uppercase tracking-widest font-mono">{t('carrierAmount')}</span>
-                        <span className="text-slate-400 text-[10px] mt-0.5">Fixed carrier revenue</span>
+                    {/* PAYMENT / AGREED AMOUNT */}
+                    <div className="border-t border-slate-800/80 pt-3">
+                      <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block mb-1.5">Payment / Agreed Amount</span>
+                      <div className="flex items-center justify-between bg-slate-950/60 p-3 rounded-2xl border border-slate-800/60">
+                        <div className="flex flex-col">
+                          <span className="text-slate-500 font-bold text-[9px] uppercase tracking-widest font-mono">{t('carrierAmount')}</span>
+                          <span className="text-slate-400 text-[10px] mt-0.5">Fixed carrier revenue</span>
+                        </div>
+                        <span className="text-orange-500 font-mono font-black text-base tracking-tight">
+                          {(() => {
+                            const amount = resolveDriverAgreedAmount(activeShipment, selectedDriverId);
+                            if (amount === null) {
+                              return <span className="text-slate-500 text-xs font-bold">Not available</span>;
+                            }
+                            return (
+                              <>
+                                {amount.toLocaleString()}{' '}
+                                <span className="text-xs">{activeShipment.currency || "USD"}</span>
+                              </>
+                            );
+                          })()}
+                        </span>
                       </div>
-                      <span className="text-orange-500 font-mono font-black text-base tracking-tight">
-                        {(() => {
-                          if (activeShipment.assignedDriverId === selectedDriverId) {
-                            return (activeShipment.agreedAmount ?? 0).toLocaleString();
-                          }
-                          const ad = activeShipment.additionalDrivers?.find((d: any) => d.driverId === selectedDriverId);
-                          if (ad && ad.agreedAmount !== undefined) {
-                            return ad.agreedAmount.toLocaleString();
-                          }
-                          return (activeShipment.agreedAmount ?? 0).toLocaleString();
-                        })()}{' '}
-                        <span className="text-xs">{activeShipment.currency || "USD"}</span>
-                      </span>
                     </div>
                   </div>
                 </div>
@@ -3202,27 +3228,46 @@ export default function DriverApplication({
 
 
 
-                {/* Shared Official documents visibility inside mobile */}
+                {/* Documents / CMR — driver_admin-facing shipment paperwork */}
                 <div className="space-y-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
-                  <div className="border-b border-slate-800 pb-2 flex items-center justify-between">
-                    <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Shared Files Center</h4>
+                  <div className="border-b border-slate-800 pb-2 flex items-center justify-between gap-2">
+                    <div className="flex flex-col">
+                      <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block">Documents</span>
+                      <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">CMR / Proof of Delivery</h4>
+                    </div>
                     {!(activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                          setScanCategory("cmr");
-                          setCapturedImage(null);
-                          setScanFilter("color");
-                          setScanState("scanning");
-                          setIsScanOpen(true);
-                          startCamera();
-                        }}
-                        className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-400 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-400" />
-                        <span>Scan Document</span>
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
+                            setScanCategory("cmr");
+                            setCapturedImage(null);
+                            setScanFilter("color");
+                            setScanState("scanning");
+                            setIsScanOpen(true);
+                            startCamera();
+                          }}
+                          className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-400 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                        >
+                          <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-400" />
+                          <span>Scan CMR</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSimFileName("");
+                            setSimFileCategory("cmr");
+                            setSimFileUrl("#");
+                            setSelectedFile(null);
+                            setFileSimOpen(true);
+                          }}
+                          className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
+                        >
+                          <FileUp className="w-3 h-3 shrink-0" />
+                          <span>Upload File</span>
+                        </button>
+                      </div>
                     )}
                   </div>
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
@@ -3265,7 +3310,7 @@ export default function DriverApplication({
                           </span>
                         )}
                         <div>
-                          <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">Consignee Helpline</h4>
+                          <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">MARAS Admin Chat</h4>
                           <span className="text-[9px] text-[#f97316] font-mono font-bold">
                             {isShipmentFinished 
                               ? (lang === 'tr' ? `Tamamlanan Görev #${activeShipment.shipmentNumber}` : lang === 'ar' ? `المهمة المكتملة #${activeShipment.shipmentNumber}` : `Finished Duty #${activeShipment.shipmentNumber}`)
@@ -3498,8 +3543,8 @@ export default function DriverApplication({
                       <MessageSquare className="w-7 h-7 mx-auto shrink-0" />
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-400">Helpline Chat Room Empty</p>
-                      <p className="text-[10px] text-slate-500 max-w-xs mx-auto leading-relaxed">Select any active job inside your assigned shipments directory to launch direct radio channels with dispatchers.</p>
+                      <p className="text-xs font-bold text-slate-400">No Admin Chat Selected</p>
+                      <p className="text-[10px] text-slate-500 max-w-xs mx-auto leading-relaxed">Select any active job inside your assigned shipments directory to open direct chat with MARAS Operations.</p>
                     </div>
                   </div>
                 )}

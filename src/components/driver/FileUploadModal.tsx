@@ -37,7 +37,10 @@ export default function FileUploadModal({
     <div className="absolute inset-0 bg-slate-950/90 z-50 flex items-center justify-center p-5 select-none animate-fade-in">
       <div className="bg-slate-900 p-5.5 border border-slate-800/80 rounded-3xl w-full max-w-[320px] space-y-4 shadow-[0_15px_45px_rgba(0,0,0,0.6)] text-xs">
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-          <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Upload Document</h5>
+          <div>
+            <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Upload Document</h5>
+            <p className="text-[9px] text-slate-500 mt-0.5">CMR, proof of delivery, invoice, or other shipment paperwork</p>
+          </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors cursor-pointer border-0 bg-transparent p-1"><X className="w-4 h-4" /></button>
         </div>
 
