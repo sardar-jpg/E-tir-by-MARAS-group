@@ -42,7 +42,8 @@ import {
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
   shouldNotifyChatParty,
-  isChatNotificationVisibleToRole
+  isChatNotificationVisibleToRole,
+  canAccessInternalStaffChannel
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
@@ -2902,17 +2903,27 @@ async function startServer() {
   // BUG-03: shipment chat is partitioned into two audiences —
   // 'driver_admin' (dispatch/operational chat) and 'client_admin'
   // (customer-service chat) — so a driver never sees a client's identity
-  // or messages and a client never sees internal driver/admin chat.
+  // or messages and a client never sees internal driver/admin chat. PR #34
+  // adds a third, admin-only audience ('internal_staff') for MARAS staff.
   // Filtering happens here, server-side, based on the verified session
   // role rather than any client-supplied parameter, so a caller can't
-  // request the other audience's channel just by changing the query string.
+  // request another audience's channel just by changing the query string.
   // Messages written before this field existed have no `channel` at all;
   // those are only ever shown to admins (safe default — an untagged
-  // message could belong to either audience and might contain the other
+  // message could belong to any audience and might contain another
   // party's identity, so it's withheld from driver/client rather than
   // guessed at).
   app.get("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
+      // PR #34: 'internal_staff' is a MARAS-staff-only audience — a
+      // driver/client requesting it explicitly via the query string gets a
+      // hard 403 rather than silently falling through to their own-channel
+      // filter below.
+      const requestedChannel = req.query.channel as string | undefined;
+      if (requestedChannel === "internal_staff" && !canAccessInternalStaffChannel(req.session!.role)) {
+        return res.status(403).json({ error: "You do not have permission to view this channel." });
+      }
+
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);
       let msgs = snapshot.docs.map(doc => {
@@ -2923,7 +2934,7 @@ async function startServer() {
         };
       });
       msgs = msgs.filter(m => m.shipmentId === req.params.id);
-      msgs = filterChatMessagesByRole(msgs, req.session!.role, req.query.channel as string | undefined);
+      msgs = filterChatMessagesByRole(msgs, req.session!.role, requestedChannel);
 
       msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
       res.json(msgs);
@@ -2940,6 +2951,9 @@ async function startServer() {
       const { viewer, channel: requestedChannel } = req.body; // viewer: 'admin' | 'driver' | 'client'
       if (!viewer) {
         return res.status(400).json({ error: "Viewer is required ('admin' or 'driver')" });
+      }
+      if (requestedChannel === "internal_staff" && !canAccessInternalStaffChannel(req.session!.role)) {
+        return res.status(403).json({ error: "You do not have permission to access this channel." });
       }
 
       // BUG-03: scope which messages a "seen" call can touch to the
@@ -3037,18 +3051,28 @@ async function startServer() {
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
       const { type, text, fileUrl, fileName, fileCategory, channel: requestedChannel } = req.body;
+
+      // PR #34: 'internal_staff' is a MARAS-staff-only audience — reject
+      // outright rather than silently reassigning to the caller's own
+      // channel, so a driver/client trying to post into it gets an
+      // unambiguous 403.
+      if (requestedChannel === "internal_staff" && !canAccessInternalStaffChannel(req.session!.role)) {
+        return res.status(403).json({ error: "You do not have permission to post to this channel." });
+      }
+
       const { sender, senderName } = await resolveChatSenderIdentity(req);
 
-      // BUG-03: which audience (driver_admin vs client_admin) this message
-      // belongs to. Driver/client identity is already server-verified
-      // above, so their channel is forced from that and never taken from
-      // client input. Admin can message either audience, so it must say
-      // which channel explicitly — there's no existing UI signal reliable
-      // enough to infer this safely, and guessing risks broadcasting one
-      // admin reply into the wrong audience's thread.
+      // BUG-03: which audience (driver_admin, client_admin, or
+      // internal_staff) this message belongs to. Driver/client identity is
+      // already server-verified above, so their channel is forced from
+      // that and never taken from client input. Admin can message any
+      // audience, so it must say which channel explicitly — there's no
+      // existing UI signal reliable enough to infer this safely, and
+      // guessing risks broadcasting one admin reply into the wrong
+      // audience's thread.
       const channel = resolveOutgoingChatChannel(sender, requestedChannel);
       if (!channel) {
-        return res.status(400).json({ error: "channel is required ('driver_admin' or 'client_admin') when sending as admin" });
+        return res.status(400).json({ error: "channel is required ('driver_admin', 'client_admin', or 'internal_staff') when sending as admin" });
       }
 
       const sDocRef = doc(db, "shipments", shipmentId);
