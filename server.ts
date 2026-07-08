@@ -891,7 +891,9 @@ const initialDrivers: Driver[] = [
     password: "pbkdf2$f9b0115c5f99f2541e0ba23085e2fe04$0b6e9232efdf4d135a685751d05bc563c6dd70ba6342cfba94ec5f4cee0469f1432008c80bf116da4703d792d3c6b777f34b836154265d04cefc2e6b0e2a7559", // hashed (was plaintext "123456") — demo seed data only
     truckNumber: "LEB-45210",
     phone: "+961 3 124 567",
-    activeShipmentsCount: 1,
+    // shipment-1003 (previously assigned to this driver) now seeds to
+    // demo-driver instead — see initialShipments.
+    activeShipmentsCount: 0,
     completedShipmentsCount: 19,
     truckType: "lowboy"
   }
@@ -1112,7 +1114,12 @@ const initialShipments: Shipment[] = [
   {
     id: "shipment-1003",
     shipmentNumber: "MAR-2026-1003",
-    companyName: "Karwan Foods & Cold Chain",
+    // Assigned to the demo driver/client accounts (rather than driver-4 /
+    // Karwan Foods) so demo_driver and demo_client each have at least one
+    // visible shipment right after a fresh `npm run dev` with
+    // SEED_DEMO_DATA=true — otherwise their dashboards are empty until an
+    // admin manually reassigns a shipment.
+    companyName: "Demo Client Co.",
     loadingCountry: "Turkey",
     loadingCity: "Gaziantep",
     loadingAddress: "Gaziantep Gıda Toptancıları Sitesi, No 77",
@@ -1123,9 +1130,9 @@ const initialShipments: Shipment[] = [
     deliveryContactNumber: "+964 750 444 5566",
     cargoDescription: "Assorted confectioneries, sunflower oils, and dried nuts.",
     cargoWeight: 19000,
-    truckNumber: "LEB-45210",
-    assignedDriverId: "driver-4",
-    assignedDriverName: "George Haddad",
+    truckNumber: "DEMO-0001",
+    assignedDriverId: "demo-driver",
+    assignedDriverName: "Demo Driver",
     agreedAmount: 2800,
     currency: "TRY",
     internalNotes: "Needs temperature tracking, even though products are shelf-stable, keep ventilated.",
@@ -1148,9 +1155,9 @@ const initialShipments: Shipment[] = [
         labelEn: "Assigned to Truck",
         labelTr: "Araca Atandı",
         labelAr: "تم التعيين للشاحنة",
-        detailsEn: "Assigned to George Haddad and truck LEB-45210.",
-        detailsTr: "George Haddad ve LEB-45210 numaralı tırına atandı.",
-        detailsAr: "تم التعيين لجورج حداد والشاحنة LEB-45210."
+        detailsEn: "Assigned to Demo Driver and truck DEMO-0001.",
+        detailsTr: "Demo Driver ve DEMO-0001 numaralı tırına atandı.",
+        detailsAr: "تم التعيين لـ Demo Driver والشاحنة DEMO-0001."
       },
       {
         timestamp: "2026-05-31T16:00:00Z",
@@ -1158,9 +1165,9 @@ const initialShipments: Shipment[] = [
         labelEn: "Order Accepted by Driver",
         labelTr: "Sürücü Siparişi Kabul Etti",
         labelAr: "تم قبول الطلب من السائق",
-        detailsEn: "George accepted Erbil cold storage ventilated shipment.",
-        detailsTr: "George havalandırmalı Erbil sevkiyatını kabul etti.",
-        detailsAr: "قبل جورج شحنة أربيل المهواة."
+        detailsEn: "Demo Driver accepted Erbil cold storage ventilated shipment.",
+        detailsTr: "Demo Driver havalandırmalı Erbil sevkiyatını kabul etti.",
+        detailsAr: "قبل Demo Driver شحنة أربيل المهواة."
       }
     ],
     createdAt: "2026-05-31T09:00:00Z",
