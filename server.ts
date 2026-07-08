@@ -3138,11 +3138,12 @@ async function startServer() {
           `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`
         );
       } else if (type === "file" && fileUrl) {
-        // internal_staff attachment: chat-only (see
-        // shouldSaveChatFileAsShipmentDocument) — never saved to
-        // shipment.documents, and notified via the same channel-gated
-        // "chat" notification path as a text message rather than the
-        // unfiltered "doc_upload" notification.
+        // internal_staff or driver_admin attachment (see
+        // shouldSaveChatFileAsShipmentDocument, PR #39): chat-only, never
+        // saved to shipment.documents — so it never reaches the customer
+        // dashboard or public share view — and notified via the same
+        // channel-gated "chat" notification path as a text message rather
+        // than the unfiltered "doc_upload" notification.
         await pushNotification(
           shipmentId,
           shipmentItem.shipmentNumber,

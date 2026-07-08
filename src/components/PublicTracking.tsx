@@ -921,6 +921,36 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           )}
         </div>
 
+        {/* SECURE SHARED PHOTOS PORTER */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
+          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+            <ImageIcon className="w-4 h-4 text-orange-500 shrink-0" />
+            <h3 className="font-extrabold text-xs text-slate-100 uppercase tracking-widest">{t('photosShared')}</h3>
+          </div>
+
+          {shipment.photos && shipment.photos.length > 0 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {shipment.photos.map((photo: any) => (
+                <a
+                  key={photo.id}
+                  href={photo.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="group block bg-slate-950 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-700 transition-all"
+                >
+                  <img src={photo.url} alt={photo.name} className="w-full h-28 object-cover group-hover:opacity-90 transition-opacity" />
+                  <p className="text-[9.5px] text-slate-400 truncate px-2 py-1.5">{photo.name}</p>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <div className="py-8 text-center bg-slate-950/40 rounded-xl border border-dashed border-slate-800/80">
+              <Lock className="w-6 h-6 text-slate-600 mx-auto mb-2" />
+              <p className="text-slate-400 text-xs italic">{t('noPhotosForPublic')}</p>
+            </div>
+          )}
+        </div>
+
         {/* LOGISTICS TRANSIT EVENT LOGS TIMELINE */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
           <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
