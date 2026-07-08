@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Language, Driver, TRUCK_TYPES } from "../types";
-import { Ship, Globe, User, Lock, Phone, Truck, Shield, ClipboardSignature, KeyRound, Mail } from "lucide-react";
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification } from "firebase/auth";
+import { Ship, Globe, User, Lock, Phone, Truck, ClipboardSignature, KeyRound, Mail, LogIn, LifeBuoy } from "lucide-react";
+import { signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification } from "firebase/auth";
 import { auth, googleSignIn } from "../googleAuth";
 import { apiFetch } from "../lib/api";
 
@@ -13,6 +13,12 @@ interface LoginPageProps {
   onViewTerms?: () => void;
 }
 
+const SUPPORT_EMAIL = "support@etir.app";
+// Only used to route a Firebase-authenticated identity to the right
+// verify-session role hint (see handleLogin) — never to grant access.
+// Actual admin authorization always comes from the server session.
+const OWNER_EMAIL = "sardar@maras.iq";
+
 export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPrivacy, onViewTerms }: LoginPageProps) {
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [verificationEmail, setVerificationEmail] = useState<string | null>(null);
@@ -23,7 +29,6 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isResettingPassword, setResettingPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [loginRole, setLoginRole] = useState<"admin" | "driver" | "client">("admin");
 
   // Registration inputs
   const [regFullName, setRegFullName] = useState("");
@@ -36,18 +41,21 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
   const [regError, setRegError] = useState<React.ReactNode | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
 
-  // Simple key translations
   const t = {
     en: {
-      title: "etir Cargo Gateway",
-      subtitle: "Multi-Country Operations Hub",
-      adminTip: "Demo Admin Support:",
-      driverTip: "Demo Driver Support:",
-      usernamePlaceholder: "Username, email, or phone",
-      passwordPlaceholder: "Password",
-      loginBtn: "Authenticate Account",
+      brand: "eTIR by MARAS",
+      tagline: "Logistics Control Platform",
+      subtitle: "Sign in to continue",
+      identifierLabel: "Email / Username",
+      identifierPlaceholder: "e.g. name@company.com",
+      passwordLabel: "Password",
+      signIn: "Sign In",
+      signingIn: "Signing in...",
+      forgotPassword: "Forgot password?",
+      sendingReset: "Sending link...",
+      needHelp: "Need help?",
       registerBtn: "Register as Driver",
-      backToLogin: "Back to Login",
+      backToLogin: "Back to Sign In",
       fullName: "Full Name",
       regUsername: "Username ID (No spaces)",
       personalEmail: "Personal Email Address",
@@ -56,22 +64,32 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       truckId: "Truck ID / Plate Number (e.g. 34-MAR-1903)",
       truckType: "Truck Type / Class",
       submitReg: "Complete Registration",
-      signingIn: "Verifying credentials...",
       creatingAccount: "Creating transport profile...",
-      errorFields: "Please fill in all requested fields",
-      driverRegHeader: "Driver Self-Registration Portal",
-      driverRegDesc: "Register your vehicle to accept international freight manifests."
+      errorFields: "Please fill in all required fields.",
+      genericLoginError: "Invalid username or password.",
+      identifierRequired: "Please enter your username or email address first to get a password reset link.",
+      resetSuccess: (email: string) => `A password reset link has been sent to ${email}. Please check your inbox and spam folder.`,
+      resetFailed: "Could not send the reset link. Please try again.",
+      unavailable: "The server is temporarily unavailable. Please try again shortly.",
+      driverRegHeader: "Driver Self-Registration",
+      driverRegDesc: "Register your vehicle to accept international freight manifests.",
+      googleSignIn: "Sign in with Google",
+      orDivider: "or",
     },
     tr: {
-      title: "etir Kargo Geçidi",
-      subtitle: "Çok Ülkeli Operasyon Merkezi",
-      adminTip: "Yönetici Bilgisi:",
-      driverTip: "Sürücü Bilgisi:",
-      usernamePlaceholder: "Kullanıcı adı, e-posta veya telefon",
-      passwordPlaceholder: "Şifre",
-      loginBtn: "Güvenli Giriş Yap",
-      registerBtn: "Yeni Sürücü Kaydı Ol",
-      backToLogin: "Giriş Sayfasına Dön",
+      brand: "eTIR by MARAS",
+      tagline: "Lojistik Kontrol Platformu",
+      subtitle: "Devam etmek için giriş yapın",
+      identifierLabel: "E-posta / Kullanıcı Adı",
+      identifierPlaceholder: "örn. isim@sirket.com",
+      passwordLabel: "Şifre",
+      signIn: "Giriş Yap",
+      signingIn: "Giriş yapılıyor...",
+      forgotPassword: "Şifremi unuttum?",
+      sendingReset: "Gönderiliyor...",
+      needHelp: "Yardıma mı ihtiyacınız var?",
+      registerBtn: "Sürücü Olarak Kaydol",
+      backToLogin: "Girişe Dön",
       fullName: "Adı Soyadı",
       regUsername: "Kullanıcı Adı (Boşluksuz)",
       personalEmail: "Kişisel E-posta Adresi",
@@ -80,20 +98,30 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       truckId: "Tır Plakası / ID (örn. 34-MAR-1903)",
       truckType: "Tır / Dorse Sınıfı",
       submitReg: "Kaydı Tamamla",
-      signingIn: "Kimlik doğrulanıyor...",
       creatingAccount: "Sürücü profili oluşturuluyor...",
-      errorFields: "Lütfen istenen tüm alanları doldurun",
+      errorFields: "Lütfen tüm zorunlu alanları doldurun.",
+      genericLoginError: "Kullanıcı adı veya şifre hatalı.",
+      identifierRequired: "Sıfırlama bağlantısı almak için önce kullanıcı adınızı veya e-posta adresinizi girin.",
+      resetSuccess: (email: string) => `${email} adresine bir şifre sıfırlama bağlantısı gönderildi. Lütfen gelen kutunuzu ve spam klasörünüzü kontrol edin.`,
+      resetFailed: "Sıfırlama bağlantısı gönderilemedi. Lütfen tekrar deneyin.",
+      unavailable: "Sunucu şu anda kullanılamıyor. Lütfen kısa süre sonra tekrar deneyin.",
       driverRegHeader: "Sürücü Öz-Kayıt Portalı",
-      driverRegDesc: "Uluslararası navlun belgelerini kabul etmek için aracınızı kaydedin."
+      driverRegDesc: "Uluslararası navlun belgelerini kabul etmek için aracınızı kaydedin.",
+      googleSignIn: "Google ile Giriş Yap",
+      orDivider: "veya",
     },
     ar: {
-      title: "بوابة شحن etir الإلكترونية",
-      subtitle: "مركز العمليات اللوجستية الدولي",
-      adminTip: "بيانات تجربة المسؤول:",
-      driverTip: "بيانات تجربة أخصائي النقل:",
-      usernamePlaceholder: "اسم المستخدم، البريد أو الهاتف",
-      passwordPlaceholder: "كلمة المرور",
-      loginBtn: "تسجيل الدخول الآمن",
+      brand: "إيتير من MARAS",
+      tagline: "منصة التحكم اللوجستي",
+      subtitle: "سجّل الدخول للمتابعة",
+      identifierLabel: "البريد الإلكتروني / اسم المستخدم",
+      identifierPlaceholder: "مثال: name@company.com",
+      passwordLabel: "كلمة المرور",
+      signIn: "تسجيل الدخول",
+      signingIn: "جاري تسجيل الدخول...",
+      forgotPassword: "نسيت كلمة المرور؟",
+      sendingReset: "جاري الإرسال...",
+      needHelp: "هل تحتاج مساعدة؟",
       registerBtn: "تسجيل أخصائي نقل جديد",
       backToLogin: "العودة لتسجيل الدخول",
       fullName: "الاسم الكامل",
@@ -104,13 +132,27 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       truckId: "رقم شاحنة الشحن / اللوحة",
       truckType: "نوع وصنف الشاحنة",
       submitReg: "إكمال عملية التسجيل",
-      signingIn: "جاري التحقق من الهوية...",
       creatingAccount: "جاري إنشاء ملف الناقل...",
-      errorFields: "يرجى تعبئة جميع الحقول المطلوبة",
+      errorFields: "يرجى تعبئة جميع الحقول المطلوبة.",
+      genericLoginError: "بيانات الدخول غير صحيحة.",
+      identifierRequired: "يرجى إدخال اسم المستخدم أو البريد الإلكتروني أولاً لتلقي رابط إعادة التعيين.",
+      resetSuccess: (email: string) => `تم إرسال رابط إعادة تعيين كلمة المرور إلى ${email}. يرجى التحقق من بريدك الإلكتروني ومجلد الرسائل غير المرغوب فيها.`,
+      resetFailed: "تعذر إرسال رابط إعادة التعيين. يرجى المحاولة مرة أخرى.",
+      unavailable: "الخادم غير متاح حالياً. يرجى المحاولة مرة أخرى بعد قليل.",
       driverRegHeader: "بوابة التسجيل الذاتي لأخصائي النقل",
-      driverRegDesc: "سجل شاحنتك الآن للبدء في تلقي مستندات الشحن الدولية والرحلات."
+      driverRegDesc: "سجل شاحنتك الآن للبدء في تلقي مستندات الشحن الدولية والرحلات.",
+      googleSignIn: "تسجيل الدخول عبر Google",
+      orDivider: "أو",
     }
   }[lang];
+
+  const isRtl = lang === "ar";
+
+  /** No "@" in the input is treated as a local username, e.g. a driver's short login name. */
+  const resolveEmail = (identifier: string) => {
+    const trimmed = identifier.trim().toLowerCase();
+    return trimmed.includes("@") ? trimmed : `${trimmed}@etir.com`;
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,209 +165,75 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
     setIsLoggingIn(true);
 
     try {
-      // Force sign out any leftover session (such as from a different user role) to prevent hijacking
+      // Force sign out any leftover session to prevent hijacking a
+      // previous user's Firebase state.
       try {
         await auth.signOut();
       } catch (soErr) {
         console.warn("Sign out during login preparation failed:", soErr);
       }
 
-      // Resolve entered username, looking or normalizing email address formatting
-      let resolvedEmail = loginUsername.trim().toLowerCase();
-      if (!resolvedEmail.includes("@")) {
+      const identifier = loginUsername.trim();
+      const enteredEmail = resolveEmail(identifier);
+
+      // Single unified endpoint — the server alone decides whether this
+      // identity is an admin, driver, or client. The client never chooses
+      // a role; there is no role selector on this page.
+      const res = await apiFetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: identifier, password: loginPassword })
+      });
+
+      const text = await res.text();
+      const isHtml = text.trim().startsWith("<");
+
+      if (isHtml) {
+        setLoginError(t.unavailable);
+        setIsLoggingIn(false);
+        return;
+      }
+
+      if (res.ok) {
+        const data = JSON.parse(text);
+        onLoginSuccess({
+          role: data.role,
+          email: data.user?.email || enteredEmail,
+          driver: data.driver || null,
+          client: data.client || null,
+          loginType: "local",
+          token: data.token,
+          adminType: data.adminType || data.user?.adminType
+        });
+        return;
+      }
+
+      // A rate-limit or pending/rejected-driver response is safe to show
+      // verbatim — it tells the caller nothing they don't already know
+      // about their own account. Everything else (wrong password, unknown
+      // identity) must stay generic, so try the legacy Firebase fallback
+      // below before ever surfacing a message.
+      if (res.status === 429 || res.status === 403) {
         try {
-          const resDrivers = await apiFetch("/api/drivers");
-          if (resDrivers.ok) {
-            const text = await resDrivers.text();
-            if (!text.trim().startsWith("<")) {
-              const driversList = JSON.parse(text);
-              const foundDriver = driversList.find((d: any) => 
-                d.username?.toLowerCase() === resolvedEmail || 
-                d.phone === resolvedEmail ||
-                d.phone?.replace(/[\s+]+/g, "") === resolvedEmail.replace(/[\s+]+/g, "")
-              );
-              if (foundDriver && foundDriver.email) {
-                resolvedEmail = foundDriver.email.toLowerCase();
-              } else {
-                resolvedEmail = `${resolvedEmail}@etir.com`;
-              }
-            } else {
-              resolvedEmail = `${resolvedEmail}@etir.com`;
-            }
-          } else {
-            resolvedEmail = `${resolvedEmail}@etir.com`;
-          }
-        } catch (apiErr) {
-          console.warn("Could not pre-fetch drivers to resolve email:", apiErr);
-          resolvedEmail = `${resolvedEmail}@etir.com`;
-        }
-      }
-      const enteredEmail = resolvedEmail;
-
-      // Direct Customer/Client portal authentication logic
-      if (loginRole === "client") {
-        const res = await apiFetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: loginUsername.trim(),
-            password: loginPassword
-          })
-        });
-
-        if (res.ok) {
-          const text = await res.text();
-          if (!text.trim().startsWith("<")) {
-            const data = JSON.parse(text);
-            if (data.role === "client") {
-              onLoginSuccess({
-                role: "client",
-                client: data.client,
-                loginType: "local",
-                token: data.token
-              });
-              return;
-            }
-          }
-        }
-        setLoginError(
-          lang === "tr"
-            ? "Müşteri kimlik doğrulaması başarısız. Lütfen bilgilerinizi kontrol edin."
-            : (lang === "ar"
-              ? "فشل تسجيل دخول العميل. يرجى التحقق من اسم المستخدم وكلمة المرور."
-              : "Customer authentication failed. Please check your username and passcode.")
-        );
-        setIsLoggingIn(false);
-        return;
-      }
-
-      // Predefined administrative checks for direct identification
-      const checkIsAdmin =
-        enteredEmail === "sardar@maras.iq" ||
-        loginUsername.trim().toLowerCase() === "sardar" ||
-        loginUsername.trim().toLowerCase() === "sardar@maras.iq" ||
-        loginRole === "admin";
-
-      // BUG-20: `checkIsAdmin` is always true whenever loginRole === "admin"
-      // (it's one of the OR terms above), so a guard of the form
-      // `loginRole === "admin" && !checkIsAdmin` could never fire — it was
-      // dead code. The real admin/wrong-role decision is made server-side
-      // by /api/login below, which returns GENERIC_LOGIN_ERROR either way
-      // so this client can't be used to enumerate valid admin identities.
-
-      if (loginRole === "driver" && checkIsAdmin && enteredEmail === "sardar@maras.iq") {
-        setLoginError("This account is registered as an Administrator. Please select the Admin Portal above to sign in.");
-        setIsLoggingIn(false);
-        return;
-      }
-
-      if (checkIsAdmin) {
-        // Try authenticating through full-stack database matching
-        const res = await apiFetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: loginUsername.trim(),
-            password: loginPassword
-          })
-        });
-
-        if (res.ok) {
-          const text = await res.text();
-          if (text.trim().startsWith("<")) {
-            setLoginError("Backend API is currently offline on your hosting server (received HTML instead of JSON).");
+          const errData = JSON.parse(text);
+          if (errData?.error) {
+            setLoginError(errData.error);
             setIsLoggingIn(false);
             return;
           }
-          const data = JSON.parse(text);
-          onLoginSuccess({
-            role: data.role,
-            email: data.user?.email || enteredEmail,
-            driver: data.driver || null,
-            loginType: "local",
-            token: data.token,
-            adminType: data.adminType || data.user?.adminType
-          });
-          return;
-        } else {
-          // If the server failed / returned error, check if it was sardar@maras.iq and try client-side Firebase Auth as backup
-          if (enteredEmail === "sardar@maras.iq" || loginUsername.trim().toLowerCase() === "sardar") {
-            let user;
-            try {
-              const userCredential = await signInWithEmailAndPassword(auth, "sardar@maras.iq", loginPassword);
-              user = userCredential.user;
-            } catch (authErr: any) {
-              console.warn("Root Admin client-side Auth sign-in failed:", authErr);
-            }
-
-            if (user) {
-              if (!user.emailVerified) {
-                try { await sendEmailVerification(user); } catch (e) {}
-                await auth.signOut();
-                setVerificationEmail(user.email || "sardar@maras.iq");
-                setIsLoggingIn(false);
-                return;
-              }
-
-              // Get a real signed session token from the server now that
-              // Firebase Auth succeeded — without this, every subsequent
-              // API call would fail with 401 once auth is enforced.
-              try {
-                const verifyRes = await apiFetch("/api/verify-session", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ role: "admin", idToken: await user.getIdToken() })
-                });
-                const verifyData = verifyRes.ok ? await verifyRes.json() : null;
-                onLoginSuccess({
-                  role: "admin",
-                  email: "sardar@maras.iq",
-                  driver: null,
-                  loginType: "firebase",
-                  token: verifyData?.token,
-                  adminType: verifyData?.adminType || verifyData?.user?.adminType
-                });
-              } catch (verifyErr) {
-                console.error("Failed to obtain session token after Firebase admin login:", verifyErr);
-                onLoginSuccess({
-                  role: "admin",
-                  email: "sardar@maras.iq",
-                  driver: null,
-                  loginType: "firebase"
-                });
-              }
-              return;
-            }
-          }
-
-          let serverError = "Administrative access denied. Incorrect password or invalid email formatting constraint.";
-          try {
-            const text = await res.text();
-            if (text.trim().startsWith("<")) {
-              serverError = "Backend API is currently offline on your hosting server (received HTML instead of JSON).";
-            } else {
-              const errorData = JSON.parse(text);
-              if (errorData && errorData.error) {
-                serverError = `Corporate security check failed: ${errorData.error}`;
-              }
-            }
-          } catch (jsonErr) {}
-          setLoginError(serverError);
-          setIsLoggingIn(false);
-          return;
-        }
+        } catch {}
       }
 
-      // If user is potential driver or normal credentials profile
+      // Fallback for identities that predate local password login (the
+      // owner account before SUPER_ADMIN_PASSWORD_HASH is configured, or
+      // drivers who signed up before this app had its own password store).
       try {
         const userCredential = await signInWithEmailAndPassword(auth, enteredEmail, loginPassword);
         const user = userCredential.user;
 
         if (user && !user.emailVerified) {
-          try {
-            await sendEmailVerification(user);
-          } catch (verErr) {
-            console.warn("Could not resend verification email for driver login:", verErr);
+          try { await sendEmailVerification(user); } catch (verErr) {
+            console.warn("Could not resend verification email:", verErr);
           }
           await auth.signOut();
           setVerificationEmail(user.email || enteredEmail);
@@ -333,108 +241,136 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           return;
         }
 
-        // Get a real signed session token from the server now that Firebase
-        // Auth succeeded — needed both to fetch /api/drivers below (which
-        // now requires auth) and for every subsequent API call this driver
-        // makes for the rest of their session.
-        let sessionToken: string | undefined;
-        try {
-          const verifyRes = await apiFetch("/api/verify-session", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ role: "driver", idToken: await user.getIdToken() })
-          });
-          if (verifyRes.ok) {
-            const verifyData = await verifyRes.json();
-            sessionToken = verifyData?.token;
-          }
-        } catch (verifyErr) {
-          console.warn("Failed to obtain session token after Firebase driver login:", verifyErr);
-        }
-
-        // Normal registered driver profile lookup - wrapped safely to prevent blocking network failures
-        let foundDriver: Driver | null = null;
-        try {
-          const resDrivers = await apiFetch("/api/drivers");
-          if (resDrivers.ok) {
-            const text = await resDrivers.text();
-            if (!text.trim().startsWith("<")) {
-              const driversList: Driver[] = JSON.parse(text);
-              foundDriver = driversList.find(d => d.id === user.uid) || null;
-            }
-          }
-        } catch (apiErr) {
-          console.warn("Could not retrieve driver metadata during login over relative API:", apiErr);
-        }
-
-        // Reliable client-side metadata constructor fallback if API fails
-        if (!foundDriver) {
-          console.log("Using firebase auth user fallback driver profile metadata.");
-          foundDriver = {
-            id: user.uid,
-            name: user.displayName || loginUsername.split("@")[0] || "Freight Driver",
-            username: loginUsername.split("@")[0] || "driver_account",
-            phone: user.phoneNumber || "+964000000000",
-            truckNumber: "M-7733-IQ",
-            truckType: "reefer",
-            activeShipmentsCount: 0,
-            completedShipmentsCount: 0
-          };
-        }
-
-        onLoginSuccess({
-          role: "driver",
-          driver: foundDriver,
-          loginType: "firebase",
-          token: sessionToken
+        const isOwner = (user.email || "").toLowerCase() === OWNER_EMAIL;
+        const verifyRes = await apiFetch("/api/verify-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: isOwner ? "admin" : "driver", idToken: await user.getIdToken() })
         });
+
+        if (!verifyRes.ok) {
+          await auth.signOut();
+          setLoginError(t.genericLoginError);
+          setIsLoggingIn(false);
+          return;
+        }
+
+        const verifyData = await verifyRes.json();
+        if (isOwner) {
+          onLoginSuccess({
+            role: "admin",
+            email: OWNER_EMAIL,
+            driver: null,
+            loginType: "firebase",
+            token: verifyData?.token,
+            adminType: verifyData?.adminType || verifyData?.user?.adminType
+          });
+        } else {
+          onLoginSuccess({
+            role: "driver",
+            driver: verifyData?.driver || null,
+            loginType: "firebase",
+            token: verifyData?.token
+          });
+        }
         return;
       } catch (authErr: any) {
-        console.warn("Driver Firebase Auth direct login failed. Trying secondary database fallback...", authErr);
-        
-        // Secondary compatibility database check for default seeds
-        try {
-          const res = await apiFetch("/api/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              username: loginUsername.trim(),
-              password: loginPassword
-            })
-          });
-
-          if (res.ok) {
-            const text = await res.text();
-            if (!text.trim().startsWith("<")) {
-              const data = JSON.parse(text);
-              onLoginSuccess({
-                role: data.role,
-                driver: data.driver || null,
-                loginType: "local",
-                token: data.token,
-                adminType: data.adminType || data.user?.adminType
-              });
-              return;
-            }
-          }
-        } catch (dbErr) {
-          console.warn("Secondary database fallback fail:", dbErr);
-        }
-
-        let friendlyError = "Authentication failed. Invalid login sequence.";
-        if (authErr.code === "auth/invalid-credential" || authErr.code === "auth/wrong-password") {
-          friendlyError = "Incorrect password or email pattern combination.";
-        } else if (authErr.code === "auth/user-not-found") {
-          friendlyError = "Account username or mobile number registration record not found.";
-        } else if (authErr.code === "auth/too-many-requests") {
-          friendlyError = "Too many login attempts. Access is temporarily suspended.";
-        }
-        setLoginError(friendlyError);
+        console.warn("Firebase Auth fallback failed:", authErr?.code || authErr);
+        setLoginError(t.genericLoginError);
       }
     } catch (err: any) {
       console.error(err);
-      const errMsg = err?.message || String(err);
-      setLoginError(`Security Gateway Exception: ${errMsg}. Please check network or config.`);
+      setLoginError(t.genericLoginError);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!loginUsername.trim()) {
+      setLoginError(t.identifierRequired);
+      return;
+    }
+    const targetEmail = resolveEmail(loginUsername);
+    try {
+      setResettingPassword(true);
+      await sendPasswordResetEmail(auth, targetEmail);
+      setLoginError(t.resetSuccess(targetEmail));
+    } catch (err: any) {
+      setLoginError(t.resetFailed);
+    } finally {
+      setResettingPassword(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setIsLoggingIn(true);
+    setLoginError(null);
+    try {
+      const res = await googleSignIn();
+      if (!res) {
+        setIsLoggingIn(false);
+        return;
+      }
+      const user = res.user;
+      const isOwner = (user.email || "").toLowerCase() === OWNER_EMAIL;
+
+      let sessionToken: string | undefined;
+      let foundDriver: Driver | null = null;
+      let adminType: string | undefined;
+
+      try {
+        const verifyRes = await apiFetch("/api/verify-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: isOwner ? "admin" : "driver", idToken: await user.getIdToken() })
+        });
+        if (verifyRes.ok) {
+          const verifyData = await verifyRes.json();
+          sessionToken = verifyData?.token;
+          foundDriver = verifyData?.driver || null;
+          adminType = verifyData?.adminType || verifyData?.user?.adminType;
+        }
+      } catch (verifyErr) {
+        console.warn("verify-session lookup failed:", verifyErr);
+      }
+
+      if (isOwner) {
+        if (!sessionToken) {
+          setLoginError(t.genericLoginError);
+          await auth.signOut();
+          setIsLoggingIn(false);
+          return;
+        }
+        onLoginSuccess({ role: "admin", email: OWNER_EMAIL, driver: null, loginType: "firebase", token: sessionToken, adminType });
+        return;
+      }
+
+      // Google Sign-In intentionally does not auto-create a new driver
+      // account. It only works for drivers who already exist (found above
+      // via verify-session) — new drivers must use the registration form,
+      // which collects their real name/phone/truck info and correctly
+      // enters the pending-approval queue.
+      if (!foundDriver || !sessionToken) {
+        setLoginError(
+          lang === "tr"
+            ? "Bu Google hesabı onaylı bir sürücü hesabına bağlı değil. Lütfen sürücü kayıt formunu kullanın."
+            : (lang === "ar"
+              ? "حساب Google هذا غير مرتبط بحساب سائق معتمد. يرجى استخدام نموذج تسجيل السائق."
+              : "This Google account is not linked to an existing approved driver account. Please use the driver registration form instead.")
+        );
+        await auth.signOut();
+        setIsLoggingIn(false);
+        return;
+      }
+
+      onLoginSuccess({ role: "driver", driver: foundDriver, loginType: "firebase", token: sessionToken });
+    } catch (e: any) {
+      if (e?.code === 'auth/popup-closed-by-user' || e?.message?.includes('popup-closed-by-user')) {
+        console.warn("Google authentication popup closed by user.");
+      } else {
+        setLoginError(t.genericLoginError);
+      }
     } finally {
       setIsLoggingIn(false);
     }
@@ -442,7 +378,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!regFullName.trim() || !regUsername.trim() || !regEmail.trim() || !regPhone.trim() || !regTruckId.trim() || !regPassword) {
       setRegError(t.errorFields);
       return;
@@ -490,13 +426,13 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       if (registerRes.ok) {
         const text = await registerRes.text();
         if (text.trim().startsWith("<")) {
-          throw new Error("Backend API is currently offline on your hosting server (received HTML instead of JSON). Please make sure Hostinger runs the full-stack Express server.");
+          throw new Error(t.unavailable);
         }
         setVerificationEmail(email);
       } else {
         const text = await registerRes.text();
         if (text.trim().startsWith("<")) {
-          throw new Error("Backend API is currently offline on your hosting server (received HTML instead of JSON).");
+          throw new Error(t.unavailable);
         }
         const errData = JSON.parse(text);
         setRegError(errData.error || "Registration failed on database side");
@@ -509,621 +445,384 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
     }
   };
 
-  const isRtl = lang === "ar";
+  const inputBaseClasses = "w-full h-12 ps-10 pe-4 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-sm text-slate-100 placeholder-slate-500 font-medium focus:outline-none transition-all text-start";
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans flex flex-col justify-center items-center p-4 relative overflow-hidden" dir={isRtl ? "rtl" : "ltr"}>
       {/* Decorative ambient blobs */}
-      <div className="absolute top-10 left-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
-      <div className="absolute bottom-10 right-10 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute top-10 start-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute bottom-10 end-10 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
 
-      {/* Language Switch Bar & Logo */}
-      <div className="w-full max-w-md flex items-center justify-between mb-6 z-10">
-        <div className="flex items-center gap-2">
-          <div className="p-2 bg-blue-600 text-white rounded-lg shadow-lg">
-            <Ship className="w-5 h-5 shrink-0" />
-          </div>
-          <div>
-            <span className="text-[10px] uppercase font-bold text-blue-400 tracking-wider">MARAS Group</span>
-            <p className="text-xs font-semibold text-slate-300">etir Gateway</p>
-          </div>
-        </div>
-
-        {/* Mini Lang Select */}
-        <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-lg border border-slate-800 text-xs font-bold text-slate-300">
-          <Globe className="w-3.5 h-3.5 text-slate-400" />
-          <select
-            value={lang}
-            onChange={(e) => onSetLang(e.target.value as Language)}
-            className="bg-transparent text-white outline-none cursor-pointer text-xs"
-          >
-            <option value="en" className="bg-slate-950 text-white">EN</option>
-            <option value="tr" className="bg-slate-950 text-white">TR</option>
-            <option value="ar" className="bg-slate-950 text-white">AR</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Main Authentication Card */}
-      <div className="w-full max-w-md bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl z-10 transition-all">
-        
-        {verificationEmail ? (
-          /* EMAIL VERIFICATION SCREEN */
-          <div className="space-y-6 text-center">
-            <div className="mx-auto w-16 h-16 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-full flex items-center justify-center animate-pulse">
-              <Mail className="w-8 h-8 text-blue-400" />
-            </div>
-            
-            <div className="space-y-2">
-              <h3 className="text-lg font-black text-white tracking-tight">
-                {lang === "en" ? "Registration Received" : lang === "tr" ? "Kayıt Alındı" : "تم استلام التسجيل"}
-              </h3>
-              <p className="text-xs text-slate-300 leading-relaxed font-semibold">
-                “Registration received for <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is pending admin approval - you will be able to log in once an admin approves it.”
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setVerificationEmail(null);
-                setIsRegisterMode(false);
-              }}
-              className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+      <div className="w-full max-w-[440px] z-10">
+        {/* Language switcher */}
+        <div className="flex items-center justify-end mb-4">
+          <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-lg border border-slate-800 text-xs font-bold text-slate-300">
+            <Globe className="w-3.5 h-3.5 text-slate-400" />
+            <select
+              value={lang}
+              onChange={(e) => onSetLang(e.target.value as Language)}
+              className="bg-transparent text-white outline-none cursor-pointer text-xs"
+              aria-label="Language"
             >
-              <KeyRound className="w-4 h-4 shrink-0" />
-              <span>
-                {lang === "en" ? "Login" : lang === "tr" ? "Giriş yap" : "تسجيل الدخول"}
-              </span>
-            </button>
+              <option value="en" className="bg-slate-950 text-white">EN</option>
+              <option value="tr" className="bg-slate-950 text-white">TR</option>
+              <option value="ar" className="bg-slate-950 text-white">AR</option>
+            </select>
           </div>
-        ) : !isRegisterMode ? (
-          /* LOGIN FORM */
-          <div className="space-y-6">
-            <div className="space-y-1 text-center sm:text-left">
-              <h2 className="text-xl font-black text-white tracking-tight">{t.title}</h2>
-              <p className="text-xs text-slate-400 font-medium">{t.subtitle}</p>
+        </div>
+
+        {/* Main Authentication Card */}
+        <div className="w-full bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-3xl p-7 sm:p-9 shadow-2xl transition-all">
+
+          {/* Brand identity */}
+          <div className="flex flex-col items-center text-center mb-7">
+            <div className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-600/20 mb-3">
+              <Ship className="w-7 h-7" />
             </div>
+            <h1 className="text-lg font-black text-white tracking-tight">{t.brand}</h1>
+            <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mt-0.5">{t.tagline}</p>
+          </div>
 
-            {/* Clean Role Portal Selector */}
-            <div className="grid grid-cols-3 gap-1.5 bg-slate-900 border border-slate-800/80 p-1 rounded-xl">
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginRole("admin");
-                  setLoginError(null);
-                }}
-                className={`py-2 px-1 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  loginRole === "admin"
-                    ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
-                }`}
-              >
-                <Shield className="w-3 h-3 shrink-0 text-blue-400" />
-                <span>
-                  {lang === "en" ? "Admin" : lang === "tr" ? "Yönetici" : "مسؤول"}
-                </span>
-              </button>
+          {verificationEmail ? (
+            /* EMAIL VERIFICATION SCREEN */
+            <div className="space-y-6 text-center">
+              <div className="mx-auto w-16 h-16 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-full flex items-center justify-center animate-pulse">
+                <Mail className="w-8 h-8 text-blue-400" />
+              </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginRole("driver");
-                  setLoginError(null);
-                }}
-                className={`py-2 px-1 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  loginRole === "driver"
-                    ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
-                }`}
-              >
-                <Truck className="w-3 h-3 shrink-0 text-blue-400" />
-                <span>
-                  {lang === "en" ? "Driver" : lang === "tr" ? "Sürücü" : "سائق"}
-                </span>
-              </button>
+              <div className="space-y-2">
+                <h3 className="text-lg font-black text-white tracking-tight">
+                  {lang === "en" ? "Registration Received" : lang === "tr" ? "Kayıt Alındı" : "تم استلام التسجيل"}
+                </h3>
+                <p className="text-xs text-slate-300 leading-relaxed font-semibold">
+                  {lang === "en"
+                    ? <>Registration received for <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is pending admin approval — you will be able to sign in once an admin approves it.</>
+                    : lang === "tr"
+                      ? <><span className="text-blue-400 font-bold">{verificationEmail}</span> için kayıt alındı. Hesabınız yönetici onayı bekliyor — bir yönetici onayladıktan sonra giriş yapabileceksiniz.</>
+                      : <>تم استلام التسجيل لـ <span className="text-blue-400 font-bold">{verificationEmail}</span>. حسابك بانتظار موافقة المسؤول — ستتمكن من تسجيل الدخول بعد الموافقة عليه.</>
+                  }
+                </p>
+              </div>
 
               <button
                 type="button"
                 onClick={() => {
-                  setLoginRole("client");
-                  setLoginError(null);
+                  setVerificationEmail(null);
+                  setIsRegisterMode(false);
                 }}
-                className={`py-2 px-0.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  loginRole === "client"
-                    ? "bg-slate-800 text-white shadow font-black border border-blue-500/30"
-                    : "text-slate-400 hover:text-slate-200 font-semibold hover:bg-slate-800"
-                }`}
+                className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
-                <User className="w-3 h-3 shrink-0 text-blue-400" />
-                <span>
-                  {lang === "en" ? "Customer" : lang === "tr" ? "Müşteri" : "عميل"}
-                </span>
+                <KeyRound className="w-4 h-4 shrink-0" />
+                <span>{lang === "en" ? "Back to Sign In" : lang === "tr" ? "Girişe Dön" : "العودة لتسجيل الدخول"}</span>
               </button>
             </div>
+          ) : !isRegisterMode ? (
+            /* LOGIN FORM */
+            <div className="space-y-5">
+              <p className="text-center text-sm text-slate-400 font-medium -mt-3">{t.subtitle}</p>
 
-            {loginError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold rounded-xl text-center space-y-2">
-                <div>⚠️ {loginError}</div>
-                {loginRole === "admin" && (
-                  <div className="pt-1.5 border-t border-red-500/10">
+              {loginError && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center" role="alert">
+                  {loginError}
+                </div>
+              )}
+
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label htmlFor="login-identifier" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.identifierLabel}
+                  </label>
+                  <div className="relative">
+                    <User className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input
+                      id="login-identifier"
+                      type="text"
+                      autoComplete="username"
+                      required
+                      placeholder={t.identifierPlaceholder}
+                      value={loginUsername}
+                      onChange={(e) => setLoginUsername(e.target.value)}
+                      className={inputBaseClasses}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center gap-2">
+                    <label htmlFor="login-password" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.passwordLabel}
+                    </label>
                     <button
                       type="button"
-                      onClick={async () => {
-                        try {
-                          setResettingPassword(true);
-                          const targetEmail = loginUsername.includes("@") 
-                            ? loginUsername.trim().toLowerCase() 
-                            : "sardar@maras.iq";
-                          
-                          await sendPasswordResetEmail(auth, targetEmail);
-                          setLoginError(
-                            lang === "tr" 
-                              ? `BAŞARILI: ${targetEmail} adresine bir şifre sıfırlama bağlantısı gönderildi. Lütfen e-posta kutunuzu ve spam klasörünüzü kontrol edin!`
-                              : (lang === "ar"
-                                ? `تم بنجاح: تم إرسال رابط إعادة تعيين كلمة المرور إلى ${targetEmail}. يرجى التحقق من بريدك الإلكتروني والرسائل غير المرغوب فيها!`
-                                : `SUCCESS: A password reset link has been dispatched to ${targetEmail}. Please check your Inbox and Spam folders to set a new password!`)
-                          );
-                        } catch (err: any) {
-                          setLoginError(`Email reset action failed: ${err.message}`);
-                        } finally {
-                          setResettingPassword(false);
-                        }
-                      }}
+                      onClick={handleForgotPassword}
                       disabled={isResettingPassword}
-                      className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white font-black text-[11px] rounded transition-all border-0 cursor-pointer uppercase tracking-wider"
+                      className="text-[11px] text-blue-400 hover:text-blue-300 font-bold hover:underline bg-transparent border-0 cursor-pointer p-0 disabled:opacity-60"
                     >
-                      {isResettingPassword 
-                        ? (lang === "tr" ? "Sıfırlama Gönderiliyor..." : lang === "ar" ? "جاري الإرسال..." : "Sending reset...") 
-                        : (lang === "tr" ? "E-Posta ile Şifre Sıfırla ✉️" : lang === "ar" ? "إعادة تعيين كلمة المرور عبر البريد ✉️" : "Reset Admin Password via Email ✉️")
-                      }
+                      {isResettingPassword ? t.sendingReset : t.forgotPassword}
                     </button>
-                    <p className="text-[10px] text-slate-400 mt-1 font-medium">
-                      {lang === "tr" 
-                        ? "Eğer şifrenizi unuttuysanız veya değiştirmek istiyorsanız, yukarıdaki butona tıklayarak güvenli sıfırlama linki oluşturabilirsiniz."
-                        : (lang === "ar"
-                          ? "إذا نسيت كلمة المرور الخاصة بك، يمكنك النقر على الزر أعلاه لتلقي رابط إعادة التعيين الآمن."
-                          : "If you forgot your password or need a secure update, click above to receive an official recovery link.")}
-                    </p>
                   </div>
-                )}
-              </div>
-            )}
-
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {loginRole === "admin" 
-                    ? (lang === "en" ? "Administrator ID / Email" : lang === "tr" ? "Yönetici E-Posta / IDsi" : "معرف المسؤول / البريد")
-                    : loginRole === "client"
-                      ? (lang === "en" ? "Customer Username or Email" : lang === "tr" ? "Müşteri Kullanıcı Adı veya E-Posta" : "اسم مستخدم العميل أو البريد")
-                      : (lang === "en" ? "Driver Username or Phone" : lang === "tr" ? "Sürücü Kullanıcı Adı veya Telefon" : "اسم مستخدم السائق أو الهاتف")
-                  }
-                </label>
-                <div className="relative">
-                  <User className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
-                  <input
-                    type="text"
-                    required
-                    placeholder={loginRole === "admin" ? "e.g. sardar@maras.iq" : loginRole === "client" ? "e.g. bahi, uruk or karwan" : "e.g. ihab"}
-                    value={loginUsername}
-                    onChange={(e) => setLoginUsername(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
-                  />
+                  <div className="relative">
+                    <Lock className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input
+                      id="login-password"
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                      placeholder="••••••••"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      className={inputBaseClasses}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div className="space-y-1">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                    {t.passwordPlaceholder}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (!loginUsername.trim()) {
-                        setLoginError(
-                          lang === "tr" 
-                            ? "Lütfen sıfırlama bağlantısı almak istediğiniz e-posta adresini veya kullanıcı adını girin!"
-                            : (lang === "ar"
-                              ? "يرجى إدخال اسم المستخدم أو البريد الإلكتروني الخاص بك أولاً لتلقي رابط الاستعادة."
-                              : "Please enter your username or email address first to get a password reset link!")
-                        );
-                        return;
-                      }
-                      
-                      try {
-                        setResettingPassword(true);
-                        const targetEmail = loginUsername.includes("@") 
-                          ? loginUsername.trim().toLowerCase() 
-                          : (loginRole === "admin" ? "sardar@maras.iq" : `${loginUsername.trim().toLowerCase()}@etir.com`);
-                        
-                        await sendPasswordResetEmail(auth, targetEmail);
-                        setLoginError(
-                          lang === "tr" 
-                            ? `BAŞARILI: ${targetEmail} adresine bir şifre sıfırlama bağlantısı gönderildi. Lütfen e-posta kutunuzu ve spam klasörünüzü kontrol edin!`
-                            : (lang === "ar"
-                              ? `تم بنجاح: تم إرسال رابط إعادة تعيين كلمة المرور إلى ${targetEmail}. يرجى التحقق من بريدك الإلكتروني والرسائل غير المرغوب فيها!`
-                              : `SUCCESS: A password reset link has been dispatched to ${targetEmail}. Please check your Inbox and Spam folders to set a new password!`)
-                        );
-                      } catch (err: any) {
-                        setLoginError(`Email reset action failed: ${err.message}`);
-                      } finally {
-                        setResettingPassword(false);
-                      }
-                    }}
-                    disabled={isResettingPassword}
-                    className="text-[10px] text-blue-400 hover:text-blue-300 font-bold hover:underline bg-transparent border-0 cursor-pointer p-0"
-                  >
-                    {isResettingPassword 
-                      ? (lang === "tr" ? "Sıfırlama Gönderiliyor..." : "Sending link...") 
-                      : (lang === "tr" ? "Şifremi Unuttum?" : lang === "ar" ? "نسيت كلمة المرور؟" : "Forgot Password?")
-                    }
-                  </button>
-                </div>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
-                  <input
-                    type="password"
-                    required
-                    placeholder="••••••••"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none transition-all text-left"
-                  />
-                </div>
-              </div>
+                <button
+                  type="submit"
+                  disabled={isLoggingIn}
+                  className="w-full h-12 sm:h-[52px] text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-70 shadow-blue-600/20"
+                >
+                  {isLoggingIn ? (
+                    <span>{t.signingIn}</span>
+                  ) : (
+                    <>
+                      <LogIn className="w-4 h-4 shrink-0" />
+                      <span>{t.signIn}</span>
+                    </>
+                  )}
+                </button>
+              </form>
 
-              <button
-                type="submit"
-                disabled={isLoggingIn}
-                className="w-full py-3 text-white font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2 bg-orange-600 hover:bg-orange-700 shadow-orange-600/20"
-              >
-                {isLoggingIn ? (
-                  <span>{t.signingIn}</span>
-                ) : (
-                  <>
-                    {loginRole === "driver" ? (
-                      <Truck className="w-4 h-4 shrink-0 text-orange-100" />
-                    ) : (
-                      <Shield className="w-4 h-4 shrink-0 text-orange-100" />
-                    )}
-                    <span>
-                      {loginRole === "driver"
-                        ? (lang === "en" ? "Sign In as Driver" : lang === "tr" ? "Sürücü Olarak Giriş Yap" : "تسجيل الدخول كسائق")
-                        : t.loginBtn
-                      }
-                    </span>
-                  </>
-                )}
-              </button>
-            </form>
-
-            <div className="space-y-4">
-            {loginRole !== "admin" && (
-              <>
-              <div className="relative flex py-2 items-center">
+              <div className="relative flex py-1 items-center">
                 <div className="flex-grow border-t border-slate-900"></div>
-                <span className="flex-shrink mx-4 text-[10px] text-slate-500 font-bold uppercase tracking-wider">or sign in with</span>
+                <span className="flex-shrink mx-4 text-[10px] text-slate-500 font-bold uppercase tracking-wider">{t.orDivider}</span>
                 <div className="flex-grow border-t border-slate-900"></div>
               </div>
 
               <button
                 type="button"
-                onClick={async () => {
-                  setIsLoggingIn(true);
-                  setLoginError(null);
-                  try {
-                    const res = await googleSignIn();
-                    if (res) {
-                      const user = res.user;
-
-                      // Sign in with Gmail for Driver/Client
-                      if (user.email?.toLowerCase() === "sardar@maras.iq") {
-                          setLoginError("This email is registered as an Administrator. Please select the Admin portal above to sign in.");
-                          await auth.signOut();
-                          setIsLoggingIn(false);
-                          return;
-                        }
-
-                        let foundDriver: Driver | null = null;
-                        let sessionToken: string | undefined;
-
-                        // First, see if a profile already exists under this
-                        // exact Firebase uid — verify-session both confirms
-                        // that and issues a real session token in one call.
-                        try {
-                          const verifyRes = await apiFetch("/api/verify-session", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ role: "driver", idToken: await user.getIdToken() })
-                          });
-                          if (verifyRes.ok) {
-                            const verifyData = await verifyRes.json();
-                            foundDriver = verifyData?.driver || null;
-                            sessionToken = verifyData?.token;
-                          }
-                        } catch (verifyErr) {
-                          console.warn("verify-session lookup by uid failed:", verifyErr);
-                        }
-
-                        // Not found by uid — register fresh. (The previous
-                        // version of this flow also tried matching an
-                        // existing driver by username prefix and re-keying
-                        // it to this uid, but that requires listing all
-                        // drivers, which is no longer possible without a
-                        // session token we don't have yet at this point.
-                        // An admin can still manually link a legacy account
-                        // by editing its id from the Drivers admin screen.)
-                        // Google Sign-In intentionally does NOT auto-create
-                        // a new driver account anymore. It only works for
-                        // drivers who already exist (found above via
-                        // verify-session) - new drivers must use the real
-                        // registration form, which collects their actual
-                        // name/phone/truck info instead of guessable
-                        // placeholders, and correctly enters the pending-
-                        // approval queue.
-                        if (!foundDriver || !sessionToken) {
-                          setLoginError("This Google account is not linked to an existing approved driver. Please register using the driver registration form instead.");
-                          await auth.signOut();
-                          setIsLoggingIn(false);
-                          return;
-                        }
-
-                        onLoginSuccess({
-                          role: "driver",
-                          driver: foundDriver,
-                          loginType: "firebase",
-                          token: sessionToken
-                        });
-                    }
-                  } catch (e: any) {
-                    if (e?.code === 'auth/popup-closed-by-user' || e?.message?.includes('popup-closed-by-user')) {
-                      console.warn("Google authentication popup closed by user.");
-                    } else {
-                      setLoginError(`Google Authentication failed: ${e.message}`);
-                    }
-                  } finally {
-                    setIsLoggingIn(false);
-                  }
-                }}
+                onClick={handleGoogleSignIn}
                 disabled={isLoggingIn}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-                  <path
-                    fill="#4285F4"
-                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22c-.22-.67-.35-1.37-.35-2.07z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                  />
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22c-.22-.67-.35-1.37-.35-2.07z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
                 </svg>
-                <span>
-                  {lang === "tr" ? "Gmail ile Giriş Yap" : lang === "ar" ? "تسجيل الدخول عبر Gmail" : "Sign In with Gmail"}
-                </span>
+                <span>{t.googleSignIn}</span>
               </button>
-              </>
-            )}
 
+              <div className="border-t border-slate-800 pt-4">
+                <button
+                  onClick={() => {
+                    setIsRegisterMode(true);
+                    setRegError(null);
+                  }}
+                  className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <ClipboardSignature className="w-4 h-4 text-blue-400 shrink-0" />
+                  <span>{t.registerBtn}</span>
+                </button>
+              </div>
 
+              {/* Support + legal footer */}
+              <div className="border-t border-slate-900 pt-4 flex flex-col items-center justify-center gap-2 text-[11px] text-slate-500">
+                <a
+                  href={`mailto:${SUPPORT_EMAIL}`}
+                  className="flex items-center gap-1.5 hover:text-blue-400 transition-all"
+                >
+                  <LifeBuoy className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t.needHelp} <span className="font-semibold">{SUPPORT_EMAIL}</span></span>
+                </a>
+                <div className="flex flex-wrap justify-center gap-x-3 gap-y-1">
+                  {onViewPrivacy && (
+                    <button
+                      type="button"
+                      onClick={onViewPrivacy}
+                      className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
+                    >
+                      {lang === "tr" ? "Gizlilik Politikası" : lang === "ar" ? "سياسة الخصوصية" : "Privacy Policy"}
+                    </button>
+                  )}
+                  {onViewPrivacy && onViewTerms && <span className="text-slate-700">|</span>}
+                  {onViewTerms && (
+                    <button
+                      type="button"
+                      onClick={onViewTerms}
+                      className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
+                    >
+                      {lang === "tr" ? "Kullanım Koşulları" : lang === "ar" ? "الشروط والأحكام" : "Terms & Conditions"}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
+          ) : (
+            /* REGISTRATION FORM */
+            <div className="space-y-5">
+              <div className="space-y-1 -mt-3">
+                <h2 className="text-md font-black text-white tracking-tight text-center">{t.driverRegHeader}</h2>
+                <p className="text-[11px] text-slate-400 text-center">{t.driverRegDesc}</p>
+              </div>
 
-            <div className="border-t border-slate-800 pt-4 flex flex-col gap-2">
+              {regError && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center">
+                  {regError}
+                </div>
+              )}
+
+              <form onSubmit={handleRegister} className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.fullName}
+                  </label>
+                  <div className="relative">
+                    <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Mehmet Aksoy"
+                      value={regFullName}
+                      onChange={(e) => setRegFullName(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.regUsername}
+                  </label>
+                  <div className="relative">
+                    <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. mehmet_aksoy"
+                      value={regUsername}
+                      onChange={(e) => setRegUsername(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.personalEmail}
+                  </label>
+                  <div className="relative">
+                    <Mail className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="email"
+                      required
+                      placeholder={t.emailPlaceholder}
+                      value={regEmail}
+                      onChange={(e) => setRegEmail(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.phone}
+                  </label>
+                  <div className="relative">
+                    <Phone className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. +90 532 999 8877"
+                      value={regPhone}
+                      onChange={(e) => setRegPhone(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.truckId}
+                  </label>
+                  <div className="relative">
+                    <Truck className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. 34-LOG-2026"
+                      value={regTruckId}
+                      onChange={(e) => setRegTruckId(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.truckType}
+                  </label>
+                  <div className="relative">
+                    <select
+                      value={regTruckType}
+                      onChange={(e) => setRegTruckType(e.target.value)}
+                      className="w-full h-11 px-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 font-semibold focus:outline-none text-start cursor-pointer"
+                    >
+                      {TRUCK_TYPES.map(type => (
+                        <option key={type.id} value={type.id} className="bg-slate-950 text-white">
+                          {lang === 'en' ? type.en : (lang === 'tr' ? type.tr : type.ar)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                    {t.passwordLabel}
+                  </label>
+                  <div className="relative">
+                    <KeyRound className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                    <input
+                      type="password"
+                      required
+                      placeholder="••••••••"
+                      value={regPassword}
+                      onChange={(e) => setRegPassword(e.target.value)}
+                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isRegistering}
+                  className="w-full h-12 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
+                >
+                  {isRegistering ? (
+                    <span>{t.creatingAccount}</span>
+                  ) : (
+                    <>
+                      <ClipboardSignature className="w-4 h-4 shrink-0" />
+                      <span>{t.submitReg}</span>
+                    </>
+                  )}
+                </button>
+              </form>
+
               <button
                 onClick={() => {
-                  setIsRegisterMode(true);
+                  setIsRegisterMode(false);
                   setRegError(null);
                 }}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-full py-2 text-slate-400 hover:text-white font-bold text-xs bg-transparent transition-all flex items-center justify-center gap-1 cursor-pointer"
               >
-                <ClipboardSignature className="w-4 h-4 text-blue-400 shrink-0" />
-                <span>{t.registerBtn}</span>
+                <span>{isRtl ? "→" : "←"} {t.backToLogin}</span>
               </button>
             </div>
+          )}
 
-            {/* Subtle Regulatory Compliance Footnote */}
-            <div className="border-t border-slate-900 pt-3 flex flex-col items-center justify-center gap-1.5 text-[10px] text-slate-500">
-              <div className="flex items-center gap-1">
-                <Shield className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                <span>MARAS Group Logistical Security Escrow Gate</span>
-              </div>
-              <div className="flex flex-wrap justify-center gap-x-3 gap-y-1">
-                {onViewPrivacy && (
-                  <button
-                    type="button"
-                    onClick={onViewPrivacy}
-                    className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
-                  >
-                    {lang === "tr" ? "Gizlilik Politikası" : lang === "ar" ? "سياسة الخصوصية" : "Privacy Policy"}
-                  </button>
-                )}
-                {onViewPrivacy && onViewTerms && <span className="text-slate-700">|</span>}
-                {onViewTerms && (
-                  <button
-                    type="button"
-                    onClick={onViewTerms}
-                    className="hover:text-orange-500 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
-                  >
-                    {lang === "tr" ? "Kullanım Koşulları" : lang === "ar" ? "الشروط والأحكام" : "Terms & Conditions"}
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* REGISTRATION FORM */
-          <div className="space-y-5">
-            <div className="space-y-1">
-              <h2 className="text-md font-black text-white tracking-tight">{t.driverRegHeader}</h2>
-              <p className="text-[11px] text-slate-400">{t.driverRegDesc}</p>
-            </div>
-
-            {regError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold rounded-xl text-center">
-                ⚠️ {regError}
-              </div>
-            )}
-
-            <form onSubmit={handleRegister} className="space-y-3">
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.fullName}
-                </label>
-                <div className="relative">
-                  <User className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Mehmet Aksoy"
-                    value={regFullName}
-                    onChange={(e) => setRegFullName(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.regUsername}
-                </label>
-                <div className="relative">
-                  <User className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. mehmet_aksoy"
-                    value={regUsername}
-                    onChange={(e) => setRegUsername(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.personalEmail}
-                </label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="email"
-                    required
-                    placeholder={t.emailPlaceholder}
-                    value={regEmail}
-                    onChange={(e) => setRegEmail(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.phone}
-                </label>
-                <div className="relative">
-                  <Phone className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. +90 532 999 8877"
-                    value={regPhone}
-                    onChange={(e) => setRegPhone(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.truckId}
-                </label>
-                <div className="relative">
-                  <Truck className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. 34-LOG-2026"
-                    value={regTruckId}
-                    onChange={(e) => setRegTruckId(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.truckType}
-                </label>
-                <div className="relative">
-                  <select
-                    value={regTruckType}
-                    onChange={(e) => setRegTruckType(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 font-semibold focus:outline-none text-left cursor-pointer"
-                  >
-                    {TRUCK_TYPES.map(type => (
-                      <option key={type.id} value={type.id} className="bg-slate-950 text-white">
-                        {lang === 'en' ? type.en : (lang === 'tr' ? type.tr : type.ar)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider font-bold text-slate-400 block text-left">
-                  {t.passwordPlaceholder}
-                </label>
-                <div className="relative">
-                  <KeyRound className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
-                  <input
-                    type="password"
-                    required
-                    placeholder="••••••••"
-                    value={regPassword}
-                    onChange={(e) => setRegPassword(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-left"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isRegistering}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer mt-2"
-              >
-                {isRegistering ? (
-                  <span>{t.creatingAccount}</span>
-                ) : (
-                  <>
-                    <ClipboardSignature className="w-4 h-4 shrink-0" />
-                    <span>{t.submitReg}</span>
-                  </>
-                )}
-              </button>
-            </form>
-
-            <button
-              onClick={() => {
-                setIsRegisterMode(false);
-                setRegError(null);
-              }}
-              className="w-full py-2 text-slate-400 hover:text-white font-bold text-xs bg-transparent transition-all flex items-center justify-center gap-1 cursor-pointer"
-            >
-              <span>← {t.backToLogin}</span>
-            </button>
-          </div>
-        )}
-
+        </div>
       </div>
     </div>
   );
