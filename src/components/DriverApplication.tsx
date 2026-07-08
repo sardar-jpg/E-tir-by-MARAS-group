@@ -14,6 +14,7 @@ import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
+import { getGpsFreshness, GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -793,6 +794,7 @@ export default function DriverApplication({
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
   const [lastGpsCoords, setLastGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [lastGpsCapturedAt, setLastGpsCapturedAt] = useState<string | null>(null);
   
   // Driver Assist adaptive routing & traffic patterns states
   const [trafficPattern, setTrafficPattern] = useState<'optimal' | 'moderate' | 'congested' | 'border_delay'>('moderate');
@@ -1171,7 +1173,12 @@ export default function DriverApplication({
     }
   }, [isForceOffline, cachedCoords.length, isSyncing, drivers, selectedDriverId, lastSyncAttemptTime]);
 
-  // GPS Telemetry transmitter — only runs when there is an active shipment
+  // Smart Tracking GPS transmitter — only runs when there is an active
+  // shipment. eTIR sends a GPS fix on GPS_DEFAULT_UPDATE_INTERVAL_MS
+  // (15 minutes by default) rather than continuously, to protect driver
+  // battery and app performance; this is not live every-second tracking.
+  // The immediate poll() call below covers "manual update" moments
+  // (e.g. right after accepting a shipment) — see handleAcceptAssignment.
   useEffect(() => {
     if (!activeShipment?.id) return;
 
@@ -1187,6 +1194,7 @@ export default function DriverApplication({
             const lng = position.coords.longitude;
             setGpsAvailable(true);
             setLastGpsCoords({ lat, lng });
+            setLastGpsCapturedAt(new Date().toISOString());
             transmitGPS(lat, lng);
           },
           (err) => {
@@ -1201,8 +1209,8 @@ export default function DriverApplication({
       }
     };
 
-    poll(); // immediate first check
-    const interval = setInterval(poll, 15000);
+    poll(); // immediate first check when the shipment becomes active
+    const interval = setInterval(poll, GPS_DEFAULT_UPDATE_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [activeShipment?.id, selectedDriverId, drivers, isForceOffline]);
 
@@ -1355,6 +1363,7 @@ export default function DriverApplication({
                 const lng = pos.coords.longitude;
                 setGpsAvailable(true);
                 setLastGpsCoords({ lat, lng });
+                setLastGpsCapturedAt(new Date().toISOString());
                 transmitGPS(lat, lng);
               },
               (err) => {
@@ -2536,8 +2545,8 @@ export default function DriverApplication({
                 <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h4 className="text-slate-200 font-bold text-xs uppercase tracking-wider text-left">Live Transit Route Tracker</h4>
-                      <p className="text-[10px] text-slate-500 text-left">Real-time GPS correlation on Google Maps</p>
+                      <h4 className="text-slate-200 font-bold text-xs uppercase tracking-wider text-left">Smart Transit Route Tracker</h4>
+                      <p className="text-[10px] text-slate-500 text-left">GPS-based route tracking on Google Maps</p>
                     </div>
                     {gpsAvailable === true && (
                       <span className="bg-emerald-950 text-emerald-400 border border-emerald-900 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
@@ -2706,15 +2715,27 @@ export default function DriverApplication({
                     <div className="bg-slate-950 border border-slate-800 p-4 rounded-2xl space-y-3.5 shadow-sm text-xs select-none">
                       <div className="grid grid-cols-3 gap-3 text-center">
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
-                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Live Speed</span>
-                          <span className="font-bold text-slate-200 font-mono text-xs">{isShipmentFinished ? "—" : (gpsAvailable === true ? "Live" : "—")}</span>
+                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Last Update</span>
+                          {(() => {
+                            const freshness = getGpsFreshness(lastGpsCapturedAt, Date.now());
+                            const label = freshness.status === "none"
+                              ? "No GPS yet"
+                              : freshness.minutesAgo === 0
+                                ? "Just now"
+                                : `${freshness.minutesAgo}m ago`;
+                            return (
+                              <span className={`font-bold font-mono text-xs ${freshness.status === "stale" ? "text-amber-400" : "text-slate-200"}`}>
+                                {label}
+                              </span>
+                            );
+                          })()}
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
                           <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
                           <span className="font-extrabold text-[#f97316] font-sans text-xs">{calculateDistancePercentage()}% Complete</span>
                         </div>
                         <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
-                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Sat Status</span>
+                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Tracking Status</span>
                           {isShipmentFinished ? (
                             <span className="font-bold text-slate-500 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
                               <span className="w-1.5 h-1.5 bg-slate-600 rounded-full"></span>

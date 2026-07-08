@@ -8,7 +8,7 @@ const fetch = apiFetch;
 import { 
   Ship, Calendar, Truck, ShieldCheck, Box, PackageOpen, ListOrdered, 
   MapPin, CheckCircle2, FileText, Image as ImageIcon, AlertTriangle, ExternalLink,
-  Copy, Check, Globe, Activity, CloudSun, Clock, Moon, Lock, Shield, ArrowUpRight,
+  Copy, Check, Activity, CloudSun, Clock, Moon, Lock, Shield, ArrowUpRight,
   Download, Printer, Compass, Navigation, Anchor, Plane, Bell
 } from 'lucide-react';
 
@@ -118,7 +118,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         setShipment(updated);
         setSubscriptionSuccess(true);
         setCustomerEmailInput("");
-        triggerToast(lang === 'tr' ? "Canlı bildirim aboneliğiniz başarıyla onaylandı!" : (lang === 'ar' ? "تم تفعيل الاشتراك في الإشعارات المباشرة بنجاح!" : "Live notification subscription successfully authorized!"));
+        triggerToast(lang === 'tr' ? "Bildirim aboneliğiniz başarıyla onaylandı!" : (lang === 'ar' ? "تم تفعيل الاشتراك في الإشعارات بنجاح!" : "Notification subscription successfully authorized!"));
       } else {
         triggerToast("Failed to process subscription registration request.");
       }
@@ -128,10 +128,6 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
       setIsSubmittingSubscription(false);
     }
   };
-
-  // local telemetry states to look premium and active
-  const [satelliteCount, setSatelliteCount] = useState(12);
-  const [simmedSpeed, setSimmedSpeed] = useState(82);
 
   const fetchSharedInfo = async () => {
     if (!tokenFromUrl) {
@@ -162,24 +158,6 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     const interval = setInterval(fetchSharedInfo, 5000);
     return () => clearInterval(interval);
   }, [tokenFromUrl, lang]);
-
-  // Telemetry fluctuation loop
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setSatelliteCount(prev => {
-        const delta = Math.random() > 0.5 ? 1 : -1;
-        const next = prev + delta;
-        return next >= 8 && next <= 16 ? next : prev;
-      });
-      setSimmedSpeed(prev => {
-        const delta = Math.floor(Math.random() * 5) - 2;
-        const next = prev + delta;
-        return next >= 75 && next <= 90 ? next : prev;
-      });
-    }, 3500);
-
-    return () => clearInterval(timer);
-  }, []);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
@@ -345,13 +323,8 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
           <div className={`${isMobileMode ? 'hidden' : 'hidden lg:flex'} items-center gap-3 font-mono text-[10px] text-slate-400`}>
             <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-sm border border-slate-800">
               <Activity className="w-3 h-3 text-emerald-400" />
-              <span>RADAR STATUS:</span>
-              <strong className="text-emerald-400">LIVE FEED</strong>
-            </div>
-            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-sm border border-slate-800">
-              <Globe className="w-3 h-3 text-cyan-400" />
-              <span>SAT GPX:</span>
-              <strong className="text-cyan-400">{satelliteCount} CON</strong>
+              <span>TRACKING MODE:</span>
+              <strong className="text-emerald-400">SMART TRACKING</strong>
             </div>
             <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-sm border border-slate-800">
               <Clock className="w-3 h-3 text-orange-400" />
@@ -419,7 +392,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                 )}
               </h1>
               <p className="text-xs text-slate-400 mt-1">
-                {lang === 'en' ? "Verified transit tracker for client clearance procedures." : (lang === 'tr' ? "Müşteri gümrük işlemleri için doğrulanmış canlı geçiş takibi." : "تتبع الشحنات المعتمد للمتابعة المباشرة من قبل العملاء والمستلمين.")}
+                {lang === 'en' ? "Verified transit tracker for client clearance procedures." : (lang === 'tr' ? "Müşteri gümrük işlemleri için doğrulanmış akıllı geçiş takibi." : "تتبع الشحنات المعتمد لمتابعة العملاء والمستلمين.")}
               </p>
             </div>
  
@@ -525,18 +498,18 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                   {shipment.freightType === 'sea' ? (
                     lang === 'en' ? "MARITIME VOYAGE TELEMETRY RADAR" : (lang === 'tr' ? "DENİZYOLU SEVKİYAT SEFİR RADARI" : "رادار تتبع وملاحة مسار شحنات خدمات الشحن البحري")
                   ) : shipment.freightType === 'air' ? (
-                    lang === 'en' ? "AIRSPACE TRANSIT FLIGHT TELEMETRY RADAR" : (lang === 'tr' ? "HAVAYOLU UÇUŞ SEVKİYAT TAKİP RADARI" : "رادار تتبع الطيران والملاحة لخدمات الشحن الجوي مباشر")
+                    lang === 'en' ? "AIRSPACE TRANSIT FLIGHT TELEMETRY RADAR" : (lang === 'tr' ? "HAVAYOLU UÇUŞ SEVKİYAT TAKİP RADARI" : "رادار تتبع الطيران والملاحة لخدمات الشحن الجوي")
                   ) : (
-                    lang === 'en' ? "CORRIDOR TRANSIT TELEMETRY RADAR" : (lang === 'tr' ? "KORİDOR SEVKİYAT GEÇİŞ RADARI" : "رادار بث وتتبع مسار النقل البري المباشر")
+                    lang === 'en' ? "CORRIDOR TRANSIT TELEMETRY RADAR" : (lang === 'tr' ? "KORİDOR SEVKİYAT GEÇİŞ RADARI" : "رادار تتبع مسار النقل البري")
                   )}
                 </h3>
                 <p className="text-[10px] text-slate-400">
                   {shipment.freightType === 'sea' ? (
-                    lang === 'en' ? "Ocean cargo channel projections between loading terminal port and final discharge port" : (lang === 'tr' ? "Yükleme ve varış limanları arasındaki denizyolu rota tespiti" : "مسار الملاحة البحرية الدولي المباشر للشحنة بين موانئ الشحن")
+                    lang === 'en' ? "Ocean cargo channel projections between loading terminal port and final discharge port" : (lang === 'tr' ? "Yükleme ve varış limanları arasındaki denizyolu rota tespiti" : "مسار الملاحة البحرية الدولي للشحنة بين موانئ الشحن")
                   ) : shipment.freightType === 'air' ? (
                     lang === 'en' ? "Active global aerial corridors between departure airport and target arrival platform" : (lang === 'tr' ? "Kalkış havalimanı ile varış havalimanı arasındaki havayolu uçuş rotası" : "مسار العبور والملاحة الجوي للشحنة بين مطار المغادرة ومطار الوصول")
                   ) : (
-                    lang === 'en' ? "GPS route projections between loading terminal and delivery target" : (lang === 'tr' ? "Yükleme terminali ile teslimat hedefi arasındaki canlı GPS rota projeksiyonu" : "إسقاطات مسار نظام تحديد المواقع الجغرافي النشط بين نقطة البداية والوصول")
+                    lang === 'en' ? "Smart GPS route projections between loading terminal and delivery target" : (lang === 'tr' ? "Yükleme terminali ile teslimat hedefi arasındaki akıllı GPS rota projeksiyonu" : "إسقاطات مسار نظام تحديد المواقع الجغرافي الذكي بين نقطة البداية والوصول")
                   )}
                 </p>
               </div>
@@ -549,7 +522,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                 <strong className="text-emerald-400">{shipment.freightType === 'sea' ? "18°C STABLE" : shipment.freightType === 'air' ? "-45°C WIND" : "24°C CLEAR"}</strong>
               </span>
               <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-bold text-[9px] px-2 py-0.5 rounded uppercase">
-                {shipment.freightType === 'sea' ? "14 KNOTS" : shipment.freightType === 'air' ? "840 KM/H" : `${simmedSpeed} KM/H`}
+                SMART TRACKING
               </span>
             </div>
           </div>
@@ -661,7 +634,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
             <div className={`${isMobileMode ? 'relative mx-2.5 mb-2.5 mt-3' : 'relative md:absolute md:bottom-3 md:left-4 md:right-4 mx-3 mb-3 md:mx-0 md:mb-0 mt-4 md:mt-0'} bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg flex flex-col ${isMobileMode ? '' : 'md:flex-row md:items-center'} justify-between gap-2.5 font-mono text-[9.5px] md:text-[10px]`}>
               <div className="flex flex-wrap items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-orange-400 shrink-0" />
-                <span className="text-slate-400 uppercase">Live Routing:</span>
+                <span className="text-slate-400 uppercase">Route:</span>
                 <strong className="text-slate-200">
                   {startCityObj.labelEn} ➔ {endCityObj.labelEn}
                 </strong>
@@ -1011,7 +984,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
                 required
                 value={customerEmailInput}
                 onChange={(e) => setCustomerEmailInput(e.target.value)}
-                placeholder={lang === 'en' ? "Enter your email for live updates" : (lang === 'tr' ? "Canlı güncellemeler için e-posta girin" : "أدخل بريدك الإلكتروني هنا للتحديثات الفورية")}
+                placeholder={lang === 'en' ? "Enter your email for tracking updates" : (lang === 'tr' ? "Takip güncellemeleri için e-posta girin" : "أدخل بريدك الإلكتروني هنا لتحديثات التتبع")}
                 className="w-full bg-slate-950 border border-slate-800 text-slate-100 rounded-xl px-4 py-2.5 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none placeholder-slate-600 font-sans"
               />
             </div>
