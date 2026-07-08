@@ -136,18 +136,28 @@ export function canAccessInternalStaffChannel(role: ChatRole): boolean {
 }
 
 /**
- * PR #35: whether posting a chat file attachment on this channel should
- * also create a shipment.documents entry (+ its "doc_upload" notification).
- * shipment.documents is returned unfiltered to driver/client
+ * PR #35 / PR #39: whether posting a chat file attachment on this channel
+ * should also create a shipment.documents entry (+ its "doc_upload"
+ * notification). shipment.documents is returned unfiltered to driver/client
  * (buildShipmentViewForRole, src/lib/shipmentView.ts) and, once
  * isSharedExternally/shareIncludeDocuments allow it, to the public share
  * view (publicShareView.ts) — neither of those checks the chat channel a
- * document came from. So an internal_staff attachment saved there would
- * leak straight past the channel-based chat filtering above. Only
- * driver_admin/client_admin attachments (already customer/driver-facing
- * documents) get mirrored into shipment.documents; internal_staff
- * attachments stay chat-only.
+ * document came from. So anything saved here reaches the customer's
+ * dashboard and, if link sharing is on, the public tracking page, with no
+ * further admin review.
+ *
+ * Only client_admin attachments qualify — the client already sent/received
+ * that file directly, so mirroring it into shipment.documents exposes
+ * nothing they don't already have. driver_admin is a private
+ * driver↔admin coordination channel (could carry a driver's own personal
+ * documents, or photos not yet meant for the customer); PR #39 found that
+ * auto-mirroring those let a driver_admin attachment reach the customer
+ * dashboard and public share link with zero admin approval, so it's
+ * excluded here alongside internal_staff. Getting a driver_admin
+ * attachment in front of the customer now requires an admin to explicitly
+ * re-upload/approve it through the document center — no such approval
+ * flow exists yet; that's a separate follow-up, not this fix.
  */
 export function shouldSaveChatFileAsShipmentDocument(channel?: ChatChannel): boolean {
-  return channel !== "internal_staff";
+  return channel === "client_admin";
 }

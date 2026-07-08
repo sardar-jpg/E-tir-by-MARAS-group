@@ -777,6 +777,19 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         </div>
                       </>
                     )}
+
+                    {selectedShipment.etd && (
+                      <div className="space-y-1">
+                        <p className="text-[9px] text-slate-500 uppercase font-black">{curT.etd}</p>
+                        <p className="font-extrabold text-white">{new Date(selectedShipment.etd).toLocaleString(lang === "tr" ? "tr-TR" : "en-US")}</p>
+                      </div>
+                    )}
+                    {selectedShipment.eta && (
+                      <div className="space-y-1">
+                        <p className="text-[9px] text-slate-500 uppercase font-black">{curT.eta}</p>
+                        <p className="font-extrabold text-orange-400">{new Date(selectedShipment.eta).toLocaleString(lang === "tr" ? "tr-TR" : "en-US")}</p>
+                      </div>
+                    )}
                   </div>
                 )}
 
