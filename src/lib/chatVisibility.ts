@@ -93,31 +93,47 @@ export function resolveSeenChannelFilter(
 
 /**
  * Whether a chat push notification should reach a given party (driver or
- * client) for this shipment. Non-chat notification types are unaffected
- * (always true) — only 'chat' notifications carry the sender's identity
- * and message text that must stay within its own audience.
+ * client) for this shipment. Non-channel-tagged notification types are
+ * unaffected (always true) — 'chat' and 'doc_upload' are the two types
+ * that can carry a chatChannel (see AppNotification.channel), and both
+ * must stay within their own audience: 'chat' because its title/body
+ * carries the sender's identity and message text, 'doc_upload' because
+ * the only call site that fires it (a client_admin chat file attachment,
+ * server.ts) must not also page the driver just because doc_upload
+ * itself isn't channel-partitioned by default (PR #44).
  */
 export function shouldNotifyChatParty(
   notificationType: string,
   party: "driver" | "client",
   chatChannel?: ChatChannel
 ): boolean {
-  if (notificationType !== "chat") return true;
+  // PR #44 — MARAS AI notification readiness: 'ai_alert' is reserved for a
+  // future admin-only alert type (see AppNotification.type / AI_ALERT_
+  // NOTIFICATION_TYPE in types.ts). No call site creates it yet — this
+  // branch exists so that whenever one does, it is admin-only by
+  // construction rather than depending on that future call site
+  // remembering to exclude driver/client itself.
+  if (notificationType === "ai_alert") return false;
+  if (notificationType !== "chat" && notificationType !== "doc_upload") return true;
   return party === "driver" ? chatChannel === "driver_admin" : chatChannel === "client_admin";
 }
 
 /**
  * Whether a stored notification (from GET /api/notifications) may be
- * shown to this role. Only 'chat' notifications are restricted; a
- * legacy/untagged chat notification has no reliable audience and is
- * withheld from driver/client rather than risk leaking it.
+ * shown to this role. Only channel-taggable types ('chat', 'doc_upload')
+ * are restricted; a legacy/untagged chat notification has no reliable
+ * audience and is withheld from driver/client rather than risk leaking it.
  */
 export function isChatNotificationVisibleToRole(
   notificationType: string,
   role: ChatRole,
   notificationChannel?: ChatChannel
 ): boolean {
-  if (notificationType !== "chat") return true;
+  // PR #44: same reservation as shouldNotifyChatParty above — 'ai_alert'
+  // is admin-only regardless of channel, by construction, ahead of any
+  // real AI provider integration.
+  if (notificationType === "ai_alert") return role === "admin";
+  if (notificationType !== "chat" && notificationType !== "doc_upload") return true;
   if (role === "driver") return notificationChannel === "driver_admin";
   if (role === "client") return notificationChannel === "client_admin";
   return true;

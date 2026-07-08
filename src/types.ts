@@ -234,7 +234,13 @@ export interface AppNotification {
   messageEn: string;
   messageTr: string;
   messageAr: string;
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration';
+  // 'ai_alert' (PR #44) is reserved for a future MARAS AI monitoring
+  // alert — see AI_ALERT_NOTIFICATION_TYPE below. No code creates this
+  // type yet (no AI provider is connected); it's admin-only by
+  // construction in chatVisibility.ts's routing helpers ahead of time, so
+  // wiring up a real alert later can't accidentally forget to exclude
+  // driver/client/public.
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration' | 'ai_alert';
   timestamp: string;
   read: boolean;
   // Session id of the user this notification should NOT be shown to (its
@@ -244,10 +250,26 @@ export interface AppNotification {
   // BUG-03: for type 'chat' notifications, which chat audience this came
   // from (see ChatMessage.channel). Used to keep a driver from being
   // notified of a client message (or vice versa) via the notification
-  // center/push, not just the chat thread itself. Absent for non-chat
-  // notification types.
+  // center/push, not just the chat thread itself.
+  // PR #44: also set for 'doc_upload' when it originated from a chat file
+  // attachment (client_admin only today), for the same reason — otherwise
+  // driver would be paged for a document event that belongs to the
+  // client_admin audience. Absent for other notification types.
   channel?: ChatChannel;
 }
+
+// PR #44 — MARAS AI notification readiness. Reserved notification type
+// string for a future admin-only MARAS AI alert (e.g. an anomaly/error
+// surfaced from audit logs). Nothing in this codebase creates a
+// notification with this type yet, and this PR does not connect MARAS AI
+// to any provider — this constant exists purely so a future integration
+// has one canonical, already-safe (admin-only, see
+// chatVisibility.ts#isChatNotificationVisibleToRole /
+// #shouldNotifyChatParty) type string to use instead of inventing a new
+// unreviewed one. Any future payload built for this type must be
+// sanitized first (safe shipment/status ids only — never raw chat text,
+// internal notes, costs, or file URLs).
+export const AI_ALERT_NOTIFICATION_TYPE = 'ai_alert' as const;
 
 export interface CostItem {
   id: string;

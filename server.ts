@@ -202,6 +202,15 @@ let memoryStore: {
   vendors: Vendor[];
   admins: any[];
   costStatements: CostStatement[];
+  // PR #44: was missing from this store entirely — every read/write
+  // against the "pushTokens" collection (register, delete, and the
+  // admin-token lookup pushNotification does before sending) resolved
+  // against `mStore[colName]` being undefined and silently no-opped, so
+  // push token registration was a no-op and push notifications could
+  // never be sent while running on the memory fallback (no live
+  // Firestore credentials, e.g. local dev). Every other collection this
+  // server writes to already has an entry here; this one was just missed.
+  pushTokens: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -222,6 +231,7 @@ function getMemoryStore() {
       vendors: [...(SEED_DEMO_DATA ? (initialVendors || []) : [])],
       admins: [],
       costStatements: [],
+      pushTokens: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -1558,11 +1568,15 @@ async function pushNotification(
   // Session id to exclude from this notification's recipients, e.g. the
   // chat sender so they don't get notified of their own message.
   excludeUserId?: string,
-  // BUG-03: for type 'chat' notifications only, which audience this chat
+  // BUG-03: for type 'chat' notifications, which audience this chat
   // message belongs to. The title/body of a chat notification carry the
   // sender's name and message text, so without this a client's message
   // would page the driver's device (and vice versa) even though the chat
   // thread itself is now partitioned by channel.
+  // PR #44: also passed for 'doc_upload' — its only call site is a
+  // client_admin chat file attachment, and without a channel here that
+  // notification would (like any other non-chat type) page the driver
+  // too, even though it originated from a client_admin-only exchange.
   chatChannel?: ChatChannel
 ) {
   const newNotif: AppNotification = {
@@ -1580,7 +1594,7 @@ async function pushNotification(
     read: false
   };
   if (excludeUserId) newNotif.excludeUserId = excludeUserId;
-  if (type === "chat" && chatChannel) newNotif.channel = chatChannel;
+  if ((type === "chat" || type === "doc_upload") && chatChannel) newNotif.channel = chatChannel;
   try {
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
@@ -3160,7 +3174,13 @@ async function startServer() {
           "تم استلام مستند جديد",
           `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
           `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
-          `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`
+          `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`,
+          // PR #44: this branch is client_admin-only (shouldSaveChatFileAsShipmentDocument
+          // above), so pass the channel through — without it, doc_upload's default
+          // (unrestricted) recipient rule would also page the driver for a purely
+          // client<->admin exchange.
+          undefined,
+          channel
         );
       } else if (type === "file" && fileUrl) {
         // internal_staff or driver_admin attachment (see
@@ -4562,6 +4582,15 @@ async function startServer() {
             owns = !!myClient && shipment.companyName === myClient.companyName;
           }
           if (!owns) {
+            return res.status(403).json({ error: "You do not have access to this notification." });
+          }
+
+          // PR #44: owning the shipment isn't enough on its own — a driver
+          // assigned to a shipment must still not be able to mark read a
+          // client_admin/internal_staff notification on that same shipment
+          // (and vice versa for a client), same audience rule already
+          // enforced on GET /api/notifications.
+          if (!isChatNotificationVisibleToRole(notif.type, req.session!.role, notif.channel)) {
             return res.status(403).json({ error: "You do not have access to this notification." });
           }
         }
