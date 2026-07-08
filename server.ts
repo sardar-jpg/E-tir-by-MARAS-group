@@ -52,6 +52,12 @@ import { isDocumentVisibleForShare } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import {
+  resolveRouteCoords,
+  haversineKm,
+  isLandFreight,
+  UNAVAILABLE_DISTANCE_MATRIX_RESPONSE,
+} from "./src/lib/distanceMatrix";
+import {
   getFirestore,
   initializeFirestore,
   collection as rawCollection,
@@ -2332,57 +2338,28 @@ async function startServer() {
       const mapsKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || "";
       if (!mapsKey) {
         // Precise Haversine distance geodetic / routing model fallback
-        const CITY_CODRD: Record<string, { lat: number; lng: number }> = {
-          "istanbul": { lat: 41.0082, lng: 28.9784 },
-          "bursa": { lat: 40.1885, lng: 29.0610 },
-          "gaziantep": { lat: 37.0662, lng: 37.3833 },
-          "erbil": { lat: 36.1912, lng: 44.0091 },
-          "baghdad": { lat: 33.3152, lng: 44.3661 },
-          "basra": { lat: 30.5081, lng: 47.7835 },
-          "zaho": { lat: 37.1436, lng: 42.6886 },
-          "dahuk": { lat: 36.8615, lng: 42.9926 },
-          "mosul": { lat: 36.3489, lng: 43.1577 },
-          "suleymaniye": { lat: 35.5613, lng: 45.4375 },
-          "kirkuk": { lat: 35.4670, lng: 44.3920 },
-          "ankara": { lat: 39.9334, lng: 32.8597 }
-        };
+        const routeCoords = resolveRouteCoords(
+          originStr,
+          destinationStr,
+          shipment.freightType,
+          hasLiveDriverGps && liveGpsLocation ? liveGpsLocation : null
+        );
 
-        const getHaversine = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-          const R = 6371;
-          const dLat = (lat2 - lat1) * Math.PI / 180;
-          const dLon = (lon2 - lon1) * Math.PI / 180;
-          const a =
-            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2);
-          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-          return R * c;
-        };
-
-        let startLat = 41.0082, startLng = 28.9784;
-        let endLat = 33.3152, endLng = 44.3661;
-
-        if (hasLiveDriverGps && liveGpsLocation) {
-          startLat = liveGpsLocation.lat;
-          startLng = liveGpsLocation.lng;
-        } else {
-          const normOrigin = originStr.toLowerCase().trim();
-          const matchKey = Object.keys(CITY_CODRD).find(k => normOrigin.includes(k) || k.includes(normOrigin));
-          if (matchKey) {
-            startLat = CITY_CODRD[matchKey].lat;
-            startLng = CITY_CODRD[matchKey].lng;
-          }
-        }
-
-        const normDest = destinationStr.toLowerCase().trim();
-        const matchDestKey = Object.keys(CITY_CODRD).find(k => normDest.includes(k) || k.includes(normDest));
-        if (matchDestKey) {
-          endLat = CITY_CODRD[matchDestKey].lat;
-          endLng = CITY_CODRD[matchDestKey].lng;
+        if (!routeCoords) {
+          // Sea/air route whose origin and/or destination don't resolve to
+          // known coordinates - there is no honest distance to compute, so
+          // report unavailable instead of reusing the land default corridor
+          // (do not persist anything to the shipment doc).
+          return res.json({
+            ...UNAVAILABLE_DISTANCE_MATRIX_RESPONSE,
+            origin: originStr,
+            destination: destinationStr,
+            hasLiveDriverGps
+          });
         }
 
         // Multiply by 1.25 to account for real roadways curvature (routing coefficient factor)
-        const distanceKm = Math.round(getHaversine(startLat, startLng, endLat, endLng) * 1.25);
+        const distanceKm = Math.round(haversineKm(routeCoords.origin, routeCoords.destination) * 1.25);
         const averageSpeedKmh = 72; // default safe cargo speed index 
         const durationSeconds = Math.round((distanceKm / averageSpeedKmh) * 3600);
         const durationInTrafficSeconds = Math.round(durationSeconds * 1.08); // Add 8% transit delay 
@@ -2446,6 +2423,16 @@ async function startServer() {
           durationInTraffic: durInTrafficObj,
           estimatedArrivalTime: calculatedEta,
           status: "OK",
+          hasLiveDriverGps
+        });
+      } else if (!isLandFreight(shipment.freightType)) {
+        // Google couldn't resolve this Sea/Air route either - there is no
+        // known corridor to estimate from, so report unavailable instead of
+        // fabricating an Istanbul-Baghdad-shaped distance/ETA.
+        return res.json({
+          ...UNAVAILABLE_DISTANCE_MATRIX_RESPONSE,
+          origin: originStr,
+          destination: destinationStr,
           hasLiveDriverGps
         });
       } else {
