@@ -11,6 +11,7 @@ const ALL_ADMIN_TAB_IDS = [
   "shipments",
   "tracking_map",
   "drivers",
+  "chat_center",
   "clients",
   "vendors",
   "costs",
