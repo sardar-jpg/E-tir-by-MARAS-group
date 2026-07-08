@@ -178,6 +178,25 @@ describe("shouldNotifyChatParty", () => {
     expect(shouldNotifyChatParty("chat", "driver", "internal_staff")).toBe(false);
     expect(shouldNotifyChatParty("chat", "client", "internal_staff")).toBe(false);
   });
+
+  it("PR #44: only notifies the matching party for a doc_upload notification, same as chat", () => {
+    expect(shouldNotifyChatParty("doc_upload", "client", "client_admin")).toBe(true);
+    expect(shouldNotifyChatParty("doc_upload", "driver", "client_admin")).toBe(false);
+    expect(shouldNotifyChatParty("doc_upload", "driver", "driver_admin")).toBe(true);
+    expect(shouldNotifyChatParty("doc_upload", "client", "driver_admin")).toBe(false);
+  });
+
+  it("PR #44: withholds a doc_upload notification with no channel from both driver and client", () => {
+    expect(shouldNotifyChatParty("doc_upload", "driver")).toBe(false);
+    expect(shouldNotifyChatParty("doc_upload", "client")).toBe(false);
+  });
+
+  it("PR #44: MARAS AI readiness — an ai_alert notification never notifies driver or client", () => {
+    expect(shouldNotifyChatParty("ai_alert", "driver", "driver_admin")).toBe(false);
+    expect(shouldNotifyChatParty("ai_alert", "client", "client_admin")).toBe(false);
+    expect(shouldNotifyChatParty("ai_alert", "driver")).toBe(false);
+    expect(shouldNotifyChatParty("ai_alert", "client")).toBe(false);
+  });
 });
 
 describe("isChatNotificationVisibleToRole", () => {
@@ -207,5 +226,27 @@ describe("isChatNotificationVisibleToRole", () => {
   it("never shows an internal_staff chat notification to driver or client", () => {
     expect(isChatNotificationVisibleToRole("chat", "driver", "internal_staff")).toBe(false);
     expect(isChatNotificationVisibleToRole("chat", "client", "internal_staff")).toBe(false);
+  });
+
+  it("PR #44: only shows a doc_upload notification to its matching channel audience, same as chat", () => {
+    expect(isChatNotificationVisibleToRole("doc_upload", "client", "client_admin")).toBe(true);
+    expect(isChatNotificationVisibleToRole("doc_upload", "driver", "client_admin")).toBe(false);
+    expect(isChatNotificationVisibleToRole("doc_upload", "driver", "driver_admin")).toBe(true);
+    expect(isChatNotificationVisibleToRole("doc_upload", "client", "driver_admin")).toBe(false);
+    expect(isChatNotificationVisibleToRole("doc_upload", "admin", "client_admin")).toBe(true);
+  });
+
+  it("PR #44: withholds an untagged doc_upload notification from driver/client but not admin", () => {
+    expect(isChatNotificationVisibleToRole("doc_upload", "driver")).toBe(false);
+    expect(isChatNotificationVisibleToRole("doc_upload", "client")).toBe(false);
+    expect(isChatNotificationVisibleToRole("doc_upload", "admin")).toBe(true);
+  });
+
+  it("PR #44: MARAS AI readiness — an ai_alert notification is admin-only regardless of channel", () => {
+    expect(isChatNotificationVisibleToRole("ai_alert", "admin")).toBe(true);
+    expect(isChatNotificationVisibleToRole("ai_alert", "driver")).toBe(false);
+    expect(isChatNotificationVisibleToRole("ai_alert", "client")).toBe(false);
+    expect(isChatNotificationVisibleToRole("ai_alert", "driver", "driver_admin")).toBe(false);
+    expect(isChatNotificationVisibleToRole("ai_alert", "client", "client_admin")).toBe(false);
   });
 });
