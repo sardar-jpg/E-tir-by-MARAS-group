@@ -9,6 +9,8 @@ import {
   canManageClients,
   canManageVendors,
   resolveFullAdminStatus,
+  sanitizeCreatedAdminType,
+  isProtectedOwnerAccount,
 } from "./adminAccess";
 
 describe("isSuperAdmin", () => {
@@ -93,5 +95,47 @@ describe("resolveFullAdminStatus", () => {
   it("returns 200 for super/operation admins, leaving successful access unchanged", () => {
     expect(resolveFullAdminStatus({ role: "admin", adminType: "super" })).toBe(200);
     expect(resolveFullAdminStatus({ role: "admin", adminType: "operation" })).toBe(200);
+  });
+});
+
+describe("sanitizeCreatedAdminType", () => {
+  it("never lets a caller mint a 'super' admin through POST /api/admins", () => {
+    expect(sanitizeCreatedAdminType("super")).toBe("operation");
+  });
+
+  it("passes through 'accounts' as requested", () => {
+    expect(sanitizeCreatedAdminType("accounts")).toBe("accounts");
+  });
+
+  it("defaults anything else (including missing/garbage input) to 'operation'", () => {
+    expect(sanitizeCreatedAdminType("operation")).toBe("operation");
+    expect(sanitizeCreatedAdminType(undefined)).toBe("operation");
+    expect(sanitizeCreatedAdminType(null)).toBe("operation");
+    expect(sanitizeCreatedAdminType("root")).toBe("operation");
+    expect(sanitizeCreatedAdminType(123)).toBe("operation");
+  });
+});
+
+describe("isProtectedOwnerAccount", () => {
+  const OWNER_EMAIL = "sardar@maras.iq";
+
+  it("protects any record whose adminType is 'super', regardless of email", () => {
+    expect(isProtectedOwnerAccount({ adminType: "super", email: "someone-else@maras.iq" }, OWNER_EMAIL)).toBe(true);
+  });
+
+  it("protects a record matching the owner email even if adminType is missing/wrong", () => {
+    expect(isProtectedOwnerAccount({ email: "Sardar@Maras.IQ" }, OWNER_EMAIL)).toBe(true);
+    expect(isProtectedOwnerAccount({ email: "sardar@maras.iq", adminType: "operation" }, OWNER_EMAIL)).toBe(true);
+  });
+
+  it("does not protect an unrelated operation/accounts admin", () => {
+    expect(isProtectedOwnerAccount({ adminType: "operation", email: "ops@maras.iq" }, OWNER_EMAIL)).toBe(false);
+    expect(isProtectedOwnerAccount({ adminType: "accounts", email: "accounts@maras.iq" }, OWNER_EMAIL)).toBe(false);
+  });
+
+  it("returns false for null/undefined candidates or a missing owner email", () => {
+    expect(isProtectedOwnerAccount(null, OWNER_EMAIL)).toBe(false);
+    expect(isProtectedOwnerAccount(undefined, OWNER_EMAIL)).toBe(false);
+    expect(isProtectedOwnerAccount({ email: "sardar@maras.iq" }, "")).toBe(false);
   });
 });

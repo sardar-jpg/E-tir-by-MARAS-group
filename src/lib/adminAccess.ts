@@ -66,6 +66,38 @@ export function canManageVendors(adminType: AdminType | undefined): boolean {
 }
 
 /**
+ * POST /api/admins lets any full admin (super or operation) create a new
+ * sub-admin, taking `adminType` straight from the request body. Without
+ * this, an operation-type admin could hand themselves (or an accomplice)
+ * a brand-new "super" admin record — indistinguishable from the real
+ * owner for every adminType-based check in this file — via a single API
+ * call. Only "operation" and "accounts" may ever be created through this
+ * route; "super" is reserved for the owner account, which is never
+ * created here (see SUPER_ADMIN_EMAIL / the local-dev demo seed).
+ */
+export function sanitizeCreatedAdminType(requested: unknown): "operation" | "accounts" {
+  return requested === "accounts" ? "accounts" : "operation";
+}
+
+/**
+ * Owner-account protection: the account matching the well-known owner
+ * identity must never be deletable through the admin-management API,
+ * regardless of who is asking (including "self-delete"). Compares against
+ * both the env-configured production owner email and the documented local
+ * fallback, so the guard also covers the seeded local-dev/demo owner
+ * account that has no real SUPER_ADMIN_EMAIL configured.
+ */
+export function isProtectedOwnerAccount(
+  candidate: { email?: string; adminType?: AdminType } | null | undefined,
+  ownerEmail: string
+): boolean {
+  if (!candidate) return false;
+  if (candidate.adminType === "super") return true;
+  const email = (candidate.email || "").toLowerCase().trim();
+  return !!email && !!ownerEmail && email === ownerEmail.toLowerCase().trim();
+}
+
+/**
  * BUG-17: requireFullAdmin (server.ts) used to fold "no session at all" and
  * "authenticated but the wrong role/adminType" into the same 401 response.
  * A logged-in client/driver, or an accounts-type admin, IS authenticated —

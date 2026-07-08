@@ -48,7 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
@@ -3859,7 +3859,7 @@ async function startServer() {
         name: data.name || "MARAS Team Member",
         email: data.email || "",
         password: hashPassword(data.password),
-        adminType: data.adminType || "operation",
+        adminType: sanitizeCreatedAdminType(data.adminType),
         createdAt: data.createdAt || new Date().toISOString()
       };
       await setDoc(doc(db, "admins", newAdmin.id), newAdmin);
@@ -3896,6 +3896,16 @@ async function startServer() {
         return res.status(403).json({ error: "You can only delete your own admin account." });
       }
       const docRef = doc(db, "admins", id);
+
+      // Owner-account protection: the account matching the owner identity
+      // (adminType "super", or its email) can never be deleted through this
+      // route, even by itself or another super-type admin.
+      const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+      const existing = await getDoc(docRef);
+      if (existing.exists() && isProtectedOwnerAccount(existing.data() as any, ownerEmail)) {
+        return res.status(403).json({ error: "The owner account cannot be deleted." });
+      }
+
       await deleteDoc(docRef);
       res.json({ success: true, message: "Admin deleted successfully" });
     } catch (err) {
