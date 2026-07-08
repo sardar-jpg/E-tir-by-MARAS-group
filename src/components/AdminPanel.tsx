@@ -4506,9 +4506,22 @@ MARAS Group etir Center`;
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs balance-rows">
-                  {filteredShipments.map((s) => (
+                  {filteredShipments.map((s) => {
+                    const fType = s.freightType || "land";
+                    return (
                     <tr key={s.id} className="hover:bg-slate-50/50">
-                      <td className="p-4 font-mono font-bold text-slate-900 selectable">{s.shipmentNumber}</td>
+                      <td className="p-4">
+                        <div className="flex items-center gap-2">
+                          {fType === 'sea' ? (
+                            <span className="p-1.5 bg-blue-50 text-blue-600 rounded-md shrink-0" title="Ocean Freight"><Anchor className="w-3.5 h-3.5" /></span>
+                          ) : fType === 'air' ? (
+                            <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-md shrink-0" title="Air Cargo"><Plane className="w-3.5 h-3.5" /></span>
+                          ) : (
+                            <span className="p-1.5 bg-orange-50 text-orange-600 rounded-md shrink-0" title="Land Goods"><Truck className="w-3.5 h-3.5" /></span>
+                          )}
+                          <span className="font-mono font-bold text-slate-900 selectable">{s.shipmentNumber}</span>
+                        </div>
+                      </td>
                       <td className="p-4">
                         <p className="font-semibold text-slate-800">{s.companyName}</p>
                         <span className="text-[10px] text-slate-400 block mt-0.5">Created: {new Date(s.createdAt).toLocaleDateString()}</span>
@@ -4582,7 +4595,7 @@ MARAS Group etir Center`;
                         >
                           Edit
                         </button>
-                        <button 
+                        <button
                           onClick={() => onSelectShipmentChat(s)}
                           className="text-slate-500 hover:text-slate-900 font-bold"
                         >
@@ -4590,7 +4603,16 @@ MARAS Group etir Center`;
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
+                  {filteredShipments.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="p-12 text-center text-slate-400 italic">
+                        <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <span>{t('noShipmentsMatched')}</span>
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -8595,8 +8617,8 @@ MARAS Group etir Center`;
                             >
                               {doc.isSharedExternally ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                             </button>
-                            <a 
-                              href={doc.url} 
+                            <a
+                              href={doc.url}
                               download
                               onClick={(e) => {
                                 if (doc.url === "#") {
@@ -8604,9 +8626,10 @@ MARAS Group etir Center`;
                                   triggerToast("Download triggered successfully (Sample file)");
                                 }
                               }}
-                              className="p-1 px-2.5 bg-slate-900 text-white rounded text-[10px] font-bold"
+                              className="p-1 px-2.5 bg-slate-900 text-white rounded text-[10px] font-bold inline-flex items-center gap-1"
                             >
-                              Get
+                              <Download className="w-3 h-3" />
+                              <span>Download</span>
                             </a>
                           </div>
                         </div>
