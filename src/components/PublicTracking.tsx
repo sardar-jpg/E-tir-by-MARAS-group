@@ -877,7 +877,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
               </div>
             </div>
             
-            <span className="bg-slate-950 text-slate-500 font-mono font-bold text-[9px] px-2 in-block self-start py-0.5 rounded border border-slate-800/80 uppercase">
+            <span className="bg-slate-950 text-slate-500 font-mono font-bold text-[9px] px-2 inline-block self-start py-0.5 rounded border border-slate-800/80 uppercase">
               TIR SHARED CARNET VAULT
             </span>
           </div>
