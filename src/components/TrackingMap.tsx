@@ -29,6 +29,7 @@ import {
   Minus
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
+import { getGpsFreshness } from "../lib/gpsFreshness";
 import { APIProvider, Map, AdvancedMarker, InfoWindow, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
@@ -344,15 +345,15 @@ function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocat
 
 const LABELS = {
   en: {
-    liveMap: "Corridor Live Radar tracking",
+    liveMap: "Corridor Smart Tracking Radar",
     inTransitMap: "Active Transits Radar",
-    subTitle: "Real-time vector tracking of shipments currently 'In Transit' along the Turkey-Iraq highway corridor.",
+    subTitle: "Smart tracking of shipments currently 'In Transit' along the Turkey-Iraq highway corridor. GPS updates periodically, not every second.",
     shipmentNum: "Shipment",
     from: "From",
     to: "To",
     status: "Status",
     driver: "Driver",
-    noInTransit: "No shipments are currently 'In Transit'. Update a shipment's status to 'In Transit' in the Shipment Registry to track its live geolocation on this radar.",
+    noInTransit: "No shipments are currently 'In Transit'. Update a shipment's status to 'In Transit' in the Shipment Registry to track its last known location on this radar.",
     truckPlate: "Truck Plate",
     customer: "Customer",
     cargo: "Cargo",
@@ -362,8 +363,8 @@ const LABELS = {
     currentGeoPos: "Simulated position",
     viewOnMap: "Locate on Grid",
     engineSelector: "Operational Tracking Interface",
-    engineVector: "ETIR Interactive Vector Radar Grid (Always Live)",
-    vectorCorridorTitle: "Turkey-to-Iraq Corridor Live Vector Grid",
+    engineVector: "ETIR Interactive Vector Radar Grid (Smart Tracking)",
+    vectorCorridorTitle: "Turkey-to-Iraq Corridor Smart Tracking Grid",
     borderCrossing: "Turkey - Iraq Border Crossing (Ibrahim Khalil)",
     truckFilterTitle: "Filter Truck Types",
     allTypes: "All Types",
@@ -378,15 +379,15 @@ const LABELS = {
     weatherSim: "Corridor Weather Check"
   },
   tr: {
-    liveMap: "Koridor Canlı İzleme Radarı",
+    liveMap: "Koridor Akıllı Takip Radarı",
     inTransitMap: "Aktif Sevkıyat Radarı",
-    subTitle: "Türkiye-Irak karayolu koridoru üzerinde 'Yolda' olan aktif sevkiyatların gerçek zamanlı vektör takibi.",
+    subTitle: "Türkiye-Irak karayolu koridoru üzerinde 'Yolda' olan aktif sevkiyatların akıllı vektör takibi. GPS periyodik olarak güncellenir, saniyelik değildir.",
     shipmentNum: "Sevkiyat",
     from: "Yükleme",
     to: "Teslimat",
     status: "Durum",
     driver: "Sürücü",
-    noInTransit: "Şu anda 'Yolda' olan aktif bir sevkiyat bulunmamaktadır. Haritada canlı izlemek için Sevkiyat Kaydı kısmında durumlarını 'Yolda' (In Transit) olarak güncelleyin.",
+    noInTransit: "Şu anda 'Yolda' olan aktif bir sevkiyat bulunmamaktadır. Son bilinen konumunu bu radarda görmek için Sevkiyat Kaydı kısmında durumunu 'Yolda' (In Transit) olarak güncelleyin.",
     truckPlate: "Plaka",
     customer: "Alıcı / Müşteri",
     cargo: "Kargo Açıklaması",
@@ -396,14 +397,14 @@ const LABELS = {
     currentGeoPos: "Simüle edilen konum",
     viewOnMap: "Izgarada Göster",
     engineSelector: "Operasyonel Takip Arayüzü",
-    engineVector: "ETIR Etkileşimli Vektör Radar Izgarası (Kesintisiz Canlı)",
-    vectorCorridorTitle: "Türkiye-Irak Lojistik Koridoru Canlı Vektör Radarı",
+    engineVector: "ETIR Etkileşimli Vektör Radar Izgarası (Akıllı Takip)",
+    vectorCorridorTitle: "Türkiye-Irak Lojistik Koridoru Akıllı Takip Radarı",
     borderCrossing: "Türkiye - Irak Sınır Kapısı (Habur / İbrahim Halil)",
     truckFilterTitle: "Araç Kalemi Filtresi",
     allTypes: "Tüm Tipler",
     unspecifiedType: "Diğer / Tanımsız",
     bestFitZoom: "Hızlı Odaklan",
-    lastUpdated: "Telemetri Akışı Aktif",
+    lastUpdated: "Akıllı Takip Aktif",
     gpsAcquired: "GPS Sinyali Alındı",
     simulatedGps: "Simüle Edilmiş Rota Verisi",
     operationalStats: "Operasyonel İstatistikler",
@@ -412,15 +413,15 @@ const LABELS = {
     weatherSim: "Hava Durumu Bilgisi"
   },
   ar: {
-    liveMap: "بث رادار تتبع المسار المباشر",
+    liveMap: "رادار التتبع الذكي للممر",
     inTransitMap: "رادار الشحنات النشطة",
-    subTitle: "تتبع نشط فوري للشحنات 'قيد الانتقال' عبر مسار النقل البري الدولي بين تركيا والعراق.",
+    subTitle: "تتبع ذكي للشحنات 'قيد الانتقال' عبر مسار النقل البري الدولي بين تركيا والعراق. يتم تحديث الـ GPS بشكل دوري وليس كل ثانية.",
     shipmentNum: "شحنة",
     from: "من موقع الشحن",
     to: "إلى الوجهة",
     status: "الحالة",
     driver: "السائق",
-    noInTransit: "لا توجد شحنات 'قيد الانتقال' حالياً. قم بتغيير حالة الشحنة إلى 'قيد الانتقال' في سجل الشحنات لمشاهدة موقعها المباشر على الرادار.",
+    noInTransit: "لا توجد شحنات 'قيد الانتقال' حالياً. قم بتغيير حالة الشحنة إلى 'قيد الانتقال' في سجل الشحنات لمشاهدة آخر موقع معروف لها على الرادار.",
     truckPlate: "رقم الشاحنة",
     customer: "العميل / الشركة",
     cargo: "وصف الحمولة",
@@ -430,14 +431,14 @@ const LABELS = {
     currentGeoPos: "موقع تقديري محاكى",
     viewOnMap: "تحديد على الشبكة",
     engineSelector: "واجهة التتبع والعمليات",
-    engineVector: "شبكة رادار رصد ومراقبة ETIR التفاعلية (مستمر دائماً)",
-    vectorCorridorTitle: "البث التفاعلي لمسار النقل بين تركيا والعراق",
+    engineVector: "شبكة رادار رصد ومراقبة ETIR التفاعلية (تتبع ذكي)",
+    vectorCorridorTitle: "شبكة التتبع الذكي التفاعلية لمسار النقل بين تركيا والعراق",
     borderCrossing: "الحدود الدولية - منفذ إبراهيم الخليل الدولي",
     truckFilterTitle: "تصنيف الشاحنات",
     allTypes: "كل الأنواع",
     unspecifiedType: "أخرى / غير محدد",
     bestFitZoom: "أوتو-فوكس للشبكة",
-    lastUpdated: "موجز البث الفوري نشط",
+    lastUpdated: "التتبع الذكي نشط",
     gpsAcquired: "إشارة الـ GPS نشطة",
     simulatedGps: "عبر نظام الملاحة التقديري",
     operationalStats: "ملخص النقل النشط",
@@ -1958,6 +1959,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       const loc = getShipmentVectorLocation(selectedShipment);
                       const city = getNearestCity(loc.x, loc.y);
                       const gpsState = getShipmentGpsState(selectedShipment);
+                      const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
+                      const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
                       return (
                         <>
                           <div className="flex justify-between items-center border-t border-slate-800 pt-1 mt-1 font-extrabold">
@@ -1978,6 +1981,16 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                               {gpsState === "live_gps"       ? "● LIVE GPS"
                               : gpsState === "dead_reckoning" ? "◌ DEAD RECKONING"
                               :                               "◯ STATIC"}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
+                            <span className="text-slate-500 uppercase">LAST UPDATE:</span>
+                            <span className={freshness.status === "stale" ? "text-amber-400" : freshness.status === "fresh" ? "text-slate-300" : "text-slate-500"}>
+                              {freshness.status === "none"
+                                ? "No GPS update yet"
+                                : freshness.minutesAgo === 0
+                                  ? "Just now"
+                                  : `${freshness.minutesAgo}m ago${freshness.status === "stale" ? " · signal may be stale" : ""}`}
                             </span>
                           </div>
                         </>

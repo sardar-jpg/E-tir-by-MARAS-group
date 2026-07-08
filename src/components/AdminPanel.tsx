@@ -949,7 +949,7 @@ This is an official transit status alert from MARAS Logistics regarding your int
 • Path: ${shipment.loadingCity} (${shipment.loadingCountry}) ➔ ${shipment.deliveryCity} (${shipment.deliveryCountry})
 • Assigned Carrier: ${shipment.truckNumber || "Unassigned"}
 
-You can track your real-time GPS location coordinates, border control checkpoints, customs verification state, and view direct transport paperwork files here:
+You can track your shipment's status, last known location, border control checkpoints, customs verification state, and view direct transport paperwork files here:
 ${trackingUrl}
 
 Best Regards,
@@ -4383,8 +4383,8 @@ MARAS Group etir Center`;
                     className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
                   >
                     <MapIcon className="w-4 h-4 text-emerald-400 mb-1.5 group-hover:scale-105 transition-transform" />
-                    <p className="font-bold text-slate-200">{lang === 'tr' ? "Canlı Harita" : (lang === 'ar' ? "خريطة التتبع" : "GIS Tracking Map")}</p>
-                    <span className="text-[9px] text-slate-400 block font-normal">Real-time GPS nodes</span>
+                    <p className="font-bold text-slate-200">{lang === 'tr' ? "Akıllı Takip Haritası" : (lang === 'ar' ? "خريطة التتبع" : "GIS Tracking Map")}</p>
+                    <span className="text-[9px] text-slate-400 block font-normal">Smart Tracking</span>
                   </button>
 
                   <button
