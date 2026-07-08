@@ -1,5 +1,6 @@
 import { ChevronRight, MessageSquare, FileUp } from 'lucide-react';
 import type { Shipment, Language } from '../../types';
+import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from '../../lib/driverVisibility';
 
 interface ActiveJobCardProps {
   shipment: Shipment;
@@ -12,11 +13,11 @@ interface ActiveJobCardProps {
 
 const LABELS: Record<Language, {
   continueJob: string; chat: string; upload: string;
-  route: string; cargo: string; payout: string; from: string; to: string; notSpecified: string;
+  route: string; cargo: string; payout: string; from: string; to: string; notSpecified: string; truck: string;
 }> = {
-  en: { continueJob: 'Continue Job', chat: 'Chat', upload: 'Upload Doc', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified' },
-  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', upload: 'Belge Yükle', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş' },
-  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', upload: 'رفع مستند', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد' },
+  en: { continueJob: 'Continue Job', chat: 'Chat', upload: 'Upload Doc', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified', truck: 'Truck' },
+  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', upload: 'Belge Yükle', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş', truck: 'Araç' },
+  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', upload: 'رفع مستند', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد', truck: 'الشاحنة' },
 };
 
 export default function ActiveJobCard({
@@ -29,13 +30,9 @@ export default function ActiveJobCard({
 }: ActiveJobCardProps) {
   const label = LABELS[lang] ?? LABELS.en;
 
-  const agreedAmount: number | null = (() => {
-    if (s.assignedDriverId === driverId) {
-      return s.agreedAmount !== undefined ? s.agreedAmount : null;
-    }
-    const ad = s.additionalDrivers?.find((d: any) => d.driverId === driverId);
-    return ad && ad.agreedAmount !== undefined ? ad.agreedAmount : null;
-  })();
+  const agreedAmount = resolveDriverAgreedAmount(s, driverId);
+  const truckNumber = resolveDriverTruckNumber(s, driverId);
+  const freightLabel = FREIGHT_TYPE_LABELS[s.freightType || 'land'];
 
   const isAssigned = s.status === 'Assigned';
   const isTransit =
@@ -55,9 +52,14 @@ export default function ActiveJobCard({
 
       {/* Shipment number + status */}
       <div className="flex items-center justify-between relative z-10">
-        <span className="font-mono font-bold text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-          #{s.shipmentNumber}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono font-bold text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+            #{s.shipmentNumber}
+          </span>
+          <span className="font-mono font-bold text-[9px] text-slate-500 bg-slate-950 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-wide">
+            {freightLabel}
+          </span>
+        </div>
         <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider font-mono border ${statusColor}`}>
           {s.status}
         </span>
@@ -83,8 +85,8 @@ export default function ActiveJobCard({
         </div>
       </div>
 
-      {/* Cargo + Payout */}
-      <div className="grid grid-cols-2 gap-3 relative z-10">
+      {/* Cargo + Payout + Truck */}
+      <div className={`grid gap-3 relative z-10 ${truckNumber ? 'grid-cols-3' : 'grid-cols-2'}`}>
         <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-900/40 space-y-1">
           <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
             {label.cargo}
@@ -107,6 +109,14 @@ export default function ActiveJobCard({
             <p className="text-xs text-slate-500">—</p>
           )}
         </div>
+        {truckNumber && (
+          <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-900/40 space-y-1">
+            <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
+              {label.truck}
+            </span>
+            <p className="text-[11px] font-bold text-slate-200 font-mono truncate">{truckNumber}</p>
+          </div>
+        )}
       </div>
 
       {/* Quick action buttons */}

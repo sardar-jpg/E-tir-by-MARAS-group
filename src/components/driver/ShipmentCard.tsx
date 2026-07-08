@@ -1,5 +1,6 @@
 import { ChevronRight } from 'lucide-react';
 import type { Shipment } from '../../types';
+import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from '../../lib/driverVisibility';
 
 interface ShipmentCardProps {
   shipment: Shipment;
@@ -12,15 +13,9 @@ export default function ShipmentCard({ shipment: s, driverId, onClick }: Shipmen
   const isTransit = s.status === 'In Transit' || s.status === 'Border Crossing' || s.status === 'Customs Clearance';
   const isDelivered = s.status === 'Delivered' || s.status === 'Arrived';
 
-  // null means no agreed amount is available for this driver on this shipment —
-  // never fall back to another driver's amount or a fake 0.
-  const agreedAmount: number | null = (() => {
-    if (s.assignedDriverId === driverId) {
-      return s.agreedAmount !== undefined ? s.agreedAmount : null;
-    }
-    const ad = s.additionalDrivers?.find((d: any) => d.driverId === driverId);
-    return ad && ad.agreedAmount !== undefined ? ad.agreedAmount : null;
-  })();
+  const agreedAmount = resolveDriverAgreedAmount(s, driverId);
+  const truckNumber = resolveDriverTruckNumber(s, driverId);
+  const freightLabel = FREIGHT_TYPE_LABELS[s.freightType || 'land'];
 
   return (
     <div
@@ -34,6 +29,9 @@ export default function ShipmentCard({ shipment: s, driverId, onClick }: Shipmen
         <div className="flex items-center gap-1.5">
           <span className="bg-slate-950 text-slate-200 font-mono font-bold px-2 py-0.5 rounded text-[10px] border border-slate-800">
             #{s.shipmentNumber}
+          </span>
+          <span className="bg-slate-950 text-slate-400 font-mono font-bold px-2 py-0.5 rounded text-[9px] border border-slate-800 uppercase tracking-wide">
+            {freightLabel}
           </span>
         </div>
 
@@ -86,6 +84,13 @@ export default function ShipmentCard({ shipment: s, driverId, onClick }: Shipmen
             )}
           </span>
         </div>
+
+        {truckNumber && (
+          <div className="flex flex-col text-right">
+            <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest font-mono">Truck</span>
+            <span className="font-bold text-slate-300 font-mono text-xs mt-0.5">{truckNumber}</span>
+          </div>
+        )}
 
         <span className="text-[10px] font-bold text-slate-400 group-hover:text-[#f97316] flex items-center gap-1 transition-all">
           <span>Open Job</span>

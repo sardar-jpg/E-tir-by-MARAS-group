@@ -83,6 +83,8 @@ describe("buildShipmentViewForRole", () => {
     expect(view.companyName).toBe("Acme Trading");
     expect(view.customerEmails).toEqual(["ops@acmetrading.example"]);
     expect(view.customerNotificationHistory).toHaveLength(1);
+    expect(view.loadingContactNumber).toBe("+964 750 000 0000");
+    expect(view.deliveryContactNumber).toBe("+90 555 000 0000");
   });
 
   it("keeps the top-level agreedAmount for the assigned primary driver, but hides other drivers' amounts", () => {
@@ -101,6 +103,8 @@ describe("buildShipmentViewForRole", () => {
     expect("customerEmails" in view).toBe(false);
     expect(view.customerNotificationHistory).toBeUndefined();
     expect("customerNotificationHistory" in view).toBe(false);
+    expect("loadingContactNumber" in view).toBe(false);
+    expect("deliveryContactNumber" in view).toBe(false);
   });
 
   it("hides the top-level agreedAmount from a co-driver, but keeps their own additionalDrivers amount", () => {
@@ -114,6 +118,8 @@ describe("buildShipmentViewForRole", () => {
     expect("companyName" in view).toBe(false);
     expect("customerEmails" in view).toBe(false);
     expect("customerNotificationHistory" in view).toBe(false);
+    expect("loadingContactNumber" in view).toBe(false);
+    expect("deliveryContactNumber" in view).toBe(false);
   });
 
   it("hides every agreedAmount from a driver with no relationship to the shipment", () => {
@@ -126,6 +132,8 @@ describe("buildShipmentViewForRole", () => {
     expect("companyName" in view).toBe(false);
     expect("customerEmails" in view).toBe(false);
     expect("customerNotificationHistory" in view).toBe(false);
+    expect("loadingContactNumber" in view).toBe(false);
+    expect("deliveryContactNumber" in view).toBe(false);
   });
 
   it("passes through shipments with no additionalDrivers array untouched", () => {
