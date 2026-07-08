@@ -53,6 +53,7 @@ import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
+import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -672,6 +673,30 @@ try {
   adminAuth = getAdminAuth(adminApp);
 } catch (err: any) {
   console.warn("Firebase Admin SDK initialization failed - push notifications and server-side ID token verification will be disabled. Error:", err instanceof Error ? err.message : String(err));
+}
+
+// One clear, consolidated startup summary — everything below this point
+// (Firestore connection attempts, seeding) logs incrementally as it
+// happens, which made it easy to miss what mode the server actually
+// started in. This is the single place to look. Never logs secret values,
+// only whether they're present. See src/lib/persistenceReadiness.ts.
+{
+  const readiness = computePersistenceReadiness(process.env, !!firebaseConfig);
+  console.log("──────────────────────────────────────────────────────────");
+  console.log(`[Startup] NODE_ENV: ${process.env.NODE_ENV || "development"} (production: ${readiness.isProduction})`);
+  console.log(`[Startup] STRICT_PERSISTENCE: ${readiness.strictPersistence} (writes fail instead of using memory fallback when true)`);
+  console.log(`[Startup] SEED_DEMO_DATA: ${readiness.seedDemoData}`);
+  console.log(`[Startup] Firebase client config found: ${readiness.firebaseConfigured}`);
+  console.log(`[Startup] SERVER_FIREBASE_EMAIL/PASSWORD configured: ${readiness.serverFirebaseCredsConfigured}`);
+  console.log(`[Startup] Configured persistence mode: ${readiness.configuredMode} (pending live Firestore connection check below)`);
+  if (readiness.warnings.length) {
+    for (const warning of readiness.warnings) {
+      console.warn(`[Startup] WARNING: ${warning}`);
+    }
+  } else {
+    console.log("[Startup] No production safety warnings.");
+  }
+  console.log("──────────────────────────────────────────────────────────");
 }
 
 // Test Firestore Connection
