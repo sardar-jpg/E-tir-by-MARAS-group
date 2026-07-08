@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
 import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
+import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors } from "../lib/adminAccess";
 import { jsPDF } from "jspdf";
@@ -253,9 +254,12 @@ export default function AdminPanel({
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
   const chatDropdownRef = React.useRef<HTMLDivElement>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account'>(
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
+  // Set by the Shipment Details modal's chat shortcut buttons to preselect
+  // a shipment + channel when navigating into the Chat Center tab.
+  const [chatCenterFocus, setChatCenterFocus] = useState<ChatCenterFocus | null>(null);
 
   // Real-time Dashboard Clock
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -3070,6 +3074,7 @@ MARAS Group etir Center`;
       { id: 'shipments', label: t('shipmentManagement'), icon: Ship },
       { id: 'tracking_map', label: lang === 'tr' ? 'GPS Takip Haritası' : (lang === 'ar' ? 'خريطة التتبع GPS' : 'GPS Tracking Map'), icon: MapIcon },
       { id: 'drivers', label: t('driverManagement'), icon: Truck },
+      { id: 'chat_center', label: lang === 'tr' ? 'Mesaj Merkezi' : (lang === 'ar' ? 'مركز المحادثات' : 'Chat Center'), icon: MessageSquare },
       { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
       { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
       { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
@@ -3088,7 +3093,7 @@ MARAS Group etir Center`;
     return rawTabs.filter(tab => {
       if (isSuper) return true;
       if (isOperation) {
-        return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'clients', 'vendors', 'my_account'].includes(tab.id);
+        return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center', 'clients', 'vendors', 'my_account'].includes(tab.id);
       }
       if (isAccounts) {
         return ['costs', 'reports', 'clients', 'vendors', 'my_account'].includes(tab.id);
@@ -6689,6 +6694,19 @@ MARAS Group etir Center`;
         <TrackingMap shipments={shipments.filter(s => (s.freightType || "land") === "land")} lang={lang} drivers={drivers} />
       )}
 
+      {/* Chat Center Tab — UI foundation only, see ChatCenter.tsx */}
+      {activeTab === 'chat_center' && (
+        <ChatCenter
+          lang={lang}
+          isRtl={isRtl}
+          shipments={shipments}
+          unreadChatMessages={unreadChatMessages}
+          onOpenFullChat={onSelectShipmentChat}
+          focus={chatCenterFocus}
+          onFocusHandled={() => setChatCenterFocus(null)}
+        />
+      )}
+
       {/* 8. Accounts & Cost Statements Tab */}
       {activeTab === 'costs' && (() => {
         // Compute dynamic metrics
@@ -7612,7 +7630,29 @@ MARAS Group etir Center`;
                 </div>
                 <h3 className="text-lg font-bold truncate max-w-md">{targetDetailsShipment.companyName}</h3>
               </div>
-              <button 
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Chat Center shortcuts — jump to this shipment's conversation, preselecting the channel. */}
+                {([
+                  { channel: 'internal' as const, label: lang === 'tr' ? 'Dahili' : (lang === 'ar' ? 'داخلي' : 'Internal') },
+                  { channel: 'driver_admin' as const, label: lang === 'tr' ? 'Sürücü' : (lang === 'ar' ? 'السائق' : 'Driver') },
+                  { channel: 'client_admin' as const, label: lang === 'tr' ? 'Müşteri' : (lang === 'ar' ? 'العميل' : 'Customer') },
+                ]).map(({ channel, label: chatLabel }) => (
+                  <button
+                    key={channel}
+                    onClick={() => {
+                      setChatCenterFocus({ shipmentId: targetDetailsShipment.id, channel });
+                      setActiveTab('chat_center');
+                      setOpenDetailsId(null);
+                    }}
+                    title={`${lang === 'tr' ? 'Sohbeti Aç' : (lang === 'ar' ? 'فتح المحادثة' : 'Open Chat')}: ${chatLabel}`}
+                    className="hidden sm:flex items-center gap-1 px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-lg text-[10px] font-bold text-slate-300 hover:text-white transition-all cursor-pointer"
+                  >
+                    <MessageSquare className="w-3 h-3" />
+                    {chatLabel}
+                  </button>
+                ))}
+              </div>
+              <button
                 onClick={() => setOpenDetailsId(null)}
                 className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-all cursor-pointer"
               >

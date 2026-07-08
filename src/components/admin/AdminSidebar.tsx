@@ -22,7 +22,7 @@ type GroupKey = 'operations' | 'business' | 'system';
 // filtered in, so role-based filtering (done by the caller) keeps working
 // unchanged and only decides which of these ids are present.
 const GROUPS: { key: GroupKey; ids: string[] }[] = [
-  { key: 'operations', ids: ['dashboard', 'shipments', 'tracking_map', 'drivers'] },
+  { key: 'operations', ids: ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center'] },
   { key: 'business', ids: ['clients', 'vendors', 'costs', 'reports'] },
   { key: 'system', ids: ['gmail', 'audit', 'team', 'my_account'] },
 ];
