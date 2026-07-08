@@ -7954,6 +7954,16 @@ MARAS Group etir Center`;
                         <p className="text-[11px] text-red-600">{distanceMatrixError}</p>
                       </div>
                     </div>
+                  ) : distanceMatrixData?.status === "UNAVAILABLE" ? (
+                    <div className="p-3.5 bg-orange-50 border border-orange-200 text-orange-700 text-xs rounded-lg font-mono flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-orange-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Route Distance Unavailable</p>
+                        <p className="text-[11px] text-orange-600">
+                          {distanceMatrixData.reason || "Route coordinates unavailable for this freight type or location."}
+                        </p>
+                      </div>
+                    </div>
                   ) : distanceMatrixData ? (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-sans">
                       <div className="bg-white p-3.5 border border-slate-200/60 rounded-xl space-y-1.5 shadow-3xs">
