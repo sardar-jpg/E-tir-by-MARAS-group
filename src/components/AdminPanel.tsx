@@ -23,11 +23,11 @@ import {
   PieChart, Pie, Cell, Legend, LineChart, Line, AreaChart, Area
 } from 'recharts';
 import { 
-  Plus, Search, Filter, ShieldCheck, Share2, MessageSquare, 
-  Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff, 
-  Edit3, ArrowUpRight, ClipboardList, CheckCircle2, FileText, 
+  Plus, Search, Filter, ShieldCheck, Share2, MessageSquare,
+  Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
+  Edit3, ArrowUpRight, ClipboardList, CheckCircle2, FileText,
   Paperclip, Image as ImageIcon, Send, X, ExternalLink, RefreshCw, UserPlus, Phone, Mail, Check, AlertCircle, Printer,
-  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert, User, Pencil, Lock
+  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert, User, Pencil, Lock, Save
 } from 'lucide-react';
 import TrackingMap from "./TrackingMap";
 import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
@@ -196,6 +196,7 @@ export default function AdminPanel({
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
+  const chatDropdownRef = React.useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
@@ -541,6 +542,7 @@ export default function AdminPanel({
   const [costStatusFilter, setCostStatusFilter] = useState<'All' | 'Unpaid' | 'Partial' | 'Paid'>('All');
   const [costTypeFilter, setCostTypeFilter] = useState<'All' | 'land' | 'sea' | 'air'>('All');
   const [isSavingCostStatement, setIsSavingCostStatement] = useState(false);
+  const savedStatementSnapshotRef = React.useRef<string | null>(null);
 
   // New Client Form States
   const [newClientCompanyName, setNewClientCompanyName] = useState("");
@@ -1286,6 +1288,25 @@ MARAS Group etir Center`;
     }
   }, [openDetailsId, shipments]);
 
+  // Close the Unread Driver Chats panel on outside click or Escape key
+  useEffect(() => {
+    if (!isChatDropdownOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (chatDropdownRef.current && !chatDropdownRef.current.contains(e.target as Node)) {
+        setIsChatDropdownOpen(false);
+      }
+    };
+    const handleEscapeKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsChatDropdownOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEscapeKey);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscapeKey);
+    };
+  }, [isChatDropdownOpen]);
+
   // Fetch Distance Matrix predictions automatically
   useEffect(() => {
     if (openDetailsId) {
@@ -1349,11 +1370,14 @@ MARAS Group etir Center`;
 
   // Cost statement management handlers
   const handleSelectActiveStatement = async (shipmentId: string) => {
+    // Close the floating driver-chat panel so it can't float above the cost modal.
+    setIsChatDropdownOpen(false);
     try {
       const res = await apiFetch(`/api/cost-statements/${shipmentId}`);
       if (res.ok) {
         const stmt = await res.json();
         setSelectedCostStatement(stmt);
+        savedStatementSnapshotRef.current = JSON.stringify(stmt);
         setStatementPreviewMode('statement');
         const firstVendor = stmt.items?.[0]?.supplierName || '';
         setSelectedVendorForStatement(firstVendor);
@@ -1378,6 +1402,7 @@ MARAS Group etir Center`;
             updatedAt: new Date().toISOString()
           };
           setSelectedCostStatement(templateStmt);
+          savedStatementSnapshotRef.current = JSON.stringify(templateStmt);
           setStatementPreviewMode('statement');
           setSelectedVendorForStatement('');
           setIsStatementEditorOpen(true);
@@ -1419,6 +1444,7 @@ MARAS Group etir Center`;
           return [...filtered, saved];
         });
         setSelectedCostStatement(saved);
+        savedStatementSnapshotRef.current = JSON.stringify(saved);
         triggerToast(lang === 'tr' ? "Maliyet tablosu başarıyla kaydedildi!" : (lang === 'ar' ? "تم حفظ كشف التكلفة بنجاح!" : "Cost statement saved successfully!"));
         const resLogs = await apiFetch("/api/logs");
         if (resLogs.ok) {
@@ -1434,6 +1460,26 @@ MARAS Group etir Center`;
     } finally {
       setIsSavingCostStatement(false);
     }
+  };
+
+  const isCostStatementDirty = () => {
+    if (!selectedCostStatement) return false;
+    return JSON.stringify(selectedCostStatement) !== savedStatementSnapshotRef.current;
+  };
+
+  const handleCloseStatementEditor = () => {
+    if (isCostStatementDirty()) {
+      const confirmClose = window.confirm(
+        lang === 'tr'
+          ? "Kaydedilmemiş değişiklikleriniz var. Kaydetmeden kapatmak istediğinize emin misiniz?"
+          : lang === 'ar'
+          ? "لديك تغييرات غير محفوظة. هل تريد الإغلاق دون الحفظ؟"
+          : "You have unsaved changes. Close without saving?"
+      );
+      if (!confirmClose) return;
+    }
+    setIsStatementEditorOpen(false);
+    setSelectedCostStatement(null);
   };
 
   const [receiptUploadingIndex, setReceiptUploadingIndex] = useState<number | null>(null);
@@ -3177,7 +3223,7 @@ MARAS Group etir Center`;
           </div>
 
           {/* Driver helpline chat button & dropdown */}
-          <div className="relative">
+          <div className="relative" ref={chatDropdownRef}>
             <button
               onClick={() => {
                 setIsChatDropdownOpen(!isChatDropdownOpen);
@@ -3206,6 +3252,13 @@ MARAS Group etir Center`;
                       </span>
                     )}
                   </div>
+                  <button
+                    onClick={() => setIsChatDropdownOpen(false)}
+                    className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all border-0 cursor-pointer"
+                    title={lang === 'tr' ? 'Kapat' : lang === 'ar' ? 'إغلاق' : 'Close'}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1.5 scrollbar-thin">
@@ -7114,11 +7167,21 @@ MARAS Group etir Center`;
                   <ArrowUpRight className="w-3.5 h-3.5 text-slate-400" />
                   <span>CSV Export</span>
                 </button>
-                <button 
-                  onClick={() => {
-                    setIsStatementEditorOpen(false);
-                    setSelectedCostStatement(null);
-                  }}
+                <button
+                  onClick={handleSaveCostStatement}
+                  disabled={isSavingCostStatement}
+                  className="px-3 py-1.5 bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed border-0 text-xs font-black rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
+                  title={lang === 'tr' ? 'Maliyet tablosunu kaydet' : 'Save the cost statement'}
+                >
+                  <Save className={`w-3.5 h-3.5 text-emerald-100 ${isSavingCostStatement ? 'animate-pulse' : ''}`} />
+                  <span>
+                    {isSavingCostStatement
+                      ? (lang === 'tr' ? 'Kaydediliyor...' : lang === 'ar' ? 'جاري الحفظ...' : 'Saving...')
+                      : (lang === 'tr' ? 'Beyannameyi Kaydet' : lang === 'ar' ? 'حفظ البيان' : 'Save Statement')}
+                  </span>
+                </button>
+                <button
+                  onClick={handleCloseStatementEditor}
                   className="p-1.5 bg-slate-900 hover:bg-red-950 hover:text-red-400 rounded-xl text-slate-400 transition-all border border-slate-800 cursor-pointer"
                   title="Close module draft"
                 >
