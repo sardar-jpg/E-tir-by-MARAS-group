@@ -142,6 +142,62 @@ const getPortsForCountry = (countryName: string): string[] => {
   return [];
 };
 
+// Fresh object every call so the Create Shipment modal always starts blank —
+// used on initial state, after a successful submit, and on Cancel/close, so
+// stale field values (and a stale freightType selection) never carry over
+// into the next time an admin opens the dialog.
+const createEmptyShipmentForm = () => ({
+  companyName: "",
+  loadingCountry: "Turkey",
+  loadingCity: "Istanbul",
+  loadingAddress: "",
+  loadingContactNumber: "",
+  deliveryCountry: "Iraq",
+  deliveryCity: "Baghdad",
+  deliveryAddress: "",
+  deliveryContactNumber: "",
+  cargoDescription: "",
+  cargoWeight: "",
+  truckNumber: "",
+  assignedDriverId: "",
+  agreedAmount: "",
+  currency: "USD" as Currency,
+  internalNotes: "",
+
+  // Sea & Air properties initial state
+  freightType: "land" as "land" | "sea" | "air",
+  additionalDrivers: [] as Array<{ driverId: string; driverName: string; truckNumber: string; agreedAmount?: number }>,
+  additionalContainers: [] as string[],
+  shippingLine: "",
+  vesselName: "",
+  containerNumber: "",
+  bookingNumber: "",
+  billOfLadingNumber: "",
+  portOfLoading: "",
+  portOfDischarge: "",
+  finalDestination: "",
+  etd: "",
+  eta: "",
+  numberOfContainers: "",
+  containerType: "",
+  airline: "",
+  flightNumber: "",
+  airWaybillNumber: "",
+  airportOfDeparture: "",
+  airportOfArrival: "",
+  grossWeight: "",
+  chargeableWeight: "",
+  numberOfPackages: "",
+
+  // Custom Broker details
+  destinationBrokerId: "",
+  destinationBrokerName: "",
+  destinationBrokerPhone: "",
+  iraqBorderBrokerId: "",
+  iraqBorderBrokerName: "",
+  iraqBorderBrokerPhone: "",
+});
+
 interface AdminPanelProps {
   lang: Language;
   // BUG-03: optional channel hint so opening chat from a driver_admin or
@@ -890,57 +946,7 @@ MARAS Group etir Center`;
   const [distanceMatrixError, setDistanceMatrixError] = useState<string | null>(null);
 
   // New Shipment Fields
-  const [newShipmentData, setNewShipmentData] = useState({
-    companyName: "",
-    loadingCountry: "Turkey",
-    loadingCity: "Istanbul",
-    loadingAddress: "",
-    loadingContactNumber: "",
-    deliveryCountry: "Iraq",
-    deliveryCity: "Baghdad",
-    deliveryAddress: "",
-    deliveryContactNumber: "",
-    cargoDescription: "",
-    cargoWeight: "",
-    truckNumber: "",
-    assignedDriverId: "",
-    agreedAmount: "",
-    currency: "USD" as Currency,
-    internalNotes: "",
-    
-    // Sea & Air properties initial state
-    freightType: "land" as "land" | "sea" | "air",
-    additionalDrivers: [] as Array<{ driverId: string; driverName: string; truckNumber: string; agreedAmount?: number }>,
-    additionalContainers: [] as string[],
-    shippingLine: "",
-    vesselName: "",
-    containerNumber: "",
-    bookingNumber: "",
-    billOfLadingNumber: "",
-    portOfLoading: "",
-    portOfDischarge: "",
-    finalDestination: "",
-    etd: "",
-    eta: "",
-    numberOfContainers: "",
-    containerType: "",
-    airline: "",
-    flightNumber: "",
-    airWaybillNumber: "",
-    airportOfDeparture: "",
-    airportOfArrival: "",
-    grossWeight: "",
-    chargeableWeight: "",
-    numberOfPackages: "",
-
-    // Custom Broker details
-    destinationBrokerId: "",
-    destinationBrokerName: "",
-    destinationBrokerPhone: "",
-    iraqBorderBrokerId: "",
-    iraqBorderBrokerName: "",
-    iraqBorderBrokerPhone: "",
-  });
+  const [newShipmentData, setNewShipmentData] = useState(createEmptyShipmentForm());
 
   // Toggles for Custom POL/POD inputs
   const [useCustomPOL, setUseCustomPOL] = useState(false);
@@ -2623,54 +2629,7 @@ MARAS Group etir Center`;
       });
       if (res.ok) {
         setIsCreateOpen(false);
-        setNewShipmentData({
-          companyName: "",
-          loadingCountry: "Turkey",
-          loadingCity: "Istanbul",
-          loadingAddress: "",
-          loadingContactNumber: "",
-          deliveryCountry: "Iraq",
-          deliveryCity: "Baghdad",
-          deliveryAddress: "",
-          deliveryContactNumber: "",
-          cargoDescription: "",
-          cargoWeight: "",
-          truckNumber: "",
-          assignedDriverId: "",
-          agreedAmount: "",
-          currency: "USD",
-          internalNotes: "",
-          
-          freightType: "land",
-          additionalDrivers: [],
-          additionalContainers: [],
-          shippingLine: "",
-          vesselName: "",
-          containerNumber: "",
-          bookingNumber: "",
-          billOfLadingNumber: "",
-          portOfLoading: "",
-          portOfDischarge: "",
-          finalDestination: "",
-          etd: "",
-          eta: "",
-          numberOfContainers: "",
-          containerType: "",
-          airline: "",
-          flightNumber: "",
-          airWaybillNumber: "",
-          airportOfDeparture: "",
-          airportOfArrival: "",
-          grossWeight: "",
-          chargeableWeight: "",
-          numberOfPackages: "",
-          destinationBrokerId: "",
-          destinationBrokerName: "",
-          destinationBrokerPhone: "",
-          iraqBorderBrokerId: "",
-          iraqBorderBrokerName: "",
-          iraqBorderBrokerPhone: "",
-        });
+        setNewShipmentData(createEmptyShipmentForm());
         setUseCustomPOL(false);
         setUseCustomPOD(false);
         triggerToast(t('createSuccess'));
@@ -2684,6 +2643,16 @@ MARAS Group etir Center`;
       console.error(err);
       triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
+  };
+
+  // Cancelling/closing the Create Shipment modal without submitting must not
+  // leave stale field values (or a stale freightType) sitting in state for
+  // the next time the dialog is opened.
+  const closeCreateShipmentModal = () => {
+    setIsCreateOpen(false);
+    setNewShipmentData(createEmptyShipmentForm());
+    setUseCustomPOL(false);
+    setUseCustomPOD(false);
   };
 
   // Edit Shipment Action
@@ -3437,7 +3406,12 @@ MARAS Group etir Center`;
 
           {(resolvedAdminType === 'super' || resolvedAdminType === 'operation') && (
             <button
-              onClick={() => setIsCreateOpen(true)}
+              onClick={() => {
+                setNewShipmentData(createEmptyShipmentForm());
+                setUseCustomPOL(false);
+                setUseCustomPOD(false);
+                setIsCreateOpen(true);
+              }}
               className="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 shadow-lg hover:shadow-orange-200 transition-all"
             >
               <Plus className="w-4 h-4" />
@@ -3965,9 +3939,11 @@ MARAS Group etir Center`;
                   </div>
                   
                   {/* Action short-cut to register dispatch */}
-                  <button 
+                  <button
                     onClick={() => {
-                      setNewShipmentData(prev => ({ ...prev, freightType: "land" }));
+                      setNewShipmentData(createEmptyShipmentForm());
+                      setUseCustomPOL(false);
+                      setUseCustomPOD(false);
                       setIsCreateOpen(true);
                     }}
                     className="self-start sm:self-auto px-3.5 py-1.5 bg-slate-950 hover:bg-slate-800 text-white font-extrabold rounded-lg text-xs tracking-wide transition-all shadow-sm hover:shadow-md flex items-center gap-1.5 border-0 focus:outline-none cursor-pointer"
@@ -8354,13 +8330,13 @@ MARAS Group etir Center`;
             
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white rounded-t-2xl">
               <h3 className="font-bold text-lg">{t('createShipment')}</h3>
-              <button onClick={() => setIsCreateOpen(false)} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
+              <button onClick={closeCreateShipmentModal} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <form onSubmit={handleCreateShipment} className="p-6 space-y-6 text-sm">
-              
+
               {/* Customer Column */}
               <div className="space-y-1 bg-slate-50 p-4 border border-slate-100 rounded-xl">
                 <label className="font-bold text-slate-900">{t('companyName')} <span className="text-red-500">*</span></label>
@@ -8813,10 +8789,9 @@ MARAS Group etir Center`;
                   
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Shipping Line / Nakliye Hattı <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
+                      <label className="text-xs font-semibold text-slate-700">Shipping Line / Nakliye Hattı</label>
+                      <input
+                        type="text"
                         placeholder="e.g. Maersk, MSC, COSCO"
                         value={newShipmentData.shippingLine}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, shippingLine: e.target.value })}
@@ -8824,11 +8799,10 @@ MARAS Group etir Center`;
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Vessel Name / Gemi Adı <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
-                        placeholder="e.g. EVER GIVEN"
+                      <label className="text-xs font-semibold text-slate-700">Vessel Name / Gemi Adı</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. EVER GIVEN (assigned once booking is confirmed)"
                         value={newShipmentData.vesselName}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, vesselName: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none"
@@ -8838,11 +8812,10 @@ MARAS Group etir Center`;
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Container Number <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
-                        placeholder="e.g. MSCO1234567"
+                      <label className="text-xs font-semibold text-slate-700">Container Number</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. MSCO1234567 (assigned once booking is confirmed)"
                         value={newShipmentData.containerNumber}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, containerNumber: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none font-mono"
@@ -8980,7 +8953,7 @@ MARAS Group etir Center`;
                     {/* POL */}
                     <div className="space-y-1">
                       <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
-                        <span>Port of Loading (POL)</span>
+                        <span>Port of Loading (POL) <span className="text-red-500">*</span></span>
                         {getPortsForCountry(newShipmentData.loadingCountry).length > 0 && (
                           <button
                             type="button"
@@ -8994,7 +8967,8 @@ MARAS Group etir Center`;
                         )}
                       </label>
                       {getPortsForCountry(newShipmentData.loadingCountry).length > 0 && !useCustomPOL ? (
-                        <select 
+                        <select
+                          required
                           value={newShipmentData.portOfLoading}
                           onChange={(e) => {
                             if (e.target.value === "__CUSTOM__") {
@@ -9013,8 +8987,9 @@ MARAS Group etir Center`;
                           <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
                         </select>
                       ) : (
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
+                          required
                           placeholder="e.g. Port of Ambarli, Istanbul"
                           value={newShipmentData.portOfLoading}
                           onChange={(e) => setNewShipmentData({ ...newShipmentData, portOfLoading: e.target.value })}
@@ -9026,7 +9001,7 @@ MARAS Group etir Center`;
                     {/* POD */}
                     <div className="space-y-1">
                       <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans font-sans">
-                        <span>Port of Discharge (POD)</span>
+                        <span>Port of Discharge (POD) <span className="text-red-500">*</span></span>
                         {getPortsForCountry(newShipmentData.deliveryCountry).length > 0 && (
                           <button
                             type="button"
@@ -9040,7 +9015,8 @@ MARAS Group etir Center`;
                         )}
                       </label>
                       {getPortsForCountry(newShipmentData.deliveryCountry).length > 0 && !useCustomPOD ? (
-                        <select 
+                        <select
+                          required
                           value={newShipmentData.portOfDischarge}
                           onChange={(e) => {
                             if (e.target.value === "__CUSTOM__") {
@@ -9059,7 +9035,8 @@ MARAS Group etir Center`;
                           <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
                         </select>
                       ) : (
-                        <input 
+                        <input
+                          required
                           type="text" 
                           placeholder="e.g. Port of Umm Qasr"
                           value={newShipmentData.portOfDischarge}
@@ -9137,10 +9114,9 @@ MARAS Group etir Center`;
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Airline / Havayolu Havuz <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
+                      <label className="text-xs font-semibold text-slate-700">Airline / Havayolu</label>
+                      <input
+                        type="text"
                         placeholder="e.g. Turkish Cargo, Lufthansa"
                         value={newShipmentData.airline}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, airline: e.target.value })}
@@ -9148,22 +9124,20 @@ MARAS Group etir Center`;
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Flight number <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
-                        placeholder="e.g. TK1242"
+                      <label className="text-xs font-semibold text-slate-700">Flight Number</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. TK1242 (assigned once booking is confirmed)"
                         value={newShipmentData.flightNumber}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, flightNumber: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none font-mono"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">AWB Number (Air Waybill) <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        required
-                        placeholder="e.g. 235-9008871"
+                      <label className="text-xs font-semibold text-slate-700">AWB Number (Air Waybill)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 235-9008871 (assigned once booking is confirmed)"
                         value={newShipmentData.airWaybillNumber}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, airWaybillNumber: e.target.value })}
                         className="w-full p-2.5 bg-white border border-slate-200 focus:border-slate-500 rounded-lg outline-none font-mono"
@@ -9173,9 +9147,10 @@ MARAS Group etir Center`;
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Airport of Departure</label>
-                      <input 
-                        type="text" 
+                      <label className="text-xs font-semibold text-slate-700">Airport of Departure <span className="text-red-500">*</span></label>
+                      <input
+                        type="text"
+                        required
                         placeholder="e.g. IST (Istanbul)"
                         value={newShipmentData.airportOfDeparture}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, airportOfDeparture: e.target.value })}
@@ -9183,9 +9158,10 @@ MARAS Group etir Center`;
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700">Airport of Arrival</label>
-                      <input 
-                        type="text" 
+                      <label className="text-xs font-semibold text-slate-700">Airport of Arrival <span className="text-red-500">*</span></label>
+                      <input
+                        type="text"
+                        required
                         placeholder="e.g. EBL (Erbil)"
                         value={newShipmentData.airportOfArrival}
                         onChange={(e) => setNewShipmentData({ ...newShipmentData, airportOfArrival: e.target.value })}
@@ -9317,7 +9293,7 @@ MARAS Group etir Center`;
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
-                <button type="button" onClick={() => setIsCreateOpen(false)} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
+                <button type="button" onClick={closeCreateShipmentModal} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
                   {t('cancel')}
                 </button>
                 <button type="submit" className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-semibold rounded-xl shadow-lg transition-all">
