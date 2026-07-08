@@ -7770,6 +7770,10 @@ MARAS Group etir Center`;
                   <span className="bg-orange-500 text-white font-mono text-xs font-bold uppercase rounded px-2.5 py-0.5 tracking-wider">
                     {targetDetailsShipment.shipmentNumber}
                   </span>
+                  <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono font-bold flex items-center gap-1">
+                    {targetDetailsShipment.freightType === 'sea' ? <Anchor className="w-3 h-3" /> : targetDetailsShipment.freightType === 'air' ? <Plane className="w-3 h-3" /> : <Truck className="w-3 h-3" />}
+                    {targetDetailsShipment.freightType === 'sea' ? 'Sea' : targetDetailsShipment.freightType === 'air' ? 'Air' : 'Land'}
+                  </span>
                   <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono font-bold">
                     {targetDetailsShipment.status}
                   </span>
@@ -7779,9 +7783,9 @@ MARAS Group etir Center`;
               <div className="flex items-center gap-1.5 shrink-0">
                 {/* Chat Center shortcuts — jump to this shipment's conversation, preselecting the channel. */}
                 {([
-                  { channel: 'internal_staff' as const, label: lang === 'tr' ? 'Dahili' : (lang === 'ar' ? 'داخلي' : 'Internal') },
-                  { channel: 'driver_admin' as const, label: lang === 'tr' ? 'Sürücü' : (lang === 'ar' ? 'السائق' : 'Driver') },
-                  { channel: 'client_admin' as const, label: lang === 'tr' ? 'Müşteri' : (lang === 'ar' ? 'العميل' : 'Customer') },
+                  { channel: 'internal_staff' as const, label: lang === 'tr' ? 'Dahili Sohbet' : (lang === 'ar' ? 'دردشة داخلية' : 'Internal Chat') },
+                  { channel: 'driver_admin' as const, label: lang === 'tr' ? 'Sürücü Sohbet' : (lang === 'ar' ? 'دردشة السائق' : 'Driver Chat') },
+                  { channel: 'client_admin' as const, label: lang === 'tr' ? 'Müşteri Sohbet' : (lang === 'ar' ? 'دردشة العميل' : 'Customer Chat') },
                 ]).map(({ channel, label: chatLabel }) => (
                   <button
                     key={channel}
@@ -7807,9 +7811,64 @@ MARAS Group etir Center`;
             </div>
 
             {/* Modal Content Drawer Grid */}
-            <div className="p-6 space-y-6 text-sm">
+            <div className="p-6 space-y-8 text-sm">
+
+              {/* SECTION: Shipment Overview */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <ClipboardList className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Sevkiyat Genel Bakış' : (lang === 'ar' ? 'نظرة عامة على الشحنة' : 'Shipment Overview')}
+                  </h3>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div>
+                    <span className="text-slate-400 text-[10px] block font-bold uppercase tracking-wider">{lang === 'tr' ? 'Sevkiyat Türü' : (lang === 'ar' ? 'نوع الشحن' : 'Freight Type')}</span>
+                    <p className="font-bold text-slate-900 mt-0.5">
+                      {targetDetailsShipment.freightType === 'sea' ? (lang === 'tr' ? 'Deniz Nakliye' : 'Sea Freight') : targetDetailsShipment.freightType === 'air' ? (lang === 'tr' ? 'Hava Nakliye' : 'Air Freight') : (lang === 'tr' ? 'Kara Nakliye' : 'Land Freight')}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 text-[10px] block font-bold uppercase tracking-wider">{t('status')}</span>
+                    <p className="font-bold text-slate-900 mt-0.5">{targetDetailsShipment.status}</p>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <span className="text-slate-400 text-[10px] block font-bold uppercase tracking-wider">{lang === 'tr' ? 'Müşteri' : (lang === 'ar' ? 'العميل' : 'Customer')}</span>
+                    <p className="font-bold text-slate-900 mt-0.5 truncate">{targetDetailsShipment.companyName}</p>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 text-[10px] block font-bold uppercase tracking-wider">{t('weightKg')}</span>
+                    <p className="font-bold text-slate-900 mt-0.5">{targetDetailsShipment.cargoWeight.toLocaleString()} kg</p>
+                  </div>
+                  <div className="col-span-2 sm:col-span-4 border-t border-slate-200 pt-3 mt-1">
+                    <span className="text-slate-400 text-[10px] block font-bold uppercase tracking-wider">{lang === 'tr' ? 'Güzergah' : (lang === 'ar' ? 'المسار' : 'Route')}</span>
+                    <p className="font-bold text-slate-900 mt-0.5 flex items-center gap-2 flex-wrap">
+                      {targetDetailsShipment.freightType === 'sea' ? (
+                        <span>{targetDetailsShipment.portOfLoading || targetDetailsShipment.loadingCity} → {targetDetailsShipment.portOfDischarge || targetDetailsShipment.deliveryCity}</span>
+                      ) : targetDetailsShipment.freightType === 'air' ? (
+                        <span>{targetDetailsShipment.airportOfDeparture || targetDetailsShipment.loadingCity} → {targetDetailsShipment.airportOfArrival || targetDetailsShipment.deliveryCity}</span>
+                      ) : (
+                        <span>{targetDetailsShipment.loadingCity} → {targetDetailsShipment.deliveryCity}</span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* SECTION: Route & Freight Details */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <MapIcon className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Güzergah ve Nakliye Detayları' : (lang === 'ar' ? 'تفاصيل المسار والشحن' : 'Route & Freight Details')}
+                  </h3>
+                </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                
+
                 {/* 1. Loading Locations Panel */}
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                   <h4 className="font-bold text-slate-900 border-b border-slate-200 pb-2 flex items-center gap-2">
@@ -7869,6 +7928,21 @@ MARAS Group etir Center`;
                   </div>
                 </div>
 
+              </div>
+              </div>
+
+              {/* SECTION: Parties & Assignment */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Taraflar ve Atama' : (lang === 'ar' ? 'الأطراف والتعيين' : 'Parties & Assignment')}
+                  </h3>
+                </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
                 {/* 4. Dispatched Driver Account & Assigned Pay */}
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                   <h4 className="font-bold text-slate-900 border-b border-slate-200 pb-2">{t('truckAndDriver')}</h4>
@@ -7896,10 +7970,6 @@ MARAS Group etir Center`;
                       <div>
                         <span className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">{t('truckNumber')}</span>
                         <p className="font-mono font-bold text-slate-800">{targetDetailsShipment.truckNumber || "-"}</p>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">{t('carrierAmount')}</span>
-                        <p className="font-bold text-orange-600">{targetDetailsShipment.agreedAmount.toLocaleString()} {targetDetailsShipment.currency}</p>
                       </div>
                     </div>
 
@@ -7952,6 +8022,20 @@ MARAS Group etir Center`;
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                   <h4 className="font-bold text-slate-900 border-b border-slate-200 pb-2">{t('internalNotes')}</h4>
                   <p className="text-xs text-slate-700 italic">{targetDetailsShipment.internalNotes || "No internal administration logs logged."}</p>
+                </div>
+
+              </div>
+              </div>
+
+              {/* SECTION: Freight-Specific & Transit Details (continuation of Route & Freight Details) */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    {targetDetailsShipment.freightType === 'sea' ? <Anchor className="w-4 h-4" /> : targetDetailsShipment.freightType === 'air' ? <Plane className="w-4 h-4" /> : <Truck className="w-4 h-4" />}
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Nakliye Türüne Özel Detaylar' : (lang === 'ar' ? 'تفاصيل خاصة بنوع الشحن' : 'Freight-Specific Details')}
+                  </h3>
                 </div>
 
                 {/* 5.1 Sea Freight Specific block */}
@@ -8253,6 +8337,19 @@ MARAS Group etir Center`;
                   )}
                 </div>
 
+              </div>
+
+              {/* SECTION: Status & Timeline */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Durum ve Zaman Cetveli' : (lang === 'ar' ? 'الحالة والجدول الزمني' : 'Status & Timeline')}
+                  </h3>
+                </div>
+
                 {/* 5.3 Dedicated Operations & Manual Status / Milestone Console */}
                 <div className="p-5 bg-slate-900 text-white rounded-xl space-y-4 md:col-span-2 shadow-xl border border-slate-700">
                   <div className="flex items-center gap-2 border-b border-slate-800 pb-2.5">
@@ -8317,6 +8414,52 @@ MARAS Group etir Center`;
                       )}
                     </button>
                   </div>
+                </div>
+
+                {/* 8. Detailed Shipment Timeline Tracker */}
+                <div className="space-y-3">
+                  <h4 className="font-bold text-slate-900 border-b border-slate-100 pb-2">{t('timeline')}</h4>
+                  {targetDetailsShipment.timeline.length > 0 ? (
+                    <div className="relative border-l border-slate-200 dark:border-slate-200 pl-4 space-y-6 ml-2 pt-2">
+                      {targetDetailsShipment.timeline.map((event, idx) => (
+                        <div key={idx} className="relative">
+                          {/* Bullet circle */}
+                          <span className="absolute -left-[21px] mt-0.5 p-1 bg-white border-2 border-slate-500 rounded-full">
+                            <span className="w-1.5 h-1.5 bg-slate-900 rounded-full block" />
+                          </span>
+
+                          <div className="space-y-0.5">
+                            <span className="text-[10px] font-mono text-slate-400 font-bold">
+                              {new Date(event.timestamp).toLocaleString()}
+                            </span>
+                            <h5 className="font-bold text-slate-900">
+                              {lang === 'en' ? event.labelEn : (lang === 'tr' ? event.labelTr : event.labelAr)}
+                            </h5>
+                            <p className="text-xs text-slate-600">
+                              {lang === 'en' ? event.detailsEn : (lang === 'tr' ? event.detailsTr : event.detailsAr)}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-slate-400 text-xs italic">
+                      {lang === 'tr' ? 'Henüz zaman cetveli kaydı yok.' : (lang === 'ar' ? 'لا توجد أحداث في الجدول الزمني بعد.' : 'No timeline events recorded yet.')}
+                    </p>
+                  )}
+                </div>
+
+              </div>
+
+              {/* SECTION: Sharing & Public Link */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <Share2 className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Paylaşım ve Genel Bağlantı' : (lang === 'ar' ? 'المشاركة والرابط العام' : 'Sharing & Public Link')}
+                  </h3>
                 </div>
 
                 {/* 6. Shipment Sharing Controls Center */}
@@ -8411,10 +8554,19 @@ MARAS Group etir Center`;
                   </div>
                 </div>
 
+              </div>
+
+              {/* SECTION: Documents */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <FileText className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">{t('documentCenter')}</h3>
+                </div>
+
                 {/* 7. Shipment Document Control Board */}
-                <div className="md:col-span-2 space-y-3">
-                  <h4 className="font-bold text-slate-900 border-b border-slate-100 pb-2">{t('documentCenter')}</h4>
-                  
+                <div className="space-y-3">
                   {targetDetailsShipment.documents.length > 0 ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {targetDetailsShipment.documents.map((doc) => (
@@ -8465,34 +8617,56 @@ MARAS Group etir Center`;
                   )}
                 </div>
 
-                {/* 8. Detailed Shipment Timeline Tracker */}
-                <div className="md:col-span-2 space-y-3">
-                  <h4 className="font-bold text-slate-900 border-b border-slate-100 pb-2">{t('timeline')}</h4>
-                  <div className="relative border-l border-slate-200 dark:border-slate-200 pl-4 space-y-6 ml-2 pt-2">
-                    {targetDetailsShipment.timeline.map((event, idx) => (
-                      <div key={idx} className="relative">
-                        {/* Bullet circle */}
-                        <span className="absolute -left-[21px] mt-0.5 p-1 bg-white border-2 border-slate-500 rounded-full">
-                          <span className="w-1.5 h-1.5 bg-slate-900 rounded-full block" />
-                        </span>
-                        
-                        <div className="space-y-0.5">
-                          <span className="text-[10px] font-mono text-slate-400 font-bold">
-                            {new Date(event.timestamp).toLocaleString()}
-                          </span>
-                          <h5 className="font-bold text-slate-900">
-                            {lang === 'en' ? event.labelEn : (lang === 'tr' ? event.labelTr : event.labelAr)}
-                          </h5>
-                          <p className="text-xs text-slate-600">
-                            {lang === 'en' ? event.detailsEn : (lang === 'tr' ? event.detailsTr : event.detailsAr)}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
               </div>
+
+              {/* SECTION: Financial / Cost Summary */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <DollarSign className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'Finansal Özet' : (lang === 'ar' ? 'الملخص المالي' : 'Financial / Cost Summary')}
+                  </h3>
+                </div>
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                  <span className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">{t('carrierAmount')}</span>
+                  <p className="font-bold text-orange-600 text-lg mt-0.5">{targetDetailsShipment.agreedAmount.toLocaleString()} {targetDetailsShipment.currency}</p>
+                </div>
+              </div>
+
+              {/* SECTION: Communication Shortcuts */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-900 text-white p-1.5 rounded-lg shrink-0">
+                    <MessageSquare className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider">
+                    {lang === 'tr' ? 'İletişim Kısayolları' : (lang === 'ar' ? 'اختصارات التواصل' : 'Communication Shortcuts')}
+                  </h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {([
+                    { channel: 'internal_staff' as const, label: lang === 'tr' ? 'Dahili Sohbet' : (lang === 'ar' ? 'دردشة داخلية' : 'Internal Chat') },
+                    { channel: 'driver_admin' as const, label: lang === 'tr' ? 'Sürücü Sohbet' : (lang === 'ar' ? 'دردشة السائق' : 'Driver Chat') },
+                    { channel: 'client_admin' as const, label: lang === 'tr' ? 'Müşteri Sohbet' : (lang === 'ar' ? 'دردشة العميل' : 'Customer Chat') },
+                  ]).map(({ channel, label: chatLabel }) => (
+                    <button
+                      key={channel}
+                      onClick={() => {
+                        setChatCenterFocus({ shipmentId: targetDetailsShipment.id, channel });
+                        setActiveTab('chat_center');
+                        setOpenDetailsId(null);
+                      }}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 bg-slate-900 hover:bg-slate-800 rounded-lg text-xs font-bold text-white transition-all cursor-pointer"
+                    >
+                      <MessageSquare className="w-4 h-4" />
+                      {chatLabel}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
             </div>
 
             {/* Modal Footer */}
