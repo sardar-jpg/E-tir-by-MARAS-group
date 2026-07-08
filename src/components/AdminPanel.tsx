@@ -9805,7 +9805,7 @@ MARAS Group etir Center`;
                       {/* Port of Loading (POL) */}
                       <div className="space-y-1">
                         <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
-                          <span>POL (Loading Port)</span>
+                          <span>Port of Loading (POL) <span className="text-red-500">*</span></span>
                           {getPortsForCountry(editingShipment.loadingCountry || "").length > 0 && (
                             <button
                               type="button"
@@ -9819,7 +9819,8 @@ MARAS Group etir Center`;
                           )}
                         </label>
                         {getPortsForCountry(editingShipment.loadingCountry || "").length > 0 && !useEditCustomPOL ? (
-                          <select 
+                          <select
+                            required
                             value={editingShipment.portOfLoading || ""}
                             onChange={(e) => {
                               if (e.target.value === "__CUSTOM__") {
@@ -9838,8 +9839,9 @@ MARAS Group etir Center`;
                             <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
                           </select>
                         ) : (
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
+                            required
                             placeholder="e.g. Port of Ambarli, Istanbul"
                             value={editingShipment.portOfLoading || ""}
                             onChange={(e) => setEditingShipment({ ...editingShipment, portOfLoading: e.target.value })}
@@ -9851,7 +9853,7 @@ MARAS Group etir Center`;
                       {/* Port of Discharge (POD) */}
                       <div className="space-y-1">
                         <label className="text-xs font-semibold text-slate-700 flex justify-between items-center h-4 font-sans">
-                          <span>POD (Discharge Port)</span>
+                          <span>Port of Discharge (POD) <span className="text-red-500">*</span></span>
                           {getPortsForCountry(editingShipment.deliveryCountry || "").length > 0 && (
                             <button
                               type="button"
@@ -9865,7 +9867,8 @@ MARAS Group etir Center`;
                           )}
                         </label>
                         {getPortsForCountry(editingShipment.deliveryCountry || "").length > 0 && !useEditCustomPOD ? (
-                          <select 
+                          <select
+                            required
                             value={editingShipment.portOfDischarge || ""}
                             onChange={(e) => {
                               if (e.target.value === "__CUSTOM__") {
@@ -9884,8 +9887,9 @@ MARAS Group etir Center`;
                             <option value="__CUSTOM__">✍️ Other (Type manual)...</option>
                           </select>
                         ) : (
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
+                            required
                             placeholder="e.g. Port of Umm Qasr"
                             value={editingShipment.portOfDischarge || ""}
                             onChange={(e) => setEditingShipment({ ...editingShipment, portOfDischarge: e.target.value })}
@@ -9996,18 +10000,22 @@ MARAS Group etir Center`;
 
                     <div className="grid grid-cols-3 gap-3">
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-700">Airport of Departure</label>
-                        <input 
-                          type="text" 
+                        <label className="text-xs font-semibold text-slate-700">Airport of Departure <span className="text-red-500">*</span></label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. IST (Istanbul)"
                           value={editingShipment.airportOfDeparture || ""}
                           onChange={(e) => setEditingShipment({ ...editingShipment, airportOfDeparture: e.target.value })}
                           className="w-full p-2.5 border border-slate-200 rounded-lg text-xs"
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-700">Airport of Arrival</label>
-                        <input 
-                          type="text" 
+                        <label className="text-xs font-semibold text-slate-700">Airport of Arrival <span className="text-red-500">*</span></label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. EBL (Erbil)"
                           value={editingShipment.airportOfArrival || ""}
                           onChange={(e) => setEditingShipment({ ...editingShipment, airportOfArrival: e.target.value })}
                           className="w-full p-2.5 border border-slate-200 rounded-lg text-xs"
