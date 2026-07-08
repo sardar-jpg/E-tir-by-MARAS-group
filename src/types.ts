@@ -191,7 +191,12 @@ export const TRUCK_TYPES = [
 // see internal driver/admin operational chat. Messages written before this
 // field existed have no channel — the server treats those as admin-only
 // (see server.ts chat routes) rather than guessing and risking a leak.
-export type ChatChannel = 'driver_admin' | 'client_admin';
+//
+// 'internal_staff' (PR #34) is a third, admin-only audience for MARAS
+// staff to discuss a shipment among themselves — never visible to driver
+// or client sessions, and never exposed via the public share proxy (see
+// chatVisibility.ts and the chat routes in server.ts).
+export type ChatChannel = 'driver_admin' | 'client_admin' | 'internal_staff';
 
 export interface ChatMessage {
   id: string;

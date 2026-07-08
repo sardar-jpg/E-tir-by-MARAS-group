@@ -1,12 +1,20 @@
 /**
  * chatVisibility.ts
  *
- * BUG-03: shipment chat is partitioned into two audiences —
+ * BUG-03: shipment chat is partitioned into audiences —
  * 'driver_admin' (dispatch/operational chat) and 'client_admin'
  * (customer-service chat) — so a driver never sees a client's identity or
  * messages, and a client never sees internal driver/admin operational
  * chat. Previously every role read/wrote the same unfiltered
  * `chatMessages` collection for a shipment.
+ *
+ * PR #34 adds a third audience, 'internal_staff' — MARAS staff discussing
+ * a shipment among themselves. It is admin-only: driver and client
+ * sessions must never read or write it, and it must never reach the
+ * public share proxy. Concretely this means driver/client are never
+ * allowed to resolve or request that channel (see
+ * canAccessInternalStaffChannel below), on top of the existing
+ * own-channel-only filtering they already get.
  *
  * Extracted from server.ts (same rationale as shipmentView.ts / auth.ts)
  * so the filtering/classification rules can be unit tested without
@@ -14,8 +22,8 @@
  *
  * Messages written before the `channel` field existed have no channel at
  * all. Those are only ever shown to admins — an untagged message could
- * belong to either audience and might contain the other party's identity,
- * so it's withheld from driver/client rather than guessed at.
+ * belong to any audience and might contain another party's identity, so
+ * it's withheld from driver/client rather than guessed at.
  */
 import type { ChatChannel } from "../types";
 
@@ -38,7 +46,7 @@ export function filterChatMessagesByRole<T extends { channel?: ChatChannel }>(
     return messages.filter((m) => m.channel === "client_admin");
   }
   // admin
-  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin") {
+  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin" || requestedChannel === "internal_staff") {
     return messages.filter((m) => m.channel === requestedChannel);
   }
   return messages;
@@ -58,7 +66,7 @@ export function resolveOutgoingChatChannel(
 ): ChatChannel | null {
   if (sender === "driver") return "driver_admin";
   if (sender === "client") return "client_admin";
-  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin") {
+  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin" || requestedChannel === "internal_staff") {
     return requestedChannel;
   }
   return null;
@@ -77,7 +85,7 @@ export function resolveSeenChannelFilter(
 ): ChatChannel | null {
   if (role === "driver") return "driver_admin";
   if (role === "client") return "client_admin";
-  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin") {
+  if (requestedChannel === "driver_admin" || requestedChannel === "client_admin" || requestedChannel === "internal_staff") {
     return requestedChannel;
   }
   return null;
@@ -113,4 +121,16 @@ export function isChatNotificationVisibleToRole(
   if (role === "driver") return notificationChannel === "driver_admin";
   if (role === "client") return notificationChannel === "client_admin";
   return true;
+}
+
+/**
+ * PR #34: explicit gate for the 'internal_staff' channel, on top of the
+ * own-channel-only filtering every other helper in this file already does.
+ * Called directly by the chat routes in server.ts so a driver/client
+ * request for `?channel=internal_staff` (or POST body `channel:
+ * "internal_staff"`) gets a hard 403 instead of silently falling through
+ * to the (also-safe, but less explicit) per-role filtering elsewhere.
+ */
+export function canAccessInternalStaffChannel(role: ChatRole): boolean {
+  return role === "admin";
 }

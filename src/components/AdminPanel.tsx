@@ -261,6 +261,23 @@ export default function AdminPanel({
   // a shipment + channel when navigating into the Chat Center tab.
   const [chatCenterFocus, setChatCenterFocus] = useState<ChatCenterFocus | null>(null);
 
+  // PR #34: internal_staff has no UI in the App.tsx full chat drawer (its
+  // channel toggle/header only know about driver_admin vs client_admin —
+  // extending it there risked touching that driver/client chat surface,
+  // which this PR intentionally leaves alone). So any "open chat" entry
+  // point that might carry channel: 'internal_staff' (unread dropdown,
+  // notification bell) routes to the Chat Center's Internal tab instead of
+  // the full drawer; every other channel keeps going to the full drawer as
+  // before.
+  const openShipmentChatForChannel = (shipment: Shipment, channel?: ChatChannel) => {
+    if (channel === 'internal_staff') {
+      setChatCenterFocus({ shipmentId: shipment.id, channel: 'internal_staff' });
+      setActiveTab('chat_center');
+      return;
+    }
+    onSelectShipmentChat(shipment, channel);
+  };
+
   // Real-time Dashboard Clock
   const [currentTime, setCurrentTime] = useState(new Date());
   useEffect(() => {
@@ -3271,7 +3288,7 @@ MARAS Group etir Center`;
                               {shipment && (
                                 <button
                                   onClick={() => {
-                                    onSelectShipmentChat(shipment, msg.channel || (msg.sender === 'client' ? 'client_admin' : 'driver_admin'));
+                                    openShipmentChatForChannel(shipment, msg.channel || (msg.sender === 'client' ? 'client_admin' : 'driver_admin'));
                                     setIsChatDropdownOpen(false);
                                   }}
                                   className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
@@ -3379,7 +3396,7 @@ MARAS Group etir Center`;
                                 {shipment && (
                                   <button
                                     onClick={() => {
-                                      onSelectShipmentChat(shipment, notif.channel);
+                                      openShipmentChatForChannel(shipment, notif.channel);
                                       setIsNotifOpen(false);
                                       if (isUnread) handleMarkNotifRead(notif.id);
                                     }}
@@ -7633,7 +7650,7 @@ MARAS Group etir Center`;
               <div className="flex items-center gap-1.5 shrink-0">
                 {/* Chat Center shortcuts — jump to this shipment's conversation, preselecting the channel. */}
                 {([
-                  { channel: 'internal' as const, label: lang === 'tr' ? 'Dahili' : (lang === 'ar' ? 'داخلي' : 'Internal') },
+                  { channel: 'internal_staff' as const, label: lang === 'tr' ? 'Dahili' : (lang === 'ar' ? 'داخلي' : 'Internal') },
                   { channel: 'driver_admin' as const, label: lang === 'tr' ? 'Sürücü' : (lang === 'ar' ? 'السائق' : 'Driver') },
                   { channel: 'client_admin' as const, label: lang === 'tr' ? 'Müşteri' : (lang === 'ar' ? 'العميل' : 'Customer') },
                 ]).map(({ channel, label: chatLabel }) => (
@@ -10463,7 +10480,7 @@ MARAS Group etir Center`;
                 {shipment && (
                   <button
                     onClick={() => {
-                      onSelectShipmentChat(shipment, notif.channel);
+                      openShipmentChatForChannel(shipment, notif.channel);
                       setActiveToasts(prev => prev.filter(t => t.id !== id));
                     }}
                     className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1 rounded-lg text-[11px] font-black shadow-md flex items-center gap-1 transition-all cursor-pointer border-0"
