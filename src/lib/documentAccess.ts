@@ -27,7 +27,63 @@
  * public/anonymous audience isSharedExternally exists to gate, and keep
  * receiving the real document record including its Storage URL.
  */
-import type { Shipment, ShipmentDocument } from "../types";
+import type { DocumentCategory, Shipment, ShipmentDocument } from "../types";
+
+/**
+ * Document-category visibility policy (feature/document-category-visibility-review).
+ *
+ * 'invoice' and 'other' are the two categories that can carry
+ * accounting/cost/vendor/internal content: 'invoice' is self-explanatory,
+ * and 'other' is this app's only catch-all category — nothing stops an
+ * admin from filing an internal cost statement or a vendor invoice under
+ * it, since there is no dedicated category for those (see the final report
+ * for a follow-up suggestion). Both are therefore treated as
+ * approval-required rather than safe-by-default everywhere below.
+ */
+const AMBIGUOUS_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set(["invoice", "other"]);
+
+/**
+ * Categories a driver may see for their own assigned shipment — CMR/POD,
+ * loading/packing instructions, and customs/border paperwork, i.e. exactly
+ * the "operational documents needed for the job" the Driver App's document
+ * panel already labels itself as ("No operational files registered.").
+ * Everything else (invoice, other, and photo, which isn't one of the listed
+ * driver-safe types) is withheld — a driver has no relation to customer
+ * invoices/accounting/cost documents, and 'other' is an unclassified
+ * catch-all that could contain any of those.
+ */
+const DRIVER_VISIBLE_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set([
+  "cmr",
+  "packing_list",
+  "customs",
+  "delivery_proof",
+]);
+
+export function isDocumentVisibleToDriver(doc: Pick<ShipmentDocument, "category">): boolean {
+  return DRIVER_VISIBLE_DOCUMENT_CATEGORIES.has(doc.category);
+}
+
+/**
+ * Whether an ambiguous-category document (invoice/other) may reach the
+ * authenticated Client dashboard. Non-ambiguous categories (cmr,
+ * packing_list, customs, delivery_proof, photo) stay visible by default, as
+ * they already were — this only tightens the two categories capable of
+ * carrying accounting/internal content, matching "customer invoices only
+ * if explicitly intended for customer visibility." isSharedExternally is
+ * reused as that explicit-intent flag: it is the only existing per-document
+ * "admin approved this" signal (see resolveNewDocumentSharedExternally —
+ * every new document defaults to false/unapproved), so an admin now has to
+ * flip it for an invoice/other document before the client's own dashboard
+ * shows it, not just before it can appear on the public tracking link.
+ */
+export function isDocumentVisibleToClient(
+  doc: Pick<ShipmentDocument, "category" | "isSharedExternally">
+): boolean {
+  if (AMBIGUOUS_DOCUMENT_CATEGORIES.has(doc.category)) {
+    return Boolean(doc.isSharedExternally);
+  }
+  return true;
+}
 
 /**
  * Whether a document should be visible/downloadable through the public
@@ -35,6 +91,14 @@ import type { Shipment, ShipmentDocument } from "../types";
  * JSON list — factored out so the download-proxy route can run the exact
  * same check at request time rather than trusting a URL/flag it saw
  * earlier.
+ *
+ * Public tracking is the anonymous, token-only audience — accounting/cost
+ * documents must never reach it (see AMBIGUOUS_DOCUMENT_CATEGORIES above),
+ * even if a document's isSharedExternally happens to be on, because that
+ * flag is meant to gate "share tracking link" visibility per document, and
+ * an admin toggling it for an invoice (e.g. so it reaches the authenticated
+ * client) must not accidentally also publish it to whoever holds the public
+ * link.
  */
 export function isDocumentVisibleForShare(
   doc: Pick<ShipmentDocument, "isSharedExternally" | "category">,
@@ -42,6 +106,7 @@ export function isDocumentVisibleForShare(
 ): boolean {
   if (!shipment.isLinkShared) return false;
   if (!doc.isSharedExternally) return false;
+  if (AMBIGUOUS_DOCUMENT_CATEGORIES.has(doc.category)) return false;
   return doc.category === "photo" ? Boolean(shipment.shareIncludePhotos) : Boolean(shipment.shareIncludeDocuments);
 }
 

@@ -8701,7 +8701,13 @@ MARAS Group etir Center`;
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               onClick={() => toggleDocVisibility(targetDetailsShipment.id, doc.id, doc.isSharedExternally)}
-                              title={doc.isSharedExternally ? "Visible on Share Tracking link" : "Hidden from Share Tracking link"}
+                              title={
+                                (doc.category === 'invoice' || doc.category === 'other')
+                                  ? (doc.isSharedExternally
+                                      ? "Visible on Share Tracking link AND the client's own dashboard"
+                                      : "Hidden from Share Tracking link AND the client's own dashboard (invoice/other docs need explicit approval)")
+                                  : (doc.isSharedExternally ? "Visible on Share Tracking link" : "Hidden from Share Tracking link")
+                              }
                               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
                                 doc.isSharedExternally 
                                   ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' 

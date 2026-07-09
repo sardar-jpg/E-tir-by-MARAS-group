@@ -24,8 +24,19 @@
  * these unchanged (their own data), same as the other identity fields.
  *
  * Admins always see the unredacted record.
+ *
+ * feature/document-category-visibility-review: `documents` used to be
+ * spread through unfiltered via `...rest` below — a driver or client got
+ * every document on the shipment regardless of category, including
+ * invoice/other entries that can carry accounting, cost, or internal
+ * content (e.g. a customer's own invoice, or a client_admin chat
+ * attachment auto-saved as a document — see shouldSaveChatFileAsShipmentDocument,
+ * chatVisibility.ts). isDocumentVisibleToDriver/isDocumentVisibleToClient
+ * (documentAccess.ts) now filter it per role, same as every other
+ * role-sensitive field here.
  */
 import type { Shipment } from "../types";
+import { isDocumentVisibleToClient, isDocumentVisibleToDriver } from "./documentAccess";
 
 export type ShipmentAccessSession = {
   role: "admin" | "driver" | "client";
@@ -74,8 +85,14 @@ export function buildShipmentViewForRole(
     loadingContactNumber: _loadingContactNumber,
     deliveryContactNumber: _deliveryContactNumber,
     additionalDrivers,
+    documents: _documents,
     ...rest
   } = shipment;
+
+  const documentsForRole =
+    session.role === "driver"
+      ? shipment.documents.filter(isDocumentVisibleToDriver)
+      : shipment.documents.filter(isDocumentVisibleToClient);
 
   const redactedAdditionalDrivers = additionalDrivers?.map((ad) => {
     if (session.role === "driver" && ad.driverId === session.id) {
@@ -89,6 +106,7 @@ export function buildShipmentViewForRole(
 
   return {
     ...rest,
+    documents: documentsForRole,
     ...(isOwnPrimaryShipment ? { agreedAmount: shipment.agreedAmount } : {}),
     ...(additionalDrivers ? { additionalDrivers: redactedAdditionalDrivers } : {}),
     ...(session.role === "client"
