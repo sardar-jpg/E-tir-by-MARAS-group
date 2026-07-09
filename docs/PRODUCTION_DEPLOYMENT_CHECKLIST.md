@@ -174,8 +174,10 @@ Firestore.
 - **Demo accounts should not be seeded in production.** Separately from
   `SEED_DEMO_DATA`, `server.ts`'s `DEMO_ACCOUNTS` (one demo login per role:
   `admin@demo.local`, `driver@demo.local` / `demo_driver`,
-  `client@demo.local` / `demo_client`, plus a local-only owner alias) is
-  gated on `IS_LOCAL_DEV = NODE_ENV !== "production"` — so setting
+  `client@demo.local` / `demo_client`, `client.staff@demo.local` /
+  `demo_client_staff` (Client Staff, `isEmployee: true`, same company as
+  `demo_client`), plus a local-only owner alias) is gated on
+  `IS_LOCAL_DEV = NODE_ENV !== "production"` — so setting
   `NODE_ENV=production` already disables this seeding path entirely,
   independent of `SEED_DEMO_DATA`. Confirm `NODE_ENV=production` is
   actually set on the Cloud Run service (don't rely on Cloud Run's
@@ -183,8 +185,8 @@ Firestore.
 - **If demo accounts exist in production** (e.g. from a prior
   misconfigured deploy), remove/disable them before launch: check the
   `admins`, `drivers`, and `clients` Firestore collections for the
-  `*.demo.local` email addresses / `demo_driver` / `demo_client` usernames
-  above and delete those records.
+  `*.demo.local` email addresses / `demo_driver` / `demo_client` /
+  `demo_client_staff` usernames above and delete those records.
 
 ## 6. Authentication and sessions
 
@@ -258,6 +260,13 @@ Smoke-test items (log in as each and confirm):
 - [ ] Sees only own customer-safe shipments
 - [ ] Can use customer/admin (`client_admin`) chat and upload a file
       (PDF/JPG/PNG/WebP/DOC(X)/XLS(X)) alongside or instead of text
+
+**Client Staff** (`isEmployee: true`, e.g. local demo `demo_client_staff`)
+- [ ] Login succeeds; sees the same company's shipments as the owner
+      account, and no other company's
+- [ ] Can use `client_admin` chat and upload a file, same as the owner
+- [ ] Cannot self-delete the account, cannot access admin/driver/internal
+      surfaces (`canClientSelfDeleteAccount`, `src/lib/clientAccess.ts`)
 
 **Driver**
 - [ ] Sees only assigned driver-safe jobs
@@ -526,7 +535,8 @@ referenced here rather than duplicated:
   real Firebase project against them (staging or production) is still a
   manual step — no real Firebase credentials were available to run this
   automatically as part of adding the guide.
-- Seed demo Client Staff account (local dev only)
+- ~~Seed demo Client Staff account (local dev only)~~ — **Done in PR #67**,
+  see `docs/FOLLOW_UP_ROADMAP.md`
 - Repository Cleanup / Legacy Files Review (`Etir/e-tir-by-maras`,
   `etir-new` scaffold directories)
 - Performance / Bundle Size Optimization (Vite chunk-size warnings)
