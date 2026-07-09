@@ -140,16 +140,24 @@ describe("filterChatMessagesByRole with file attachments (PR #35)", () => {
 });
 
 describe("shouldSaveChatFileAsShipmentDocument", () => {
-  it("saves client_admin attachments as shipment documents", () => {
-    expect(shouldSaveChatFileAsShipmentDocument("client_admin")).toBe(true);
+  it("saves an admin-sent client_admin attachment as a shipment document", () => {
+    expect(shouldSaveChatFileAsShipmentDocument("client_admin", "admin")).toBe(true);
+  });
+
+  it("PR #62: never saves a customer/client-staff-sent client_admin attachment as a shipment document — stays chat-only until an admin separately approves it", () => {
+    expect(shouldSaveChatFileAsShipmentDocument("client_admin", "client")).toBe(false);
   });
 
   it("PR #39: never saves a driver_admin attachment as a shipment document — it stayed customer/public visible with no admin approval", () => {
-    expect(shouldSaveChatFileAsShipmentDocument("driver_admin")).toBe(false);
+    expect(shouldSaveChatFileAsShipmentDocument("driver_admin", "admin")).toBe(false);
   });
 
   it("never saves an internal_staff attachment as a shipment document", () => {
-    expect(shouldSaveChatFileAsShipmentDocument("internal_staff")).toBe(false);
+    expect(shouldSaveChatFileAsShipmentDocument("internal_staff", "admin")).toBe(false);
+  });
+
+  it("never saves an attachment when sender is missing (defensive default)", () => {
+    expect(shouldSaveChatFileAsShipmentDocument("client_admin")).toBe(false);
   });
 });
 
