@@ -50,10 +50,11 @@ import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
-import { isDocumentVisibleForShare } from "./src/lib/documentAccess";
+import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
+import { validateUpload } from "./src/lib/uploadValidation";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -2054,6 +2055,15 @@ async function startServer() {
       const base64Data = match[2];
       const buffer = Buffer.from(base64Data, "base64");
 
+      // PR #46: reject anything outside the PDF/JPG/PNG/WebP/DOC(X)/XLS(X)
+      // allowlist and anything over the per-file size cap before it ever
+      // reaches Storage. The client's file-input `accept=` is advisory only
+      // (this endpoint can be called directly), so this is the real check.
+      const validation = validateUpload(mimeType, filename, buffer.length);
+      if (!validation.ok) {
+        return res.status(415).json({ error: validation.error });
+      }
+
       if (useMemoryFallback || !firebaseApp) {
         // No durable storage available right now — say so plainly rather
         // than silently keeping the file in memory only, where it would
@@ -3150,7 +3160,10 @@ async function startServer() {
           category: fileCategory || "other",
           uploadedBy: senderName || (sender === "admin" ? "Admin" : sender === "client" ? "Client" : "Driver"),
           uploadedAt: new Date().toISOString(),
-          isSharedExternally: true
+          // PR #46: new documents default internal-only — an admin opts one
+          // into the public tracking link explicitly via the document
+          // center's visibility toggle (see resolveNewDocumentSharedExternally).
+          isSharedExternally: resolveNewDocumentSharedExternally()
         };
 
         shipmentItem.documents.push(newDoc);
@@ -3247,7 +3260,8 @@ async function startServer() {
         category: (category as DocumentCategory) || "other",
         uploadedBy: uploadedBy || "Admin",
         uploadedAt: new Date().toISOString(),
-        isSharedExternally: isSharedExternally !== undefined ? isSharedExternally : true
+        // PR #46: internal-only by default — see resolveNewDocumentSharedExternally.
+        isSharedExternally: resolveNewDocumentSharedExternally(isSharedExternally)
       };
 
       shipmentItem.documents.push(newDoc);

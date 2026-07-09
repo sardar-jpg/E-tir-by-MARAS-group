@@ -54,3 +54,20 @@ export function isDocumentVisibleForShare(
 export function buildPublicShareDocumentPath(shareToken: string, docId: string): string {
   return `/api/share/${encodeURIComponent(shareToken)}/documents/${encodeURIComponent(docId)}`;
 }
+
+/**
+ * PR #46: whether a newly created shipment document should default to
+ * externally-shared. Both call sites that create a document (the
+ * client_admin chat auto-save, and the direct document-center upload route
+ * in server.ts) previously hardcoded/defaulted this to `true` — meaning a
+ * document was public-tracking-eligible (pending only isLinkShared +
+ * shareIncludeDocuments) the instant it was created, unless a caller
+ * remembered to say otherwise. AdminPanel's document center has a
+ * dedicated per-document eye/eye-off toggle for exactly this decision,
+ * which only makes sense if new documents start hidden and an admin
+ * explicitly turns one on — so the default here is `false`; only an
+ * explicit `true` opts a new document into public visibility.
+ */
+export function resolveNewDocumentSharedExternally(explicit?: boolean): boolean {
+  return explicit === true;
+}
