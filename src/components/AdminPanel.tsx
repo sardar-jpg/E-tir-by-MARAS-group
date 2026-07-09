@@ -36,6 +36,7 @@ import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
+import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
@@ -6505,6 +6506,13 @@ MARAS Group etir Center`;
                   }
                   if (!gmailTo.trim() || !gmailSubject.trim() || !gmailBody.trim()) {
                     setGmailResponse({ success: false, message: "Recipient, Subject, and Body are required." });
+                    return;
+                  }
+                  if (containsRawPrivateDocumentUrl(gmailSubject) || containsRawPrivateDocumentUrl(gmailBody)) {
+                    setGmailResponse({
+                      success: false,
+                      message: "This message contains a raw private document/storage link, which is not safe to email. Use the safe tracking link instead of raw storage/private document links."
+                    });
                     return;
                   }
 
