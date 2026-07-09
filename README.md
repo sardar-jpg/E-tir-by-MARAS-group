@@ -22,5 +22,6 @@ View your app in AI Studio: https://ai.studio/apps/43f003da-29bb-4b79-b7a4-8fcf5
 ## Documentation
 
 - [Production Deployment Checklist](docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md) — required reading before launching on `etir.app`
+- [Real Firebase Verification](docs/REAL_FIREBASE_VERIFICATION.md) — procedure for verifying real Firestore/Storage/Auth behavior before relying on it
 - [Follow-Up Roadmap](docs/FOLLOW_UP_ROADMAP.md) — deferred items tracked between PRs
 - [Project Reference](ETIR-PROJECT-REFERENCE.md) — architecture, deploy mechanics, and operational gotchas
