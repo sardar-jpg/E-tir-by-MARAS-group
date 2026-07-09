@@ -679,6 +679,7 @@ export default function AdminPanel({
   const [isSubmittingEditClient, setIsSubmittingEditClient] = useState(false);
 
   const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const notifDropdownRef = React.useRef<HTMLDivElement>(null);
   const [activeToasts, setActiveToasts] = useState<{ id: string; notif: AppNotification }[]>([]);
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const isFirstLoadRef = React.useRef(true);
@@ -1032,7 +1033,15 @@ MARAS Group etir Center`;
 
   const handleMarkNotifRead = async (id: string) => {
     try {
-      await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+      const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+      // Only reflect the change locally once the backend actually recorded
+      // it — otherwise a failed request (e.g. a 403/500) still looked like
+      // it worked until the next background refresh silently reverted the
+      // notification back to unread.
+      if (!res.ok) {
+        console.error(`Failed to mark notification ${id} as read: ${res.status}`);
+        return;
+      }
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     } catch (err) {
       console.error(err);
@@ -1041,7 +1050,11 @@ MARAS Group etir Center`;
 
   const handleMarkAllNotifsRead = async () => {
     try {
-      await apiFetch(`/api/notifications/clear`, { method: "POST" });
+      const res = await apiFetch(`/api/notifications/clear`, { method: "POST" });
+      if (!res.ok) {
+        console.error(`Failed to mark all notifications as read: ${res.status}`);
+        return;
+      }
       setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     } catch (err) {
       console.error(err);
@@ -1367,6 +1380,28 @@ MARAS Group etir Center`;
       document.removeEventListener('keydown', handleEscapeKey);
     };
   }, [isChatDropdownOpen]);
+
+  // Close the Notifications panel on outside click or Escape key — same
+  // pattern as the Unread Driver Chats dropdown above. Previously this
+  // panel could only be closed by clicking the bell again, with no close
+  // button and no outside-click handling, making it hard to dismiss.
+  useEffect(() => {
+    if (!isNotifOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (notifDropdownRef.current && !notifDropdownRef.current.contains(e.target as Node)) {
+        setIsNotifOpen(false);
+      }
+    };
+    const handleEscapeKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsNotifOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEscapeKey);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscapeKey);
+    };
+  }, [isNotifOpen]);
 
   // Close the ✨ MARAS AI drawer on Escape key (outside-click is handled by
   // the backdrop's own onClick, since the drawer is a fixed overlay).
@@ -3384,7 +3419,7 @@ MARAS Group etir Center`;
           </div>
 
           {/* Notification Bell Dropdown */}
-          <div className="relative">
+          <div className="relative" ref={notifDropdownRef}>
             <button
               onClick={() => {
                 setIsNotifOpen(!isNotifOpen);
@@ -3417,14 +3452,24 @@ MARAS Group etir Center`;
                       </span>
                     )}
                   </div>
-                  {notifications.filter(n => !n.read).length > 0 && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    {notifications.filter(n => !n.read).length > 0 && (
+                      <button
+                        onClick={handleMarkAllNotifsRead}
+                        className="text-xs text-orange-500 hover:text-orange-600 font-semibold cursor-pointer border-0 bg-transparent"
+                      >
+                        {lang === 'tr' ? 'Tümünü okundu işaretle' : lang === 'ar' ? 'تحديد الكل كمقروء' : 'Mark all as read'}
+                      </button>
+                    )}
                     <button
-                      onClick={handleMarkAllNotifsRead}
-                      className="text-xs text-orange-500 hover:text-orange-600 font-semibold cursor-pointer border-0 bg-transparent"
+                      onClick={() => setIsNotifOpen(false)}
+                      className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all border-0 cursor-pointer shrink-0"
+                      title="Close"
+                      aria-label="Close notifications"
                     >
-                      {lang === 'tr' ? 'Tümünü okundu işaretle' : lang === 'ar' ? 'تحديد الكل كمقروء' : 'Mark all as read'}
+                      <X className="w-4 h-4" />
                     </button>
-                  )}
+                  </div>
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1.5 scrollbar-thin">
