@@ -10,6 +10,7 @@ import {
   canManageVendors,
   canViewCostStatements,
   canViewAuditLogs,
+  canViewLogisticsAnalytics,
   resolveFullAdminStatus,
   sanitizeCreatedAdminType,
   isProtectedOwnerAccount,
@@ -86,6 +87,15 @@ describe("canViewCostStatements", () => {
     expect(canViewCostStatements("accounts")).toBe(true);
     expect(canViewCostStatements("operation")).toBe(false);
     expect(canViewCostStatements(undefined)).toBe(false);
+  });
+});
+
+describe("canViewLogisticsAnalytics", () => {
+  it("allows only super — operation never had Reports, and accounts can't fetch the shipments the charts are built from", () => {
+    expect(canViewLogisticsAnalytics("super")).toBe(true);
+    expect(canViewLogisticsAnalytics("operation")).toBe(false);
+    expect(canViewLogisticsAnalytics("accounts")).toBe(false);
+    expect(canViewLogisticsAnalytics(undefined)).toBe(false);
   });
 });
 
