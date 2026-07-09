@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./documentAccess";
+import {
+  isDocumentVisibleForShare,
+  buildPublicShareDocumentPath,
+  resolveNewDocumentSharedExternally,
+} from "./documentAccess";
 
 const sharedShipment = { isLinkShared: true, shareIncludeDocuments: true, shareIncludePhotos: true };
 
@@ -53,5 +57,19 @@ describe("buildPublicShareDocumentPath", () => {
 
   it("URL-encodes the token and doc id", () => {
     expect(buildPublicShareDocumentPath("tok/123", "doc 1")).toBe("/api/share/tok%2F123/documents/doc%201");
+  });
+});
+
+describe("resolveNewDocumentSharedExternally", () => {
+  it("PR #46: defaults a new document to internal-only when no explicit flag is given", () => {
+    expect(resolveNewDocumentSharedExternally(undefined)).toBe(false);
+  });
+
+  it("keeps a document internal-only when explicitly set to false", () => {
+    expect(resolveNewDocumentSharedExternally(false)).toBe(false);
+  });
+
+  it("only opts a document into public visibility on an explicit true", () => {
+    expect(resolveNewDocumentSharedExternally(true)).toBe(true);
   });
 });
