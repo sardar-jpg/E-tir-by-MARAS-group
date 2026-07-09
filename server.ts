@@ -4738,7 +4738,11 @@ async function startServer() {
             notes: "",
             items: [],
             createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
+            // Accounts-safe snapshot (PR #60) — see the CostStatement.agreedAmount/
+            // truckNumber comment in src/types.ts.
+            agreedAmount: s.agreedAmount,
+            truckNumber: s.truckNumber
           };
           return res.json(templateStatement);
         }
@@ -4760,13 +4764,14 @@ async function startServer() {
       if (!sDoc.exists() && !useMemoryFallback) {
         return res.status(404).json({ error: "Shipment not found" });
       }
-      
+      const sData = sDoc.exists() ? (sDoc.data() as Shipment) : undefined;
+
       const items = data.items || [];
       const totalCost = items.reduce((sum, item) => sum + (Number(item.totalAmount) || 0), 0);
       const paidAmount = Number(data.paidAmount) || 0;
       const remainingBalance = totalCost - paidAmount;
       const paymentStatus = remainingBalance <= 0 && totalCost > 0 ? "Paid" : (paidAmount > 0 ? "Partial" : "Unpaid");
-      
+
       const finalStatement: CostStatement = {
         shipmentId,
         shipmentNumber: data.shipmentNumber || "",
@@ -4781,7 +4786,15 @@ async function startServer() {
         notes: data.notes || "",
         items,
         createdAt: data.createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        // Accounts-safe snapshot (PR #60): sourced from the authoritative
+        // shipment record (not the client payload) whenever it exists, so
+        // accounts admins reading this statement later — without shipment-
+        // registry access — see a value that actually matches the
+        // shipment. See the CostStatement.agreedAmount/truckNumber comment
+        // in src/types.ts.
+        agreedAmount: sData?.agreedAmount ?? data.agreedAmount,
+        truckNumber: sData?.truckNumber || data.truckNumber || ""
       };
       
       const dRef = doc(db, "costStatements", shipmentId);
