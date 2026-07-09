@@ -300,5 +300,20 @@ export interface CostStatement {
   items: CostItem[];
   createdAt: string;
   updatedAt: string;
+
+  // Accounts Admin data completeness (PR #60): accounts admins can view
+  // cost statements (canViewCostStatements) but never fetch the shipment
+  // registry (canViewShipmentRegistry is super/operation only), so the
+  // Costs tab can't rely on joining against the live `shipments` array for
+  // this role. These are accounting-safe snapshot fields copied from the
+  // shipment at cost-statement create/update time (see server.ts POST
+  // /api/cost-statements/:shipmentId) so search/filter/display and
+  // customer-facing exports (costStatementExportView.ts) work from the
+  // statement alone. Both are already shown/used in the accounts-visible
+  // Costs UI today (the "Contract Agreed Amount" column and the "truck
+  // plate" search field) — not new data exposure, just no longer requiring
+  // a shipments join to read it.
+  agreedAmount?: number;
+  truckNumber?: string;
 }
 

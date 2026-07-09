@@ -36,6 +36,7 @@ import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
+import { buildCostStatementRows, filterCostStatementRows, resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { jsPDF } from "jspdf";
 
@@ -1726,7 +1727,11 @@ MARAS Group etir Center`;
   const handleExportCSV = (stmt: CostStatement) => {
     let csvContent = "data:text/csv;charset=utf-8,";
     csvContent += "Cost Type,Description,Supplier Name,Quantity,Unit Price,Total Amount,Currency,Notes\n";
-    const matchingShipment = shipments.find(s => s.id === stmt.shipmentId);
+    // Accounts-safe: reads the statement's own agreedAmount/freightType
+    // snapshot first, so this doesn't silently zero out for accounts
+    // admins (shipments is always [] for that role — see
+    // costStatementRegistryView.ts).
+    const matchingShipment = resolveStatementShipmentContext(stmt, shipments);
     const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement);
     items.forEach(item => {
       const row = [
@@ -1792,7 +1797,8 @@ MARAS Group etir Center`;
         doc.text(sanitizePdfText(val), x, y, options);
       };
       
-      const matchingShipment = shipments.find(s => s.id === selectedCostStatement.shipmentId);
+      // Accounts-safe: see the matching comment in handleExportCSV above.
+      const matchingShipment = resolveStatementShipmentContext(selectedCostStatement, shipments);
 
       // Filter items to render based on selection — customer-facing modes
       // never get raw internal cost items (see costStatementExportView.ts).
@@ -2163,7 +2169,7 @@ MARAS Group etir Center`;
   };
 
   const renderStatementHeader = (selectedStatement: CostStatement) => {
-    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     let title = lang === 'tr' ? 'MALİYET BEYANNAMESİ' : 'COST STATEMENT';
     let refNum = `Reference: MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
     
@@ -2204,7 +2210,7 @@ MARAS Group etir Center`;
   };
 
   const renderStatementPartyInfo = (selectedStatement: CostStatement) => {
-    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     if (statementPreviewMode === 'vendor_statement') {
       return (
         <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 text-[11px] leading-relaxed">
@@ -2248,7 +2254,7 @@ MARAS Group etir Center`;
   };
 
   const renderStatementBodyTable = (selectedStatement: CostStatement) => {
-    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     if (statementPreviewMode === 'invoice') {
       const amt = matchingShipment?.agreedAmount || 0;
       return (
@@ -2426,7 +2432,7 @@ MARAS Group etir Center`;
   };
 
   const renderStatementTotalsSection = (selectedStatement: CostStatement) => {
-    const matchingShipment = shipments.find(s => s.id === selectedStatement.shipmentId);
+    const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     if (statementPreviewMode === 'invoice') {
       const totalInv = matchingShipment?.agreedAmount || 0;
       const paidDeposit = selectedStatement.paidAmount || 0;
@@ -7364,38 +7370,19 @@ MARAS Group etir Center`;
           .sort((a,b) => Number(b.value) - Number(a.value))
           .slice(0, 5);
 
-        // Core dynamic filter query
-        const filteredShipmentsCosts = shipments.filter(sh => {
-          const query = costSearchQuery.toLowerCase().trim();
-          const stmt = costStatements.find(cs => cs.shipmentId === sh.id);
-          
-          if (query) {
-            const hasSupplierMatch = stmt?.items?.some(item => 
-              item.supplierName?.toLowerCase().includes(query) ||
-              item.costType?.toLowerCase().includes(query) ||
-              item.description?.toLowerCase().includes(query)
-            );
-            const numMatch = sh.shipmentNumber?.toLowerCase().includes(query);
-            const clientMatch = sh.companyName?.toLowerCase().includes(query);
-            const truckMatch = sh.truckNumber?.toLowerCase().includes(query);
-            
-            if (!numMatch && !clientMatch && !truckMatch && !hasSupplierMatch) {
-              return false;
-            }
-          }
-
-          if (costStatusFilter !== 'All') {
-            const status = stmt?.paymentStatus || "Unpaid";
-            if (status !== costStatusFilter) return false;
-          }
-
-          if (costTypeFilter !== 'All') {
-            const type = sh.freightType || "land";
-            if (type !== costTypeFilter) return false;
-          }
-
-          return true;
-        });
+        // Core dynamic filter query. Built from costStatements first (see
+        // costStatementRegistryView.ts) so this doesn't depend on the
+        // `shipments` client array — GET /api/shipments 403s for accounts
+        // admins (canViewShipmentRegistry, adminAccess.ts), so `shipments`
+        // is always [] for that role, but they can still fetch
+        // costStatements (canViewCostStatements) and should see them here.
+        const costStatementRegistryRows = buildCostStatementRows(costStatements, shipments);
+        const filteredShipmentsCosts = filterCostStatementRows(
+          costStatementRegistryRows,
+          costSearchQuery,
+          costStatusFilter,
+          costTypeFilter
+        );
 
         const activeCurrencies = Object.keys(totalCostsByCurrency);
 
@@ -7623,21 +7610,21 @@ MARAS Group etir Center`;
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {filteredShipmentsCosts.length > 0 ? (
-                      filteredShipmentsCosts.map((sh) => {
-                        const stmt = costStatements.find(cs => cs.shipmentId === sh.id);
-                        const freightType = sh.freightType || "land";
-                        
+                      filteredShipmentsCosts.map((row) => {
+                        const stmt = row.statement;
+                        const freightType = row.freightType;
+
                         return (
-                          <tr key={sh.id} className="hover:bg-slate-50/50 transition-colors">
-                            
+                          <tr key={row.shipmentId} className="hover:bg-slate-50/50 transition-colors">
+
                             {/* Shipment Details */}
                             <td className="p-3">
-                              <div className="font-extrabold text-slate-900 group-hover:text-orange-600 transition-colors uppercase tracking-tight">{sh.shipmentNumber}</div>
-                              <div className="text-[10px] text-slate-400 mt-0.5 max-w-xs truncate">{sh.cargoDescription || "General cargo goods"}</div>
+                              <div className="font-extrabold text-slate-900 group-hover:text-orange-600 transition-colors uppercase tracking-tight">{row.shipmentNumber}</div>
+                              <div className="text-[10px] text-slate-400 mt-0.5 max-w-xs truncate">{row.cargoDescription || "General cargo goods"}</div>
                             </td>
 
                             {/* Client Name */}
-                            <td className="p-3 font-semibold text-slate-800">{sh.companyName}</td>
+                            <td className="p-3 font-semibold text-slate-800">{row.companyName}</td>
 
                             {/* Freight Segment Type */}
                             <td className="p-3 text-center">
@@ -7648,7 +7635,7 @@ MARAS Group etir Center`;
 
                             {/* Contract amount agreed with customer */}
                             <td className="p-3 text-right font-mono font-bold text-slate-700">
-                              {Number(sh.agreedAmount || 0).toLocaleString()} <span className="text-[10px] text-slate-400">{sh.currency || "USD"}</span>
+                              {Number(row.agreedAmount || 0).toLocaleString()} <span className="text-[10px] text-slate-400">{row.currency || "USD"}</span>
                             </td>
 
                             {/* Declared total costs */}
@@ -7658,7 +7645,7 @@ MARAS Group etir Center`;
                                   {Number(stmt.totalCost).toLocaleString()} <span className="text-[10px] text-slate-500">{stmt.currency}</span>
                                 </span>
                               ) : (
-                                <span className="text-slate-400 italic text-[11px] font-mono">0.00 {sh.currency || "USD"}</span>
+                                <span className="text-slate-400 italic text-[11px] font-mono">0.00 {row.currency || "USD"}</span>
                               )}
                             </td>
 
@@ -7690,10 +7677,10 @@ MARAS Group etir Center`;
                             {/* Action to create or view cost statement */}
                             <td className="p-3 text-center">
                               <button
-                                onClick={() => handleSelectActiveStatement(sh.id)}
+                                onClick={() => handleSelectActiveStatement(row.shipmentId)}
                                 className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl border transition-all cursor-pointer inline-flex items-center gap-1 shrink-0 ${
-                                  stmt 
-                                    ? 'bg-slate-900 border-slate-800 text-white hover:bg-slate-800' 
+                                  stmt
+                                    ? 'bg-slate-900 border-slate-800 text-white hover:bg-slate-800'
                                     : 'bg-white border-orange-500/40 hover:border-orange-500 text-orange-600 hover:bg-orange-500/5'
                                 }`}
                               >

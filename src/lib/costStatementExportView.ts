@@ -94,7 +94,7 @@ function buildClientStatementItems(
 export function resolveExportItems(
   mode: CostStatementExportMode,
   statement: CostStatement,
-  shipment: Shipment | undefined,
+  shipment: Pick<Shipment, "agreedAmount" | "freightType"> | undefined,
   selectedVendor?: string
 ): CostItem[] {
   const items = statement.items || [];
