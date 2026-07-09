@@ -487,7 +487,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           {viewOnly && (
             <span className="px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-lg flex items-center gap-1.5">
               <Eye className="w-3 h-3" />
-              View Only
+              {lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "طاقم العميل" : "Client Staff")}
             </span>
           )}
 

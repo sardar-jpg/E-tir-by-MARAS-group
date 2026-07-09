@@ -5106,7 +5106,7 @@ MARAS Group etir Center`;
                                   <span>{client.contactName}</span>
                                   {client.isEmployee && (
                                     <span className="px-1.5 py-0.5 bg-orange-50 border border-orange-200 text-orange-600 text-[9px] font-black uppercase rounded tracking-wider">
-                                      Employee
+                                      {lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "طاقم العميل" : "Client Staff")}
                                     </span>
                                   )}
                                 </div>
@@ -5338,7 +5338,7 @@ MARAS Group etir Center`;
                         className="w-4 h-4 accent-orange-600 cursor-pointer"
                       />
                       <span className="font-bold text-slate-700 text-xs">
-                        {lang === 'tr' ? "Çalışan / Salt Görüntüleme Hesabı" : (lang === 'ar' ? "حساب موظف (للمشاهدة فقط)" : "Employee / View-Only Account")}
+                        {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
                       </span>
                     </label>
 
@@ -5499,7 +5499,7 @@ MARAS Group etir Center`;
                     />
                   </div>
 
-                  {/* Employee / Login Account Section */}
+                  {/* Client Staff / Login Account Section */}
                   <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
                     <label className="flex items-center gap-2.5 cursor-pointer select-none">
                       <input
@@ -5509,7 +5509,7 @@ MARAS Group etir Center`;
                         className="w-4 h-4 accent-orange-600 cursor-pointer"
                       />
                       <span className="font-bold text-slate-700 text-xs">
-                        {lang === 'tr' ? "Çalışan / Salt Görüntüleme Hesabı" : (lang === 'ar' ? "حساب موظف (للمشاهدة فقط)" : "Employee / View-Only Account")}
+                        {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
                       </span>
                     </label>
 
