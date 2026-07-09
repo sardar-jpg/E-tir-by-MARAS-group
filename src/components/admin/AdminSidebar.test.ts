@@ -20,6 +20,7 @@ const ALL_ADMIN_TAB_IDS = [
   "audit",
   "team",
   "my_account",
+  "settings",
 ];
 
 describe("findUngroupedTabIds", () => {
