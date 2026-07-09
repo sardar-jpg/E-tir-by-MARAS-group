@@ -120,6 +120,12 @@ const DEMO_ACCOUNTS = IS_LOCAL_DEV
       owner: { email: "sardar@maras.iq", password: "LocalOwner123!" },
       driver: { username: "demo_driver", email: "driver@demo.local", password: "DemoDriver123!" },
       client: { username: "demo_client", email: "client@demo.local", password: "DemoClient123!" },
+      // Client Staff (Client.isEmployee) demo login, tied to the same
+      // "Demo Client Co." company as the demo_client owner account above —
+      // see clientAccess.ts for why this is a separate Firestore/memory
+      // record rather than a flag on the owner. Local/dev-only, same as
+      // every other DEMO_ACCOUNTS entry.
+      clientStaff: { username: "demo_client_staff", email: "client.staff@demo.local", password: "DemoClientStaff123!" },
     }
   : null;
 
@@ -279,12 +285,31 @@ function getMemoryStore() {
         password: hashPassword(DEMO_ACCOUNTS.client.password),
         createdAt: new Date().toISOString(),
       });
+      // Client Staff demo login: its own Client record (own id/username/
+      // password), attached to the same "Demo Client Co." companyName as
+      // the owner above so it gets identical customer-safe shipment/chat
+      // scoping, but with isEmployee: true so clientAccess.ts's
+      // isClientStaffAccount/canClientSelfDeleteAccount block it from
+      // self-deleting or managing the account the way the owner can.
+      memoryStore.clients.push({
+        id: "demo-client-staff",
+        companyName: "Demo Client Co.",
+        contactName: "Demo Client Staff (local/demo only)",
+        phone: "+1 000 000 0002",
+        email: DEMO_ACCOUNTS.clientStaff.email,
+        address: "N/A",
+        username: DEMO_ACCOUNTS.clientStaff.username,
+        password: hashPassword(DEMO_ACCOUNTS.clientStaff.password),
+        isEmployee: true,
+        createdAt: new Date().toISOString(),
+      });
 
       console.log("\n[local dev] Memory fallback is active — seeded demo accounts for local login:");
-      console.log(`  Admin  -> username: ${DEMO_ACCOUNTS.admin.email}   password: ${DEMO_ACCOUNTS.admin.password}`);
-      console.log(`  Owner  -> username: ${DEMO_ACCOUNTS.owner.email}   password: ${DEMO_ACCOUNTS.owner.password}`);
-      console.log(`  Driver -> username: ${DEMO_ACCOUNTS.driver.username}   password: ${DEMO_ACCOUNTS.driver.password}`);
-      console.log(`  Client -> username: ${DEMO_ACCOUNTS.client.username}   password: ${DEMO_ACCOUNTS.client.password}\n`);
+      console.log(`  Admin        -> username: ${DEMO_ACCOUNTS.admin.email}   password: ${DEMO_ACCOUNTS.admin.password}`);
+      console.log(`  Owner        -> username: ${DEMO_ACCOUNTS.owner.email}   password: ${DEMO_ACCOUNTS.owner.password}`);
+      console.log(`  Driver       -> username: ${DEMO_ACCOUNTS.driver.username}   password: ${DEMO_ACCOUNTS.driver.password}`);
+      console.log(`  Client       -> username: ${DEMO_ACCOUNTS.client.username}   password: ${DEMO_ACCOUNTS.client.password}`);
+      console.log(`  Client Staff -> username: ${DEMO_ACCOUNTS.clientStaff.username}   password: ${DEMO_ACCOUNTS.clientStaff.password}\n`);
     }
   }
   return memoryStore;

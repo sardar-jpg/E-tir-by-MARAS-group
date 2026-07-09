@@ -375,9 +375,9 @@ as concrete real-Firebase checks (not just tab visibility) — see
       Fallback"`, `"utilizing default Memory Fallback"`, or any
       `[STARTUP ERROR]` line
 - [ ] Confirm demo data was not reseeded — no `*.demo.local` /
-      `demo_driver` / `demo_client` accounts appear (only possible if
-      `NODE_ENV` were not `production`/staging-equivalent — see
-      `DEMO_ACCOUNTS` in `server.ts`, gated on `IS_LOCAL_DEV`)
+      `demo_driver` / `demo_client` / `demo_client_staff` accounts appear
+      (only possible if `NODE_ENV` were not `production`/staging-equivalent
+      — see `DEMO_ACCOUNTS` in `server.ts`, gated on `IS_LOCAL_DEV`)
 - [ ] Confirm no `SEED_DEMO_DATA`-seeded dataset (drivers/shipments/chat
       from `initialDrivers`/`initialShipments`/etc.) is present
 
@@ -432,8 +432,8 @@ environment is not production-ready:
 - Uploads returning "File storage is temporarily unavailable"
   (`useMemoryFallback || !firebaseApp` — means Firestore/Storage isn't
   actually connected, not just an upload-specific failure)
-- `*.demo.local` / `demo_driver` / `demo_client` accounts reachable, or
-  `SEED_DEMO_DATA=true` while `NODE_ENV=production`
+- `*.demo.local` / `demo_driver` / `demo_client` / `demo_client_staff`
+  accounts reachable, or `SEED_DEMO_DATA=true` while `NODE_ENV=production`
 - `STRICT_PERSISTENCE=false` while `NODE_ENV=production`
 - A wildcard (`*`) origin anywhere in `ALLOWED_ORIGINS`/`APP_URL`/
   `CLIENT_URL`/`PUBLIC_APP_URL`, or the server reflecting an arbitrary
