@@ -34,6 +34,30 @@ export function canViewDriverRoster(adminType: AdminType | undefined): boolean {
   return adminType === "super" || adminType === "operation";
 }
 
+/**
+ * Logistics Analytics / Reports tab (PR #59): the tab's charts (status
+ * distribution, driver agreed amount by currency, completed-shipment
+ * trend) are all computed client-side from the `shipments` state, which
+ * comes from GET /api/shipments — canViewShipmentRegistry above already
+ * restricts that to super/operation, not accounts. filteredAdminTabs used
+ * to show 'reports' to accounts anyway, so their Reports page always
+ * rendered empty ("No registered shipments info available").
+ *
+ * Kept narrower than canViewShipmentRegistry (super only, not operation)
+ * rather than widening accounts' access or building a scoped
+ * accounts-analytics endpoint in this PR:
+ *  - there's no cost-statement-based analytics source yet to show accounts
+ *    admins instead of an empty shipment-based page
+ *  - operation admins have never had this tab, and today's charts include
+ *    a financial figure (driver agreed amount), which isn't something to
+ *    hand them without a dedicated non-financial view
+ * See docs/FOLLOW_UP_ROADMAP.md for the accounts-analytics and
+ * operation-safe-analytics follow-ups.
+ */
+export function canViewLogisticsAnalytics(adminType: AdminType | undefined): boolean {
+  return isSuperAdmin(adminType);
+}
+
 /** GET /api/admins — the Team/admin roster; super-only in the UI. */
 export function canViewAdminRoster(adminType: AdminType | undefined): boolean {
   return isSuperAdmin(adminType);

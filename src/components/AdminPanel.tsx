@@ -34,7 +34,7 @@ import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
 import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
-import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs } from "../lib/adminAccess";
+import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { jsPDF } from "jspdf";
@@ -3225,12 +3225,20 @@ MARAS Group etir Center`;
     ];
 
     const roleFiltered = rawTabs.filter(tab => {
+      // Logistics Analytics (PR #59): gated by canViewLogisticsAnalytics
+      // (super only, for now) ahead of the per-role lists below — its
+      // charts are built from the shipments client state, which accounts
+      // admins can't fetch (GET /api/shipments is super/operation only),
+      // so showing accounts the tab just rendered an empty page. See
+      // adminAccess.ts for the full reasoning and docs/FOLLOW_UP_ROADMAP.md
+      // for the accounts-analytics / operation-safe-analytics follow-ups.
+      if (tab.id === 'reports') return canViewLogisticsAnalytics(resolvedAdminType);
       if (isSuper) return true;
       if (isOperation) {
         return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
       }
       if (isAccounts) {
-        return ['costs', 'reports', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
+        return ['costs', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
       }
       return false;
     });
@@ -4928,13 +4936,31 @@ MARAS Group etir Center`;
         </div>
       )}
 
-      {/* 4. Reports Tab */}
-      {activeTab === 'reports' && (
+      {/* 4. Reports Tab (Logistics Analytics).
+          Defense-in-depth (PR #59): 'reports' is already gated out of
+          filteredAdminTabs for anyone but canViewLogisticsAnalytics
+          (super only, for now — see adminAccess.ts), but this content
+          block had no adminType check of its own, matching the pattern
+          already used for 'audit'/'team'/'costs' below. */}
+      {activeTab === 'reports' && canViewLogisticsAnalytics(resolvedAdminType) && (
         <div className="space-y-6">
           <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-6">
             <div>
-              <h2 className="text-xl font-bold text-slate-900">{t('operationsReport')}</h2>
-              <p className="text-slate-500 text-sm">Dynamic metrics of currency allocations and shipment statuses</p>
+              <h2 className="text-xl font-bold text-slate-900">{t('reports')}</h2>
+              <p className="text-slate-500 text-sm">
+                {lang === 'tr'
+                  ? "Sevkiyat kayıtlarına dayalı operasyonel analizler. Finansal muhasebe analizleri ayrıca eklenecektir."
+                  : (lang === 'ar'
+                    ? "تحليلات تشغيلية مبنية على سجلات الشحنات. سيتم إضافة تحليلات المحاسبة المالية بشكل منفصل لاحقًا."
+                    : "Operational analytics based on shipment records. Financial accounting analytics will be added separately.")}
+              </p>
+              <p className="text-slate-400 text-xs mt-1">
+                {lang === 'tr'
+                  ? `Veri kaynağı: sevkiyat kayıtları — ${totalShipmentsCount} kayıt`
+                  : (lang === 'ar'
+                    ? `مصدر البيانات: سجلات الشحنات — ${totalShipmentsCount} سجل`
+                    : `Data source: shipment records — ${totalShipmentsCount} record${totalShipmentsCount === 1 ? '' : 's'}`)}
+              </p>
             </div>
 
             <div className={`grid grid-cols-1 ${isMobileMode ? '' : 'lg:grid-cols-2'} gap-6 pt-5`}>
@@ -4977,12 +5003,12 @@ MARAS Group etir Center`;
                       <BarChart data={currencyChartData}>
                         <XAxis dataKey="name" stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
                         <YAxis stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
-                        <Tooltip formatter={(value) => [`${Number(value).toLocaleString()}`, 'Total Sum']} />
+                        <Tooltip formatter={(value) => [`${Number(value).toLocaleString()}`, t('carrierAmount')]} />
                         <Bar dataKey="Amount" fill="#f97316" radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="h-full flex items-center justify-center text-slate-400 italic">No currency statistics found.</div>
+                    <div className="h-full flex items-center justify-center text-slate-400 italic">No driver agreed amount data found.</div>
                   )}
                 </div>
               </div>
