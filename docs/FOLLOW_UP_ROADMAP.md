@@ -5,7 +5,8 @@ reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
 ## Access & permissions
-- **Admin Data Fetch / AdminType Access Review** — audit every admin data-fetch path against `resolvedAdminType` to confirm server-side responses (not just UI tabs) are scoped per admin type.
+- ~~**Admin Data Fetch / AdminType Access Review**~~ — **Done in PR #58** (`feature/admin-data-fetch-admin-type-access-review`). GET/POST `/api/logs` and GET `/api/cost-statements(/:shipmentId)` used `requireRole("admin")` with no `adminType` check, so any admin type could fetch the audit ledger or the accounting/cost-statement data directly, and AdminPanel's `fetchData()` fetched both unconditionally into browser state for every admin type regardless of which tabs `filteredAdminTabs` showed them. Also found and fixed: the Dashboard's "Operational Activity Stream" widget rendered the last 5 `activityLogs` entries (with a "Full Audit" button routing into the hidden `audit` tab) unconditionally for every admin type, since the Dashboard tab itself is shown to all three. See `canViewAuditLogs`/`canViewCostStatements` (`src/lib/adminAccess.ts`) and their `requireCanViewAuditLogs`/`requireCanViewCostStatements` server guards.
+- **Cost statement write access for accounts admins** — found during PR #58: `POST /api/cost-statements/:shipmentId` uses `requireFullAdmin` (super/operation only), so an accounts admin — the type the 'costs' tab is shown to for exactly this purpose — currently cannot save a cost statement from the UI (the request 403s). Pre-existing, orthogonal to PR #58's scope (widening access is a product decision, not a safety fix); needs a decision on whether accounts admins should be able to write cost statements.
 - **Permissions & Roles Settings Review** — decide whether Staff & Permissions needs finer-grained roles beyond `super` / `operation` / `accounts`.
 - **Centralized 401/403 denied-access logging** — log denied-access attempts (401/403) in one place instead of ad hoc per route.
 - **`/api/verify-session` audit logging** — add logging to the session-verification endpoint so failed/forged session checks are visible in audit logs.
@@ -32,6 +33,11 @@ next so the work isn't lost between sessions.
 ## Dashboard
 - **Revenue KPI** — add a revenue-based KPI tile to the admin dashboard.
 - **Active Shipments vs Active Transits** — clarify/separate these two metrics, which currently may conflate active count with in-transit count.
+
+## Logistics Analytics (PR #59, surfaced during PR #58's review)
+- **Accounts admin sees an empty Reports tab** — `filteredAdminTabs` shows 'reports' to `accounts` and `super`, but the tab's charts are built entirely from the `shipments` client state, and `GET /api/shipments` is blocked for `accounts` (`canViewShipmentRegistry`, super/operation only). An accounts admin's Reports tab therefore always renders empty ("No registered shipments info available"). Needs a scoped, cost/analytics-appropriate data source for accounts admins instead of either widening `/api/shipments` access or leaving the tab non-functional for its intended audience.
+- **"Currency Values" / `currencyDistribution` label is imprecise** — the chart sums `shipment.agreedAmount` by currency. Per `shipmentView.ts`'s own documentation, `agreedAmount` is the price privately agreed with the *driver* (an operational/payout figure), not customer revenue, and not a `CostStatement` (profit/cost) figure. The current subtitle ("Dynamic metrics of currency allocations and shipment statuses") and chart title don't disclose which of those it is. Low severity today (only `super`/`accounts` see this tab, both of whom already have legitimate cost visibility), but worth a wording pass — e.g. "Driver Payout by Currency" — so it can't later be read as revenue or profit.
+- **No non-financial analytics view for operation admins** — operation admins manage shipments/drivers day to day but have no analytics view at all (`reports` is hidden from them); consider whether a non-financial subset (status distribution, completed volume) belongs on their Dashboard instead.
 
 ## Infra & operations
 - **Production Deployment Checklist** — formalize a pre-deploy checklist (env vars, Firestore auth, seed data flags).

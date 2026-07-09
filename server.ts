@@ -48,7 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
 import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
@@ -1925,6 +1925,40 @@ async function startServer() {
     }
     if (!canViewVendors(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view vendors." });
+    }
+    next();
+  }
+
+  /**
+   * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/cost-statements
+   * and GET /api/cost-statements/:shipmentId used requireRole("admin"), which let
+   * an operation-type admin fetch the full accounting ledger directly even
+   * though the AdminPanel UI never shows them the 'costs' tab. See
+   * canViewCostStatements (adminAccess.ts) for the super/accounts-only rule.
+   */
+  function requireCanViewCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canViewCostStatements(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to view cost statements." });
+    }
+    next();
+  }
+
+  /**
+   * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs and
+   * POST /api/logs used requireRole("admin"), which let any admin type read
+   * or append to the immutable security/activity ledger directly, even
+   * though the AdminPanel UI never shows the 'audit' tab to anyone but
+   * super. See canViewAuditLogs (adminAccess.ts).
+   */
+  function requireCanViewAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canViewAuditLogs(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to view audit logs." });
     }
     next();
   }
@@ -4666,7 +4700,7 @@ async function startServer() {
   });
 
   // Cost Statements APIs
-  app.get("/api/cost-statements", requireRole("admin"), async (req, res) => {
+  app.get("/api/cost-statements", requireCanViewCostStatements, async (req, res) => {
     try {
       const col = collection(db, "costStatements");
       const snapshot = await getDocs(col);
@@ -4678,7 +4712,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/cost-statements/:shipmentId", requireRole("admin"), async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId", requireCanViewCostStatements, async (req, res) => {
     try {
       const dRef = doc(db, "costStatements", req.params.shipmentId);
       const dDoc = await getDoc(dRef);
@@ -4779,7 +4813,7 @@ async function startServer() {
   });
 
   // 14. Activity Logs
-  app.get("/api/logs", requireRole("admin"), async (req, res) => {
+  app.get("/api/logs", requireCanViewAuditLogs, async (req, res) => {
     try {
       const col = collection(db, "activityLogs");
       const snapshot = await getDocs(col);
@@ -4792,7 +4826,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/logs", requireRole("admin"), async (req, res) => {
+  app.post("/api/logs", requireCanViewAuditLogs, async (req, res) => {
     try {
       const { shipmentId, shipmentNumber, actor, actionEn, actionTr, actionAr } = sanitizeLogInput(req.body || {});
       await logActivity(
