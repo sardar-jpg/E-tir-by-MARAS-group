@@ -24,7 +24,13 @@ function makeShipment(overrides: Partial<Shipment> = {}): Shipment {
     currency: "USD",
     internalNotes: "Expedite customs at Ibrahim Khalil.",
     status: "In Transit",
-    documents: [],
+    documents: [
+      { id: "doc-cmr", name: "CMR.pdf", url: "https://storage.example/cmr", category: "cmr", uploadedBy: "Admin", uploadedAt: "2026-01-01T00:00:00.000Z", isSharedExternally: false },
+      { id: "doc-invoice", name: "Invoice.pdf", url: "https://storage.example/invoice", category: "invoice", uploadedBy: "Admin", uploadedAt: "2026-01-01T00:00:00.000Z", isSharedExternally: false },
+      { id: "doc-invoice-approved", name: "Invoice-approved.pdf", url: "https://storage.example/invoice2", category: "invoice", uploadedBy: "Admin", uploadedAt: "2026-01-01T00:00:00.000Z", isSharedExternally: true },
+      { id: "doc-other", name: "Misc.pdf", url: "https://storage.example/other", category: "other", uploadedBy: "Admin", uploadedAt: "2026-01-01T00:00:00.000Z", isSharedExternally: false },
+      { id: "doc-photo", name: "loading.jpg", url: "https://storage.example/photo", category: "photo", uploadedBy: "Admin", uploadedAt: "2026-01-01T00:00:00.000Z", isSharedExternally: false },
+    ],
     timeline: [],
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
@@ -142,5 +148,31 @@ describe("buildShipmentViewForRole", () => {
 
     expect(view.additionalDrivers).toBeUndefined();
     expect(view.agreedAmount).toBeUndefined();
+  });
+
+  it("keeps every document, including unapproved invoice/other ones, for admin", () => {
+    const shipment = makeShipment();
+    const view = buildShipmentViewForRole(shipment, { role: "admin", id: "admin" });
+
+    expect(view.documents.map((d) => d.id).sort()).toEqual(
+      ["doc-cmr", "doc-invoice", "doc-invoice-approved", "doc-other", "doc-photo"].sort()
+    );
+  });
+
+  it("only gives a driver operational documents — never invoice, other, or photo", () => {
+    const shipment = makeShipment();
+    const view = buildShipmentViewForRole(shipment, { role: "driver", id: "driver-1" });
+
+    expect(view.documents.map((d) => d.id)).toEqual(["doc-cmr"]);
+  });
+
+  it("hides unapproved invoice/other documents from a client, keeps them once approved", () => {
+    const shipment = makeShipment();
+    const view = buildShipmentViewForRole(shipment, { role: "client", id: "client-1" });
+
+    const ids = view.documents.map((d) => d.id).sort();
+    expect(ids).toEqual(["doc-cmr", "doc-invoice-approved", "doc-photo"].sort());
+    expect(ids).not.toContain("doc-invoice");
+    expect(ids).not.toContain("doc-other");
   });
 });
