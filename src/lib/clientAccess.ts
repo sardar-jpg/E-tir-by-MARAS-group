@@ -37,3 +37,21 @@ export function isClientStaffAccount(client: Pick<Client, "isEmployee">): boolea
 export function canClientSelfDeleteAccount(client: Pick<Client, "isEmployee">): boolean {
   return !isClientStaffAccount(client);
 }
+
+/**
+ * customer-chat-enablement-safety-review: whether a "client" session may
+ * send a message/attachment in the existing customer/admin chat (the
+ * ClientDashboard "Support inquiries" panel). Unlike self-delete or
+ * document/share approval, sending a chat message is not an Admin-managed
+ * action — Client Staff gets exactly the same send capability as the
+ * company's own owner account here, matching server.ts's
+ * /api/shipments/:id/chat and /api/upload routes, which already accept
+ * session.viewOnly (Client Staff) the same as the owner. Kept as its own
+ * named decision point (rather than inlining `true` at the call site) so a
+ * future attempt to reuse isClientStaffAccount/canClientSelfDeleteAccount
+ * to gate chat sending is a deliberate, reviewable change to this
+ * function instead of a silent regression.
+ */
+export function canClientSendChatMessage(_client: Pick<Client, "isEmployee">): boolean {
+  return true;
+}

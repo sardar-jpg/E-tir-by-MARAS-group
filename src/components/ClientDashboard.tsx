@@ -9,6 +9,7 @@ import {
 import { apiFetch } from "../lib/api";
 import { auth } from "../googleAuth";
 import ClientShipmentMap from "./ClientShipmentMap";
+import { canClientSendChatMessage } from "../lib/clientAccess";
 
 // Local multilingual dictionary
 const t = {
@@ -411,7 +412,14 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           sender: "client",
           senderName: `${clientCompanyName} (${lang === "ar" ? "عميل" : "Client"})`,
           type: "text",
-          text: inquiryText.trim()
+          text: inquiryText.trim(),
+          // customer-chat-enablement-safety-review: explicit here for
+          // defense-in-depth — the server independently forces every
+          // "client"-role sender to client_admin regardless of this value
+          // (resolveOutgoingChatChannel, src/lib/chatVisibility.ts), so a
+          // client session can never actually reach driver_admin/
+          // internal_staff even if this were tampered with.
+          channel: "client_admin"
         })
       });
 
@@ -903,8 +911,11 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                       )}
                     </div>
 
-                    {/* Support inquiries block — temporarily hidden; remove {false &&} wrapper to restore */}
-                    {false && (
+                    {/* Support inquiries block — existing customer/admin
+                        chat (client_admin channel only, see chatVisibility.ts).
+                        Client Owner and Client Staff share this same view;
+                        see canClientSendChatMessage below for why sending is
+                        never gated on viewOnly here. */}
                     <div className="space-y-3">
                       <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
                         <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
@@ -938,7 +949,13 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                           </div>
                         )}
 
-                        {viewOnly ? (
+                        {/* customer-chat-enablement-safety-review: Client
+                            Staff (viewOnly) get the same chat send access as
+                            the Client Owner — viewOnly only restricts
+                            account-management actions (see the "Delete
+                            Account" button above and canClientSelfDeleteAccount
+                            in clientAccess.ts), never chat. */}
+                        {!canClientSendChatMessage({ isEmployee: viewOnly }) ? (
                           <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
                             <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span>{lang === 'ar' ? "حساب المشاهدة فقط — لا يمكن إرسال الرسائل." : lang === 'tr' ? "Salt görüntüleme hesabı — mesaj gönderilemiyor." : "View-only account — sending messages is disabled."}</span>
@@ -973,7 +990,6 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         )}
                       </div>
                     </div>
-                    )}
 
                   </div>
                 </div>

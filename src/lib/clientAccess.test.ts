@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isClientStaffAccount, canClientSelfDeleteAccount } from "./clientAccess";
+import { isClientStaffAccount, canClientSelfDeleteAccount, canClientSendChatMessage } from "./clientAccess";
 
 describe("isClientStaffAccount", () => {
   it("is true only when isEmployee is explicitly true", () => {
@@ -18,5 +18,13 @@ describe("canClientSelfDeleteAccount", () => {
 
   it("blocks a Client Staff account from self-deleting — MARAS Admin only", () => {
     expect(canClientSelfDeleteAccount({ isEmployee: true })).toBe(false);
+  });
+});
+
+describe("canClientSendChatMessage", () => {
+  it("customer-chat-enablement-safety-review: gives Client Staff the same chat send capability as the company owner", () => {
+    expect(canClientSendChatMessage({ isEmployee: true })).toBe(true);
+    expect(canClientSendChatMessage({ isEmployee: false })).toBe(true);
+    expect(canClientSendChatMessage({})).toBe(true);
   });
 });
