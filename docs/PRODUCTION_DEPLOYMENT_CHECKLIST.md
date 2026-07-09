@@ -18,6 +18,10 @@ the full architecture/deploy-mechanics reference.
 This document does not itself change any runtime behavior, infrastructure,
 or secrets. It is documentation only.
 
+See also `docs/REAL_FIREBASE_VERIFICATION.md` for the step-by-step
+procedure to actually prove the real Firestore/Storage/Auth path (§4, §17
+below) works — not just that these env vars are set.
+
 ## 2. Production domain
 
 - App/domain: `https://etir.app`
@@ -424,12 +428,15 @@ staff before go-live.
 ## 16. Build and test commands
 
 ```bash
-npm run lint    # tsc --noEmit
-npm run test    # vitest run
-npm run build   # vite build + esbuild bundle of server.ts
+npm run lint                      # tsc --noEmit
+npm run test                      # vitest run
+npm run build                     # vite build + esbuild bundle of server.ts
+npm run check-firebase-readiness  # static, secret-free env/config readiness check
 ```
 
-All three must pass cleanly before considering the app ready to deploy.
+All four must pass/report clean before considering the app ready to deploy.
+See `docs/REAL_FIREBASE_VERIFICATION.md` §10 for what the readiness script
+checks.
 
 ## 17. Production smoke test after deploy
 
@@ -500,8 +507,15 @@ referenced here rather than duplicated:
 - Notification Dismiss behavior review
 - Accounts-facing analytics endpoint; non-financial analytics for
   operation admins
-- Real Firebase Verification (this checklist's §4/§17 cover the
-  production-launch version of this item)
+- ~~**Real Firebase Verification**~~ — **Guide added** in
+  `docs/REAL_FIREBASE_VERIFICATION.md` (§4 staging setup, §5–§6 rules
+  verification, §7 role smoke-test matrix, §8 upload verification, §9
+  persistence verification, plus the secret-free
+  `npm run check-firebase-readiness` static check). This checklist's §4/§17
+  remain the production-launch version of these checks; actually running a
+  real Firebase project against them (staging or production) is still a
+  manual step — no real Firebase credentials were available to run this
+  automatically as part of adding the guide.
 - Seed demo Client Staff account (local dev only)
 - Repository Cleanup / Legacy Files Review (`Etir/e-tir-by-maras`,
   `etir-new` scaffold directories)
