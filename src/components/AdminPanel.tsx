@@ -34,6 +34,7 @@ import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors } from "../lib/adminAccess";
+import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
@@ -1659,7 +1660,8 @@ MARAS Group etir Center`;
   const handleExportCSV = (stmt: CostStatement) => {
     let csvContent = "data:text/csv;charset=utf-8,";
     csvContent += "Cost Type,Description,Supplier Name,Quantity,Unit Price,Total Amount,Currency,Notes\n";
-    const items = stmt.items || [];
+    const matchingShipment = shipments.find(s => s.id === stmt.shipmentId);
+    const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement);
     items.forEach(item => {
       const row = [
         item.costType,
@@ -1726,10 +1728,9 @@ MARAS Group etir Center`;
       
       const matchingShipment = shipments.find(s => s.id === selectedCostStatement.shipmentId);
 
-      // Filter items to render based on selection
-      const itemsToRender = statementPreviewMode === 'vendor_statement'
-        ? (selectedCostStatement.items || []).filter(item => item.supplierName === selectedVendorForStatement)
-        : (selectedCostStatement.items || []);
+      // Filter items to render based on selection — customer-facing modes
+      // never get raw internal cost items (see costStatementExportView.ts).
+      const itemsToRender = resolveExportItems(statementPreviewMode, selectedCostStatement, matchingShipment, selectedVendorForStatement);
 
       // Dynamic sub-titles and party details
       let docSubtitle = "OFFICIAL COST DECLARATION LEDGER";
@@ -1985,16 +1986,18 @@ MARAS Group etir Center`;
       doc.setFont("Helvetica", "bold");
       drawText(val3Text, 190, currentY + 24.5, { align: "right" });
       
-      // Memo and Remarks block on the left
-      if (selectedCostStatement.notes) {
+      // Memo and Remarks block on the left — internal accounting notes are
+      // never surfaced to a customer/vendor export (see resolveExportNotes).
+      const exportNotes = resolveExportNotes(statementPreviewMode, selectedCostStatement.notes);
+      if (exportNotes) {
         doc.setTextColor(71, 85, 105); // slate-600
         doc.setFontSize(8);
         doc.setFont("Helvetica", "bold");
         drawText("LEDGER REMARKS & MEMORANDUMS:", 15, currentY + 5);
-        
+
         doc.setFont("Helvetica", "normal");
         doc.setTextColor(100, 116, 139); // slate-500
-        const splitNotes = doc.splitTextToSize(selectedCostStatement.notes, 100);
+        const splitNotes = doc.splitTextToSize(exportNotes, 100);
         drawText(splitNotes, 15, currentY + 11);
       }
       
