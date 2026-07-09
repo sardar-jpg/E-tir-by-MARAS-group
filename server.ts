@@ -51,6 +51,7 @@ import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisib
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
+import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -2040,7 +2041,11 @@ async function startServer() {
   // Media uploading endpoints
   app.post("/api/upload", requireAuth, async (req, res) => {
     try {
-      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot upload files." });
+      // feature/client-staff-accounts-safety-review: Client Staff
+      // (session.viewOnly) may use this to upload a chat attachment, same
+      // as the Client owner — see the /chat route below. They're still
+      // blocked from anything that lets a document skip that chat flow
+      // (the Document Center upload route, share/visibility toggles).
       const base64DataUrl = req.body.base64DataUrl || req.body.file || req.body.base64;
       const filename = req.body.filename || "upload.bin";
       if (!base64DataUrl) {
@@ -2890,6 +2895,9 @@ async function startServer() {
   // 5b. Subscribe Customer to Cargo Updates
   app.post("/api/shipments/:id/subscribe-customer", requireShipmentAccess, async (req, res) => {
     try {
+      // feature/client-staff-accounts-safety-review: unlike chat, this
+      // stays blocked for Client Staff (session.viewOnly) — managing who
+      // gets notified is an account-level setting, not day-to-day tracking.
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const { email, channel } = req.body;
       if (!email || !email.includes("@")) {
@@ -3099,7 +3107,11 @@ async function startServer() {
   // 7. Post Chat Message & Handle Document Savings
   app.post("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {
     try {
-      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
+      // feature/client-staff-accounts-safety-review: Client Staff
+      // (session.viewOnly) may use the existing customer/admin chat, same
+      // as the Client owner — chat/document *approval* stays admin-only
+      // (see the /documents and /share routes below, which still block
+      // viewOnly), but sending a message or a chat attachment does not.
       const shipmentId = req.params.id;
       const { type, text, fileUrl, fileName, fileCategory, channel: requestedChannel } = req.body;
 
@@ -3242,6 +3254,11 @@ async function startServer() {
   // 8. Upload Document Directly (Admin Center)
   app.post("/api/shipments/:id/documents", requireShipmentAccess, async (req, res) => {
     try {
+      // feature/client-staff-accounts-safety-review: unlike a chat
+      // attachment, this route files a document directly with no chat
+      // trail — stays blocked for Client Staff (session.viewOnly); a
+      // Client Staff member uploads through chat instead (see the /chat
+      // route above).
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
       const { name, url, category, uploadedBy, isSharedExternally } = req.body;
@@ -3308,6 +3325,9 @@ async function startServer() {
   // 10. Configure Sharing Page Link
   app.post("/api/shipments/:id/share", requireShipmentAccess, async (req, res) => {
     try {
+      // feature/client-staff-accounts-safety-review: Client Staff
+      // (session.viewOnly) must not approve/share documents or configure
+      // public link sharing — stays blocked.
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
@@ -4055,6 +4075,17 @@ async function startServer() {
         return res.status(403).json({ error: "You can only delete your own account." });
       }
       const docRef = doc(db, "clients", id);
+      // feature/client-staff-accounts-safety-review: a Client Staff account
+      // is created/managed by MARAS Admin only — self-service delete is
+      // reserved for the company owner account. Loaded fresh here (never
+      // trust the session's stale isEmployee) so a staff member calling
+      // this route directly can't remove their own login without Admin.
+      if (isSelf && !isFullAdmin) {
+        const selfDoc = await getDoc(docRef);
+        if (selfDoc.exists() && !canClientSelfDeleteAccount(selfDoc.data() as Client)) {
+          return res.status(403).json({ error: "Client Staff accounts can only be removed by MARAS Admin." });
+        }
+      }
       await deleteDoc(docRef);
       res.json({ success: true, message: "Client deleted successfully" });
     } catch (err) {
