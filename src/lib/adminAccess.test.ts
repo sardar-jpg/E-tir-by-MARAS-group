@@ -3,6 +3,7 @@ import {
   isSuperAdmin,
   canViewShipmentRegistry,
   canViewDriverRoster,
+  canViewGpsTracking,
   canViewAdminRoster,
   canViewClients,
   canViewVendors,
@@ -42,6 +43,15 @@ describe("canViewDriverRoster", () => {
     expect(canViewDriverRoster("operation")).toBe(true);
     expect(canViewDriverRoster("accounts")).toBe(false);
     expect(canViewDriverRoster(undefined)).toBe(false);
+  });
+});
+
+describe("canViewGpsTracking", () => {
+  it("allows super and operation, blocks accounts — the GPS Tracking Map tab is internal-operations-only", () => {
+    expect(canViewGpsTracking("super")).toBe(true);
+    expect(canViewGpsTracking("operation")).toBe(true);
+    expect(canViewGpsTracking("accounts")).toBe(false);
+    expect(canViewGpsTracking(undefined)).toBe(false);
   });
 });
 

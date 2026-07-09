@@ -1901,7 +1901,13 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       </Map>
                     </APIProvider>
                   ) : (
-                    /* Elegant Google Map API Instructions if keys aren't found */
+                    /* BUG-26 (PR #63 GPS QA review): this used to tell admins to open
+                       "Settings > Secrets" in "AI Studio" — leftover prototype
+                       boilerplate that doesn't exist in this deployed app, so
+                       following it would just dead-end. Rewritten to state plainly
+                       that this is a fallback/setup state (not a live map, and not a
+                       bug) and point at the real mechanism: an environment variable,
+                       set outside the repo, never a hardcoded key. */
                     <div className="w-full h-full flex flex-col justify-center items-center text-center p-6 space-y-4">
                       <div className="w-12 h-12 rounded-full bg-orange-950/40 border border-orange-800 flex items-center justify-center shrink-0">
                         <MapPin className="w-6 h-6 text-orange-400 animate-bounce" />
@@ -1909,14 +1915,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       <div className="space-y-1">
                         <h4 className="font-bold text-sm text-slate-100">Google Maps Platform Key Required</h4>
                         <p className="text-[11px] text-slate-400 max-w-sm mx-auto leading-normal">
-                          Provide your Google Cloud API key to trace active highway corridor units with high-definition GIS mapping.
+                          No Google Maps Platform key is configured for this deployment, so the interactive map can't load. This is a setup step, not a live map — shipment list, search, and filters below are unaffected.
                         </p>
                       </div>
                       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl text-left text-[11px]/normal text-slate-400 space-y-1.5 max-w-sm w-full font-mono">
                         <p className="text-[10px] font-bold text-slate-200 uppercase tracking-wider">Setup Instructions:</p>
-                        <p>1. Open <strong className="text-white">Settings</strong> (⚙️ gear icon, top-right) in AI Studio.</p>
-                        <p>2. Choose <strong className="text-white">Secrets</strong>.</p>
-                        <p>3. Create/Edit <strong className="text-orange-400">GOOGLE_MAPS_PLATFORM_KEY</strong> and paste your key.</p>
+                        <p>1. Get a Google Maps Platform API key from <strong className="text-white">Google Cloud Console &gt; Credentials</strong>.</p>
+                        <p>2. Restrict it by HTTP referrer — <strong className="text-white">localhost</strong> for local dev, <strong className="text-white">etir.app</strong> for production.</p>
+                        <p>3. Set it as the <strong className="text-orange-400">GOOGLE_MAPS_PLATFORM_KEY</strong> environment variable for this deployment (e.g. a Cloud Run secret/env var) — never commit it to the repository.</p>
+                        <p>4. Redeploy or restart the dev server to pick it up.</p>
                       </div>
                     </div>
                   )}
