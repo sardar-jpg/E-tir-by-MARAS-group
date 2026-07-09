@@ -3219,7 +3219,7 @@ async function startServer() {
       await setDoc(doc(db, "chatMessages", newMessage.id), newMessage);
 
       // Save file inside shipment documents
-      if (type === "file" && fileUrl && shouldSaveChatFileAsShipmentDocument(channel)) {
+      if (type === "file" && fileUrl && shouldSaveChatFileAsShipmentDocument(channel, sender)) {
         const docId = `doc-${Date.now()}`;
         const newDoc = {
           id: docId,
@@ -3264,12 +3264,13 @@ async function startServer() {
           channel
         );
       } else if (type === "file" && fileUrl) {
-        // internal_staff or driver_admin attachment (see
-        // shouldSaveChatFileAsShipmentDocument, PR #39): chat-only, never
-        // saved to shipment.documents — so it never reaches the customer
-        // dashboard or public share view — and notified via the same
-        // channel-gated "chat" notification path as a text message rather
-        // than the unfiltered "doc_upload" notification.
+        // internal_staff/driver_admin attachment, or a customer/client-staff
+        // upload on client_admin (see shouldSaveChatFileAsShipmentDocument,
+        // PR #39 / PR #62): chat-only, never saved to shipment.documents —
+        // so it never reaches the customer dashboard or public share view —
+        // and notified via the same channel-gated "chat" notification path
+        // as a text message rather than the unfiltered "doc_upload"
+        // notification.
         await pushNotification(
           shipmentId,
           shipmentItem.shipmentNumber,

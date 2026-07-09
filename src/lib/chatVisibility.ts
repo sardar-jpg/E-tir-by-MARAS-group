@@ -162,18 +162,26 @@ export function canAccessInternalStaffChannel(role: ChatRole): boolean {
  * dashboard and, if link sharing is on, the public tracking page, with no
  * further admin review.
  *
- * Only client_admin attachments qualify — the client already sent/received
- * that file directly, so mirroring it into shipment.documents exposes
- * nothing they don't already have. driver_admin is a private
- * driver↔admin coordination channel (could carry a driver's own personal
- * documents, or photos not yet meant for the customer); PR #39 found that
- * auto-mirroring those let a driver_admin attachment reach the customer
- * dashboard and public share link with zero admin approval, so it's
- * excluded here alongside internal_staff. Getting a driver_admin
- * attachment in front of the customer now requires an admin to explicitly
- * re-upload/approve it through the document center — no such approval
- * flow exists yet; that's a separate follow-up, not this fix.
+ * Only an *admin-sent* client_admin attachment qualifies — that's an admin
+ * deliberately publishing an official document (invoice, CMR, POD, etc.) to
+ * the customer via chat, same as the Document Center. driver_admin and
+ * internal_staff stay excluded for the reasons above (PR #39: mirroring a
+ * driver_admin attachment let it reach the customer dashboard and public
+ * share link with zero admin approval).
+ *
+ * PR #62 (Customer Chat File Upload UI) added client-side uploads to this
+ * same client_admin channel and narrowed this further to admin-sent only:
+ * a customer/client-staff upload is chat-only and must NOT auto-promote
+ * into shipment.documents (so it never reaches the public share link
+ * without review) — a customer already sent/has the file, so nothing is
+ * hidden from them by not mirroring it. An admin can separately choose to
+ * re-upload/approve a customer's chat file as an official document through
+ * the document center later; no such conversion flow exists yet, and this
+ * PR does not add one.
  */
-export function shouldSaveChatFileAsShipmentDocument(channel?: ChatChannel): boolean {
-  return channel === "client_admin";
+export function shouldSaveChatFileAsShipmentDocument(
+  channel?: ChatChannel,
+  sender?: ChatRole
+): boolean {
+  return channel === "client_admin" && sender === "admin";
 }

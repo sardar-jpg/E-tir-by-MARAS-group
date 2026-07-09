@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from "react";
-import { Language, Shipment, Driver, ShipmentDocument, LocationUpdate } from "../types";
-import { 
+import { Language, Shipment, Driver, ShipmentDocument, LocationUpdate, DocumentCategory } from "../types";
+import {
   Ship, Globe, Star, Truck, Calendar, Eye, EyeOff, MapPin,
   Search, Shield, Clipboard, ArrowRight, MessageSquare, CheckCircle2,
   FileText, Download, Clock, ChevronRight, X, Send, HelpCircle,
-  Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert
+  Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert, Paperclip
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { auth } from "../googleAuth";
 import ClientShipmentMap from "./ClientShipmentMap";
 import { canClientSendChatMessage } from "../lib/clientAccess";
+import { validateUpload } from "../lib/uploadValidation";
 
 // Local multilingual dictionary
 const t = {
@@ -42,6 +43,10 @@ const t = {
     inquiryError: "Could not send inquiry. Please try again.",
     inquiryPlaceholder: "Type your operational message or cargo concern...",
     submitInquiry: "Dispatch Support Inquiry",
+    attachFile: "Attach a file",
+    removeFile: "Remove file",
+    uploadingFile: "Uploading...",
+    uploadFileError: "File upload failed. Please try again.",
     viewMap: "Smart Tracking Map",
     smartTrackingNote: "GPS updates periodically to protect driver battery and app performance.",
     close: "Close Panel",
@@ -88,6 +93,10 @@ const t = {
     inquiryError: "Talep gönderilemedi. Lütfen tekrar deneyin.",
     inquiryPlaceholder: "Yükün durumu veya operasyonel sorularınızı buraya yazın...",
     submitInquiry: "Operasyonel Talep Gönder",
+    attachFile: "Dosya ekle",
+    removeFile: "Dosyayı kaldır",
+    uploadingFile: "Yükleniyor...",
+    uploadFileError: "Dosya yüklenemedi. Lütfen tekrar deneyin.",
     viewMap: "Akıllı Takip Haritası",
     smartTrackingNote: "Sürücü bataryasını ve uygulama performansını korumak için GPS periyodik olarak güncellenir.",
     close: "Sekmeyi Kapat",
@@ -134,6 +143,10 @@ const t = {
     inquiryError: "فشل إرسال طلب الدعم. يرجى المحاولة لاحقاً.",
     inquiryPlaceholder: "تفاصيل استفسارك أو أسئلتك اللوجستية حول الحمولة...",
     submitInquiry: "إرسال طلب الدعم الفني",
+    attachFile: "إرفاق ملف",
+    removeFile: "إزالة الملف",
+    uploadingFile: "جارٍ الرفع...",
+    uploadFileError: "فشل رفع الملف. يرجى المحاولة مرة أخرى.",
     viewMap: "خارطة التتبع الذكي",
     smartTrackingNote: "يتم تحديث نظام تحديد المواقع بشكل دوري للحفاظ على بطارية السائق وأداء التطبيق.",
     close: "إغلاق التفاصيل",
@@ -176,6 +189,10 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const [inquiryText, setInquiryText] = useState("");
   const [sendingInquiry, setSendingInquiry] = useState(false);
   const [inquiryStatus, setInquiryStatus] = useState<"idle" | "success" | "error">("idle");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFileDataUrl, setSelectedFileDataUrl] = useState("");
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
+  const [fileError, setFileError] = useState("");
 
   // Real-time Notification Center States
   const [notifications, setNotifications] = useState<any[]>([]);
@@ -399,32 +416,104 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
     }
   };
 
+  // customer-chat-file-upload-ui: selecting a file only reads it into
+  // memory + runs the same client-side pre-check the server enforces
+  // (validateUpload, src/lib/uploadValidation.ts) for fast feedback; the
+  // actual upload happens on send (handleSendInquiry), same as the
+  // existing admin attachment flow in App.tsx.
+  const handleAttachmentSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file after removing it
+    if (!file) return;
+
+    const validation = validateUpload(file.type, file.name, file.size);
+    if (!validation.ok) {
+      setFileError(validation.error);
+      setSelectedFile(null);
+      setSelectedFileDataUrl("");
+      return;
+    }
+
+    setFileError("");
+    setSelectedFile(file);
+    const reader = new FileReader();
+    reader.onload = (evt) => setSelectedFileDataUrl((evt.target?.result as string) || "");
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveAttachment = () => {
+    setSelectedFile(null);
+    setSelectedFileDataUrl("");
+    setFileError("");
+  };
+
   const handleSendInquiry = async (shipmentId: string) => {
-    if (!inquiryText.trim()) return;
+    if (!inquiryText.trim() && !selectedFile) return;
     setSendingInquiry(true);
     setInquiryStatus("idle");
+    setFileError("");
 
     try {
+      let fileUrl: string | undefined;
+      let fileName: string | undefined;
+      let fileCategory: DocumentCategory | undefined;
+
+      if (selectedFile && selectedFileDataUrl) {
+        setIsUploadingFile(true);
+        try {
+          const uploadRes = await apiFetch("/api/upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              base64DataUrl: selectedFileDataUrl,
+              filename: selectedFile.name
+            })
+          });
+          if (!uploadRes.ok) {
+            const errData = await uploadRes.json().catch(() => ({}));
+            setFileError(errData.error || curT.uploadFileError);
+            setSendingInquiry(false);
+            setIsUploadingFile(false);
+            return;
+          }
+          const uploadData = await uploadRes.json();
+          fileUrl = uploadData.url;
+          fileName = selectedFile.name;
+          fileCategory = selectedFile.type.startsWith("image/") ? "photo" : "other";
+        } finally {
+          setIsUploadingFile(false);
+        }
+      }
+
+      const body: Record<string, unknown> = {
+        sender: "client",
+        senderName: `${clientCompanyName} (${lang === "ar" ? "عميل" : "Client"})`,
+        type: fileUrl ? "file" : "text",
+        // customer-chat-enablement-safety-review: explicit here for
+        // defense-in-depth — the server independently forces every
+        // "client"-role sender to client_admin regardless of this value
+        // (resolveOutgoingChatChannel, src/lib/chatVisibility.ts), so a
+        // client session can never actually reach driver_admin/
+        // internal_staff even if this were tampered with.
+        channel: "client_admin"
+      };
+      if (inquiryText.trim()) body.text = inquiryText.trim();
+      if (fileUrl) {
+        body.fileUrl = fileUrl;
+        body.fileName = fileName;
+        body.fileCategory = fileCategory;
+      }
+
       const res = await apiFetch(`/api/shipments/${shipmentId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender: "client",
-          senderName: `${clientCompanyName} (${lang === "ar" ? "عميل" : "Client"})`,
-          type: "text",
-          text: inquiryText.trim(),
-          // customer-chat-enablement-safety-review: explicit here for
-          // defense-in-depth — the server independently forces every
-          // "client"-role sender to client_admin regardless of this value
-          // (resolveOutgoingChatChannel, src/lib/chatVisibility.ts), so a
-          // client session can never actually reach driver_admin/
-          // internal_staff even if this were tampered with.
-          channel: "client_admin"
-        })
+        body: JSON.stringify(body)
       });
 
       if (res.ok) {
         setInquiryText("");
+        setSelectedFile(null);
+        setSelectedFileDataUrl("");
         setInquiryStatus("success");
         setTimeout(() => setInquiryStatus("idle"), 5000);
         // Refresh chats
@@ -942,7 +1031,30 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                                       {new Date(msg.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
                                     </span>
                                   </div>
-                                  <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                  {msg.type === "file" ? (
+                                    <div className="space-y-1">
+                                      <span className="inline-block bg-slate-900 text-slate-400 text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">
+                                        {msg.fileCategory || "file"}
+                                      </span>
+                                      <a
+                                        href={msg.fileUrl || "#"}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => {
+                                          if (!msg.fileUrl || msg.fileUrl === "#") e.preventDefault();
+                                        }}
+                                        className="flex items-center gap-1 text-slate-200 hover:text-orange-400 font-bold text-[10px] underline break-all"
+                                      >
+                                        <Download className="w-3 h-3 text-orange-400 shrink-0" />
+                                        <span>{msg.fileName || "Attachment"}</span>
+                                      </a>
+                                      {msg.text && (
+                                        <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                  )}
                                 </div>
                               );
                             })}
@@ -970,6 +1082,41 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                               className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
                             />
 
+                            <div className="flex items-center gap-2">
+                              <label
+                                title={curT.attachFile}
+                                className="p-2 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-400 hover:text-orange-400 cursor-pointer transition-colors shrink-0"
+                              >
+                                <Paperclip className="w-3.5 h-3.5" />
+                                <input
+                                  type="file"
+                                  accept="image/jpeg,image/png,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                  onChange={handleAttachmentSelect}
+                                  disabled={isUploadingFile || sendingInquiry}
+                                  className="hidden"
+                                />
+                              </label>
+
+                              {selectedFile && (
+                                <div className="flex items-center gap-1.5 min-w-0 flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-300 font-semibold">
+                                  <FileText className="w-3 h-3 text-orange-400 shrink-0" />
+                                  <span className="truncate">{selectedFile.name}</span>
+                                  <button
+                                    type="button"
+                                    onClick={handleRemoveAttachment}
+                                    title={curT.removeFile}
+                                    disabled={isUploadingFile || sendingInquiry}
+                                    className="ml-auto shrink-0 text-slate-500 hover:text-red-400 border-0 bg-transparent cursor-pointer"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            {fileError && (
+                              <p className="text-[10px] text-red-400 font-extrabold">{fileError}</p>
+                            )}
                             {inquiryStatus === "success" && (
                               <p className="text-[10px] text-emerald-400 font-extrabold">{curT.inquirySuccess}</p>
                             )}
@@ -980,11 +1127,15 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             <button
                               type="button"
                               onClick={() => handleSendInquiry(selectedShipment!.id)}
-                              disabled={sendingInquiry || !inquiryText.trim()}
+                              disabled={sendingInquiry || (!inquiryText.trim() && !selectedFile)}
                               className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
-                              <Send className="w-3.5 h-3.5" />
-                              <span>{curT.submitInquiry}</span>
+                              {isUploadingFile ? (
+                                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              ) : (
+                                <Send className="w-3.5 h-3.5" />
+                              )}
+                              <span>{isUploadingFile ? curT.uploadingFile : curT.submitInquiry}</span>
                             </button>
                           </div>
                         )}
