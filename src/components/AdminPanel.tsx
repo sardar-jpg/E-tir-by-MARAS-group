@@ -34,7 +34,7 @@ import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
 import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
-import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics } from "../lib/adminAccess";
+import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics, canViewGpsTracking, canViewDriverRoster, canViewShipmentRegistry } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { buildCostStatementRows, filterCostStatementRows, resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
@@ -4507,23 +4507,36 @@ MARAS Group etir Center`;
                     <span className="text-[9px] text-slate-400 block font-normal">{clients.length} corporate partners</span>
                   </button>
 
-                  <button
-                    onClick={() => setActiveTab('drivers')}
-                    className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
-                  >
-                    <Truck className="w-4 h-4 text-orange-400 mb-1.5 group-hover:scale-105 transition-transform" />
-                    <p className="font-bold text-slate-200">{lang === 'tr' ? "Sürücü Birliği" : (lang === 'ar' ? "تحالف السائقين" : "Active Driver Fleet")}</p>
-                    <span className="text-[9px] text-slate-400 block font-normal">{drivers.length} registered vehicles</span>
-                  </button>
+                  {/* BUG-26: 'drivers' (Driver Alliance) is super/operation-only per
+                      canViewDriverRoster (adminAccess.ts) and hidden from accounts admins
+                      in the sidebar (filteredAdminTabs). This shortcut used to be
+                      unconditional — not currently reachable by an accounts admin in
+                      practice (they never land on this Dashboard tab at all, see
+                      isAccountsAdminType above), but gated anyway for defense-in-depth,
+                      consistent with the 'reports' shortcut below. */}
+                  {canViewDriverRoster(resolvedAdminType) && (
+                    <button
+                      onClick={() => setActiveTab('drivers')}
+                      className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
+                    >
+                      <Truck className="w-4 h-4 text-orange-400 mb-1.5 group-hover:scale-105 transition-transform" />
+                      <p className="font-bold text-slate-200">{lang === 'tr' ? "Sürücü Birliği" : (lang === 'ar' ? "تحالف السائقين" : "Active Driver Fleet")}</p>
+                      <span className="text-[9px] text-slate-400 block font-normal">{drivers.length} registered vehicles</span>
+                    </button>
+                  )}
 
-                  <button
-                    onClick={() => setActiveTab('tracking_map')}
-                    className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
-                  >
-                    <MapIcon className="w-4 h-4 text-emerald-400 mb-1.5 group-hover:scale-105 transition-transform" />
-                    <p className="font-bold text-slate-200">{lang === 'tr' ? "Akıllı Takip Haritası" : (lang === 'ar' ? "خريطة التتبع" : "GIS Tracking Map")}</p>
-                    <span className="text-[9px] text-slate-400 block font-normal">Smart Tracking</span>
-                  </button>
+                  {/* BUG-26: same gap as 'drivers' above, for the GPS Tracking Map —
+                      see canViewGpsTracking (adminAccess.ts). */}
+                  {canViewGpsTracking(resolvedAdminType) && (
+                    <button
+                      onClick={() => setActiveTab('tracking_map')}
+                      className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
+                    >
+                      <MapIcon className="w-4 h-4 text-emerald-400 mb-1.5 group-hover:scale-105 transition-transform" />
+                      <p className="font-bold text-slate-200">{lang === 'tr' ? "Akıllı Takip Haritası" : (lang === 'ar' ? "خريطة التتبع" : "GIS Tracking Map")}</p>
+                      <span className="text-[9px] text-slate-400 block font-normal">Smart Tracking</span>
+                    </button>
+                  )}
 
                   {/* 'reports' is accounts/super-only per adminAccess.ts and hidden from
                       operation admins in the sidebar (filteredAdminTabs) — keep this
@@ -4549,7 +4562,13 @@ MARAS Group etir Center`;
       )}
 
       {/* 2. Shipments Registry Tab */}
-      {activeTab === 'shipments' && (
+      {/* BUG-26: content-render guard added alongside filteredAdminTabs —
+          see canViewShipmentRegistry (adminAccess.ts) for why this was
+          missing (no live bypass found for this tab specifically, but
+          added for defense-in-depth consistency with tracking_map/drivers
+          above, and because the API-level guard alone shouldn't be the
+          only thing standing between accounts admins and this page). */}
+      {activeTab === 'shipments' && canViewShipmentRegistry(resolvedAdminType) && (
         <div className="space-y-4">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-4">
             <div className="flex flex-col gap-4 w-full">
@@ -4764,7 +4783,9 @@ MARAS Group etir Center`;
       )}
 
       {/* 3. Driver Alliance Tab */}
-      {activeTab === 'drivers' && (
+      {/* BUG-26: content-render guard added alongside filteredAdminTabs —
+          see canViewDriverRoster (adminAccess.ts) for why this was missing. */}
+      {activeTab === 'drivers' && canViewDriverRoster(resolvedAdminType) && (
         <div className="space-y-6">
           {drivers.some(d => d.status === "pending") && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
@@ -7294,7 +7315,9 @@ MARAS Group etir Center`;
       )}
 
       {/* 7. Active GPS Tracking Map Tab */}
-      {activeTab === 'tracking_map' && (
+      {/* BUG-26: content-render guard added alongside filteredAdminTabs —
+          see canViewGpsTracking (adminAccess.ts) for why this was missing. */}
+      {activeTab === 'tracking_map' && canViewGpsTracking(resolvedAdminType) && (
         // BUG-13: this map is a Turkey<->Iraq land corridor visualization —
         // it has no coordinate data for Sea/Air routes, so mixing them in
         // just fell back to a fake Istanbul->Baghdad pin. Land-only here.

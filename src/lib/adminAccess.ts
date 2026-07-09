@@ -24,13 +24,46 @@ export function isSuperAdmin(adminType: AdminType | undefined): boolean {
   return adminType === "super";
 }
 
-/** GET /api/shipments — the operational shipment registry; hidden from accounts admins in the UI. */
+/**
+ * GET /api/shipments — the operational shipment registry; hidden from
+ * accounts admins in the UI. Also used as the AdminPanel 'shipments'
+ * (Shipment Registry) tab's content-render guard — see BUG-26 below.
+ */
 export function canViewShipmentRegistry(adminType: AdminType | undefined): boolean {
   return adminType === "super" || adminType === "operation";
 }
 
-/** GET /api/drivers — the operational driver roster; hidden from accounts admins in the UI. */
+/**
+ * GET /api/drivers — the operational driver roster; hidden from accounts
+ * admins in the UI. Also used as the AdminPanel 'drivers' (Driver Alliance)
+ * tab's content-render guard — see BUG-26 below.
+ */
 export function canViewDriverRoster(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "operation";
+}
+
+/**
+ * BUG-26 (PR #63, GPS Tracking Map / Driver Alliance / Shipment Registry QA
+ * review): the AdminPanel 'tracking_map' (GPS Tracking Map) tab was already
+ * correctly hidden from accounts admins in `filteredAdminTabs` (sidebar +
+ * mobile tab bar), but its content block only checked `activeTab ===
+ * 'tracking_map'` — no adminType check, unlike the 'reports'/'audit'/'team'
+ * tabs, which already re-check their access function at the content block
+ * (defense-in-depth, PR #59/#58/#57 pattern). The Dashboard's "Administrative
+ * Operations Quick Links" widget also had an unconditional
+ * `setActiveTab('tracking_map')` button.
+ *
+ * Verified this is not currently reachable by an accounts admin in
+ * practice: `activeTab`'s initial state is `isAccountsAdminType ? 'costs' :
+ * 'dashboard'`, and 'dashboard' itself is absent from `filteredAdminTabs`
+ * for accounts, so an accounts admin never lands on — or has any button
+ * that navigates to — the Dashboard tab the quick-link lives in. Both gaps
+ * were fixed anyway, matching the existing defense-in-depth convention:
+ * relying solely on "no button happens to reach it today" is exactly the
+ * kind of assumption a future change (a new quick-link, a different default
+ * tab) could quietly invalidate.
+ */
+export function canViewGpsTracking(adminType: AdminType | undefined): boolean {
   return adminType === "super" || adminType === "operation";
 }
 
