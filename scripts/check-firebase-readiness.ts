@@ -8,6 +8,15 @@
  * dangerous-in-production combinations documented in
  * src/lib/persistenceReadiness.ts apply to the current environment.
  *
+ * Also checks (src/lib/firebaseRulesUid.ts) that firestore.rules and
+ * storage.rules hardcode the *same* server-account UID, and — if the
+ * non-secret SERVER_FIREBASE_UID env var is set — that it matches the UID
+ * found in those rules. It never reads firestore.rules/storage.rules from
+ * anywhere but disk and never contacts Firebase to look up the real UID;
+ * that comparison against the real SERVER_FIREBASE_EMAIL account still has
+ * to be done manually in Firebase Console (see
+ * docs/REAL_FIREBASE_VERIFICATION.md).
+ *
  * Usage:
  *   npx tsx scripts/check-firebase-readiness.ts
  *   NODE_ENV=production npx tsx scripts/check-firebase-readiness.ts   # simulate a prod check
@@ -15,13 +24,16 @@
  * Exits non-zero if run with NODE_ENV=production and any launch-blocking
  * condition from the checklist is detected (memory fallback, demo seeding,
  * missing SESSION_SECRET/SUPER_ADMIN_PASSWORD_HASH, a wildcard CORS origin,
- * or a committed service-account-looking JSON file). Exits 0 (with warnings)
- * outside production, since local dev is expected to run on the memory
- * fallback with demo data.
+ * a committed service-account-looking JSON file, firestore.rules/storage.rules
+ * disagreeing on the server UID, or — in production with STRICT_PERSISTENCE
+ * on — SERVER_FIREBASE_UID disagreeing with the rules). Exits 0 (with
+ * warnings) outside production, since local dev is expected to run on the
+ * memory fallback with demo data.
  */
 import fs from "fs";
 import path from "path";
 import { computePersistenceReadiness } from "../src/lib/persistenceReadiness";
+import { checkRulesUids } from "../src/lib/firebaseRulesUid";
 
 const projectRoot = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
 
@@ -117,6 +129,25 @@ function main() {
 
   if (readiness.isProduction && readiness.configuredMode === "memory-fallback") {
     problems.push("Production is configured to run on the in-memory fallback (see warnings above) — this is a launch blocker.");
+  }
+
+  const firestoreRulesPath = path.join(projectRoot, "firestore.rules");
+  const storageRulesPath = path.join(projectRoot, "storage.rules");
+  if (fs.existsSync(firestoreRulesPath) && fs.existsSync(storageRulesPath)) {
+    const uidCheck = checkRulesUids(
+      fs.readFileSync(firestoreRulesPath, "utf8"),
+      fs.readFileSync(storageRulesPath, "utf8"),
+      env.SERVER_FIREBASE_UID,
+      { isProduction: readiness.isProduction, strictPersistence: readiness.strictPersistence }
+    );
+    console.log(`firestore.rules server UID: ${uidCheck.firestoreUid ?? "(not found)"}`);
+    console.log(`storage.rules server UID: ${uidCheck.storageUid ?? "(not found)"}`);
+    console.log(`firestore.rules / storage.rules UIDs match: ${uidCheck.rulesMatch}`);
+    console.log(`SERVER_FIREBASE_UID present: ${!!env.SERVER_FIREBASE_UID}`);
+    problems.push(...uidCheck.problems);
+    warnings.push(...uidCheck.warnings);
+  } else {
+    warnings.push("firestore.rules and/or storage.rules not found at repo root — skipped server-UID consistency check.");
   }
 
   console.log("──────────────────────────────────────────────────────────");
