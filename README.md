@@ -18,3 +18,9 @@ View your app in AI Studio: https://ai.studio/apps/43f003da-29bb-4b79-b7a4-8fcf5
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Documentation
+
+- [Production Deployment Checklist](docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md) — required reading before launching on `etir.app`
+- [Follow-Up Roadmap](docs/FOLLOW_UP_ROADMAP.md) — deferred items tracked between PRs
+- [Project Reference](ETIR-PROJECT-REFERENCE.md) — architecture, deploy mechanics, and operational gotchas

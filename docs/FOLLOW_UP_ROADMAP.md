@@ -44,7 +44,7 @@ next so the work isn't lost between sessions.
 - **Chart / report exports** — Logistics Analytics (and Costs) currently have no export affordance (CSV/PDF); consider once there's a concrete requester for it, to avoid adding an unused feature.
 
 ## Infra & operations
-- **Production Deployment Checklist** — formalize a pre-deploy checklist (env vars, Firestore auth, seed data flags).
+- ~~**Production Deployment Checklist**~~ — **Done in PR #64** (`feature/production-deployment-checklist`). Formalized as `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`: env vars (exact names from `server.ts`/`.env.example`), Firebase/Firestore/Storage readiness, persistence/demo-data flags, auth/session review, a role/access smoke-test matrix, upload/document/public-tracking safety checks, Google Maps key restriction steps, CORS/domain readiness, Google Workspace scope review, accounting/GPS readiness, build/test commands, a post-deploy smoke test, and a rollback plan. Documentation only — no runtime/infra/access behavior changed.
 - **Real Firebase Verification** — verify behavior against a real Firestore/Firebase project instead of the in-memory fallback used in local dev.
 - **Seed demo Client Staff account** — add a demo client-staff (`Client.isEmployee`) account to the seed data for local testing.
 - **Repository Cleanup / Legacy Files Review** — review `Etir/e-tir-by-maras` and `etir-new` scaffold directories for removal.
