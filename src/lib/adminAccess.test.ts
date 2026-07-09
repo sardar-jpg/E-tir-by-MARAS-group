@@ -9,6 +9,7 @@ import {
   canManageClients,
   canManageVendors,
   canViewCostStatements,
+  canWriteCostStatements,
   canViewAuditLogs,
   canViewLogisticsAnalytics,
   resolveFullAdminStatus,
@@ -87,6 +88,21 @@ describe("canViewCostStatements", () => {
     expect(canViewCostStatements("accounts")).toBe(true);
     expect(canViewCostStatements("operation")).toBe(false);
     expect(canViewCostStatements(undefined)).toBe(false);
+  });
+});
+
+describe("canWriteCostStatements", () => {
+  it("allows super and accounts, blocks operation — accounts admins can save the statements they can already view", () => {
+    expect(canWriteCostStatements("super")).toBe(true);
+    expect(canWriteCostStatements("accounts")).toBe(true);
+    expect(canWriteCostStatements("operation")).toBe(false);
+    expect(canWriteCostStatements(undefined)).toBe(false);
+  });
+
+  it("matches canViewCostStatements — write access never exceeds read access", () => {
+    for (const adminType of ["super", "operation", "accounts", undefined]) {
+      expect(canWriteCostStatements(adminType)).toBe(canViewCostStatements(adminType));
+    }
   });
 });
 
