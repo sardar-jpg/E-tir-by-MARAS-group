@@ -32,6 +32,7 @@ import {
 import TrackingMap from "./TrackingMap";
 import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
+import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
 import { canManageClients, canManageVendors } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
@@ -259,6 +260,11 @@ export default function AdminPanel({
 
   const isRtl = lang === 'ar';
 
+  const showPasswordLabel = lang === 'tr' ? 'Şifreyi göster' : (lang === 'ar' ? 'إظهار كلمة المرور' : 'Show password');
+  const hidePasswordLabel = lang === 'tr' ? 'Şifreyi gizle' : (lang === 'ar' ? 'إخفاء كلمة المرور' : 'Hide password');
+  const passwordMismatchError = lang === 'tr' ? 'Şifreler eşleşmiyor.' : (lang === 'ar' ? 'كلمتا المرور غير متطابقتين.' : 'Passwords do not match.');
+  const passwordToggleClasses = "absolute end-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer bg-transparent border-0 p-0";
+
   // BUG-16: adminType is the single source of truth for admin UI decisions —
   // this component used to also accept a `userRole` prop, but no caller ever
   // passed it, so its 'accounts' branch was always dead and every check that
@@ -329,6 +335,7 @@ export default function AdminPanel({
   const [newAdminName, setNewAdminName] = useState("");
   const [newAdminEmail, setNewAdminEmail] = useState("");
   const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [newAdminConfirmPassword, setNewAdminConfirmPassword] = useState("");
   const [newAdminType, setNewAdminType] = useState<"operation" | "accounts">("operation");
   const [adminFormError, setAdminFormError] = useState<string | null>(null);
 
@@ -656,6 +663,7 @@ export default function AdminPanel({
   const [newClientIsEmployee, setNewClientIsEmployee] = useState(false);
   const [newClientUsername, setNewClientUsername] = useState("");
   const [newClientPassword, setNewClientPassword] = useState("");
+  const [newClientConfirmPassword, setNewClientConfirmPassword] = useState("");
   // Edit client modal
   const [editClientTarget, setEditClientTarget] = useState<Client | null>(null);
   const [editClientContactName, setEditClientContactName] = useState("");
@@ -666,6 +674,7 @@ export default function AdminPanel({
   const [editClientIsEmployee, setEditClientIsEmployee] = useState(false);
   const [editClientUsername, setEditClientUsername] = useState("");
   const [editClientPassword, setEditClientPassword] = useState("");
+  const [editClientConfirmPassword, setEditClientConfirmPassword] = useState("");
   const [isSubmittingEditClient, setIsSubmittingEditClient] = useState(false);
 
   const [isNotifOpen, setIsNotifOpen] = useState(false);
@@ -2516,6 +2525,10 @@ MARAS Group etir Center`;
       triggerToast(lang === 'tr' ? "Şirket Adı ve İletişim Kişisi zorunludur!" : (lang === 'ar' ? "اسم الشركة وجهة الاتصال مطلوبان!" : "Company Name and Contact Name are required!"));
       return;
     }
+    if (newClientPassword.trim() && newClientPassword.trim() !== newClientConfirmPassword.trim()) {
+      triggerToast(passwordMismatchError);
+      return;
+    }
     setIsSubmittingClient(true);
     try {
       const res = await apiFetch("/api/clients", {
@@ -2547,6 +2560,7 @@ MARAS Group etir Center`;
         setNewClientIsEmployee(false);
         setNewClientUsername("");
         setNewClientPassword("");
+        setNewClientConfirmPassword("");
         setIsAddClientOpen(false);
         // Refresh data
         fetchData();
@@ -2571,11 +2585,16 @@ MARAS Group etir Center`;
     setEditClientIsEmployee(!!client.isEmployee);
     setEditClientUsername(client.username || "");
     setEditClientPassword("");
+    setEditClientConfirmPassword("");
   };
 
   const handleEditClientSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editClientTarget) return;
+    if (editClientPassword.trim() && editClientPassword.trim() !== editClientConfirmPassword.trim()) {
+      triggerToast(passwordMismatchError);
+      return;
+    }
     setIsSubmittingEditClient(true);
     try {
       const body: Record<string, unknown> = {
@@ -2854,6 +2873,11 @@ MARAS Group etir Center`;
       return;
     }
 
+    if (newAdminPassword.trim() !== newAdminConfirmPassword.trim()) {
+      setAdminFormError(passwordMismatchError);
+      return;
+    }
+
     try {
       const res = await apiFetch("/api/admins", {
         method: "POST",
@@ -2871,6 +2895,7 @@ MARAS Group etir Center`;
         setNewAdminName("");
         setNewAdminEmail("");
         setNewAdminPassword("");
+        setNewAdminConfirmPassword("");
         setNewAdminType("operation");
         setIsAddAdminOpen(false);
         fetchData(true);
@@ -5333,12 +5358,28 @@ MARAS Group etir Center`;
                           {lang === 'tr' ? "Yeni Şifre" : (lang === 'ar' ? "كلمة مرور جديدة" : "New Password")}
                           <span className="font-normal normal-case ml-1 text-slate-400">(leave blank to keep)</span>
                         </label>
-                        <input
-                          type="password"
+                        <PasswordInput
                           placeholder="Leave blank to keep current"
                           value={editClientPassword}
                           onChange={(e) => setEditClientPassword(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          toggleClassName={passwordToggleClasses}
+                          showLabel={showPasswordLabel}
+                          hideLabel={hidePasswordLabel}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
+                          {lang === 'tr' ? "Yeni Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور الجديدة" : "Confirm New Password")}
+                        </label>
+                        <PasswordInput
+                          placeholder="Leave blank to keep current"
+                          value={editClientConfirmPassword}
+                          onChange={(e) => setEditClientConfirmPassword(e.target.value)}
+                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          toggleClassName={passwordToggleClasses}
+                          showLabel={showPasswordLabel}
+                          hideLabel={hidePasswordLabel}
                         />
                       </div>
                     </div>
@@ -5507,12 +5548,28 @@ MARAS Group etir Center`;
                         <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
                           {lang === 'tr' ? "Şifre" : (lang === 'ar' ? "كلمة المرور" : "Password")}
                         </label>
-                        <input
-                          type="password"
+                        <PasswordInput
                           placeholder="Set login password"
                           value={newClientPassword}
                           onChange={(e) => setNewClientPassword(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          toggleClassName={passwordToggleClasses}
+                          showLabel={showPasswordLabel}
+                          hideLabel={hidePasswordLabel}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
+                          {lang === 'tr' ? "Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور" : "Confirm Password")}
+                        </label>
+                        <PasswordInput
+                          placeholder="Confirm login password"
+                          value={newClientConfirmPassword}
+                          onChange={(e) => setNewClientConfirmPassword(e.target.value)}
+                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
+                          toggleClassName={passwordToggleClasses}
+                          showLabel={showPasswordLabel}
+                          hideLabel={hidePasswordLabel}
                         />
                       </div>
                     </div>
@@ -6013,13 +6070,29 @@ MARAS Group etir Center`;
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-700 block">Password Key</label>
-                    <input 
-                      type="text" 
+                    <PasswordInput
                       required
                       value={newAdminPassword}
                       onChange={(e) => setNewAdminPassword(e.target.value)}
                       placeholder="Strong unique key"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      toggleClassName={passwordToggleClasses}
+                      showLabel={showPasswordLabel}
+                      hideLabel={hidePasswordLabel}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 block">Confirm Password Key</label>
+                    <PasswordInput
+                      required
+                      value={newAdminConfirmPassword}
+                      onChange={(e) => setNewAdminConfirmPassword(e.target.value)}
+                      placeholder="Repeat the key above"
+                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      toggleClassName={passwordToggleClasses}
+                      showLabel={showPasswordLabel}
+                      hideLabel={hidePasswordLabel}
                     />
                   </div>
 
@@ -6099,37 +6172,43 @@ MARAS Group etir Center`;
                     <label className="text-xs font-bold text-slate-700 block">
                       {lang === 'tr' ? 'Mevcut Şifre' : (lang === 'ar' ? 'كلمة المرور الحالية' : 'Current Password')}
                     </label>
-                    <input
-                      type="password"
+                    <PasswordInput
                       required
                       value={currentPasswordInput}
                       onChange={(e) => setCurrentPasswordInput(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      toggleClassName={passwordToggleClasses}
+                      showLabel={showPasswordLabel}
+                      hideLabel={hidePasswordLabel}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-700 block">
                       {lang === 'tr' ? 'Yeni Şifre' : (lang === 'ar' ? 'كلمة المرور الجديدة' : 'New Password')}
                     </label>
-                    <input
-                      type="password"
+                    <PasswordInput
                       required
                       value={newPasswordInput}
                       onChange={(e) => setNewPasswordInput(e.target.value)}
                       placeholder={lang === 'tr' ? 'En az 8 karakter' : (lang === 'ar' ? '8 أحرف على الأقل' : 'At least 8 characters')}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      toggleClassName={passwordToggleClasses}
+                      showLabel={showPasswordLabel}
+                      hideLabel={hidePasswordLabel}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-700 block">
                       {lang === 'tr' ? 'Yeni Şifreyi Onayla' : (lang === 'ar' ? 'تأكيد كلمة المرور الجديدة' : 'Confirm New Password')}
                     </label>
-                    <input
-                      type="password"
+                    <PasswordInput
                       required
                       value={confirmNewPasswordInput}
                       onChange={(e) => setConfirmNewPasswordInput(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                      toggleClassName={passwordToggleClasses}
+                      showLabel={showPasswordLabel}
+                      hideLabel={hidePasswordLabel}
                     />
                   </div>
                   <button
