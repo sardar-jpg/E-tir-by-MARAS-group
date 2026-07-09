@@ -55,6 +55,35 @@ export function canViewVendors(adminType: AdminType | undefined): boolean {
   return canViewClients(adminType);
 }
 
+/**
+ * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/cost-statements
+ * and GET /api/cost-statements/:shipmentId used requireRole("admin") — any
+ * adminType, including 'operation', could fetch the full accounting ledger
+ * directly even though the AdminPanel UI's filteredAdminTabs only ever shows
+ * the 'costs' tab to 'accounts' and 'super' (see the isAccounts/isOperation
+ * split in AdminPanel.tsx). This restricts the server response to the same
+ * two types the UI already shows the tab to.
+ */
+export function canViewCostStatements(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "accounts";
+}
+
+/**
+ * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs (and the
+ * POST that appends to it) used requireRole("admin") — any adminType could
+ * read or write the immutable security/activity ledger directly, even though
+ * the AdminPanel UI's filteredAdminTabs only ever shows the 'audit' tab to
+ * 'super'. Every current client call site for the POST route is inside the
+ * super-only Google Workspace (gmail) flow, so restricting both directions
+ * to super doesn't remove any operation/accounts capability that exists
+ * today — it closes a gap where either type could otherwise read the full
+ * audit trail, or write forged entries into it, by calling the route
+ * directly.
+ */
+export function canViewAuditLogs(adminType: AdminType | undefined): boolean {
+  return isSuperAdmin(adminType);
+}
+
 /** POST/PUT/DELETE /api/clients — accounts admins are read-only here; only super/operation may create/edit/delete clients. */
 export function canManageClients(adminType: AdminType | undefined): boolean {
   return adminType === "super" || adminType === "operation";

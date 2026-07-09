@@ -8,6 +8,8 @@ import {
   canViewVendors,
   canManageClients,
   canManageVendors,
+  canViewCostStatements,
+  canViewAuditLogs,
   resolveFullAdminStatus,
   sanitizeCreatedAdminType,
   isProtectedOwnerAccount,
@@ -75,6 +77,24 @@ describe("canManageClients / canManageVendors", () => {
     expect(canManageVendors("operation")).toBe(true);
     expect(canManageVendors("accounts")).toBe(false);
     expect(canManageVendors(undefined)).toBe(false);
+  });
+});
+
+describe("canViewCostStatements", () => {
+  it("allows super and accounts, blocks operation — the AdminPanel UI only shows 'costs' to those two", () => {
+    expect(canViewCostStatements("super")).toBe(true);
+    expect(canViewCostStatements("accounts")).toBe(true);
+    expect(canViewCostStatements("operation")).toBe(false);
+    expect(canViewCostStatements(undefined)).toBe(false);
+  });
+});
+
+describe("canViewAuditLogs", () => {
+  it("allows only super — operation and accounts are both blocked from the audit/activity ledger", () => {
+    expect(canViewAuditLogs("super")).toBe(true);
+    expect(canViewAuditLogs("operation")).toBe(false);
+    expect(canViewAuditLogs("accounts")).toBe(false);
+    expect(canViewAuditLogs(undefined)).toBe(false);
   });
 });
 

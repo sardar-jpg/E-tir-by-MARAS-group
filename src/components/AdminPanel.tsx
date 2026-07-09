@@ -34,7 +34,7 @@ import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import ChatCenter, { type ChatCenterFocus } from "./admin/ChatCenter";
 import PasswordInput from "./PasswordInput";
 import { apiFetch } from "../lib/api";
-import { canManageClients, canManageVendors } from "../lib/adminAccess";
+import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs } from "../lib/adminAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { jsPDF } from "jspdf";
@@ -1080,16 +1080,30 @@ MARAS Group etir Center`;
     setSwrStatus('syncing');
     
     try {
+      const resolvedAdminTypeForSWR = adminType || 'super';
+
       const resShipments = await apiFetch("/api/shipments");
       const resDrivers = await apiFetch("/api/drivers");
       const resClients = await apiFetch("/api/clients");
       const resVendors = await apiFetch("/api/vendors");
-      const resLogs = await apiFetch("/api/logs");
       const resNotifs = await apiFetch("/api/notifications");
       const resUnreadChat = await apiFetch("/api/chat/unread");
-      const resCostStatements = await apiFetch("/api/cost-statements");
 
-      const resolvedAdminTypeForSWR = adminType || 'super';
+      // Admin Data Fetch / AdminType Access Review (PR #58): the server now
+      // rejects these for admin types the AdminPanel UI doesn't show the
+      // corresponding tab to (canViewAuditLogs/canViewCostStatements,
+      // adminAccess.ts) — skip the request entirely rather than firing it
+      // and discarding a 403, same pattern already used for /api/admins
+      // below.
+      let resLogs: Response | null = null;
+      if (canViewAuditLogs(resolvedAdminTypeForSWR)) {
+        resLogs = await apiFetch("/api/logs");
+      }
+      let resCostStatements: Response | null = null;
+      if (canViewCostStatements(resolvedAdminTypeForSWR)) {
+        resCostStatements = await apiFetch("/api/cost-statements");
+      }
+
       let resAdmins: Response | null = null;
       if (resolvedAdminTypeForSWR === 'super') {
         resAdmins = await apiFetch("/api/admins");
@@ -1107,8 +1121,8 @@ MARAS Group etir Center`;
       if (resDrivers.ok) setDrivers(await safeJson(resDrivers));
       if (resClients.ok) setClients(await safeJson(resClients));
       if (resVendors.ok) setVendors(await safeJson(resVendors));
-      if (resLogs.ok) setActivityLogs(await safeJson(resLogs));
-      if (resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
+      if (resLogs && resLogs.ok) setActivityLogs(await safeJson(resLogs));
+      if (resCostStatements && resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
       if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
       
       if (resUnreadChat.ok) {
@@ -4402,53 +4416,61 @@ MARAS Group etir Center`;
             {/* Right Widget Column: Central Control panel & Activity logging */}
             <div className="space-y-6">
               
-              {/* Widget A: Real-Time Operational Activity Logging */}
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col justify-between">
-                <div className="p-4 border-b border-slate-100 bg-slate-50/30 flex items-center justify-between">
-                  <div>
-                    <h4 className="text-xs font-black uppercase text-slate-800 tracking-wider flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
-                      <span>{lang === 'tr' ? "Canlı Güvenlik Logları" : (lang === 'ar' ? "سجل النشاط الإداري" : "Operational Activity Stream")}</span>
-                    </h4>
-                    <p className="text-[10px] text-slate-500 font-medium">Real-time immutable control ledger</p>
-                  </div>
-                  <button 
-                    onClick={() => setActiveTab('audit')} 
-                    className="text-[10px] text-orange-600 hover:underline font-black uppercase tracking-wider bg-transparent border-0 cursor-pointer"
-                  >
-                    {lang === 'tr' ? "Tümünü Gör" : (lang === 'ar' ? "الكل" : "Full Audit")}
-                  </button>
-                </div>
-
-                <div className="p-4 divide-y divide-slate-100 max-h-[290px] overflow-y-auto scrollbar-thin space-y-3">
-                  {activityLogs.length === 0 ? (
-                    <div className="py-12 text-center text-slate-400 text-xs italic">
-                      No operational logs registered yet.
+              {/* Widget A: Real-Time Operational Activity Logging.
+                  Audit/activity log content is super-only (canViewAuditLogs,
+                  adminAccess.ts) — this widget used to render unconditionally
+                  on the Dashboard, which every admin type sees, and its "Full
+                  Audit" button opened the 'audit' tab despite that tab being
+                  hidden from operation/accounts in filteredAdminTabs. Gate it
+                  the same way the 'reports' quick link below already is. */}
+              {resolvedAdminType === 'super' && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col justify-between">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50/30 flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-black uppercase text-slate-800 tracking-wider flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                        <span>{lang === 'tr' ? "Canlı Güvenlik Logları" : (lang === 'ar' ? "سجل النشاط الإداري" : "Operational Activity Stream")}</span>
+                      </h4>
+                      <p className="text-[10px] text-slate-500 font-medium">Real-time immutable control ledger</p>
                     </div>
-                  ) : (
-                    activityLogs.slice(0, 5).map((log, idx) => (
-                      <div key={log.id || idx} className="pt-2 pb-1.5 text-[11px] first:pt-0">
-                        <div className="flex items-center justify-between text-slate-400 text-[10px] mb-0.5">
-                          <span className="font-bold text-slate-700 truncate max-w-[120px] bg-slate-100 px-1.5 py-0.5 rounded">
-                            {log.actor}
-                          </span>
-                          <span className="font-mono">
-                            {new Date(log.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        </div>
-                        <p className="text-slate-600 font-semibold leading-relaxed">
-                          {lang === 'tr' ? log.actionTr : (lang === 'ar' ? log.actionAr : log.actionEn)}
-                        </p>
-                        {log.shipmentNumber && (
-                          <span className="text-[9.5px] text-indigo-600 font-extrabold mt-0.5 block">
-                            Shipment Ref: #{log.shipmentNumber}
-                          </span>
-                        )}
+                    <button
+                      onClick={() => setActiveTab('audit')}
+                      className="text-[10px] text-orange-600 hover:underline font-black uppercase tracking-wider bg-transparent border-0 cursor-pointer"
+                    >
+                      {lang === 'tr' ? "Tümünü Gör" : (lang === 'ar' ? "الكل" : "Full Audit")}
+                    </button>
+                  </div>
+
+                  <div className="p-4 divide-y divide-slate-100 max-h-[290px] overflow-y-auto scrollbar-thin space-y-3">
+                    {activityLogs.length === 0 ? (
+                      <div className="py-12 text-center text-slate-400 text-xs italic">
+                        No operational logs registered yet.
                       </div>
-                    ))
-                  )}
+                    ) : (
+                      activityLogs.slice(0, 5).map((log, idx) => (
+                        <div key={log.id || idx} className="pt-2 pb-1.5 text-[11px] first:pt-0">
+                          <div className="flex items-center justify-between text-slate-400 text-[10px] mb-0.5">
+                            <span className="font-bold text-slate-700 truncate max-w-[120px] bg-slate-100 px-1.5 py-0.5 rounded">
+                              {log.actor}
+                            </span>
+                            <span className="font-mono">
+                              {new Date(log.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          <p className="text-slate-600 font-semibold leading-relaxed">
+                            {lang === 'tr' ? log.actionTr : (lang === 'ar' ? log.actionAr : log.actionEn)}
+                          </p>
+                          {log.shipmentNumber && (
+                            <span className="text-[9.5px] text-indigo-600 font-extrabold mt-0.5 block">
+                              Shipment Ref: #{log.shipmentNumber}
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Widget B: Fast Navigation Operations Drawer */}
               <div className="bg-slate-950 bg-slate-900 text-white rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col justify-between">
@@ -5953,7 +5975,13 @@ MARAS Group etir Center`;
       )}
 
       {/* 5. Audit Log Tracker */}
-      {activeTab === 'audit' && (
+      {/* Defense-in-depth (PR #58): 'audit' is already absent from
+          filteredAdminTabs for operation/accounts and the server now
+          rejects GET /api/logs for them (canViewAuditLogs, adminAccess.ts),
+          but this content block had no adminType check of its own — if
+          activeTab were ever set to 'audit' by anything other than the
+          hidden sidebar entry, it rendered regardless of adminType. */}
+      {activeTab === 'audit' && resolvedAdminType === 'super' && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="p-5 border-b border-slate-100 flex items-center justify-between">
             <div>
@@ -5991,8 +6019,13 @@ MARAS Group etir Center`;
         </div>
       )}
 
-      {/* Operation Team Section */}
-      {activeTab === 'team' && (
+      {/* Operation Team Section.
+          Defense-in-depth (PR #58): 'team' only exists in rawTabs for
+          isSuper, but this content block had no adminType check of its
+          own — add one so it can't render for any other adminType even if
+          activeTab were somehow set to 'team' by something other than that
+          sidebar entry. */}
+      {activeTab === 'team' && resolvedAdminType === 'super' && (
         <div className="space-y-6">
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -7249,8 +7282,13 @@ MARAS Group etir Center`;
         />
       )}
 
-      {/* 8. Accounts & Cost Statements Tab */}
-      {activeTab === 'costs' && (() => {
+      {/* 8. Accounts & Cost Statements Tab.
+          Defense-in-depth (PR #58): 'costs' is only in rawTabs' roleFiltered
+          result for isSuper/isAccounts, but this content block had no
+          adminType check of its own — add one so an operation admin can't
+          render the accounting ledger even if activeTab were somehow set to
+          'costs' by something other than that sidebar entry. */}
+      {activeTab === 'costs' && canViewCostStatements(resolvedAdminType) && (() => {
         // Compute dynamic metrics
         const totalCostsByCurrency = costStatements.reduce((acc, s) => {
           const cur = s.currency || "USD";
