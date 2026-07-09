@@ -98,6 +98,25 @@ export function isProtectedOwnerAccount(
 }
 
 /**
+ * DELETE /api/admins/:id — deciding whether a given admin session may
+ * delete a given target admin document id. Every admin type may always
+ * delete their own record (required so every admin account created
+ * through the app's "Create Admin" flow can be self-deleted, per Apple
+ * Guideline 5.1.1(v)), but deleting *someone else's* account is
+ * restricted to the super-admin: GET /api/admins (the Team roster) is
+ * already super-only, so an operation-type admin who isn't allowed to see
+ * that roster must not be able to remove an entry from it either.
+ */
+export function canDeleteAdminAccount(
+  session: { role?: string; adminType?: AdminType; id?: string } | null | undefined,
+  targetId: string
+): boolean {
+  if (!session || session.role !== "admin") return false;
+  if (session.id === targetId) return true;
+  return isSuperAdmin(session.adminType);
+}
+
+/**
  * BUG-17: requireFullAdmin (server.ts) used to fold "no session at all" and
  * "authenticated but the wrong role/adminType" into the same 401 response.
  * A logged-in client/driver, or an accounts-type admin, IS authenticated —

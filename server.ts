@@ -48,7 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
@@ -3913,8 +3913,19 @@ async function startServer() {
       if (!data.password || data.password.length < 8) {
         return res.status(400).json({ error: "A password of at least 8 characters is required." });
       }
+      const newAdminId = data.id || `admin-${Date.now()}`;
+      // This route must only ever create a brand-new admin record. Without
+      // this check, a client-supplied id colliding with an existing admin's
+      // document would silently overwrite it via setDoc below — letting an
+      // operation-type admin (who can call this route but, unlike super,
+      // can neither view nor delete another admin's account) hijack a peer
+      // admin's credentials just by guessing/reusing their id.
+      const existingAdmin = await getDoc(doc(db, "admins", newAdminId));
+      if (existingAdmin.exists()) {
+        return res.status(409).json({ error: "An admin with this id already exists." });
+      }
       const newAdmin = {
-        id: data.id || `admin-${Date.now()}`,
+        id: newAdminId,
         name: data.name || "MARAS Team Member",
         email: data.email || "",
         password: hashPassword(data.password),
@@ -3940,19 +3951,10 @@ async function startServer() {
       const rawId = req.params.id;
       const id = rawId === "me" && req.session!.role === "admin" ? req.session!.id : rawId;
 
-      const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
-      // An admin (any type, including 'accounts') may always delete their
-      // own record — required so every admin account created through this
-      // app's "Create Admin" flow can be self-deleted, per Apple Guideline
-      // 5.1.1(v). For an admin session, req.session.id IS the Firestore
-      // document id of their own admins record (see the subAdmin.id
-      // assignment in the login and verify-session handlers above) — the
-      // super-admin is the one exception, whose session.id is their email
-      // since they have no Firestore document at all, but the super-admin
-      // already qualifies via isFullAdmin above regardless.
-      const isSelf = req.session!.role === "admin" && id === req.session!.id;
-      if (!isFullAdmin && !isSelf) {
-        return res.status(403).json({ error: "You can only delete your own admin account." });
+      // See canDeleteAdminAccount (src/lib/adminAccess.ts): every admin may
+      // delete their own record; deleting someone else's is super-only.
+      if (!canDeleteAdminAccount(req.session, id)) {
+        return res.status(403).json({ error: "Only the super-admin can delete another admin's account." });
       }
       const docRef = doc(db, "admins", id);
 

@@ -11,6 +11,7 @@ import {
   resolveFullAdminStatus,
   sanitizeCreatedAdminType,
   isProtectedOwnerAccount,
+  canDeleteAdminAccount,
 } from "./adminAccess";
 
 describe("isSuperAdmin", () => {
@@ -137,5 +138,29 @@ describe("isProtectedOwnerAccount", () => {
     expect(isProtectedOwnerAccount(null, OWNER_EMAIL)).toBe(false);
     expect(isProtectedOwnerAccount(undefined, OWNER_EMAIL)).toBe(false);
     expect(isProtectedOwnerAccount({ email: "sardar@maras.iq" }, "")).toBe(false);
+  });
+});
+
+describe("canDeleteAdminAccount", () => {
+  it("allows any admin type to delete their own record", () => {
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "operation", id: "admin-1" }, "admin-1")).toBe(true);
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "accounts", id: "admin-2" }, "admin-2")).toBe(true);
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "super", id: "sardar@maras.iq" }, "sardar@maras.iq")).toBe(true);
+  });
+
+  it("blocks an operation or accounts admin from deleting a different admin's record", () => {
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "operation", id: "admin-1" }, "admin-2")).toBe(false);
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "accounts", id: "admin-2" }, "admin-1")).toBe(false);
+  });
+
+  it("allows the super-admin to delete a different admin's record", () => {
+    expect(canDeleteAdminAccount({ role: "admin", adminType: "super", id: "sardar@maras.iq" }, "admin-1")).toBe(true);
+  });
+
+  it("blocks non-admin sessions and missing sessions entirely", () => {
+    expect(canDeleteAdminAccount({ role: "driver", id: "driver-1" }, "driver-1")).toBe(false);
+    expect(canDeleteAdminAccount({ role: "client", id: "client-1" }, "client-1")).toBe(false);
+    expect(canDeleteAdminAccount(null, "admin-1")).toBe(false);
+    expect(canDeleteAdminAccount(undefined, "admin-1")).toBe(false);
   });
 });

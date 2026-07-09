@@ -5935,10 +5935,6 @@ MARAS Group etir Center`;
                       </div>
 
                       <div className="border-t border-slate-100 mt-4 pt-3 space-y-1 text-[11px] text-slate-500">
-                        <div className="flex items-center justify-between">
-                          <span>{lang === 'tr' ? 'Giriş Şifresi' : 'Sign-in Password'}</span>
-                          <span className="font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100 text-slate-700 select-all font-bold">{adm.password}</span>
-                        </div>
                         {adm.createdAt && (
                           <div className="flex items-center justify-between text-[10px] text-slate-400">
                             <span>{lang === 'tr' ? 'Yetkilendirildi' : 'Authorized'}</span>
