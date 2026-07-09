@@ -24,7 +24,7 @@ type GroupKey = 'operations' | 'business' | 'system';
 const GROUPS: { key: GroupKey; ids: string[] }[] = [
   { key: 'operations', ids: ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center'] },
   { key: 'business', ids: ['clients', 'vendors', 'costs', 'reports'] },
-  { key: 'system', ids: ['gmail', 'audit', 'team', 'my_account'] },
+  { key: 'system', ids: ['settings', 'gmail', 'audit', 'team', 'my_account'] },
 ];
 
 /**
