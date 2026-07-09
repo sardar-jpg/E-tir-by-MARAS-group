@@ -63,6 +63,7 @@ STRICT_PERSISTENCE=true            # default; only the literal string "false" tu
 SEED_DEMO_DATA=false               # default; only "true" seeds a full demo dataset
 SERVER_FIREBASE_EMAIL=<dedicated-server-account-email>
 SERVER_FIREBASE_PASSWORD=<dedicated-server-account-password>
+SERVER_FIREBASE_UID=<firebase-auth-uid-for-server-account>   # NOT a secret — see §5a
 SUPER_ADMIN_EMAIL=<root-admin-login-email>
 SUPER_ADMIN_PASSWORD_HASH=<generate-with-npm-run-hash-password>
 GOOGLE_MAPS_PLATFORM_KEY=<restricted-maps-key>    # only needed to test GPS/map pages
@@ -186,6 +187,69 @@ Recommended, in order:
       — confirm via Firebase Console > Firestore > Rules Playground (or the
       Firebase emulator) that a request with no `request.auth`, or a
       different UID, is denied
+
+## 5a. Server-account UID verification (static, no Firebase connection)
+
+This is the step most likely to be skipped, because a mismatched UID doesn't
+fail loudly like a missing env var does — the server falls back to memory
+and logs it (§4 step 8, §11), but nothing forces you to *notice* before
+deploying rules. Do this every time the server account or a Firebase project
+changes:
+
+1. In Firebase Console, open **Authentication > Users**.
+2. Find the user whose email matches `SERVER_FIREBASE_EMAIL` for the target
+   project.
+3. Copy that user's **UID**.
+4. Confirm it matches the UID hardcoded in both `firestore.rules`
+   (`function isServerAccount()`) and `storage.rules` (same function) —
+   they must currently be updated together, by hand; there is no build step
+   that generates one from the other.
+5. Optionally, set `SERVER_FIREBASE_UID` to the UID from step 3 — locally in
+   your shell or `.env.local` (never committed) — and run:
+   ```bash
+   npm run check-firebase-readiness
+   ```
+   The script (`scripts/check-firebase-readiness.ts`,
+   `src/lib/firebaseRulesUid.ts`) reads `firestore.rules` and
+   `storage.rules` directly off disk and reports:
+   - the UID it found in each rules file,
+   - whether the two rule files agree with each other,
+   - whether `SERVER_FIREBASE_UID` (if set) matches what the rules contain.
+
+   **`SERVER_FIREBASE_UID` is not a secret.** It is a plain Firebase Auth
+   UID (like the one already committed in plaintext in `firestore.rules`
+   and `storage.rules`) — not a password, not a token, and not
+   `SERVER_FIREBASE_EMAIL`/`SERVER_FIREBASE_PASSWORD`. It exists only so
+   this script has something to diff the rules' hardcoded UID against
+   without contacting Firebase.
+
+   What failure means:
+   - **`firestore.rules` / `storage.rules` UIDs match: false`** — the two
+     rule files authorize different accounts; whichever one doesn't match
+     the real `SERVER_FIREBASE_EMAIL` account will reject every request
+     from the server. Fix both files to the same UID before deploying
+     either.
+   - **A `SERVER_FIREBASE_UID` mismatch warning/problem** — the UID you set
+     locally doesn't match what's hardcoded in the rules. If you're
+     confident `SERVER_FIREBASE_UID` is the *correct* value (i.e. you just
+     copied it from Firebase Console per steps 1–3), the rules are stale
+     and need updating before this account's requests will succeed against
+     the target project. This is reported as a warning outside production,
+     and as a blocking problem when `NODE_ENV=production` and
+     `STRICT_PERSISTENCE` is on (the default) — matching how other
+     launch-blocker problems are reported by this script.
+   - **No `SERVER_FIREBASE_UID` set** — the script only reports what UID it
+     found in the rules; it cannot confirm that matches the real
+     `SERVER_FIREBASE_EMAIL` account without you completing steps 1–4
+     manually. This is always a warning, never a blocking problem — the var
+     is optional.
+
+   This check is entirely static: it never signs in to Firebase, never
+   reads `SERVER_FIREBASE_PASSWORD`, and never prints `SERVER_FIREBASE_UID`'s
+   value beyond the presence/match booleans above. It cannot substitute for
+   actually confirming the UID in Firebase Console (steps 1–3) — it can only
+   catch the case where you *did* look it up and either the rules or your
+   env var don't reflect it.
 
 ## 6. Storage rules verification
 
@@ -335,10 +399,13 @@ and never prints a secret value. It reports the same persistence-mode
 picture as the server's own `[Startup]` log
 (`src/lib/persistenceReadiness.ts`), plus: whether `SESSION_SECRET` /
 `SUPER_ADMIN_PASSWORD_HASH` are present, whether any `ALLOWED_ORIGINS`-style
-env var contains a wildcard `*`, and whether any committed file in the repo
-looks like a Firebase/GCP service-account key. Run it with `NODE_ENV=production`
-set (matching your real deployment env) to get the same launch-blocker
-checks the checklist requires — it exits non-zero if any are found:
+env var contains a wildcard `*`, whether any committed file in the repo
+looks like a Firebase/GCP service-account key, and — per §5a —
+whether `firestore.rules`/`storage.rules` agree on the server-account UID
+and, if `SERVER_FIREBASE_UID` is set, whether it matches them. Run it with
+`NODE_ENV=production` set (matching your real deployment env) to get the
+same launch-blocker checks the checklist requires — it exits non-zero if any
+are found:
 
 ```bash
 npm run check-firebase-readiness                       # check current shell env
@@ -372,7 +439,11 @@ environment is not production-ready:
   `CLIENT_URL`/`PUBLIC_APP_URL`, or the server reflecting an arbitrary
   Origin header (would indicate `src/lib/cors.ts` was changed unsafely)
 - Firestore/Storage rules' hardcoded UID not matching the actual
-  `SERVER_FIREBASE_EMAIL` account's UID for the project in use
+  `SERVER_FIREBASE_EMAIL` account's UID for the project in use — run
+  `npm run check-firebase-readiness` (§5a) to at least confirm
+  `firestore.rules` and `storage.rules` agree with each other and (if set)
+  with `SERVER_FIREBASE_UID`; the underlying Firebase Console comparison
+  still has to be done by hand
 - Accounts admin able to fetch `GET /api/shipments`, `GET /api/drivers`, or
   `GET /api/logs` (should 403)
 - Public tracking (`GET /api/share/:token`) returning internal documents,
@@ -392,7 +463,7 @@ environment is not production-ready:
 - [ ] `npm run check-firebase-readiness` (with `NODE_ENV=production`) reports
       no blocking problems
 - [ ] Firestore and Storage rules deployed to the target project, with the
-      server-account UID confirmed matching (§5–§6)
+      server-account UID confirmed matching (§5–§6, §5a)
 - [ ] Persistence verified real (§9) — data survives a restart, no memory
       fallback, no demo data
 - [ ] Full role smoke test matrix (§7) passed for all seven roles/surfaces

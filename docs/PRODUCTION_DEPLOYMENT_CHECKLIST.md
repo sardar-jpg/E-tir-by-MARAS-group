@@ -135,14 +135,24 @@ Firestore.
 - [ ] Firestore indexes reviewed if any composite queries require them
       (check Cloud Run logs after first production traffic for
       "requires an index" errors)
-- [ ] Firestore rules (`firestore.rules`) deployed — current rule
-      restricts all read/write to the single server-account UID
-      (`mQadHKcpmgbLIAwQaz8AqrAytIo2` in the committed file — **confirm
-      this UID matches the actual `SERVER_FIREBASE_EMAIL` account's UID
-      for the production project**, updating the rule if a different
-      account/project is used)
-- [ ] Storage rules (`storage.rules`) deployed — same UID-match caveat
-      as above
+- [ ] `SERVER_FIREBASE_UID` verified — copy the UID of the
+      `SERVER_FIREBASE_EMAIL` account from Firebase Console >
+      Authentication > Users (this var is not a secret; see
+      `docs/REAL_FIREBASE_VERIFICATION.md` §5a)
+- [ ] `firestore.rules` UID matches `storage.rules` UID — both files'
+      `isServerAccount()` currently hardcode the same literal
+      (`mQadHKcpmgbLIAwQaz8AqrAytIo2` as committed); run
+      `npm run check-firebase-readiness` to check this statically
+- [ ] Both rules files' UID matches `SERVER_FIREBASE_EMAIL`'s real Firebase
+      Auth UID for the production project — **confirm this by hand in
+      Firebase Console**, updating both rule files together if a different
+      account/project is used; a mismatch fails closed (memory fallback,
+      logged loudly) rather than granting access to the wrong account
+- [ ] Firestore rules (`firestore.rules`) deployed only after the UID checks
+      above pass (Firebase Console > Firestore Database > Rules, or
+      `firebase deploy --only firestore:rules`)
+- [ ] Storage rules (`storage.rules`) deployed only after the UID checks
+      above pass (same UID-match caveat as Firestore)
 - [ ] Production data backup strategy decided (see §18 — Firestore export)
 
 ## 5. Persistence and demo data
