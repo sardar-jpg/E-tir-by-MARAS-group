@@ -3959,7 +3959,10 @@ MARAS Group etir Center`;
                 <div className="text-[10px] font-bold text-emerald-600 flex items-center gap-1">
                   <Check className="w-3.5 h-3.5" />
                   <span>
-                    {lang === 'tr' ? "Eksiksiz tamamlandı" : (lang === 'ar' ? "تم التسليم بنجاح" : "100% successful rate")}
+                    {(() => {
+                      const pct = totalShipmentsCount > 0 ? Math.round((completedShipmentsCount / totalShipmentsCount) * 100) : 0;
+                      return lang === 'tr' ? `Toplam sevkiyatın %${pct}'i` : (lang === 'ar' ? `${pct}% من إجمالي الشحنات` : `${pct}% of total shipments`);
+                    })()}
                   </span>
                 </div>
               </div>
@@ -4290,7 +4293,7 @@ MARAS Group etir Center`;
                             <span className="text-slate-900 block font-black text-xs">
                               {shipment.agreedAmount.toLocaleString()} {shipment.currency}
                             </span>
-                            <span className="text-[9px] text-slate-400 font-medium block">Cleared Settlement</span>
+                            <span className="text-[9px] text-slate-400 font-medium block">Agreed Amount</span>
                           </td>
                           <td className="p-4">
                             <div className="space-y-1">
@@ -4468,14 +4471,19 @@ MARAS Group etir Center`;
                     <span className="text-[9px] text-slate-400 block font-normal">Smart Tracking</span>
                   </button>
 
-                  <button
-                    onClick={() => setActiveTab('reports')}
-                    className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
-                  >
-                    <ClipboardList className="w-4 h-4 text-indigo-400 mb-1.5 group-hover:scale-105 transition-transform" />
-                    <p className="font-bold text-slate-200">{lang === 'tr' ? "Lojistik Raporlar" : (lang === 'ar' ? "الإحصاءات المالية" : "Financial Reports")}</p>
-                    <span className="text-[9px] text-slate-400 block font-normal">Revenue breakdowns</span>
-                  </button>
+                  {/* 'reports' is accounts/super-only per adminAccess.ts and hidden from
+                      operation admins in the sidebar (filteredAdminTabs) — keep this
+                      shortcut in sync so it doesn't offer a route around that. */}
+                  {resolvedAdminType !== 'operation' && (
+                    <button
+                      onClick={() => setActiveTab('reports')}
+                      className="p-3 text-left bg-slate-800/80 hover:bg-slate-800 rounded-lg border border-slate-700/60 transition-all text-xs group cursor-pointer"
+                    >
+                      <ClipboardList className="w-4 h-4 text-indigo-400 mb-1.5 group-hover:scale-105 transition-transform" />
+                      <p className="font-bold text-slate-200">{lang === 'tr' ? "Lojistik Raporlar" : (lang === 'ar' ? "الإحصاءات المالية" : "Financial Reports")}</p>
+                      <span className="text-[9px] text-slate-400 block font-normal">Revenue breakdowns</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
