@@ -17,11 +17,7 @@ next so the work isn't lost between sessions.
 - **Company/System Settings backend** — make the read-only placeholder fields (company name, currency, order number format, etc.) actually editable and persisted.
 
 ## Sidebar / navigation cleanup
-- **Decide later whether to hide duplicated top-level sidebar entries** (deferred by explicit decision in PR #56):
-  - My Account
-  - Operation Team / Staff & Permissions
-  - Google Workspace
-  - Audit Logs / Security Activity
+- ~~**Decide later whether to hide duplicated top-level sidebar entries**~~ — **Done in PR #57** (`feature/sidebar-settings-dedup-cleanup`). `My Account`, `Operation Team / Staff & Permissions`, `Google Workspace`, and `Audit Logs / Security Activity` are hidden from the top-level desktop sidebar and mobile tab bar; Settings is now the single entry point, linking to them via its cards' `setActiveTab` calls. The tabs, their `activeTab` ids, and content blocks are unchanged — only the duplicate top-level nav entries were removed.
 
 ## Google Workspace
 - **Google Drive Shipment Folder Structure** — define a consistent per-shipment folder layout for Drive backups.
