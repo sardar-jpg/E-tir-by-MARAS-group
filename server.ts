@@ -55,6 +55,7 @@ import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
+import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -2935,9 +2936,9 @@ async function startServer() {
       await logActivity(
         item.id,
         item.shipmentNumber,
-        cleanEmail,
+        "Customer (Tracking Subscription)",
         `Subscribed to real-time cargo updates`,
-        `${cleanEmail} e-posta ile canlı güncellemelere abone oldu`,
+        `Canlı kargo güncellemelerine abone oldu`,
         `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
       );
 
@@ -3497,6 +3498,10 @@ async function startServer() {
           console.error("[login] SUPER_ADMIN_PASSWORD_HASH is not configured.");
         } else if (verifyPassword(password, SUPER_ADMIN_PASSWORD_HASH)) {
           clearLoginRateLimit(req, normalizedQuery);
+          // Fire-and-forget: logActivity swallows its own errors, and is
+          // never awaited here so a slow/failing log write can't delay or
+          // block the login response.
+          logActivity("", "", SUPER_ADMIN_EMAIL, "Super-admin login succeeded", "Süper yönetici girişi başarılı", "تم تسجيل دخول المسؤول الأعلى بنجاح");
           const sessionPayload: SessionPayload = {
             role: "admin",
             id: SUPER_ADMIN_EMAIL,
@@ -3524,6 +3529,7 @@ async function startServer() {
         // server-side only, never in the client-facing response, which
         // would otherwise leak that this email is a real admin account.
         console.warn(`[login] Wrong password for super-admin account: ${SUPER_ADMIN_EMAIL}`);
+        logActivity("", "", maskLoginIdentifier(SUPER_ADMIN_EMAIL), "Failed login attempt for super-admin account", "Süper yönetici hesabı için başarısız giriş denemesi", "محاولة تسجيل دخول فاشلة لحساب المسؤول الأعلى");
         return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
       }
 
@@ -3540,6 +3546,7 @@ async function startServer() {
           });
           if (matched) {
             clearLoginRateLimit(req, normalizedQuery);
+            logActivity("", "", subAdmin.email, "Admin login succeeded", "Yönetici girişi başarılı", "تم تسجيل دخول المسؤول بنجاح");
             const sessionPayload: SessionPayload = {
               role: "admin",
               id: subAdmin.id,
@@ -3566,6 +3573,7 @@ async function startServer() {
           // let the client tell a wrong-password admin apart from an
           // unknown identity.
           console.warn(`[login] Wrong password for admin account: ${subAdmin.email}`);
+          logActivity("", "", maskLoginIdentifier(subAdmin.email), "Failed login attempt for admin account", "Yönetici hesabı için başarısız giriş denemesi", "محاولة تسجيل دخول فاشلة لحساب المسؤول");
           return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
         }
       } catch (err) {
@@ -3593,12 +3601,15 @@ async function startServer() {
         });
         if (matched) {
           if (matchedDriver.status === "pending") {
+            logActivity("", "", maskLoginIdentifier(matchedDriver.email || matchedDriver.username), "Driver login blocked - account pending approval", "Sürücü girişi engellendi - hesap onay bekliyor", "تم حظر تسجيل دخول السائق - الحساب بانتظار الموافقة");
             return res.status(403).json({ error: "Your driver account is pending admin approval. Please check back soon." });
           }
           if (matchedDriver.status === "rejected") {
+            logActivity("", "", maskLoginIdentifier(matchedDriver.email || matchedDriver.username), "Driver login blocked - registration rejected", "Sürücü girişi engellendi - kayıt reddedildi", "تم حظر تسجيل دخول السائق - تم رفض التسجيل");
             return res.status(403).json({ error: "Your driver registration was not approved. Please contact MARAS Group support." });
           }
           clearLoginRateLimit(req, normalizedQuery);
+          logActivity("", "", matchedDriver.email || matchedDriver.username || "Driver", "Driver login succeeded", "Sürücü girişi başarılı", "تم تسجيل دخول السائق بنجاح");
           const sessionPayload: SessionPayload = {
             role: "driver",
             id: matchedDriver.id,
@@ -3634,6 +3645,7 @@ async function startServer() {
         });
         if (matched) {
           clearLoginRateLimit(req, normalizedQuery);
+          logActivity("", "", matchedClient.email || matchedClient.username || "Client", "Client login succeeded", "Müşteri girişi başarılı", "تم تسجيل دخول العميل بنجاح");
           // isEmployee is read from the Firestore record loaded above — never from the request body.
           const sessionPayload: SessionPayload = {
             role: "client",
@@ -3652,6 +3664,7 @@ async function startServer() {
         }
       }
 
+      logActivity("", "", maskLoginIdentifier(normalizedQuery), "Failed login attempt - invalid credentials or unrecognized identity", "Geçersiz kimlik bilgileri veya tanınmayan kullanıcı ile başarısız giriş denemesi", "محاولة تسجيل دخول فاشلة - بيانات اعتماد غير صحيحة أو هوية غير معروفة");
       return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
     } catch (err) {
       console.error(err);
@@ -4750,14 +4763,14 @@ async function startServer() {
 
   app.post("/api/logs", requireRole("admin"), async (req, res) => {
     try {
-      const { shipmentId, shipmentNumber, actor, actionEn, actionTr, actionAr } = req.body;
+      const { shipmentId, shipmentNumber, actor, actionEn, actionTr, actionAr } = sanitizeLogInput(req.body || {});
       await logActivity(
-        shipmentId || "",
-        shipmentNumber || "",
-        actor || "Operator",
-        actionEn || "",
-        actionTr || "",
-        actionAr || ""
+        shipmentId,
+        shipmentNumber,
+        actor,
+        actionEn,
+        actionTr,
+        actionAr
       );
       res.status(201).json({ status: "success" });
     } catch (err) {

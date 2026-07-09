@@ -76,6 +76,13 @@ function getOwnSessionId(): string | null {
   }
 }
 
+/** Masks a recipient email before it's persisted into the shared, admin-readable audit log. */
+function maskEmailForLog(email: string): string {
+  const [user, domain] = (email || "").split("@");
+  if (!user || !domain) return "unknown-recipient";
+  return `${user[0]}***@${domain}`;
+}
+
 const COUNTRY_PORTS: Record<string, string[]> = {
   "Turkey": ["Port of Ambarli (Istanbul)", "Port of Mersin", "Port of Gemlik", "Port of Izmir (Alsancak)", "Port of Aliaga", "Port of Iskenderun", "Port of Derince"],
   "Türkiye": ["Ambarlı Limanı (İstanbul)", "Mersin Limanı", "Gemlik Limanı", "İzmir Limanı (Alsancak)", "Aliağa Limanı", "İskenderun Limanı", "Derince Limanı"],
@@ -6474,9 +6481,9 @@ MARAS Group etir Center`;
                           body: JSON.stringify({
                             actor: gmailUser?.email || "Gmail Operator",
                             shipmentNumber: targetShipObj?.shipmentNumber || "GMAIL-BROADCAST",
-                            actionEn: `Dispatched operational email alert via Gmail Workspace connection to ${gmailTo}`,
-                            actionTr: `Gmail Workspace bağlantısı üzerinden ${gmailTo} adresine operasyonel e-posta gönderildi`,
-                            actionAr: `تم إرسال تنبيه بالبريد الإلكتروني عبر حساب Gmail إلى ${gmailTo}`
+                            actionEn: `Dispatched operational email alert via Gmail Workspace connection to ${maskEmailForLog(gmailTo)}`,
+                            actionTr: `Gmail Workspace bağlantısı üzerinden ${maskEmailForLog(gmailTo)} adresine operasyonel e-posta gönderildi`,
+                            actionAr: `تم إرسال تنبيه بالبريد الإلكتروني عبر حساب Gmail إلى ${maskEmailForLog(gmailTo)}`
                           })
                         });
                         // Refresh audit logs in background
