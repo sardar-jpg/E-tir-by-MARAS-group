@@ -3210,7 +3210,7 @@ MARAS Group etir Center`;
       { id: 'settings', label: lang === 'tr' ? 'Ayarlar' : (lang === 'ar' ? 'الإعدادات' : 'Settings'), icon: Settings }
     ];
 
-    return rawTabs.filter(tab => {
+    const roleFiltered = rawTabs.filter(tab => {
       if (isSuper) return true;
       if (isOperation) {
         return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
@@ -3220,6 +3220,19 @@ MARAS Group etir Center`;
       }
       return false;
     });
+
+    // Sidebar/nav dedup (PR #57): 'my_account' / 'team' / 'gmail' / 'audit'
+    // are still full tabs — their activeTab values, content blocks, and
+    // role gating above are untouched — but Settings (the 'settings' tab)
+    // is now the single top-level entry point for them, linking in via its
+    // "My Profile" / "Staff & Permissions" / "Google Workspace" /
+    // "Security & Activity" cards' setActiveTab calls. Hiding them here
+    // (the array shared by AdminSidebar and the mobile tab bar below) just
+    // removes the duplicate top-level nav entry; it doesn't affect who can
+    // reach them, since that's still decided by the role filter above and
+    // by resolvedAdminType === 'super' on the Settings cards themselves.
+    const HIDDEN_FROM_TOP_LEVEL_NAV_IDS = ['my_account', 'team', 'gmail', 'audit'];
+    return roleFiltered.filter(tab => !HIDDEN_FROM_TOP_LEVEL_NAV_IDS.includes(tab.id));
   })();
 
   // BUG-24: catch a tab that AdminSidebar's GROUPS forgot to place — it
