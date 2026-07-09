@@ -93,6 +93,23 @@ export function canViewCostStatements(adminType: AdminType | undefined): boolean
 }
 
 /**
+ * PR #61 (Accounts Cost Statement Write Access): POST
+ * /api/cost-statements/:shipmentId used requireFullAdmin (super/operation),
+ * which blocks 'accounts' — the type the 'costs' tab is shown to for
+ * exactly this purpose (see canViewCostStatements above) — from ever
+ * saving the statement it can already view. Product decision: Accounts
+ * Admin owns accounting end-to-end (cost items, supplier names,
+ * quantities, unit prices, totals, paid amount, notes), so write access
+ * mirrors read access here. This does not widen any other route —
+ * 'operation' remains blocked from cost statements entirely, and
+ * 'accounts' still has no access to GET /api/shipments, /api/logs, or
+ * /api/admins. See docs/FOLLOW_UP_ROADMAP.md (Option A).
+ */
+export function canWriteCostStatements(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "accounts";
+}
+
+/**
  * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs (and the
  * POST that appends to it) used requireRole("admin") — any adminType could
  * read or write the immutable security/activity ledger directly, even though

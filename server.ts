@@ -48,7 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
 import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
@@ -1942,6 +1942,27 @@ async function startServer() {
     }
     if (!canViewCostStatements(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view cost statements." });
+    }
+    next();
+  }
+
+  /**
+   * PR #61 (Accounts Cost Statement Write Access): POST
+   * /api/cost-statements/:shipmentId used requireFullAdmin, which blocks
+   * 'accounts' — the type the 'costs' tab is shown to for exactly this
+   * purpose — from ever saving the statement it can already view via
+   * requireCanViewCostStatements above. See canWriteCostStatements
+   * (adminAccess.ts): mirrors the view rule (super/accounts), still
+   * excludes 'operation' entirely, and grants nothing beyond this route —
+   * accounts admins still cannot GET /api/shipments, /api/logs, or
+   * /api/admins.
+   */
+  function requireCanWriteCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canWriteCostStatements(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to write cost statements." });
     }
     next();
   }
@@ -4754,7 +4775,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cost-statements/:shipmentId", requireFullAdmin, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements, async (req, res) => {
     try {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
