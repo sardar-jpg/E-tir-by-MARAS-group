@@ -15,9 +15,9 @@ const LABELS: Record<Language, {
   continueJob: string; chat: string; upload: string;
   route: string; cargo: string; payout: string; from: string; to: string; notSpecified: string; truck: string;
 }> = {
-  en: { continueJob: 'Continue Job', chat: 'Chat', upload: 'Upload Doc', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified', truck: 'Truck' },
-  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', upload: 'Belge Yükle', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş', truck: 'Araç' },
-  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', upload: 'رفع مستند', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد', truck: 'الشاحنة' },
+  en: { continueJob: 'Continue Job', chat: 'Chat', upload: 'Send Photo/File', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified', truck: 'Truck' },
+  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', upload: 'Fotoğraf/Dosya Gönder', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş', truck: 'Araç' },
+  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', upload: 'إرسال صورة/ملف', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد', truck: 'الشاحنة' },
 };
 
 export default function ActiveJobCard({

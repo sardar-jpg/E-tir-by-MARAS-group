@@ -317,8 +317,10 @@ Smoke-test items (log in as each and confirm):
       used) for production
 - [ ] Billing enabled on the Google Cloud project if required by current
       Maps Platform pricing
-- [ ] GPS Tracking Map, Client Shipment Map, and Driver Application map
-      pages tested with a real, restricted key
+- [ ] GPS Tracking Map and Client Shipment Map pages tested with a real,
+      restricted key (the Driver app's own map card was removed in PR #72
+      — drivers no longer render a map; their background GPS still feeds
+      the admin GPS Tracking Map)
 - [ ] Missing-key fallback tested (unset/empty key shows the "Google Maps
       Platform Key Required" setup-instructions card,
       `src/components/TrackingMap.tsx`, rather than a broken/blank map)
@@ -527,9 +529,12 @@ referenced here rather than duplicated:
   approve/reject, cost-statement read/export, document visibility)
 - Notification Preferences backend, Company/System Settings backend
 - Google Drive Shipment Folder Structure, Google Drive Scope Review
-- Driver App Simplification (trimming non-CMR admin-dashboard-style
-  sections) — the driver-uploaded-CMR contradiction itself was fixed in
-  PR #71, see `docs/FOLLOW_UP_ROADMAP.md`
+- ~~Driver App Simplification~~ — **Done in PR #72** (trimmed the
+  non-CMR admin-dashboard-style sections: route-tracker map, POD
+  signature panel, trip-estimate simulator, and Menu's ELD/Fuel
+  Calculator/duplicate-settings block); the driver-uploaded-CMR
+  contradiction itself was fixed earlier in PR #71. See
+  `docs/FOLLOW_UP_ROADMAP.md`
 - Notification Dismiss behavior review
 - Accounts-facing analytics endpoint; non-financial analytics for
   operation admins

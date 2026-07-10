@@ -31,7 +31,7 @@ next so the work isn't lost between sessions.
 - ~~**Driver-uploaded CMR/customs scan approval flow**~~ — **superseded by the CMR product decision below** (added in PR #69, docs-only). Adding an approval step for driver-submitted CMRs is no longer the direction: the decision is that drivers must not create, generate, sign, stamp, approve, or upload CMR at all — CMR becomes admin-only end-to-end, with drivers getting read-only view/download access. See "Driver App Simplification + CMR Read-Only Review" below.
 - **Notification Dismiss behavior** — review how notifications are dismissed/cleared across roles.
 
-## Driver app simplification (added in PR #69, docs-only; CMR contradiction fixed in PR #71)
+## Driver app simplification (added in PR #69, docs-only; CMR contradiction fixed in PR #71; UI complexity trimmed in PR #72)
 
 Product decision recorded in PR #69
 (`feature/ios-app-review-performance-readiness-pack`, documentation only).
@@ -93,15 +93,43 @@ document renders as a "Documents from Admin" row reading
 `cmr`; no upload/sign/stamp CMR wording remains anywhere in
 `DriverApplication.tsx`.
 
-**Also to document/implement in a future PR (not done in PR #71 — kept
-focused on the CMR upload/view contradiction):**
-- Remove or hide unnecessary counters, charts, analytics, and
-  admin-style dashboard sections from `DriverApplication` — a dedicated
-  scoping pass. Not done in PR #71 either; the "Quick Cockpit Actions" /
-  "Trip Estimate" road-condition simulator / "Smart Transit Route Tracker"
-  sections are stylized but don't leak any admin/customer/accounting data
-  (confirmed during this PR's browser pass), so they were left alone rather
-  than redesigned in a CMR-focused safety PR.
+**Done in PR #72** (`feature/driver-simple-mobile-ux-cleanup`). This was
+the dedicated scoping pass deferred from PR #71: removed the "Smart
+Transit Route Tracker" map card (Google Maps embed, fallback block, and
+the Last Update/Progress %/Tracking Status counters), the "Proof of
+Delivery" digital-signature/checklist panel, and the "Trip Estimate"
+road-condition simulator from the job-detail view — none of them leaked
+admin/customer/accounting data (confirmed in PR #71's review), they were
+purely cockpit-style UI weight. "Quick Cockpit Actions" was cut from a
+3-button grid with an inline status drawer down to a plain 2-button
+"Quick Actions" panel (Start Shipment, Send Photo) — the inline status
+drawer was a duplicate of the status form already below it. The Menu
+tab's "Pilot Operations" section (ELD Hours of Service timer, Fuel &
+Route Calculator, and a "System Configuration" block that only
+duplicated the toggles already above it) was removed entirely, along
+with the non-functional Measurement Units toggle, the Sound
+Alerts/Speed Post Guard toggles (found to gate nothing — the underlying
+Web Audio chime code ran unconditionally regardless of the toggle, so
+that dead chime code was removed too rather than wired up), and the
+fake "Save Preferences" button (only fired a toast, persisted nothing).
+Menu now reads as a simple Settings page: driver identity badge, a
+real Theme (Day/Night) toggle, a read-only Language display, and
+Logout. Profile's "Stats Counter Grid" (active/completed job counts of
+unverified accuracy) was also removed. Wording changes: "Scan Document"
+→ "Take Photo", "Upload File"/chat "Upload Doc" → "Send File" /
+"Send Photo/File", the status-update form's heading ("... Updates
+Terminal") → "Update Shipment Status", and the remaining camera-capture
+modal's "Document Scanner"/"Capture Document"/"Send Document" strings →
+"Take Photo"/"Capture Photo"/"Send to Admin". None of this touched
+`src/lib/documentAccess.ts`, the server-side CMR-upload rejection, or
+`isDocumentVisibleToDriver` — the "Documents from Admin" panel and its
+CMR/packing-list View links are unchanged. Background GPS transmission
+(`transmitGPS`/`triggerGpsSync`, the polling `useEffect`) was kept
+as-is — it feeds the admin GPS Tracking Map and has no UI in the driver
+app, so it wasn't "cockpit" surface to remove. Verified browser-driven
+at 390×844 with the same `demo_driver` scenario documented below; see
+`docs/IOS_APP_REVIEW_READINESS.md` §12 for the App-Review-facing
+cross-reference.
 - Driver must never see: customer company name, Client Staff identity,
   customer price/payment status, cost statements, vendor costs,
   profit/margin, invoices, internal notes, `client_admin` chat, or
@@ -149,11 +177,12 @@ focused on the CMR upload/view contradiction):**
 - The future PR should include a real mobile-size browser smoke test for
   `DriverApplication` (narrow viewport, not just a desktop-sized
   headless browser window), matching the browser-driven verification
-  standard set by PR #68's client-staff smoke test. **Done in PR #71** —
-  driven at 390×844, Documents panel and Quick Actions cockpit both render
-  correctly with no overlap/truncation.
+  standard set by PR #68's client-staff smoke test. **Done in PR #71**,
+  re-verified in PR #72 against the simplified UI — driven at 390×844,
+  Home/Jobs/Chat/Menu/Profile all render correctly with no
+  overlap/truncation and zero console errors.
 
-### Driver review demo scenario (local/dev only — PR #71)
+### Driver review demo scenario (local/dev only — PR #71, re-verified PR #72)
 
 For manually reviewing the Driver app end-to-end (this section, not a
 permanent feature): **local/dev only, never seeded in production** — gated
@@ -183,8 +212,8 @@ inline if preferred — never commit either.)
 - Agreed driver amount: 2,800 TRY (own payout — allowed)
 - Status: `Accepted` (leaves every forward transition —
   Loading/Loaded/In Transit/Border Crossing/Customs
-  Clearance/Arrived/Delivered — available to exercise in the Quick Actions
-  cockpit / status dropdown)
+  Clearance/Arrived/Delivered — available to exercise via the status
+  dropdown)
 - `driver_admin` chat thread: an admin message ("your CMR document ... has
   been uploaded and is ready to view") and a driver reply — both properly
   `channel: "driver_admin"`-tagged so they render in a fresh
