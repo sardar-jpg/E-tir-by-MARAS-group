@@ -31,12 +31,11 @@ next so the work isn't lost between sessions.
 - ~~**Driver-uploaded CMR/customs scan approval flow**~~ — **superseded by the CMR product decision below** (added in PR #69, docs-only). Adding an approval step for driver-submitted CMRs is no longer the direction: the decision is that drivers must not create, generate, sign, stamp, approve, or upload CMR at all — CMR becomes admin-only end-to-end, with drivers getting read-only view/download access. See "Driver App Simplification + CMR Read-Only Review" below.
 - **Notification Dismiss behavior** — review how notifications are dismissed/cleared across roles.
 
-## Driver app simplification (added in PR #69, docs-only — not implemented)
+## Driver app simplification (added in PR #69, docs-only; CMR contradiction fixed in PR #71)
 
-Product decision recorded here for a **future dedicated PR**. Not
-implemented in PR #69 (`feature/ios-app-review-performance-readiness-pack`)
-— documentation only, no code changed for this item. See
-`docs/IOS_APP_REVIEW_READINESS.md` §12 for the mobile/App-Review-facing
+Product decision recorded in PR #69
+(`feature/ios-app-review-performance-readiness-pack`, documentation only).
+See `docs/IOS_APP_REVIEW_READINESS.md` §12 for the mobile/App-Review-facing
 cross-reference.
 
 **Important product decision: the Driver app must stay simple and
@@ -61,34 +60,172 @@ restriction):**
   design and shipment data.
 - Driver CMR access must be **read-only**: view, download, and show at
   the border. Nothing else.
-- **Current state does not match this yet** — checked as part of adding
-  this item: `DriverApplication.tsx` today actively invites the driver to
-  upload a CMR ("Scan CMR / Paperwork" in the document-upload UI, a
-  driver-facing prompt reading "Please upload the signed CMR document as
-  soon as possible.", and a `cmr` option in the upload category picker,
-  same as `src/components/driver/FileUploadModal.tsx`). The future PR
-  implementing this decision needs to **remove** that driver-upload-CMR
-  path (not just decline to add an approval step for it, per the
-  now-superseded roadmap item above), not only add the read-only
-  view/download surface.
 
-**Also to document/implement in that future PR:**
+**Done in PR #71** (`feature/driver-app-simplification-cmr-documents-review`).
+`DriverApplication.tsx` used to actively invite the driver to upload a CMR
+("Scan CMR / Paperwork" in the document-upload UI, a driver-facing prompt
+reading "Please upload the signed CMR document as soon as possible.", and a
+`cmr` option in two separate category pickers — the inline camera-scanner
+modal and `src/components/driver/FileUploadModal.tsx`). All of that is now
+removed: the `cmr` category option no longer appears in either picker (or in
+`FileUploadModal`'s filename-based auto-detection), every default/quick-action
+category that used to hardcode `"cmr"` now defaults to `"photo"`, "Scan CMR"
+is now "Scan Photo", the generic "Upload File" action is now "Send File", and
+the driver-facing chat-translation dictionary entry that modeled an admin
+*asking the driver to upload* a signed CMR was replaced with one that models
+the correct flow (admin notifying the driver a CMR is uploaded and ready to
+view). The Documents panel header changed from "CMR / Proof of Delivery" to
+"Documents from Admin", and — this was the other half of the fix — each
+document row is now an actual `<a href={d.url} target="_blank">` link
+("View"), where before the panel listed document names with **no click
+target at all**, so a driver had no way to open an admin-sent document even
+though the visibility model already allowed it. `src/lib/documentAccess.ts`'s
+`isDocumentVisibleToDriver`/`DRIVER_VISIBLE_DOCUMENT_CATEGORIES` needed **no
+logic change** — `cmr` was already correctly driver-*visible* (view-only);
+the contradiction was entirely in the driver-*upload* UI offering `cmr` as a
+category of file the driver originates, plus the missing click target on the
+read side. Verified browser-driven (`demo_driver` for the general flow,
+`murat_yilmaz`/`driver-1` — whose seeded shipment carries the demo CMR
+document — for the read-only-view-link check specifically, since
+`demo_driver`'s own seeded shipment has no documents): the admin-sent CMR
+document renders as a "Documents from Admin" row reading
+`CMR_MAR-2026-1001.pdf` / `CMR` / `VIEW`; neither upload dropdown offers
+`cmr`; no upload/sign/stamp CMR wording remains anywhere in
+`DriverApplication.tsx`.
+
+**Also to document/implement in a future PR (not done in PR #71 — kept
+focused on the CMR upload/view contradiction):**
 - Remove or hide unnecessary counters, charts, analytics, and
   admin-style dashboard sections from `DriverApplication` — a dedicated
-  scoping pass, not folded into PR #69.
+  scoping pass. Not done in PR #71 either; the "Quick Cockpit Actions" /
+  "Trip Estimate" road-condition simulator / "Smart Transit Route Tracker"
+  sections are stylized but don't leak any admin/customer/accounting data
+  (confirmed during this PR's browser pass), so they were left alone rather
+  than redesigned in a CMR-focused safety PR.
 - Driver must never see: customer company name, Client Staff identity,
   customer price/payment status, cost statements, vendor costs,
   profit/margin, invoices, internal notes, `client_admin` chat, or
-  `internal_staff` chat. **Note:** the customer-identity/price part of
-  this already holds today per PR #68's browser smoke test (driver
-  dashboard shows only its own assigned job — cargo description, own
-  payout/truck, no customer company name or Client Staff identity) —
-  the future PR should re-confirm this hasn't regressed, not assume it
-  needs to be built from scratch.
+  `internal_staff` chat. **Re-confirmed in PR #71's browser pass** (still
+  holds, same as PR #68's finding): `demo_driver` and `murat_yilmaz` each see
+  only their own assigned shipment — cargo description, own payout/truck, no
+  company name, Client Staff identity, or invoice document (the seeded
+  invoice document on `murat_yilmaz`'s shipment, `isSharedExternally: false`,
+  correctly never renders in the Documents panel).
+- **New, found during PR #71's browser pass:** every seeded demo chat
+  message (`initialChatMessages` in `server.ts`) predates the `channel`
+  field and so is invisible to `driver`/`client` sessions
+  (`filterChatMessagesByRole` withholds untagged messages from both —
+  correct behavior for real data, since an untagged message's audience is
+  unknowable, but it means a fresh `SEED_DEMO_DATA=true` dev environment
+  shows an empty driver_admin/client_admin chat thread instead of the seeded
+  demo conversation). Sending a **new** message still works end-to-end
+  (verified — it only fails locally because this dev environment has no live
+  Firestore, the same 503-on-write behavior PR #68 already documented for
+  uploads). Not fixed here: backfilling `channel` onto every seeded message
+  needs a per-message audience decision (`driver_admin` vs `client_admin`)
+  that's outside a CMR-focused PR's scope.
+- ~~**Server-side CMR-upload rejection**~~ — **Done in PR #71** (same PR,
+  follow-up commit). Found during PR #71's initial review: removing the
+  `cmr` option from the driver-facing upload UI was a client-side/UX fix
+  only — nothing server-side stopped a driver session from POSTing
+  `fileCategory`/`category: "cmr"` directly to `POST
+  /api/shipments/:id/chat` or, more directly, `POST
+  /api/shipments/:id/documents` (the Document Center upload route — no UI
+  currently calls it, but `requireShipmentAccess` lets any driver who owns
+  the shipment reach it, and unlike the chat route it writes straight into
+  `shipment.documents` with no `shouldSaveChatFileAsShipmentDocument` gate
+  at all). Both routes now call the new
+  `canDriverUploadDocumentCategory(category)` (`src/lib/documentAccess.ts`)
+  and reject with `403 { error: "Drivers cannot upload CMR documents. CMR
+  documents must be sent by Admin." }` whenever `req.session.role ===
+  "driver"` and the category is `"cmr"`. Every other category a driver
+  already uploads under (photo, delivery_proof, customs, packing_list,
+  invoice, other) is unaffected, and admin/client sessions are unaffected
+  entirely — the check only fires for `role === "driver"`. Driver *viewing*
+  an admin-sent CMR is untouched (`isDocumentVisibleToDriver` still lists
+  `cmr`, unit tests confirm both directions independently). See
+  `src/lib/documentAccess.test.ts`'s `canDriverUploadDocumentCategory`
+  suite.
 - The future PR should include a real mobile-size browser smoke test for
   `DriverApplication` (narrow viewport, not just a desktop-sized
   headless browser window), matching the browser-driven verification
-  standard set by PR #68's client-staff smoke test.
+  standard set by PR #68's client-staff smoke test. **Done in PR #71** —
+  driven at 390×844, Documents panel and Quick Actions cockpit both render
+  correctly with no overlap/truncation.
+
+### Driver review demo scenario (local/dev only — PR #71)
+
+For manually reviewing the Driver app end-to-end (this section, not a
+permanent feature): **local/dev only, never seeded in production** — gated
+the same way as every other demo fixture in this file (`IS_LOCAL_DEV` for
+the login itself, `SEED_DEMO_DATA=true` for the shipment/document/chat data;
+`persistenceReadiness.ts` already warns loudly if `SEED_DEMO_DATA=true` is
+ever combined with `NODE_ENV=production`). No real customer data, no
+secrets.
+
+**Login:** username `demo_driver`, password `DemoDriver123!` (the existing
+`DEMO_ACCOUNTS.driver` entry, `server.ts` — reused rather than adding a new
+`demo_driver_review` account, since this one already exists, is already
+documented for manual review at the top of this PR, and only needed its
+assigned shipment enriched with review data).
+
+**Local commands:**
+```
+SESSION_SECRET="<any local value>" SEED_DEMO_DATA=true npm run dev
+```
+(`SESSION_SECRET` is required — the server refuses to start without it, not
+demo-specific. Put both in a local, gitignored `.env.local` rather than
+inline if preferred — never commit either.)
+
+**What appears (shipment MAR-2026-1003, `shipment-1003` in `server.ts`):**
+- Active assigned job — Gaziantep → Erbil, "Assorted confectioneries,
+  sunflower oils, and dried nuts.", truck `DEMO-0001`
+- Agreed driver amount: 2,800 TRY (own payout — allowed)
+- Status: `Accepted` (leaves every forward transition —
+  Loading/Loaded/In Transit/Border Crossing/Customs
+  Clearance/Arrived/Delivered — available to exercise in the Quick Actions
+  cockpit / status dropdown)
+- `driver_admin` chat thread: an admin message ("your CMR document ... has
+  been uploaded and is ready to view") and a driver reply — both properly
+  `channel: "driver_admin"`-tagged so they render in a fresh
+  `SEED_DEMO_DATA=true` run (the older seed messages on other shipments
+  predate the `channel` field and are invisible to driver/client sessions
+  by design — see the untagged-messages item below)
+- Documents from Admin panel:
+  - **`CMR_MAR-2026-1003.pdf`** (category `cmr`) — must appear as a
+    **View**-only row (opens `doc.url`), never as an upload prompt
+  - `PackingList_MAR-2026-1003.pdf` (category `packing_list`) — the
+    admin-sent non-CMR document, also View-only
+  - **`Invoice_DemoClientCo-1003.pdf`** (category `invoice`) — must
+    **NOT** appear anywhere in the driver's Documents panel
+    (`isDocumentVisibleToDriver` blocks `invoice`) — this is the
+    internal/accounting/customer document a reviewer should confirm stays
+    hidden
+
+**Confirm hidden from the driver:** customer company name ("Demo Client
+Co." — present on the record, never rendered to driver), Client Staff
+identity, customer price/payment status, cost statements, vendor costs,
+profit/margin, `internalNotes` ("Needs temperature tracking..." — present
+on the record, admin-only), the invoice document above, `client_admin` chat
+(a third seeded message on this same shipment is deliberately tagged
+`channel: "client_admin"` — confirm it never appears in the driver's chat
+tab), `internal_staff` chat.
+
+**Confirm driver sees only their own assigned job:** shipment-1001
+(`companyName: "Al-Bahi General Trading Ltd."`, assigned to `driver-1`) and
+shipment-1002 (`companyName: "Uruk Industrial Spares Group"`, assigned to
+`driver-2`) are both seeded under the same `SEED_DEMO_DATA=true` run but
+belong to different drivers/companies — neither should ever appear in
+`demo_driver`'s job list.
+
+**Upload/sign/stamp CMR must not be offered or accepted:** confirmed both
+in the UI (no `cmr` option in either category picker, "Documents from
+Admin" panel is read-only) and now server-side — a request from this
+session with `fileCategory`/`category: "cmr"` to either
+`POST /api/shipments/:id/chat` or `POST /api/shipments/:id/documents` gets
+rejected with `403 { "error": "Drivers cannot upload CMR documents. CMR
+documents must be sent by Admin." }` (`canDriverUploadDocumentCategory`,
+`src/lib/documentAccess.ts`).
 
 ## Dashboard
 - **Revenue KPI** — add a revenue-based KPI tile to the admin dashboard.

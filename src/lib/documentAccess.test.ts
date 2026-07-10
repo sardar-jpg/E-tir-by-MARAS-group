@@ -3,6 +3,7 @@ import {
   isDocumentVisibleForShare,
   isDocumentVisibleToDriver,
   isDocumentVisibleToClient,
+  canDriverUploadDocumentCategory,
   buildPublicShareDocumentPath,
   resolveNewDocumentSharedExternally,
 } from "./documentAccess";
@@ -76,6 +77,25 @@ describe("isDocumentVisibleToDriver", () => {
     for (const category of driverBlocked) {
       expect(isDocumentVisibleToDriver({ category })).toBe(false);
     }
+  });
+});
+
+describe("canDriverUploadDocumentCategory", () => {
+  it("blocks a driver from originating a 'cmr' document/attachment", () => {
+    expect(canDriverUploadDocumentCategory("cmr")).toBe(false);
+  });
+
+  it("allows every other operational upload category", () => {
+    const allowed: DocumentCategory[] = ["photo", "delivery_proof", "customs", "packing_list", "invoice", "other"];
+    for (const category of allowed) {
+      expect(canDriverUploadDocumentCategory(category)).toBe(true);
+    }
+  });
+
+  it("does not treat a missing/unrecognized category as 'cmr'", () => {
+    expect(canDriverUploadDocumentCategory(undefined)).toBe(true);
+    expect(canDriverUploadDocumentCategory(null)).toBe(true);
+    expect(canDriverUploadDocumentCategory("")).toBe(true);
   });
 });
 

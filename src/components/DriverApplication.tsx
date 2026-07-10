@@ -193,10 +193,10 @@ const CHAT_TRANSLATIONS_DICT: Record<string, Record<"tr" | "ar" | "en", string>>
     tr: "Zaho Sınır Kapısındaki güncel tahmini varış süreniz (ETA) nedir?",
     ar: "ما هو وقت الوصول المقدر الحالي الخاص بك في منفذ زاخو؟"
   },
-  "please upload the signed cmr document as soon as possible.": {
-    en: "Please upload the signed CMR document as soon as possible.",
-    tr: "Lütfen imzalı CMR belgesini en kısa sürede sisteme yükleyin.",
-    ar: "يرجى تحميل مستند CMR الموقع في أقرب وقت ممكن الحدوث."
+  "your cmr document has been uploaded and is ready to view.": {
+    en: "Your CMR document has been uploaded and is ready to view.",
+    tr: "CMR belgeniz sisteme yüklendi ve görüntülemeye hazır.",
+    ar: "تم تحميل مستند CMR الخاص بك وهو جاهز للعرض."
   },
   "are you experiencing any delays?": {
     en: "Are you experiencing any delays?",
@@ -777,7 +777,7 @@ export default function DriverApplication({
   // Custom file sim trigger
   const [fileSimOpen, setFileSimOpen] = useState(false);
   const [simFileName, setSimFileName] = useState("");
-  const [simFileCategory, setSimFileCategory] = useState<DocumentCategory>("cmr");
+  const [simFileCategory, setSimFileCategory] = useState<DocumentCategory>("photo");
   const [simFileUrl, setSimFileUrl] = useState("#");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -787,7 +787,7 @@ export default function DriverApplication({
   const [scanState, setScanState] = useState<'scanning' | 'review' | 'uploading'>('scanning');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [scanFilter, setScanFilter] = useState<'color' | 'grayscale' | 'mono'>('color');
-  const [scanCategory, setScanCategory] = useState<DocumentCategory>("cmr");
+  const [scanCategory, setScanCategory] = useState<DocumentCategory>("photo");
   const [scanDocName, setScanDocName] = useState("");
   const [flashLight, setFlashLight] = useState(false);
 
@@ -2049,7 +2049,7 @@ export default function DriverApplication({
                       setActiveShipment(homeActiveJob);
                       setSelectedStatusVal(homeActiveJob.status);
                       setSimFileName("");
-                      setSimFileCategory("cmr");
+                      setSimFileCategory("photo");
                       setSimFileUrl("#");
                       setSelectedFile(null);
                       setFileSimOpen(true);
@@ -2181,8 +2181,8 @@ export default function DriverApplication({
                       startShipmentSubAction: "Accept Shipment",
                       startShipmentSubTransit: "Set In-Transit",
                       startShipmentSubActive: "Driving Live",
-                      addDoc: "Add Document",
-                      addDocSub: "Scan CMR / Paperwork",
+                      addDoc: "Add Photo",
+                      addDocSub: "Scan Delivery / Issue Photo",
                       statusUpdate: "Status Update",
                       statusUpdateSub: "Tap to change state",
                       recommendedNext: "RECOMMENDED NEXT",
@@ -2197,8 +2197,8 @@ export default function DriverApplication({
                       startShipmentSubAction: "Sevkiyatı Kabul Et",
                       startShipmentSubTransit: "Yola Çık",
                       startShipmentSubActive: "Yolculuk Aktif",
-                      addDoc: "Evrak Ekle",
-                      addDocSub: "CMR veya Belge Tara",
+                      addDoc: "Fotoğraf Ekle",
+                      addDocSub: "Teslimat / Sorun Fotoğrafı Çek",
                       statusUpdate: "Durum Güncelle",
                       statusUpdateSub: "Konumu değiştir",
                       recommendedNext: "SIRADAKİ ÖNERİLEN",
@@ -2213,8 +2213,8 @@ export default function DriverApplication({
                       startShipmentSubAction: "قبول الشحنة",
                       startShipmentSubTransit: "تغيير إلى في الطريق",
                       startShipmentSubActive: "التتبع جاري",
-                      addDoc: "إضافة ملف",
-                      addDocSub: "مسح CMR مستندات",
+                      addDoc: "إضافة صورة",
+                      addDocSub: "مسح صورة تسليم / مشكلة",
                       statusUpdate: "تحديث الحالة",
                       statusUpdateSub: "اضغط لتعديل الخطوة",
                       recommendedNext: "الخطوة التالية المقترحة",
@@ -2229,8 +2229,8 @@ export default function DriverApplication({
                     startShipmentSubAction: "Accept Shipment",
                     startShipmentSubTransit: "Set In-Transit",
                     startShipmentSubActive: "Driving Live",
-                    addDoc: "Add Document",
-                    addDocSub: "Scan CMR / Paperwork",
+                    addDoc: "Add Photo",
+                    addDocSub: "Scan Delivery / Issue Photo",
                     statusUpdate: "Status Update",
                     statusUpdateSub: "Tap to change state",
                     recommendedNext: "RECOMMENDED NEXT",
@@ -2282,7 +2282,7 @@ export default function DriverApplication({
 
                   const handleQuickAddDoc = () => {
                     setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                    setScanCategory("cmr");
+                    setScanCategory("photo");
                     setCapturedImage(null);
                     setScanFilter("color");
                     setScanState("scanning");
@@ -3249,12 +3249,19 @@ export default function DriverApplication({
 
 
 
-                {/* Documents / CMR — driver_admin-facing shipment paperwork */}
+                {/* Documents from Admin — read-only CMR/POD/customs paperwork
+                    published by MARAS/Admin (isDocumentVisibleToDriver,
+                    documentAccess.ts). Driver never creates, signs, stamps,
+                    approves, or uploads a CMR here — only views/downloads
+                    what Admin already sent. The Scan/Upload buttons below
+                    are a separate action: they send an operational photo
+                    (delivery/border/issue) to Admin via driver_admin chat,
+                    they do not add to this list. */}
                 <div className="space-y-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
                   <div className="border-b border-slate-800 pb-2 flex items-center justify-between gap-2">
                     <div className="flex flex-col">
                       <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block">Documents</span>
-                      <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">CMR / Proof of Delivery</h4>
+                      <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Documents from Admin</h4>
                     </div>
                     {!(activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') && (
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -3262,7 +3269,7 @@ export default function DriverApplication({
                           type="button"
                           onClick={() => {
                             setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                            setScanCategory("cmr");
+                            setScanCategory("photo");
                             setCapturedImage(null);
                             setScanFilter("color");
                             setScanState("scanning");
@@ -3272,13 +3279,13 @@ export default function DriverApplication({
                           className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-400 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
                         >
                           <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-400" />
-                          <span>Scan CMR</span>
+                          <span>Scan Photo</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => {
                             setSimFileName("");
-                            setSimFileCategory("cmr");
+                            setSimFileCategory("photo");
                             setSimFileUrl("#");
                             setSelectedFile(null);
                             setFileSimOpen(true);
@@ -3286,7 +3293,7 @@ export default function DriverApplication({
                           className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
                         >
                           <FileUp className="w-3 h-3 shrink-0" />
-                          <span>Upload File</span>
+                          <span>Send File</span>
                         </button>
                       </div>
                     )}
@@ -3294,15 +3301,24 @@ export default function DriverApplication({
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
                     <div className="space-y-2">
                       {activeShipment.documents.map(d => (
-                        <div key={d.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between text-xs hover:border-slate-700 transition-colors">
-                          <div className="flex items-center gap-2">
-                            <div className="p-1.5 rounded-lg bg-orange-500/5 border border-orange-500/20 text-orange-500 h-7 w-7 flex items-center justify-center">
+                        <a
+                          key={d.id}
+                          href={d.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between text-xs hover:border-orange-500/40 transition-colors cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="p-1.5 rounded-lg bg-orange-500/5 border border-orange-500/20 text-orange-500 h-7 w-7 flex items-center justify-center shrink-0">
                               <Paperclip className="w-3.5 h-3.5" />
                             </div>
-                            <span className="truncate max-w-[150px] font-mono text-[10px] text-slate-200">{d.name}</span>
+                            <div className="min-w-0">
+                              <span className="truncate max-w-[150px] font-mono text-[10px] text-slate-200 block">{d.name}</span>
+                              <span className="text-[8px] text-orange-400 uppercase font-black font-mono tracking-wider">{d.category}</span>
+                            </div>
                           </div>
-                          <span className="text-[8px] bg-slate-900 border border-slate-800 text-orange-400 px-1.5 py-0.5 rounded-md uppercase font-black font-mono tracking-wider">{d.category}</span>
-                        </div>
+                          <span className="p-1 px-2 bg-slate-900 border border-slate-800 rounded-md text-slate-300 font-extrabold text-[8.5px] uppercase tracking-wider font-mono shrink-0">View</span>
+                        </a>
                       ))}
                     </div>
                   ) : (
@@ -3342,10 +3358,10 @@ export default function DriverApplication({
                       </div>
                       {!isShipmentFinished && (
                           <div className="flex gap-1.5 items-center">
-                            <button 
+                            <button
                               onClick={() => {
                                 setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                                setScanCategory("cmr");
+                                setScanCategory("photo");
                                 setCapturedImage(null);
                                 setScanFilter("color");
                                 setScanState("scanning");
@@ -4639,7 +4655,7 @@ export default function DriverApplication({
                               const file = e.target.files?.[0];
                               if (file) {
                                 setScanDocName(file.name);
-                                setScanCategory("cmr");
+                                setScanCategory("photo");
                                 const reader = new FileReader();
                                 reader.onload = (evt) => {
                                   const b64 = evt.target?.result as string;
@@ -4749,7 +4765,6 @@ export default function DriverApplication({
                           }}
                           className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
                         >
-                          <option value="cmr" className="bg-slate-950 text-white font-bold">CMR Document (Shipment Protocol)</option>
                           <option value="invoice" className="bg-slate-950 text-white font-bold">Invoice Receipt</option>
                           <option value="packing_list" className="bg-slate-950 text-white font-bold">Packing Sheet</option>
                           <option value="customs" className="bg-slate-950 text-white font-bold">Customs Clearance Receipt</option>

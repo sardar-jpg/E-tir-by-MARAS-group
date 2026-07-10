@@ -527,7 +527,9 @@ referenced here rather than duplicated:
   approve/reject, cost-statement read/export, document visibility)
 - Notification Preferences backend, Company/System Settings backend
 - Google Drive Shipment Folder Structure, Google Drive Scope Review
-- Driver-uploaded CMR/customs scan approval flow
+- Driver App Simplification (trimming non-CMR admin-dashboard-style
+  sections) — the driver-uploaded-CMR contradiction itself was fixed in
+  PR #71, see `docs/FOLLOW_UP_ROADMAP.md`
 - Notification Dismiss behavior review
 - Accounts-facing analytics endpoint; non-financial analytics for
   operation admins
