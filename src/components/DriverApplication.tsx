@@ -14,7 +14,7 @@ import { auth } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
-import { getGpsFreshness, GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
+import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -22,13 +22,12 @@ import NotificationsPanel from "./driver/NotificationsPanel";
 import ShipmentCard from "./driver/ShipmentCard";
 import FileUploadModal from "./driver/FileUploadModal";
 import DriverHome from "./driver/DriverHome";
-import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
-import { 
-  Ship, MessageSquare, Truck, DollarSign, Send, CheckCircle2,
-  X, Camera, FileUp, AlertTriangle, CornerDownRight, Landmark, User,
-  Edit2, Phone, Shield, Check, MapPin, Activity, Briefcase, Paperclip, Search, Languages,
-  Award, HeartPulse, Palette, Settings, Volume2, VolumeX, Timer, Gauge, Fuel, Coffee, Trash2, ShieldAlert,
-  Plus, Minus, Compass, Sun, Moon, Play, Lock
+import {
+  MessageSquare, Truck, Send, CheckCircle2,
+  X, Camera, FileUp, User,
+  Edit2, Phone, Shield, Check, Activity, Briefcase, Paperclip, Search, Languages,
+  Settings, Trash2, ShieldAlert,
+  Compass, Sun, Moon, Play, Lock
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -39,147 +38,6 @@ interface DriverApplicationProps {
   loggedInDriver?: Driver | null;
   onLogout?: () => void;
   isMobile?: boolean;
-}
-
-const CITY_COORDINATES: Record<string, { lat: number; lng: number }> = {
-  "istanbul": { lat: 41.0082, lng: 28.9784 },
-  "bursa": { lat: 40.1885, lng: 29.0610 },
-  "gaziantep": { lat: 37.0662, lng: 37.3833 },
-  "erbil": { lat: 36.1912, lng: 44.0091 },
-  "baghdad": { lat: 33.3152, lng: 44.3661 },
-  "basra": { lat: 30.5081, lng: 47.7835 },
-  "zaho": { lat: 37.1436, lng: 42.6886 },
-  "dahuk": { lat: 36.8615, lng: 42.9926 },
-  "mosul": { lat: 36.3489, lng: 43.1577 },
-  "suleymaniye": { lat: 35.5613, lng: 45.4375 },
-  "kirkuk": { lat: 35.4670, lng: 44.3920 },
-  "ankara": { lat: 39.9334, lng: 32.8597 }
-};
-
-// Retrieve Maps API key safely across development, iframe, and production runtimes
-const GOOGLE_MAPS_KEY_FALLBACK =
-  process.env.GOOGLE_MAPS_PLATFORM_KEY ||
-  (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY ||
-  (globalThis as any).GOOGLE_MAPS_PLATFORM_KEY ||
-  "";
-
-interface RouteDisplayProps {
-  origin: google.maps.LatLngLiteral;
-  destination: google.maps.LatLngLiteral;
-}
-
-function RouteDisplay({ origin, destination }: RouteDisplayProps) {
-  const map = useMap();
-  const routesLib = useMapsLibrary('routes');
-  const polylinesRef = useRef<google.maps.Polyline[]>([]);
-
-  useEffect(() => {
-    if (!routesLib || !map) return;
-    
-    // Clear previous route
-    polylinesRef.current.forEach(p => p.setMap(null));
-    polylinesRef.current = [];
-
-    routesLib.Route.computeRoutes({
-      origin,
-      destination,
-      travelMode: 'DRIVING',
-      fields: ['path', 'distanceMeters', 'durationMillis', 'viewport'],
-    }).then(({ routes }) => {
-      if (routes?.[0]) {
-        const newPolylines = routes[0].createPolylines();
-        newPolylines.forEach(p => p.setMap(map));
-        polylinesRef.current = newPolylines;
-
-        if (routes[0].viewport) {
-          map.fitBounds(routes[0].viewport);
-        }
-      }
-    }).catch(err => {
-      console.warn("Google Maps Corridor Routing failed:", err);
-    });
-
-    return () => {
-      polylinesRef.current.forEach(p => p.setMap(null));
-      polylinesRef.current = [];
-    };
-  }, [routesLib, map, origin.lat, origin.lng, destination.lat, destination.lng]);
-
-  return null;
-}
-
-interface MapCustomControlsProps {
-  activeShipment: Shipment | null;
-  lang: Language;
-}
-
-function MapCustomControls({ activeShipment, lang }: MapCustomControlsProps) {
-  const map = useMap();
-
-  const handleZoomIn = () => {
-    if (map) {
-      map.setZoom((map.getZoom() || 6) + 1);
-    }
-  };
-
-  const handleZoomOut = () => {
-    if (map) {
-      map.setZoom((map.getZoom() || 6) - 1);
-    }
-  };
-
-  const handleCenterRoute = () => {
-    if (!map) return;
-    if (typeof google === "undefined" || !google.maps) return;
-
-    if (activeShipment) {
-      const originName = (activeShipment.loadingCity || "").toLowerCase().trim();
-      const destName = (activeShipment.deliveryCity || "").toLowerCase().trim();
-      const startLoc = CITY_COORDINATES[originName] || CITY_COORDINATES["istanbul"];
-      const endLoc = CITY_COORDINATES[destName] || CITY_COORDINATES["baghdad"];
-      
-      const bounds = new google.maps.LatLngBounds();
-      bounds.extend(startLoc);
-      bounds.extend(endLoc);
-      map.fitBounds(bounds);
-    }
-  };
-
-  return (
-    <div className="absolute top-3 right-3 z-20 flex flex-col gap-1.5 pointer-events-auto">
-      {/* Zoom Panel */}
-      <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col overflow-hidden">
-        <button
-          type="button"
-          onClick={handleZoomIn}
-          title={lang === "tr" ? "Yakınlaştır" : lang === "ar" ? "تكبير" : "Zoom In"}
-          aria-label={lang === "tr" ? "Yakınlaştır" : lang === "ar" ? "تكبير" : "Zoom In"}
-          className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors border-b border-slate-800 cursor-pointer"
-        >
-          <Plus className="w-3.5 h-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={handleZoomOut}
-          title={lang === "tr" ? "Uzaklaştır" : lang === "ar" ? "تصغير" : "Zoom Out"}
-          aria-label={lang === "tr" ? "Uzaklaştır" : lang === "ar" ? "تصغير" : "Zoom Out"}
-          className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-        >
-          <Minus className="w-3.5 h-3.5" />
-        </button>
-      </div>
-
-      {/* Auto-Centering Control */}
-      <button
-        type="button"
-        onClick={handleCenterRoute}
-        title={lang === "tr" ? "Rotaya Odaklan" : lang === "ar" ? "التركيز على المسار" : "Focus on Route"}
-        className="w-7 h-7 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex items-center justify-center text-orange-400 hover:text-orange-300 hover:bg-slate-800 hover:scale-105 active:scale-95 transition-all cursor-pointer"
-      >
-        <Compass className="w-3.5 h-3.5 animate-pulse text-orange-500" style={{ animationDuration: "3s" }} />
-      </button>
-    </div>
-  );
 }
 
 const CHAT_TRANSLATIONS_DICT: Record<string, Record<"tr" | "ar" | "en", string>> = {
@@ -265,8 +123,6 @@ export default function DriverApplication({
       truckNumber: "Plate Number / Truck ID",
       truckType: "Truck Type / Category",
       saveProfile: "Save Changes",
-      activeJobs: "Active Jobs",
-      completedJobs: "Completed Deliveries",
       profileUpdated: "Profile updated successfully!",
       noActive: "None",
       saveSpinner: "Updating account...",
@@ -281,8 +137,6 @@ export default function DriverApplication({
       truckNumber: "Plaka Numarası / Tır ID",
       truckType: "Tır / Dorse Kategori",
       saveProfile: "Değişiklikleri Kaydet",
-      activeJobs: "Aktif Seferler",
-      completedJobs: "Tamamlanan Teslimatlar",
       profileUpdated: "Profiliniz başarıyla güncellendi!",
       noActive: "Yok",
       saveSpinner: "Kayıt güncelleniyor...",
@@ -297,8 +151,6 @@ export default function DriverApplication({
       truckNumber: "رقم اللوحة / الشاحنة",
       truckType: "صنف ونوع الشاحنة",
       saveProfile: "حفظ التغييرات",
-      activeJobs: "الرحلات النشطة",
-      completedJobs: "الرحلات المكتملة",
       profileUpdated: "تم تحديث الملف الشخصي بنجاح!",
       noActive: "لا يوجد",
       saveSpinner: "جاري حفظ التعديلات...",
@@ -312,8 +164,6 @@ export default function DriverApplication({
     phone: "Contact phone",
     truckNumber: "Plate Number / Truck ID",
     saveProfile: "Save Changes",
-    activeJobs: "Active Jobs",
-    completedJobs: "Completed Deliveries",
     profileUpdated: "Profile updated successfully!",
     noActive: "None",
     saveSpinner: "Updating account...",
@@ -382,313 +232,7 @@ export default function DriverApplication({
     })[0];
   }, [shipments]);
 
-  // Calculate real percentage of total trip distance based on shipment start and end coordinates
-  const calculateDistancePercentage = (): number => {
-    if (!activeShipment) return 0;
-    if (isShipmentFinished) return 100;
-    if (activeShipment.status === 'New') return 0;
-
-    const startCity = (activeShipment.loadingCity || "istanbul").toLowerCase().trim();
-    const endCity = (activeShipment.deliveryCity || "baghdad").toLowerCase().trim();
-
-    const start = CITY_COORDINATES[startCity] || CITY_COORDINATES["istanbul"];
-    const end = CITY_COORDINATES[endCity] || CITY_COORDINATES["baghdad"];
-
-    if (!lastGpsCoords) {
-      // Fallback logic if dynamic GPS coordinate has not updated yet
-      switch (activeShipment.status) {
-        case 'Assigned': return 10;
-        case 'Accepted': return 25;
-        case 'Loading': return 40;
-        case 'Loaded': return 55;
-        case 'In Transit': return 75;
-        case 'Border Crossing': return 88;
-        case 'Customs Clearance': return 94;
-        default: return 0;
-      }
-    }
-
-    const vLat = end.lat - start.lat;
-    const vLng = end.lng - start.lng;
-
-    const uLat = lastGpsCoords.lat - start.lat;
-    const uLng = lastGpsCoords.lng - start.lng;
-
-    const denominator = vLat * vLat + vLng * vLng;
-    if (denominator === 0) return 0;
-
-    const dotProduct = uLat * vLat + uLng * vLng;
-    const t = dotProduct / denominator;
-
-    return Math.max(0, Math.min(98, Math.round(t * 100)));
-  };
-
   const [activeTab, setActiveTab] = useState<'home' | 'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('home');
-
-  const [activeMapsKey, setActiveMapsKey] = useState<string>(GOOGLE_MAPS_KEY_FALLBACK);
-  const hasValidMapsKey = Boolean(activeMapsKey) && activeMapsKey !== "YOUR_API_KEY";
-  const [mapsAuthError, setMapsAuthError] = useState<boolean>(() => {
-    return Boolean((window as any).googleMapsAuthFailed);
-  });
-
-  useEffect(() => {
-    const handleMapsFailure = () => {
-      setMapsAuthError(true);
-    };
-    window.addEventListener("google-maps-auth-failure", handleMapsFailure);
-    return () => {
-      window.removeEventListener("google-maps-auth-failure", handleMapsFailure);
-    };
-  }, []);
-
-  useEffect(() => {
-    fetch("/api/maps-key")
-      .then(async res => {
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const contentType = res.headers.get("content-type");
-        if (contentType && contentType.includes("application/json")) {
-          return res.json();
-        } else {
-          const text = await res.text();
-          throw new Error(`Non-JSON response: ${text.slice(0, 50)}`);
-        }
-      })
-      .then(data => {
-        if (data && data.key) {
-          setActiveMapsKey(data.key);
-        }
-      })
-      .catch(err => console.warn("Could not retrieve map configuration gracefully:", err.message));
-  }, []);
-
-  // Driver App Settings & Tools States
-  const [telemetryInterval, setTelemetryInterval] = useState<number>(15);
-  const [distanceUnit, setDistanceUnit] = useState<'km' | 'mi'>('km');
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [speedLimitWarn, setSpeedLimitWarn] = useState<boolean>(true);
-  
-  // Break / Driving Limit Timer States
-  const [drivingStatus, setDrivingStatus] = useState<'off' | 'driving' | 'resting'>('off');
-  const [drivingTimeLeft, setDrivingTimeLeft] = useState<number>(4.5 * 3600); // 4.5 hours in seconds
-  const [restingTimeLeft, setRestingTimeLeft] = useState<number>(45 * 60); // 45 minutes in seconds
-
-  // Proof of Delivery Signature States
-  const [podReceiverName, setPodReceiverName] = useState<string>("");
-  const [podChecklist, setPodChecklist] = useState({ sealIntact: false, cargoVerified: false });
-  const [podSigningActive, setPodSigningActive] = useState<boolean>(false);
-  const [podUploading, setPodUploading] = useState<boolean>(false);
-
-  const sigCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const isDrawingRef = useRef<boolean>(false);
-
-  const getCoordinates = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = sigCanvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
-    const rect = canvas.getBoundingClientRect();
-    
-    // Check if touch event
-    if ('touches' in e) {
-      if (e.touches.length === 0) return { x: 0, y: 0 };
-      return {
-        x: e.touches[0].clientX - rect.left,
-        y: e.touches[0].clientY - rect.top
-      };
-    } else {
-      return {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top
-      };
-    }
-  };
-
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = sigCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const coords = getCoordinates(e);
-    ctx.beginPath();
-    ctx.moveTo(coords.x, coords.y);
-    isDrawingRef.current = true;
-  };
-
-  const drawSignature = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (!isDrawingRef.current) return;
-    const canvas = sigCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const coords = getCoordinates(e);
-    ctx.lineTo(coords.x, coords.y);
-    ctx.strokeStyle = '#1e3a8a'; // Blue ink color for official feel
-    ctx.lineWidth = 2.5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.stroke();
-  };
-
-  const stopDrawing = () => {
-    isDrawingRef.current = false;
-  };
-
-  const clearSignature = () => {
-    const canvas = sigCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  };
-
-  const handleCompleteDeliveryWithSignature = async () => {
-    if (!activeShipment) return;
-    const canvas = sigCanvasRef.current;
-    if (!canvas) return;
-
-    const base64DataUrl = canvas.toDataURL('image/png');
-
-    setPodUploading(true);
-    try {
-      // 1. Upload signature image to backend media gateway
-      let finalSignatureUrl = "";
-      try {
-        const uploadRes = await apiFetch("/api/upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            base64DataUrl: base64DataUrl,
-            filename: `SIGNATURE_POD_${activeShipment.shipmentNumber}.png`
-          })
-        });
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          finalSignatureUrl = uploadData.url;
-        }
-      } catch (uploadErr) {
-        console.warn("POD Signature upload failed:", uploadErr);
-      }
-
-      // 2. Put status details
-      const response = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          status: "Delivered",
-          remarksDesc: `Shipment marked delivered at destination depot. Digitally signed by consignee representative: ${podReceiverName || "Authorized Receiver"}. Signature URL linked in logs.`,
-          updaterName: getDriverName(),
-          role: "driver"
-        })
-      });
-
-      if (response.ok) {
-        triggerToast("🎉 Proof of Delivery Captured! Shipment registered as Delivered.");
-        
-        // 3. Document payload for dispatcher chat timeline sync
-        try {
-          const sigPayload = {
-            sender: "driver",
-            senderName: getDriverName(),
-            type: "file",
-            fileName: `POD_Signature_${activeShipment.shipmentNumber}.png`,
-            fileCategory: "delivery_proof",
-            fileUrl: finalSignatureUrl || base64DataUrl,
-            text: `📦 Proof of Delivery (POD) Signed by: ${podReceiverName || "Authorized Receiver"}.\n- Seals Checked: ${podChecklist.sealIntact ? "YES" : "NO"}\n- Cargo Condition Verified: ${podChecklist.cargoVerified ? "YES" : "NO"}`
-          };
-
-          await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(sigPayload)
-          });
-        } catch (chatErr) {
-          console.warn("Could not save POD signature packet to chat timeline:", chatErr);
-        }
-
-        setPodSigningActive(false);
-        setPodReceiverName("");
-        setPodChecklist({ sealIntact: false, cargoVerified: false });
-        fetchData(); // Refresh UI
-      } else {
-        triggerToast("❌ Status update failed. Please check dispatcher connection.");
-      }
-    } catch (err) {
-      console.error("POD Sign-off save error:", err);
-      triggerToast("❌ Communication issue. Retry POD capture.");
-    } finally {
-      setPodUploading(false);
-    }
-  };
-
-  // Fuel & Dynamic Cargo Calculator States
-  const [calcCargoWeight, setCalcCargoWeight] = useState<number>(18); // 18 tons default
-  const [calcDistance, setCalcDistance] = useState<number>(420); // 420 km default
-  const [calcTerrain, setCalcTerrain] = useState<'flat' | 'hilly' | 'mountain'>('flat');
-  const [calcResult, setCalcResult] = useState<{ fuel: number; time: number } | null>({ fuel: 161.7, time: 5.25 });
-
-  // Countdown limits stopwatch effect
-  useEffect(() => {
-    let timer: any;
-    if (drivingStatus === 'driving') {
-      timer = setInterval(() => {
-        setDrivingTimeLeft(prev => {
-          if (prev <= 1) {
-            setDrivingStatus('off');
-            triggerToast("🚨 Driving Limit Reached! Pull over immediately for a mandatory 45-minute rest break.");
-            return 4.5 * 3600;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else if (drivingStatus === 'resting') {
-      timer = setInterval(() => {
-        setRestingTimeLeft(prev => {
-          if (prev <= 1) {
-            setDrivingStatus('off');
-            triggerToast("✅ Rest break completed successfully! Ready for your next driving shift.");
-            return 45 * 60;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [drivingStatus]);
-
-  const formatTimer = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  const calculateFuelEstimate = () => {
-    let terrainFactor = 1.0;
-    let avgSpeed = 80; // km/h
-    if (calcTerrain === 'hilly') {
-      terrainFactor = 1.25;
-      avgSpeed = 70;
-    } else if (calcTerrain === 'mountain') {
-      terrainFactor = 1.55;
-      avgSpeed = 50;
-    }
-
-    const consumptionPer100Km = (32 + (calcCargoWeight * 0.45)) * terrainFactor;
-    const fuelVal = (calcDistance / 100) * consumptionPer100Km;
-    const estimatedHours = calcDistance / avgSpeed;
-
-    setCalcResult({
-      fuel: Math.round(fuelVal * 10) / 10,
-      time: Math.round(estimatedHours * 10) / 10
-    });
-  };
-
-  // Run calculation as inputs change
-  useEffect(() => {
-    calculateFuelEstimate();
-  }, [calcCargoWeight, calcDistance, calcTerrain]);
 
   // Profile Form States
   const [profileName, setProfileName] = useState("");
@@ -794,12 +338,6 @@ export default function DriverApplication({
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
   const [lastGpsCoords, setLastGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [lastGpsCapturedAt, setLastGpsCapturedAt] = useState<string | null>(null);
-  
-  // Driver Assist adaptive routing & traffic patterns states
-  const [trafficPattern, setTrafficPattern] = useState<'optimal' | 'moderate' | 'congested' | 'border_delay'>('moderate');
-  const [assistActive, setAssistActive] = useState<boolean>(true);
-  const [quickStatusOpen, setQuickStatusOpen] = useState(false);
 
   const [toast, setToast] = useState<string | null>(null);
 
@@ -888,19 +426,6 @@ export default function DriverApplication({
                       ? `💬 Dispatch: "${m.text}"` 
                       : (lang === 'tr' ? `💬 Mesaj: "${m.text}"` : `💬 إشعار: "${m.text}"`);
                     triggerToast(alertMsg);
-                    
-                    // Web Audio API subtle alert sound
-                    try {
-                      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                      const osc = audioCtx.createOscillator();
-                      const gain = audioCtx.createGain();
-                      osc.connect(gain);
-                      gain.connect(audioCtx.destination);
-                      osc.frequency.value = 523.25; // C5
-                      gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
-                      osc.start();
-                      osc.stop(audioCtx.currentTime + 0.1);
-                    } catch (_) {}
                   }
                 }
               }
@@ -961,30 +486,6 @@ export default function DriverApplication({
 
               // Trigger toast alert for message/doc_upload/status_update
               triggerToast(`🔔 ${title}: ${msg}`);
-
-              // Sound chime
-              try {
-                const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                const oscillator = audioCtx.createOscillator();
-                const gainNode = audioCtx.createGain();
-                oscillator.connect(gainNode);
-                gainNode.connect(audioCtx.destination);
-                oscillator.frequency.value = 659.25; // E5
-                gainNode.gain.setValueAtTime(0.04, audioCtx.currentTime);
-                oscillator.start();
-                oscillator.stop(audioCtx.currentTime + 0.15);
-
-                setTimeout(() => {
-                  const osc2 = audioCtx.createOscillator();
-                  const gain2 = audioCtx.createGain();
-                  osc2.connect(gain2);
-                  gain2.connect(audioCtx.destination);
-                  osc2.frequency.value = 987.77; // B5
-                  gain2.gain.setValueAtTime(0.04, audioCtx.currentTime);
-                  osc2.start();
-                  osc2.stop(audioCtx.currentTime + 0.2);
-                }, 110);
-              } catch (_) {}
             }
           }
         }
@@ -1194,7 +695,6 @@ export default function DriverApplication({
             const lng = position.coords.longitude;
             setGpsAvailable(true);
             setLastGpsCoords({ lat, lng });
-            setLastGpsCapturedAt(new Date().toISOString());
             transmitGPS(lat, lng);
           },
           (err) => {
@@ -1363,7 +863,6 @@ export default function DriverApplication({
                 const lng = pos.coords.longitude;
                 setGpsAvailable(true);
                 setLastGpsCoords({ lat, lng });
-                setLastGpsCapturedAt(new Date().toISOString());
                 transmitGPS(lat, lng);
               },
               (err) => {
@@ -1698,124 +1197,6 @@ export default function DriverApplication({
     const dr = drivers.find(d => d.id === selectedDriverId);
     return dr ? dr.truckNumber : "";
   };
-
-  // Driver Assist logic block (Adaptive ETA & Traffic Pattern Engine)
-  const assistCalculations = useMemo(() => {
-    if (!activeShipment) return null;
-
-    const originName = (activeShipment.loadingCity || "istanbul").toLowerCase().trim();
-    const destName = (activeShipment.deliveryCity || "baghdad").toLowerCase().trim();
-
-    const origin = CITY_COORDINATES[originName] || CITY_COORDINATES["istanbul"];
-    const dest = CITY_COORDINATES[destName] || CITY_COORDINATES["baghdad"];
-
-    // Haversine calculation to determine real road coordinates distance
-    const R = 6371; // earth radius in km
-    const dLat = (dest.lat - origin.lat) * Math.PI / 180;
-    const dLon = (dest.lng - origin.lng) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(origin.lat * Math.PI / 180) * Math.cos(dest.lat * Math.PI / 180) * 
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    const rawDistance = Math.round(R * c);
-    
-    // Road/routing layout safety factor multiplier (usually physical roads are ~25% longer than straight lines)
-    const routeDistance = Math.max(120, Math.round(rawDistance * 1.25));
-    const progressPct = Math.max(0, Math.min(100, calculateDistancePercentage()));
-    const processedDistance = Math.max(0, Math.round(routeDistance * (1 - progressPct / 100)));
-
-    // Choose speed parameters and delay bounds based on selected traffic scenarios
-    let avgSpeed = 70; // km/h
-    let trafficFactorDescription = "";
-    let borderDelayHours = 0;
-    let congestionDelayHours = 0;
-    let statusLabelEnglish = "Moderate Flow";
-
-    switch(trafficPattern) {
-      case 'optimal':
-        avgSpeed = 82;
-        borderDelayHours = 0.5;
-        congestionDelayHours = 0.04;
-        trafficFactorDescription = lang === 'tr' 
-          ? "Akıcı Yol Koşulları - Gecikme Saptanmadı (%100 Motor Hızı)" 
-          : (lang === 'ar' ? "حركة مرور طليقة - لم يتم العثور على تأخيرات (سعة ١٠٠٪)" : "Fluid highway velocity - No active delays detected.");
-        statusLabelEnglish = "Optimal Flow";
-        break;
-      case 'congested':
-        avgSpeed = 44;
-        borderDelayHours = 1.0;
-        congestionDelayHours = 2.4;
-        trafficFactorDescription = lang === 'tr' 
-          ? "Yoğun Trafik ve Otoyol Çalışmaları - Düşük Hız ve Dur-Kalk" 
-          : (lang === 'ar' ? "ازدحام شديد وأعمال طرق - سرعة منخفضة" : "Heavy metropolitan bumper-to-bumper peak queueing & lane restrictions.");
-        statusLabelEnglish = "Severe Congestion";
-        break;
-      case 'border_delay':
-        avgSpeed = 70;
-        borderDelayHours = 4.5;
-        congestionDelayHours = 0.5;
-        trafficFactorDescription = lang === 'tr' 
-          ? "Sınır Gümrük Yoğunluğu - Uzun TIR Kuyrukları ve Belge Kontrolü" 
-          : (lang === 'ar' ? "تراكم الشاحنات بجمارك الحدود - فحص ممتد" : "Customs checkpoint backlog and documentation safety verification queue.");
-        statusLabelEnglish = "Customs Backlog";
-        break;
-      case 'moderate':
-      default:
-        avgSpeed = 68;
-        borderDelayHours = 1.0;
-        congestionDelayHours = 0.8;
-        trafficFactorDescription = lang === 'tr' 
-          ? "Tipik Şehirlerarası Yoğunluk ve Olağan Sınır Kontrolü" 
-          : (lang === 'ar' ? "ازدحام معتاد وفحص جمركي عادي" : "Standard inter-state congestion & average customs clearance inspection period.");
-        statusLabelEnglish = "Normal Volumes";
-        break;
-    }
-
-    const activeSpeed = avgSpeed;
-
-    // Remaining travel hours
-    const netTravelHours = processedDistance / activeSpeed;
-    const totalDelays = borderDelayHours + congestionDelayHours;
-    const finalEtaHours = netTravelHours + totalDelays;
-
-    // Relative ETA text formatting
-    const totalMinutes = Math.round(finalEtaHours * 60);
-    const displayHours = Math.floor(totalMinutes / 60);
-    const displayMinutes = totalMinutes % 60;
-
-    // Target absolute arrival date
-    const now = new Date();
-    const etaDate = new Date(now.getTime() + totalMinutes * 60 * 1000);
-    
-    // Formatting absolute time
-    const timeString = etaDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-    
-    let etaDayLabel = lang === 'tr' ? "Bugün" : (lang === 'ar' ? "اليوم" : "Today");
-    if (etaDate.getDate() !== now.getDate()) {
-      etaDayLabel = lang === 'tr' ? "Yarın" : (lang === 'ar' ? "غداً" : "Tomorrow");
-      if (etaDate.getDate() > now.getDate() + 1) {
-        etaDayLabel = etaDate.toLocaleDateString([], { day: 'numeric', month: 'short' });
-      }
-    }
-
-    return {
-      routeDistance,
-      processedDistance,
-      avgSpeed,
-      activeSpeed,
-      borderDelayHours,
-      congestionDelayHours,
-      totalDelays,
-      finalEtaHours,
-      displayHours,
-      displayMinutes,
-      etaDayLabel,
-      timeString,
-      trafficFactorDescription,
-      statusLabelEnglish
-    };
-  }, [activeShipment, lastGpsCoords, trafficPattern, lang]);
 
   return (
     <div 
@@ -2171,84 +1552,49 @@ export default function DriverApplication({
                   </button>
                 </div>
 
-                {/* ACCESSIBILITY-FIRST DRIVER QUICK ACTIONS COCKPIT GRID */}
+                {/* QUICK ACTIONS */}
                 {!isShipmentFinished && (() => {
                   const quickT = {
                     en: {
-                      title: "Quick Cockpit Actions",
-                      subtitle: "High-contrast controls optimized for secure one-tap driving use",
+                      title: "Quick Actions",
+                      subtitle: "Common actions for this job",
                       startShipment: "Start Shipment",
                       startShipmentSubAction: "Accept Shipment",
                       startShipmentSubTransit: "Set In-Transit",
                       startShipmentSubActive: "Driving Live",
-                      addDoc: "Add Photo",
-                      addDocSub: "Scan Delivery / Issue Photo",
-                      statusUpdate: "Status Update",
-                      statusUpdateSub: "Tap to change state",
-                      recommendedNext: "RECOMMENDED NEXT",
-                      currentStatus: "Current status: ",
-                      cancel: "Close Panel",
-                      updating: "Updating Logistics status..."
+                      addDoc: "Send Photo",
+                      addDocSub: "Send a photo to Admin"
                     },
                     tr: {
-                      title: "Hızlı Sürücü Eylemleri",
-                      subtitle: "Tek dokunuşla güvenli sürüş için optimize edilmiş kontroller",
+                      title: "Hızlı Eylemler",
+                      subtitle: "Bu sefer için yaygın eylemler",
                       startShipment: "Sevkiyatı Başlat",
                       startShipmentSubAction: "Sevkiyatı Kabul Et",
                       startShipmentSubTransit: "Yola Çık",
                       startShipmentSubActive: "Yolculuk Aktif",
-                      addDoc: "Fotoğraf Ekle",
-                      addDocSub: "Teslimat / Sorun Fotoğrafı Çek",
-                      statusUpdate: "Durum Güncelle",
-                      statusUpdateSub: "Konumu değiştir",
-                      recommendedNext: "SIRADAKİ ÖNERİLEN",
-                      currentStatus: "Mevcut durum: ",
-                      cancel: "Paneli Kapat",
-                      updating: "Lojistik durumu güncelleniyor..."
+                      addDoc: "Fotoğraf Gönder",
+                      addDocSub: "Admin'e fotoğraf gönder"
                     },
                     ar: {
-                      title: "أوامر السائق السريعة",
-                      subtitle: "أزرار تحكم متباينة للغاية ومحسنة للاستخدام الآمن بلمسة واحدة أثناء القيادة",
+                      title: "إجراءات سريعة",
+                      subtitle: "الإجراءات الشائعة لهذه المهمة",
                       startShipment: "بدء الشحن",
                       startShipmentSubAction: "قبول الشحنة",
                       startShipmentSubTransit: "تغيير إلى في الطريق",
                       startShipmentSubActive: "التتبع جاري",
-                      addDoc: "إضافة صورة",
-                      addDocSub: "مسح صورة تسليم / مشكلة",
-                      statusUpdate: "تحديث الحالة",
-                      statusUpdateSub: "اضغط لتعديل الخطوة",
-                      recommendedNext: "الخطوة التالية المقترحة",
-                      currentStatus: "الحالة الحالية: ",
-                      cancel: "إغلاق لوحة التحكم",
-                      updating: "جاري تحديث الحالة اللوجستية..."
+                      addDoc: "إرسال صورة",
+                      addDocSub: "إرسال صورة إلى الإدارة"
                     }
                   }[lang as 'en' | 'tr' | 'ar'] || {
-                    title: "Quick Cockpit Actions",
-                    subtitle: "High-contrast controls optimized for secure one-tap driving use",
+                    title: "Quick Actions",
+                    subtitle: "Common actions for this job",
                     startShipment: "Start Shipment",
                     startShipmentSubAction: "Accept Shipment",
                     startShipmentSubTransit: "Set In-Transit",
                     startShipmentSubActive: "Driving Live",
-                    addDoc: "Add Photo",
-                    addDocSub: "Scan Delivery / Issue Photo",
-                    statusUpdate: "Status Update",
-                    statusUpdateSub: "Tap to change state",
-                    recommendedNext: "RECOMMENDED NEXT",
-                    currentStatus: "Current status: ",
-                    cancel: "Close Panel",
-                    updating: "Updating Logistics status..."
+                    addDoc: "Send Photo",
+                    addDocSub: "Send a photo to Admin"
                   };
-
-                  const getNextExpectedStatus = (curr: string): string => {
-                    const list = ['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'];
-                    const idx = list.indexOf(curr);
-                    if (idx !== -1 && idx < list.length - 1) {
-                      return list[idx + 1];
-                    }
-                    return 'Delivered';
-                  };
-
-                  const nextRecStatus = getNextExpectedStatus(activeShipment.status);
 
                   const handleQuickStart = async () => {
                     if (activeShipment.status === "Assigned") {
@@ -2262,7 +1608,7 @@ export default function DriverApplication({
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
                             status: "In Transit",
-                            remarksDesc: "Transit auto-started via high-contrast Quick Actions cockpit.",
+                            remarksDesc: "Transit auto-started via Quick Actions.",
                             updaterName: getDriverName(),
                             role: "driver"
                           })
@@ -2281,38 +1627,11 @@ export default function DriverApplication({
                   };
 
                   const handleQuickAddDoc = () => {
-                    setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                    setScanCategory("photo");
-                    setCapturedImage(null);
-                    setScanFilter("color");
-                    setScanState("scanning");
-                    setIsScanOpen(true);
-                    startCamera();
-                  };
-
-                  const handleQuickStatusSelect = async (newSt: string) => {
-                    try {
-                      const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
-                        method: "PUT",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          status: newSt,
-                          remarksDesc: `Auto-updated via Driver Quick Actions cockpit`,
-                          updaterName: getDriverName(),
-                          role: "driver"
-                        })
-                      });
-                      if (res.ok) {
-                        triggerToast(`${lang === 'tr' ? 'Durum Güncellendi:' : 'Logistics State Verified:'} ${newSt}`);
-                        setQuickStatusOpen(false);
-                        fetchData();
-                      } else {
-                        triggerToast("❌ Failed to update status. Please try again.");
-                      }
-                    } catch (err) {
-                      console.error("Status check update error", err);
-                      triggerToast("❌ Could not reach the server.");
-                    }
+                    setSimFileName("");
+                    setSimFileCategory("photo");
+                    setSimFileUrl("#");
+                    setSelectedFile(null);
+                    setFileSimOpen(true);
                   };
 
                   // Check highlight or active state
@@ -2321,7 +1640,7 @@ export default function DriverApplication({
                   const isTransit = activeShipment.status === "In Transit";
 
                   return (
-                    <div id="driver-quick-actions-cockpit" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] select-none">
+                    <div id="driver-quick-actions" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] select-none">
                       <div className="flex flex-col text-left">
                         <span className="text-[9px] font-black tracking-widest text-[#f97316] uppercase font-mono">
                           {quickT.title}
@@ -2331,14 +1650,13 @@ export default function DriverApplication({
                         </span>
                       </div>
 
-                      {/* Three Column Spacious Tactile Grid */}
-                      <div className="grid grid-cols-3 gap-3.5">
+                      <div className="grid grid-cols-2 gap-3.5">
                         {/* 1. START SHIPMENT */}
                         <button
                           type="button"
                           onClick={handleQuickStart}
                           className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all duration-300 transform active:scale-95 cursor-pointer max-w-full text-center relative overflow-hidden h-24 ${
-                            isAssigned 
+                            isAssigned
                               ? "bg-orange-500 text-white border-orange-600 shadow-[0_4px_18px_rgba(249,115,22,0.4)] animate-pulse"
                               : isPreTransit
                               ? "bg-slate-900 hover:bg-slate-800 text-orange-400 border-orange-500/30 animate-shimmer"
@@ -2354,17 +1672,17 @@ export default function DriverApplication({
                             {quickT.startShipment}
                           </span>
                           <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
-                            {isAssigned 
-                              ? quickT.startShipmentSubAction 
-                              : isPreTransit 
-                              ? quickT.startShipmentSubTransit 
-                              : isTransit 
-                              ? quickT.startShipmentSubActive 
+                            {isAssigned
+                              ? quickT.startShipmentSubAction
+                              : isPreTransit
+                              ? quickT.startShipmentSubTransit
+                              : isTransit
+                              ? quickT.startShipmentSubActive
                               : activeShipment.status}
                           </span>
                         </button>
 
-                        {/* 2. ADD DOCUMENT */}
+                        {/* 2. SEND PHOTO */}
                         <button
                           type="button"
                           onClick={handleQuickAddDoc}
@@ -2380,79 +1698,7 @@ export default function DriverApplication({
                             {quickT.addDocSub}
                           </span>
                         </button>
-
-                        {/* 3. STATUS UPDATE */}
-                        <button
-                          type="button"
-                          onClick={() => setQuickStatusOpen(!quickStatusOpen)}
-                          className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all transform active:scale-95 cursor-pointer h-24 text-center ${
-                            quickStatusOpen 
-                              ? "bg-slate-800 text-white border-slate-600 shadow-inner" 
-                              : "bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[#f97316] hover:border-slate-700"
-                          }`}
-                        >
-                          <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-[#f97316]">
-                            <Activity className="w-5 h-5 text-orange-400" />
-                          </div>
-                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
-                            {quickT.statusUpdate}
-                          </span>
-                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
-                            {quickT.statusUpdateSub}
-                          </span>
-                        </button>
                       </div>
-
-                      {/* EXPANDED INTERACTIVE HIGH-CONTRAST CHANNELS DRAWER */}
-                      {quickStatusOpen && (
-                        <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-3 animate-fade-in text-left">
-                          <div className="flex items-center justify-between border-b border-slate-900 pb-2">
-                            <div>
-                              <span className="text-[8px] font-black uppercase tracking-widest text-slate-500 block font-mono">
-                                {quickT.currentStatus}
-                              </span>
-                              <span className="text-white font-extrabold text-xs uppercase font-mono">
-                                {activeShipment.status}
-                              </span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setQuickStatusOpen(false)}
-                              className="text-[9px] font-bold text-slate-500 hover:text-white uppercase tracking-wider bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800 cursor-pointer"
-                            >
-                              {quickT.cancel}
-                            </button>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2">
-                            {['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'].map(st => {
-                              const isNext = st === nextRecStatus;
-                              const isCurrent = st === activeShipment.status;
-                              return (
-                                <button
-                                  key={st}
-                                  type="button"
-                                  onClick={() => handleQuickStatusSelect(st)}
-                                  className={`p-3 rounded-xl border text-xs font-bold transition-all text-center flex flex-col items-center justify-center gap-0.5 cursor-pointer relative ${
-                                    isCurrent 
-                                      ? "bg-amber-500/10 text-amber-500 border-amber-500/30 font-black cursor-default"
-                                      : isNext
-                                      ? "bg-orange-500 text-white border-orange-600 shadow-[0_2px_12px_rgba(249,115,22,0.3)] font-black"
-                                      : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white"
-                                  }`}
-                                >
-                                  {isNext && (
-                                    <span className="absolute -top-1 px-1 bg-[#f97316] text-[#ffffff] text-[6.5px] font-black rounded uppercase tracking-wider scale-95 border border-orange-600 block">
-                                      {quickT.recommendedNext}
-                                    </span>
-                                  )}
-                                  <span>{st}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   );
                 })()}
@@ -2541,631 +1787,6 @@ export default function DriverApplication({
                   </div>
                 </div>
 
-                {/* Google Maps Real-time tracking progress panel */}
-                <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-slate-200 font-bold text-xs uppercase tracking-wider text-left">Smart Transit Route Tracker</h4>
-                      <p className="text-[10px] text-slate-500 text-left">GPS-based route tracking on Google Maps</p>
-                    </div>
-                    {gpsAvailable === true && (
-                      <span className="bg-emerald-950 text-emerald-400 border border-emerald-900 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
-                        Tracking Active
-                      </span>
-                    )}
-                    {gpsAvailable === false && (
-                      <span className="bg-amber-950/50 text-amber-500 border border-amber-900/50 text-[9px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
-                        Location Unavailable
-                      </span>
-                    )}
-                  </div>
-
-                  {mapsAuthError ? (
-                    <div className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px] select-text">
-                      <div className="w-12 h-12 rounded-full bg-orange-500/5 border border-orange-500/20 flex items-center justify-center shadow-inner">
-                        <MapPin className="w-5 h-5 text-orange-500" />
-                      </div>
-                      <div className="space-y-1.5 max-w-sm">
-                        <span className="inline-block bg-amber-950/50 text-amber-500 font-mono font-black text-[9px] tracking-widest px-2.5 py-0.5 rounded border border-amber-900/50 uppercase">
-                          {lang === "tr" ? "Harita Geçici Olarak Kullanılamıyor" : lang === "ar" ? "الخريطة غير متاحة مؤقتاً" : "Map Temporarily Unavailable"}
-                        </span>
-                        <p className="text-[10px] text-slate-400 leading-relaxed pt-1">
-                          {lang === "tr"
-                            ? "Canlı harita şu anda yüklenemiyor, ancak seferiniz bundan etkilenmiyor."
-                            : lang === "ar"
-                            ? "لا يمكن تحميل عرض الخريطة المباشر حالياً، لكن هذا لا يؤثر على رحلتك."
-                            : "The live map view can't load right now, but your trip is not affected."}
-                        </p>
-                        <p className="text-[10px] text-slate-400 leading-relaxed">
-                          {lang === "tr"
-                            ? "Konum izni etkinken GPS takibiniz aktif olmaya devam eder."
-                            : lang === "ar"
-                            ? "لا يزال تتبع GPS الخاص بك نشطاً طالما إذن الموقع مفعّل."
-                            : "Your GPS tracking is still active when location permission is enabled."}
-                        </p>
-                        <p className="text-[10px] text-slate-400 leading-relaxed">
-                          {lang === "tr"
-                            ? "Lütfen sevkiyat güncellemelerinizi normal şekilde sürdürün — sevkiyat merkezi durumunuzu takip edebilmeye devam ediyor."
-                            : lang === "ar"
-                            ? "يرجى متابعة تحديثات الشحنة بشكل طبيعي — لا يزال بإمكان مركز العمليات متابعة حالتك."
-                            : "Please continue your shipment updates normally — dispatch can still follow your status."}
-                        </p>
-                        <p className="text-[10px] text-slate-500 leading-relaxed pt-1">
-                          {lang === "tr"
-                            ? "Bu durum devam ederse MARAS Operasyon ile iletişime geçin."
-                            : lang === "ar"
-                            ? "إذا استمرت هذه المشكلة، يرجى التواصل مع عمليات MARAS."
-                            : "If this continues, contact MARAS Operations."}
-                        </p>
-                      </div>
-                    </div>
-                  ) : hasValidMapsKey ? (
-                    <div className="relative w-full rounded-xl overflow-hidden border border-slate-800 bg-slate-950" style={{ height: '240px' }}>
-                      <APIProvider apiKey={activeMapsKey}>
-                        <Map
-                          id="driver_shipment_progress_map"
-                          defaultCenter={lastGpsCoords || CITY_COORDINATES[(activeShipment?.loadingCity || "").toLowerCase().trim()] || CITY_COORDINATES["istanbul"]}
-                          defaultZoom={6}
-                          gestureHandling={'cooperative'}
-                          disableDefaultUI={true}
-                          zoomControl={false}
-                          mapId="DEMO_MAP_ID"
-                        >
-                          {/* Custom Map Controls (Zoom Panel and Auto-Center) */}
-                          <MapCustomControls activeShipment={activeShipment} lang={lang} />
-
-                          {/* Route Polyline Renderer */}
-                          <RouteDisplay 
-                            origin={CITY_COORDINATES[(activeShipment?.loadingCity || "").toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
-                            destination={CITY_COORDINATES[(activeShipment?.deliveryCity || "").toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
-                          />
-
-                          {/* Origin Marker */}
-                          <AdvancedMarker 
-                            position={CITY_COORDINATES[(activeShipment?.loadingCity || "").toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
-                            title={`Origin: ${activeShipment.loadingCity}`}
-                          >
-                            <div className="flex flex-col items-center justify-center">
-                              <span className="bg-emerald-600 border border-emerald-500 text-white font-bold text-[9px]/tight px-1.5 py-0.5 rounded shadow-md z-10 select-none whitespace-nowrap">
-                                {activeShipment.loadingCity}
-                              </span>
-                              <div style={{ width: '40px', height: '40px' }} className="w-10 h-10 bg-emerald-600/20 border border-emerald-500 rounded-full flex items-center justify-center">
-                                <div className="w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white"></div>
-                              </div>
-                            </div>
-                          </AdvancedMarker>
-
-                          {/* Destination Marker */}
-                          <AdvancedMarker 
-                            position={CITY_COORDINATES[(activeShipment?.deliveryCity || "").toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
-                            title={`Destination: ${activeShipment.deliveryCity}`}
-                          >
-                            <div className="flex flex-col items-center justify-center">
-                              <span className="bg-blue-600 border border-blue-500 text-white font-bold text-[9px]/tight px-1.5 py-0.5 rounded shadow-md z-10 select-none whitespace-nowrap">
-                                {activeShipment.deliveryCity}
-                              </span>
-                              <div style={{ width: '40px', height: '40px' }} className="w-10 h-10 bg-blue-600/20 border border-blue-500 rounded-full flex items-center justify-center animate-pulse">
-                                <div className="w-3.5 h-3.5 bg-blue-500 rounded-full border-2 border-white"></div>
-                              </div>
-                            </div>
-                          </AdvancedMarker>
-
-                          {/* Live Truck Marker */}
-                          {lastGpsCoords && (
-                            <AdvancedMarker position={lastGpsCoords} title={`Vehicle Plaque: ${getDriverTruck()}`}>
-                              <div className="flex flex-col items-center justify-center">
-                                <span className="bg-orange-600 border border-orange-500 text-white font-bold font-mono text-[8px]/tight px-1.5 py-0.5 rounded shadow-md z-10 select-none whitespace-nowrap">
-                                  {getDriverTruck() || 'TRUCK'}
-                                </span>
-                                <div style={{ width: '40px', height: '40px' }} className="w-10 h-10 bg-orange-600 border border-white rounded-full flex items-center justify-center shadow-lg transition-all duration-1000">
-                                  <Truck className="w-4 h-4 text-white" />
-                                </div>
-                              </div>
-                            </AdvancedMarker>
-                          )}
-                        </Map>
-                      </APIProvider>
-                    </div>
-                  ) : (
-                    /* Driver-facing fallback shown when the live map view is unavailable */
-                    <div className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-6 flex flex-col justify-center items-center text-center space-y-4 min-h-[240px]">
-                      <div className="w-12 h-12 rounded-full bg-orange-500/5 border border-orange-500/20 flex items-center justify-center shadow-inner">
-                        <MapPin className="w-5 h-5 text-orange-500" />
-                      </div>
-                      <div className="space-y-1.5 max-w-xs mx-auto">
-                        <h5 className="font-extrabold text-xs text-white uppercase tracking-wider">
-                          {lang === "tr" ? "Harita Geçici Olarak Kullanılamıyor" : lang === "ar" ? "الخريطة غير متاحة مؤقتاً" : "Map Temporarily Unavailable"}
-                        </h5>
-                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                          {lang === "tr"
-                            ? "Canlı harita şu anda yüklenemiyor, ancak seferiniz bundan etkilenmiyor."
-                            : lang === "ar"
-                            ? "لا يمكن تحميل عرض الخريطة المباشر حالياً، لكن هذا لا يؤثر على رحلتك."
-                            : "The live map view can't load right now, but your trip is not affected."}
-                        </p>
-                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                          {lang === "tr"
-                            ? "Konum izni etkinken GPS takibiniz aktif olmaya devam eder."
-                            : lang === "ar"
-                            ? "لا يزال تتبع GPS الخاص بك نشطاً طالما إذن الموقع مفعّل."
-                            : "Your GPS tracking is still active when location permission is enabled."}
-                        </p>
-                        <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                          {lang === "tr"
-                            ? "Lütfen sevkiyat güncellemelerinizi normal şekilde sürdürün — sevkiyat merkezi durumunuzu takip edebilmeye devam ediyor."
-                            : lang === "ar"
-                            ? "يرجى متابعة تحديثات الشحنة بشكل طبيعي — لا يزال بإمكان مركز العمليات متابعة حالتك."
-                            : "Please continue your shipment updates normally — dispatch can still follow your status."}
-                        </p>
-                        <p className="text-[10.5px] text-slate-500 leading-relaxed pt-1">
-                          {lang === "tr"
-                            ? "Bu durum devam ederse MARAS Operasyon ile iletişime geçin."
-                            : lang === "ar"
-                            ? "إذا استمرت هذه المشكلة، يرجى التواصل مع عمليات MARAS."
-                            : "If this continues, contact MARAS Operations."}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Route Progress bar & telemetry metadata row */}
-                  {lastGpsCoords && (
-                    <div className="bg-slate-950 border border-slate-800 p-4 rounded-2xl space-y-3.5 shadow-sm text-xs select-none">
-                      <div className="grid grid-cols-3 gap-3 text-center">
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
-                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Last Update</span>
-                          {(() => {
-                            const freshness = getGpsFreshness(lastGpsCapturedAt, Date.now());
-                            const label = freshness.status === "none"
-                              ? "No GPS yet"
-                              : freshness.minutesAgo === 0
-                                ? "Just now"
-                                : `${freshness.minutesAgo}m ago`;
-                            return (
-                              <span className={`font-bold font-mono text-xs ${freshness.status === "stale" ? "text-amber-400" : "text-slate-200"}`}>
-                                {label}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
-                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Progress</span>
-                          <span className="font-extrabold text-[#f97316] font-sans text-xs">{calculateDistancePercentage()}% Complete</span>
-                        </div>
-                        <div className="bg-slate-900/60 p-2 rounded-xl border border-slate-800/40">
-                          <span className="text-slate-500 text-[9px] uppercase tracking-wider block font-mono">Tracking Status</span>
-                          {isShipmentFinished ? (
-                            <span className="font-bold text-slate-500 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
-                              <span className="w-1.5 h-1.5 bg-slate-600 rounded-full"></span>
-                              CLOSED
-                            </span>
-                          ) : (
-                            <span className="font-bold text-emerald-400 font-mono text-[10px]/none inline-flex items-center gap-1 mt-0.5 justify-center">
-                              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping"></span>
-                              ACTIVE
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono font-bold">
-                          <span>ROUTE PROGRESS (GPS)</span>
-                          <span>{calculateDistancePercentage()}%</span>
-                        </div>
-                        <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
-                          <div 
-                            className="bg-gradient-to-r from-orange-600 to-orange-400 h-2 rounded-full transition-all duration-1000" 
-                            style={{ width: `${calculateDistancePercentage()}%` }}
-                          ></div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* PROOF OF DELIVERY (POD) SIGN-OFF & HANDOFF SIGNATURE PANEL */}
-                {!isShipmentFinished && (
-                  <div id="driver-pod-signature-portal" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] text-left select-none relative overflow-hidden group">
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
-                    <div className="flex items-start gap-2.5 relative z-10 text-left">
-                      <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/25 flex items-center justify-center text-orange-500 shrink-0">
-                        <CheckCircle2 className="w-4 h-4 text-orange-400" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-black text-white uppercase tracking-wider font-mono block">
-                          Proof of Delivery (POD)
-                        </span>
-                        <span className="text-[9px] text-slate-400 block leading-tight mt-0.5">
-                          Collect digital signature & checklist approval at destination depot
-                        </span>
-                      </div>
-                    </div>
-
-                    {!podSigningActive ? (
-                      <div className="space-y-3.5 relative z-10 text-left">
-                        <p className="text-[10.5px] text-slate-400 leading-normal">
-                          Ready to hand off cargo and complete the logistics run? Verify cargo seal integrity, item count, and collect the consignee representative's signature directly on screen to mark secure delivery.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPodSigningActive(true);
-                            // Clear signature state
-                            setTimeout(clearSignature, 100);
-                          }}
-                          className="w-full py-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 shadow-md border-0"
-                        >
-                          <Edit2 className="w-3.5 h-3.5 text-white" />
-                          <span>Initiate Delivery Sign-off</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="space-y-4 animate-fade-in relative z-10 text-left">
-                        {/* Handoff Checklist */}
-                        <div className="space-y-2.5 bg-slate-950 p-3.5 rounded-2xl border border-slate-800/60">
-                          <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
-                            Handoff Verification Checklist
-                          </span>
-                          
-                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-400 hover:text-white">
-                            <input
-                              type="checkbox"
-                              checked={podChecklist.sealIntact}
-                              onChange={(e) => setPodChecklist(prev => ({ ...prev, sealIntact: e.target.checked }))}
-                              className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-orange-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-orange-500"
-                            />
-                            <span>Confirm trailer seal is intact & matches BOL</span>
-                          </label>
-
-                          <label className="flex items-center gap-3 cursor-pointer text-xs font-bold text-slate-400 hover:text-white">
-                            <input
-                              type="checkbox"
-                              checked={podChecklist.cargoVerified}
-                              onChange={(e) => setPodChecklist(prev => ({ ...prev, cargoVerified: e.target.checked }))}
-                              className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-orange-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-orange-500"
-                            />
-                            <span>Verify cargo item count & physical condition</span>
-                          </label>
-                        </div>
-
-                        {/* Authorized Receiver Name */}
-                        <div className="space-y-1.5">
-                          <label className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
-                            Recipient Name / Stamp
-                          </label>
-                          <input
-                            type="text"
-                            value={podReceiverName}
-                            onChange={(e) => setPodReceiverName(e.target.value)}
-                            placeholder="e.g. John Doe (Depot Manager)"
-                            className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 focus:border-orange-500/50 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none transition-colors"
-                          />
-                        </div>
-
-                        {/* Signature Drawing Canvas Area */}
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <label className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
-                              Recipients Signature Pad
-                            </label>
-                            <button
-                              type="button"
-                              onClick={clearSignature}
-                              className="text-[8px] font-black text-slate-500 hover:text-red-400 uppercase tracking-wider transition-colors cursor-pointer"
-                            >
-                              Clear Pad
-                            </button>
-                          </div>
-                          
-                          <div className="relative bg-slate-950 rounded-xl border border-slate-800 overflow-hidden h-36">
-                            <canvas
-                              ref={sigCanvasRef}
-                              width={360}
-                              height={144}
-                              onMouseDown={startDrawing}
-                              onMouseMove={drawSignature}
-                              onMouseUp={stopDrawing}
-                              onMouseLeave={stopDrawing}
-                              onTouchStart={startDrawing}
-                              onTouchMove={drawSignature}
-                              onTouchEnd={stopDrawing}
-                              className="w-full h-full cursor-crosshair touch-none bg-slate-950"
-                            />
-                            <div className="absolute bottom-2.5 left-3 pointer-events-none text-[8.5px] text-slate-500 uppercase tracking-wider font-mono font-bold select-none opacity-40">
-                              X ___________________________ (Sign Here)
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Sign Actions */}
-                        <div className="flex gap-2 pt-1">
-                          <button
-                            type="button"
-                            disabled={podUploading}
-                            onClick={() => setPodSigningActive(false)}
-                            className="flex-1 py-3 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
-                          >
-                            Cancel
-                          </button>
-                          
-                          <button
-                            type="button"
-                            disabled={podUploading || !podReceiverName.trim() || !podChecklist.sealIntact || !podChecklist.cargoVerified}
-                            onClick={handleCompleteDeliveryWithSignature}
-                            className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
-                          >
-                            {podUploading ? (
-                              <>
-                                <span className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin shrink-0" />
-                                <span>Syncing...</span>
-                              </>
-                            ) : (
-                              <>
-                                <CheckCircle2 className="w-4 h-4 text-slate-950" />
-                                <span>Confirm & Deliver</span>
-                              </>
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* TRIP ETA ESTIMATE PANEL (distance + driver-selected traffic condition) */}
-                {!isShipmentFinished && (() => {
-                  const assistT = {
-                    en: {
-                      title: "Trip Estimate",
-                      subtitle: "Estimated arrival based on the selected road condition",
-                      modeAuto: "Estimate Shown",
-                      modeManual: "Estimate Hidden",
-                      trafficScenario: "Road Condition",
-                      remDistance: "Remaining Dist.",
-                      estSpeed: "Estimated Speed",
-                      extraDelay: "Scheduled Delays",
-                      etaArrival: "Estimated Arrival Time",
-                      calculating: "Based on your selected road condition.",
-                      optimal: "Optimal Flow",
-                      moderate: "Normal Peak",
-                      congested: "Heavy Traffic",
-                      border: "Custom Backlog",
-                      statusText: "Traffic conditions optimized",
-                      enableHint: "Toggle off to enter manual routing planning.",
-                      disabledHint: "Trip estimate is hidden. Tap above to show the estimated arrival time."
-                    },
-                    tr: {
-                      title: "Sefer Tahmini",
-                      subtitle: "Seçilen yol durumuna göre tahmini varış süresi",
-                      modeAuto: "Tahmin Gösteriliyor",
-                      modeManual: "Tahmin Gizli",
-                      trafficScenario: "Yol Durumu",
-                      remDistance: "Kalan Mesafe",
-                      estSpeed: "Öngörülen Hız",
-                      extraDelay: "Gümrük & Kontrol Gecikmesi",
-                      etaArrival: "Tahmini Varış Süresi",
-                      calculating: "Seçtiğiniz yol durumuna göre hesaplanmıştır.",
-                      optimal: "Akıcı Yol",
-                      moderate: "Olağan Akış",
-                      congested: "Yoğun Trafik",
-                      border: "Sınır Yoğunluğu",
-                      statusText: "Trafik koşulları optimize edildi",
-                      enableHint: "Manuel planlamaya geçmek için devredışı bırakın.",
-                      disabledHint: "Sefer tahmini gizlendi. Tahmini varış süresini görmek için yukarı dokunun."
-                    },
-                    ar: {
-                      title: "تقدير الرحلة",
-                      subtitle: "وقت الوصول المقدر بناءً على حالة الطريق المحددة",
-                      modeAuto: "التقدير معروض",
-                      modeManual: "التقدير مخفي",
-                      trafficScenario: "حالة الطريق",
-                      remDistance: "المسافة المتبقية",
-                      estSpeed: "السرعة المتوقعة",
-                      extraDelay: "تأخيرات التفتيش والجمارك",
-                      etaArrival: "وقت الوصول المقدر",
-                      calculating: "بناءً على حالة الطريق التي اخترتها.",
-                      optimal: "طريق سريع",
-                      moderate: "تدفق معتاد",
-                      congested: "ازدحام شديد",
-                      border: "طابور الحدود",
-                      statusText: "تم تحسين حسابات القيادة",
-                      enableHint: "قم بالإيقاف للعودة للتخطيط اليدوي.",
-                      disabledHint: "تقدير الرحلة مخفي حاليًا. انقر أعلاه لعرض وقت الوصول المقدر."
-                    }
-                  }[lang as 'en' | 'tr' | 'ar'] || {
-                    title: "Trip Estimate",
-                    subtitle: "Estimated arrival based on the selected road condition",
-                    modeAuto: "Estimate Shown",
-                    modeManual: "Estimate Hidden",
-                    trafficScenario: "Road Condition",
-                    remDistance: "Remaining Dist.",
-                    estSpeed: "Estimated Speed",
-                    extraDelay: "Scheduled Delays",
-                    etaArrival: "Estimated Arrival Time",
-                    calculating: "Based on your selected road condition.",
-                    optimal: "Optimal Flow",
-                    moderate: "Normal Peak",
-                    congested: "Heavy Traffic",
-                    border: "Custom Backlog",
-                    statusText: "Traffic conditions optimized",
-                    enableHint: "Toggle off to enter manual routing planning.",
-                    disabledHint: "Trip estimate is hidden. Tap above to show the estimated arrival time."
-                  };
-
-                  return (
-                    <div id="driver-assist-core" className="p-5 bg-slate-900 border border-slate-800/80 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)] relative overflow-hidden group select-none">
-                      <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
-                      
-                      {/* Section Title with Activation Toggle */}
-                      <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-                        <div className="flex items-start gap-2 max-w-[70%] text-left">
-                          <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/25 flex items-center justify-center text-orange-500 shrink-0">
-                            <Compass className="w-4 h-4 animate-pulse text-orange-400" />
-                          </div>
-                          <div>
-                            <span className="text-[10px] font-black text-white uppercase tracking-wider font-mono block">
-                              {assistT.title}
-                            </span>
-                            <span className="text-[9px] text-slate-400 block truncate leading-tight mt-0.5">
-                              {assistT.subtitle}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Slide/Toggle Pill Element */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const nextState = !assistActive;
-                            setAssistActive(nextState);
-                            triggerToast(nextState ? "Trip estimate shown." : "Trip estimate hidden.");
-                          }}
-                          className={`px-3 py-1.5 rounded-full border text-[9px] font-black uppercase tracking-wider transition-all duration-300 inline-flex items-center gap-1.5 cursor-pointer ${
-                            assistActive 
-                              ? "bg-orange-500/15 text-orange-400 border-orange-500/35 shadow-[0_2px_10px_rgba(249,115,22,0.15)] animate-shimmer" 
-                              : "bg-slate-950/80 text-slate-400 border-slate-800 hover:bg-slate-900"
-                          }`}
-                        >
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${assistActive ? "bg-orange-500 animate-pulse" : "bg-slate-500"}`} />
-                          <span>{assistActive ? assistT.modeAuto : assistT.modeManual}</span>
-                        </button>
-                      </div>
-
-                      {assistActive && assistCalculations ? (
-                        <div className="space-y-4">
-                          {/* Traffic Simulation Scenarios Selector */}
-                          <div className="space-y-2">
-                            <span className="text-slate-500 text-[8px] font-bold uppercase tracking-wider font-mono block text-left">
-                              {assistT.trafficScenario}
-                            </span>
-                            <div className="grid grid-cols-4 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
-                              {[
-                                { key: 'optimal', text: assistT.optimal },
-                                { key: 'moderate', text: assistT.moderate },
-                                { key: 'congested', text: assistT.congested },
-                                { key: 'border_delay', text: assistT.border }
-                              ].map(item => (
-                                <button
-                                  key={item.key}
-                                  type="button"
-                                  onClick={() => {
-                                    setTrafficPattern(item.key as any);
-                                    triggerToast(`Road condition set to ${item.key.toUpperCase()}`);
-                                  }}
-                                  className={`py-1 text-[8px] font-bold rounded-lg uppercase tracking-wider transition-all duration-200 cursor-pointer text-center select-none border border-transparent box-border ${
-                                    trafficPattern === item.key 
-                                      ? "bg-orange-500 !text-white border-orange-600 shadow-sm font-black" 
-                                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/40"
-                                  }`}
-                                >
-                                  {item.text}
-                                </button>
-                              ))}
-                            </div>
-                            
-                            {/* Scenario verbal description contextual helper */}
-                            <p className="text-[10px] text-slate-400 leading-relaxed text-left border-l-2 border-orange-500/40 pl-2 py-0.5 select-text">
-                              {assistCalculations.trafficFactorDescription}
-                            </p>
-                          </div>
-
-                          {/* Predictor Core Metric Bento Grid */}
-                          <div className="grid grid-cols-3 gap-3">
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center relative overflow-hidden">
-                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
-                                {assistT.remDistance}
-                              </span>
-                              <div className="mt-1 flex items-baseline justify-center gap-0.5">
-                                <span className="font-bold text-slate-200 text-xs font-mono">
-                                  {assistCalculations.processedDistance}
-                                </span>
-                                <span className="text-[8px] font-mono text-slate-500">KM</span>
-                              </div>
-                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
-                                / {assistCalculations.routeDistance} km total
-                              </span>
-                            </div>
-
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center">
-                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
-                                {assistT.estSpeed}
-                              </span>
-                              <div className="mt-1 flex items-baseline justify-center gap-1">
-                                <Gauge className="w-3 h-3 text-orange-400 shrink-0 self-center" />
-                                <span className="font-bold text-slate-200 text-xs font-mono">
-                                  {assistCalculations.activeSpeed}
-                                </span>
-                                <span className="text-[8px] font-mono text-slate-500">KMH</span>
-                              </div>
-                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
-                                avg road factor
-                              </span>
-                            </div>
-
-                            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800/70 text-center">
-                              <span className="text-[7.5px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
-                                {assistT.extraDelay}
-                              </span>
-                              <div className="mt-1 flex items-baseline justify-center gap-0.5">
-                                <span className={`font-bold text-xs font-mono ${assistCalculations.totalDelays > 2 ? 'text-orange-400' : 'text-slate-200'}`}>
-                                  +{assistCalculations.totalDelays.toFixed(1)}
-                                </span>
-                                <span className="text-[8px] font-mono text-slate-500">HRS</span>
-                              </div>
-                              <span className="text-[7px] text-slate-500 font-mono block mt-0.5">
-                                border & queue wait
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Main High Contrast Predicted ETA Output Block */}
-                          <div className="bg-orange-500/5 rounded-2xl p-4 border border-orange-500/15 flex items-center justify-between">
-                            <div className="space-y-1 text-left">
-                              <span className="text-[8px] font-bold text-[#f97316] uppercase tracking-wider font-mono block">
-                                {assistT.etaArrival}
-                              </span>
-                              <div className="flex items-center gap-2">
-                                <span className="text-white font-black text-xl tracking-tight font-sans">
-                                  {assistCalculations.timeString}
-                                </span>
-                                <span className="bg-orange-500/10 text-orange-400 text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border border-orange-500/20">
-                                  {assistCalculations.etaDayLabel}
-                                </span>
-                              </div>
-                              <p className="text-[9px] font-mono text-slate-500">
-                                {assistT.calculating}
-                              </p>
-                            </div>
-
-                            <div className="flex flex-col items-end gap-1 font-mono">
-                              <div className="bg-orange-500/10 text-orange-400 text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg border border-orange-500/20 inline-flex items-center gap-1">
-                                <Timer className="w-3 h-3 text-orange-400" />
-                                <span>
-                                  {assistCalculations.displayHours > 0 && `${assistCalculations.displayHours}h `}
-                                  {assistCalculations.displayMinutes}m
-                                </span>
-                              </div>
-                              <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">
-                                total duration
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      ) : (
-                        /* Paused Manual planning dashboard view */
-                        <div className="py-4 px-2 rounded-2xl bg-slate-950/40 border border-slate-800/60 flex flex-col items-center justify-center text-center space-y-2">
-                          <AlertTriangle className="w-7 h-7 text-slate-500" />
-                          <p className="text-[10.5px] text-slate-400 max-w-xs leading-relaxed">
-                            {assistT.disabledHint}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-
                 {/* STATUS ACTIONS CONDITIONAL ROUTING */}
                 {(() => {
                   const isShipmentFinished = activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed';
@@ -3210,7 +1831,9 @@ export default function DriverApplication({
                   return (
                     <form onSubmit={handleStatusUpdate} className="p-5 bg-slate-900 border border-slate-800 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
                       <div className="border-b border-slate-800 pb-2">
-                        <h4 className="font-black text-xs text-white uppercase tracking-wider font-mono">{t('status')} Updates Terminal</h4>
+                        <h4 className="font-black text-xs text-white uppercase tracking-wider font-mono">
+                          {lang === 'en' ? 'Update Shipment Status' : lang === 'tr' ? 'Sevkiyat Durumunu Güncelle' : 'تحديث حالة الشحنة'}
+                        </h4>
                       </div>
                       
                       <div className="space-y-1">
@@ -3371,14 +1994,14 @@ export default function DriverApplication({
                               className="p-1 px-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer shadow-[0_2px_10px_rgba(16,185,129,0.25)] transition-all active:scale-95 border-0"
                             >
                               <Camera className="w-3 h-3 shrink-0 animate-pulse" />
-                              <span>Scan Document</span>
+                              <span>Take Photo</span>
                             </button>
-                            <button 
+                            <button
                               onClick={() => setFileSimOpen(true)}
                               className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
                             >
                               <FileUp className="w-3 h-3 shrink-0" />
-                              <span>Upload File</span>
+                              <span>Send File</span>
                             </button>
                           </div>
                         )}
@@ -3689,22 +2312,6 @@ export default function DriverApplication({
                         <p className="text-[10px] font-mono font-bold text-orange-400">@{profileUsername || "driver"}</p>
                       </div>
 
-                      {/* Stats Counter Grid */}
-                      <div className="grid grid-cols-2 gap-2 bg-slate-900/60 p-3 border border-slate-800/80 rounded-2xl text-center">
-                        <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/40">
-                          <span className="text-[9px] text-slate-500 font-bold block uppercase tracking-wide">{profileT.activeJobs}</span>
-                          <p className="text-base font-black text-orange-500 mt-0.5">
-                            {drivers.find(d => d.id === selectedDriverId)?.activeShipmentsCount ?? 0}
-                          </p>
-                        </div>
-                        <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/40">
-                          <span className="text-[9px] text-slate-500 font-bold block uppercase tracking-wide">{profileT.completedJobs}</span>
-                          <p className="text-base font-black text-emerald-500 mt-0.5">
-                            {drivers.find(d => d.id === selectedDriverId)?.completedShipmentsCount ?? 0}
-                          </p>
-                        </div>
-                      </div>
-
                       {/* Personal Info Box */}
                       <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                         <span className="text-[9.5px] font-bold text-slate-400 block uppercase tracking-wider border-b border-slate-800/65 pb-1.5">{profileT.personalData}</span>
@@ -4009,76 +2616,28 @@ export default function DriverApplication({
                 {(() => {
                   const menuOptions = {
                     en: {
-                      title: "App Settings",
-                      subtitle: "Customize your driver portal application",
-                      activeDriver: "Active Driver Profile",
+                      title: "Settings",
+                      subtitle: "Manage your driver app preferences",
                       statusActive: "Active & Online",
                       truckId: "Truck ID",
-                      typeId: "Truck Type",
-                      pingRateLabel: "GPS Sync Frequency",
-                      pingRateSub: "Controls coordinate updates to dispatcher map",
-                      pingHigh: "High Accuracy (15s)",
-                      pingMed: "Battery Saver (45s)",
-                      pingLow: "Eco Saver (90s)",
-                      audioAlerts: "Critical Sound Alerts",
-                      audioAlertsSub: "Play audio warnings on active dispatch changes",
-                      speedAdvisor: "Speed Post Guard",
-                      speedAdvisorSub: "Spoken warnings near border control zones",
-                      unitsLabel: "Measurement Units",
-                      unitsSub: "Toggle distance unit between metric and imperial",
                       activeLang: "Application Language",
-                      activeLangSub: "Active language selected for dispatcher text",
-                      savePref: "Save Preferences",
-                      savePrefSub: "Save modifications locally on device",
-                      toastSaved: "Settings preference and sync rate saved successfully!"
+                      activeLangSub: "Active language selected for dispatcher text"
                     },
                     tr: {
-                      title: "Uygulama Ayarları",
-                      subtitle: "Sürücü portalı uygulamanızı özelleştirin",
-                      activeDriver: "Aktif Sürücü Profili",
+                      title: "Ayarlar",
+                      subtitle: "Sürücü uygulaması tercihlerinizi yönetin",
                       statusActive: "Aktif ve Çevrimiçi",
                       truckId: "Araç Plaka",
-                      typeId: "Araç Tipi",
-                      pingRateLabel: "GPS Konum Sıklığı",
-                      pingRateSub: "Sevk sorumlusu haritasına konum yükleme süresi",
-                      pingHigh: "Yüksek Hassasiyet (15sn)",
-                      pingMed: "Pil Tasarrufu (45sn)",
-                      pingLow: "Eko Tasarruf (90sn)",
-                      audioAlerts: "Sesli Uyarı Bildirimleri",
-                      audioAlertsSub: "Aktif sevk değişikliklerinde sesli uyarı çal",
-                      speedAdvisor: "Hız Sınırı Koruyucu",
-                      speedAdvisorSub: "Sınır kapısı yaklaşımında sesli uyarı ver",
-                      unitsLabel: "Ölçüm Birimi",
-                      unitsSub: "Kilometre (KM) ile Mil (MI) arasında geçiş yapın",
                       activeLang: "Uygulama Dili",
-                      activeLangSub: "Sevk sorumlusu metni için seçilen aktif dil",
-                      savePref: "Tercihleri Kaydet",
-                      savePrefSub: "Değişiklikleri yerel cihaz durumuna uygula",
-                      toastSaved: "Uygulama tercihleri başarıyla kaydedildi!"
+                      activeLangSub: "Sevk sorumlusu metni için seçilen aktif dil"
                     },
                     ar: {
-                      title: "إعدادات التطبيق",
-                      subtitle: "تخصيص تطبيق بوابة السائق الخاص بك",
-                      activeDriver: "ملف السائق النشط",
+                      title: "الإعدادات",
+                      subtitle: "إدارة تفضيلات تطبيق السائق الخاص بك",
                       statusActive: "نشط ومتصل بالإنترنت",
                       truckId: "رقم الشاحنة",
-                      typeId: "نوع الشاحنة",
-                      pingRateLabel: "تحديث تتبع الموقع (GPS)",
-                      pingRateSub: "التحكم في سرعة مزامنة إحداثيات الموقع للمرسل",
-                      pingHigh: "دقة عالية (١٥ ثانية)",
-                      pingMed: "توفير البطارية (٤٥ ثانية)",
-                      pingLow: "الموفر الاقتصادي (٩٠ ثانية)",
-                      audioAlerts: "التنبيهات الصوتية الهامة",
-                      audioAlertsSub: "تشغيل أصوات تنبيه عند تحديث المهام",
-                      speedAdvisor: "مستشار حد السرعة",
-                      speedAdvisorSub: "تحذير صوتي عند الاقتراب من البوابات الحدودية",
-                      unitsLabel: "وحدات القياس",
-                      unitsSub: "التحويل بين النظام المتري (كم) والإمبراطوري (ميل)",
                       activeLang: "لغة التطبيق",
-                      activeLangSub: "اللغة النشطة لرسائل وتوجيهات الإرسال",
-                      savePref: "حفظ التوجيهات",
-                      savePrefSub: "تطبيق التعديلات وحفظها على الجهاز",
-                      toastSaved: "تم تحديث تفضيلات التطبيق وحفظها بنجاح!"
+                      activeLangSub: "اللغة النشطة لرسائل وتوجيهات الإرسال"
                     }
                   };
                   const menuT = menuOptions[lang] || menuOptions.en;
@@ -4136,26 +2695,7 @@ export default function DriverApplication({
                         </div>
 
                         <div className="space-y-3">
-                          {/* Unit Configuration preference toggle */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
-                            <div className="space-y-0.5">
-                              <span className="text-[11px] font-bold text-white block">{menuT.unitsLabel}</span>
-                              <span className="text-[9px] text-slate-500 block leading-tight">{menuT.unitsSub}</span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const nextUnit = distanceUnit === 'km' ? 'mi' : 'km';
-                                setDistanceUnit(nextUnit);
-                                triggerToast(`Units switched to ${nextUnit.toUpperCase()}`);
-                              }}
-                              className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-orange-400 font-mono text-[9.5px] uppercase font-black tracking-wider rounded-lg transition-all"
-                            >
-                              {distanceUnit === 'km' ? 'KM (METRIC)' : 'MI (IMPERIAL)'}
-                            </button>
-                          </div>
-
-                          {/* Daylight/Nighttime View Theme Switcher - Now prominently in App Preferences */}
+                          {/* Daylight/Nighttime View Theme Switcher */}
                           <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
                             <div className="space-y-0.5 text-left">
                               <span className="text-[11px] font-bold text-white block">
@@ -4192,42 +2732,6 @@ export default function DriverApplication({
                             </button>
                           </div>
 
-                          {/* Sound Notification Feed preference toggle */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
-                            <div className="space-y-0.5">
-                              <span className="text-[11px] font-bold text-white block">{menuT.audioAlerts}</span>
-                              <span className="text-[9px] text-slate-600 block leading-tight">{menuT.audioAlertsSub}</span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSoundEnabled(!soundEnabled);
-                                triggerToast(!soundEnabled ? "Audio alerts enabled!" : "Audio alerts muted.");
-                              }}
-                              className={`p-1 w-9 rounded-full cursor-pointer flex transition-all ${soundEnabled ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
-                            >
-                              <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-600'}`} />
-                            </button>
-                          </div>
-
-                          {/* Speed advising advisor alerts */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs">
-                            <div className="space-y-0.5">
-                              <span className="text-[11px] font-bold text-white block">{menuT.speedAdvisor}</span>
-                              <span className="text-[9px] text-slate-600 block leading-tight">{menuT.speedAdvisorSub}</span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSpeedLimitWarn(!speedLimitWarn);
-                                triggerToast(!speedLimitWarn ? "Border post advisory alerts enabled!" : "Border post advisory alerts muted.");
-                              }}
-                              className={`p-1 w-9 rounded-full cursor-pointer flex transition-all ${speedLimitWarn ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
-                            >
-                              <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-600'}`} />
-                            </button>
-                          </div>
-
                           {/* Application Selected Language Indicator Card */}
                           <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs text-left">
                             <div className="space-y-0.5">
@@ -4241,293 +2745,20 @@ export default function DriverApplication({
                         </div>
                       </div>
 
-                      {/* CONVENIENT DIAGNOSTICS & SAVE PREFERENCES INTERACTION */}
-                      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4.5 space-y-3.5 relative shadow-md">
+                      {onLogout && (
                         <button
                           type="button"
-                          onClick={() => {
-                            triggerToast(menuT.toastSaved);
-                          }}
-                          className="w-full py-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-extrabold text-[11px] uppercase tracking-wider rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-98 shadow-md"
+                          onClick={onLogout}
+                          className="w-full py-2.5 bg-slate-950 hover:bg-red-950/40 border border-slate-800 hover:border-red-500/30 text-slate-400 hover:text-red-400 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                         >
-                          <CheckCircle2 className="w-4 h-4 shrink-0 text-white" />
-                          <span>{menuT.savePref}</span>
+                          <X className="w-4 h-4 shrink-0 text-red-500" />
+                          <span>{profileT.logout}</span>
                         </button>
-                      </div>
+                      )}
                     </>
                   );
                 })()}
 
-                <div className="space-y-4 pt-4 border-t border-slate-800/60 mt-4">
-                {/* Header title block */}
-                <div className="border-b border-slate-900 pb-3 flex items-center">
-                  <div>
-                    <h3 className="font-extrabold text-sm text-white tracking-tight uppercase font-mono">Pilot Operations</h3>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Control panel & active telemetry logs</p>
-                  </div>
-                </div>
-
-                {/* MODULE 1: SHIFT COMPLIANCE TIMER (ELD Hours of Service Tracker) */}
-                <div className="bg-slate-900/90 border border-slate-800 rounded-2.5xl p-4.5 space-y-3.5 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-orange-600/5 rounded-full blur-xl" />
-                  <div className="flex items-center justify-between relative z-10">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
-                        <Timer className="w-4 h-4 text-orange-500" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-black text-white uppercase tracking-tight">ELD Hours of Service</h4>
-                        <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">Shift Safety Monitor</span>
-                      </div>
-                    </div>
-                    {drivingStatus === 'driving' ? (
-                      <span className="bg-emerald-500/10 text-emerald-400 font-mono text-[9px] font-bold px-2 py-0.5 rounded border border-emerald-500/20 animate-pulse">
-                        ● ON DUTY
-                      </span>
-                    ) : drivingStatus === 'resting' ? (
-                      <span className="bg-cyan-500/10 text-cyan-400 font-mono text-[9px] font-bold px-2 py-0.5 rounded border border-cyan-500/20">
-                        ☕ BREAK
-                      </span>
-                    ) : (
-                      <span className="bg-slate-950 text-slate-400 font-mono text-[9px] font-bold px-2 py-0.5 rounded border border-slate-800">
-                        OFF DUTY
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Timer Displays */}
-                  <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
-                    <div>
-                      <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Max drive time cycle</span>
-                      <strong className={`text-lg font-mono font-black ${drivingStatus === 'driving' ? 'text-orange-500' : 'text-slate-400'}`}>
-                        {formatTimer(drivingTimeLeft)}
-                      </strong>
-                    </div>
-                    <div className="border-l border-slate-800 pl-4 text-right">
-                      <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Rest countdown</span>
-                      <strong className={`text-lg font-mono font-black ${drivingStatus === 'resting' ? 'text-cyan-400' : 'text-slate-500'}`}>
-                        {formatTimer(restingTimeLeft)}
-                      </strong>
-                    </div>
-                  </div>
-
-                  {/* Interactive Timer Controls */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDrivingStatus('driving');
-                        triggerToast("🚛 Logged On-Duty: Driving cycle timer started.");
-                      }}
-                      disabled={drivingStatus === 'driving'}
-                      className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all text-center select-none cursor-pointer ${
-                        drivingStatus === 'driving'
-                          ? 'bg-orange-600/20 text-orange-400 border border-orange-500/20'
-                          : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      Drive
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDrivingStatus('resting');
-                        triggerToast("☕ Rest Break Initiated. Enjoy your downtime!");
-                      }}
-                      disabled={drivingStatus === 'resting'}
-                      className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all text-center select-none cursor-pointer ${
-                        drivingStatus === 'resting'
-                          ? 'bg-cyan-600/20 text-cyan-400 border border-cyan-500/20'
-                          : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      Rest
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDrivingStatus('off');
-                        setDrivingTimeLeft(4.5 * 3600);
-                        setRestingTimeLeft(45 * 60);
-                        triggerToast("🏁 Off-Duty mode active. Compliant logs synchronized with dispatcher.");
-                      }}
-                      className="py-2 bg-red-950/20 hover:bg-red-950/40 text-red-400 border border-red-900/30 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all text-center select-none cursor-pointer"
-                    >
-                      Reset
-                    </button>
-                  </div>
-                </div>
-
-                {/* MODULE 2: DYNAMIC CARGO FUEL ESTIMATOR */}
-                <div className="bg-slate-900/90 border border-slate-800 rounded-2.5xl p-4.5 space-y-3.5 relative overflow-hidden">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
-                      <Fuel className="w-4 h-4 text-orange-500" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-black text-white uppercase tracking-tight">Fuel & Route Calculator</h4>
-                      <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">Cargo Planning Auxiliary</span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    {/* Cargo Weight Weight Slider */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                        <span className="font-bold">TRAILER CARGO LOAD</span>
-                        <strong className="text-orange-500 font-black">{calcCargoWeight} TONS</strong>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="2" 
-                        max="40" 
-                        value={calcCargoWeight} 
-                        onChange={(e) => setCalcCargoWeight(Number(e.target.value))}
-                        className="w-full accent-orange-500 bg-slate-950 rounded-lg appearance-none h-1.5 cursor-pointer"
-                      />
-                    </div>
-
-                    {/* Distance Slider */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                        <span className="font-bold">ESTIMATED ROUTE DISTANCE</span>
-                        <strong className="text-orange-500 font-black">{calcDistance} {distanceUnit}</strong>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="20" 
-                        max="1200" 
-                        value={calcDistance} 
-                        onChange={(e) => setCalcDistance(Number(e.target.value))}
-                        className="w-full accent-orange-500 bg-slate-950 rounded-lg appearance-none h-1.5 cursor-pointer"
-                      />
-                    </div>
-
-                    {/* Route Terrain Select */}
-                    <div className="space-y-1">
-                      <label className="text-[9px] text-slate-500 block uppercase font-black tracking-wider font-mono">Topographical Terrain</label>
-                      <div className="grid grid-cols-3 gap-1.5 select-none">
-                        {(['flat', 'hilly', 'mountain'] as const).map((tType) => (
-                          <button
-                            key={tType}
-                            type="button"
-                            onClick={() => setCalcTerrain(tType)}
-                            className={`py-1.5 rounded-lg text-[9px] font-bold uppercase transition-all tracking-wider text-center cursor-pointer select-none border ${
-                              calcTerrain === tType 
-                                ? 'bg-orange-600/10 text-orange-400 border-orange-500/30' 
-                                : 'bg-slate-950 border-slate-800 hover:border-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {tType}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Result outputs and estimations banner */}
-                    {calcResult && (
-                      <div className="bg-slate-950 p-2.5 rounded-2xl border border-slate-800/80 grid grid-cols-2 gap-2 text-center text-xs">
-                        <div className="border-r border-slate-800/80 pr-2">
-                          <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Fuel Needed</span>
-                          <strong className="font-mono text-orange-500 font-black text-sm">{calcResult.fuel} L</strong>
-                        </div>
-                        <div className="pl-2">
-                          <span className="text-[8px] text-slate-500 block uppercase font-mono tracking-widest leading-none mb-1">Transit Time</span>
-                          <strong className="font-mono text-white font-black text-sm">{calcResult.time} Hrs</strong>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* MODULE 3: DETAILED DISPATCHER SETTINGS SYSTEM */}
-                <div className="bg-slate-900/90 border border-slate-800 rounded-2.5xl p-4.5 space-y-3.5 relative">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
-                      <Settings className="w-4 h-4 text-orange-500" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-black text-white uppercase tracking-tight">System Configuration</h4>
-                      <span className="text-[9px] text-slate-500 block uppercase font-mono tracking-tight">Active Preferences</span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3 text-xs">
-
-                    {/* Metric Imperial Switch */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
-                      <span className="text-slate-300 font-bold uppercase tracking-wider">Metric Units Override</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextUnit = distanceUnit === 'km' ? 'mi' : 'km';
-                          setDistanceUnit(nextUnit);
-                          triggerToast(`Units switched to ${nextUnit.toUpperCase()}`);
-                        }}
-                        className="px-2.5 py-1 bg-slate-900 border border-slate-800 text-orange-400 text-[9px] uppercase font-black tracking-wider rounded-lg transition-all"
-                      >
-                        {distanceUnit === 'km' ? 'Metric (KM)' : 'Imperial (MI)'}
-                      </button>
-                    </div>
-
-                    {/* Daylight/Nighttime View Theme Switcher */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
-                      <span className="text-slate-300 font-bold uppercase tracking-wider">Visibility Contrast Mode</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextTheme = theme === 'dark' ? 'light' : 'dark';
-                          setTheme(nextTheme);
-                          triggerToast(nextTheme === 'light' ? "☀️ Light mode enabled for bright daylight visibility." : "🌙 Dark mode enabled for relaxed night driving.");
-                        }}
-                        className="px-2.5 py-1 bg-slate-900 border border-slate-800 text-orange-400 text-[9px] uppercase font-black tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
-                      >
-                        {theme === 'dark' ? (
-                          <>
-                            <Moon className="w-3 h-3 text-orange-400 shrink-0" />
-                            <span>Night Dark</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sun className="w-3 h-3 text-amber-500 animate-spin shrink-0" style={{ animationDuration: "12s" }} />
-                            <span>Day Light</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {/* Speed Advisor Alarm Warning */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
-                      <span className="text-slate-300 font-bold uppercase tracking-wider">Speed Limit Guard</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSpeedLimitWarn(!speedLimitWarn);
-                          triggerToast(!speedLimitWarn ? "Excessive speed advisory alerts enabled." : "Excessive speed advisory alerts muted.");
-                        }}
-                        className={`p-1 w-10 rounded-full cursor-pointer flex transition-all ${speedLimitWarn ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
-                      >
-                        <span className={`w-3.5 h-3.5 rounded-full shadow ${speedLimitWarn ? 'bg-white' : 'bg-slate-600'}`} />
-                      </button>
-                    </div>
-
-                    {/* System sound indicator parameters */}
-                    <div className="flex items-center justify-between bg-slate-950 p-2 rounded-xl border border-slate-800 text-[10px] font-mono">
-                      <span className="text-slate-300 font-bold uppercase tracking-wider">Operational Audio FX</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSoundEnabled(!soundEnabled);
-                          triggerToast(!soundEnabled ? "Audio response sound effects enabled." : "Audio responses muted.");
-                        }}
-                        className={`p-1 w-10 rounded-full cursor-pointer flex transition-all ${soundEnabled ? 'bg-orange-600 justify-end' : 'bg-slate-900 border border-slate-800 justify-start'}`}
-                      >
-                        <span className={`w-3.5 h-3.5 rounded-full shadow ${soundEnabled ? 'bg-white' : 'bg-slate-600'}`} />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                </div> {/* close hidden wrapper */}
               </div>
             )}
 
@@ -4560,8 +2791,8 @@ export default function DriverApplication({
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
                     <div>
-                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Document Scanner</h5>
-                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Align the document inside the frame</span>
+                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Take Photo</h5>
+                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Align the photo inside the frame</span>
                     </div>
                   </div>
                   <button 
@@ -4643,8 +2874,8 @@ export default function DriverApplication({
                       <div className="flex items-center justify-between gap-4 pt-1 select-none">
                         {/* Custom photo uploader label alias */}
                         <label
-                          title="Upload a real file"
-                          aria-label="Upload a real file"
+                          title="Choose from Gallery"
+                          aria-label="Choose from Gallery"
                           className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0"
                         >
                           <FileUp className="w-4 h-4" />
@@ -4679,7 +2910,7 @@ export default function DriverApplication({
                           <div className="w-4 h-4 rounded-full border-2 border-slate-950 shrink-0 bg-transparent flex items-center justify-center">
                             <div className="w-2 h-2 rounded-full bg-slate-950" />
                           </div>
-                          <span>Capture Document</span>
+                          <span>Capture Photo</span>
                         </button>
                       </div>
                     </div>
@@ -4796,7 +3027,7 @@ export default function DriverApplication({
                         className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
                       >
                         <Send className="w-4 h-4 shrink-0 text-slate-950" />
-                        <span>Send Document</span>
+                        <span>Send to Admin</span>
                       </button>
                     </div>
 
@@ -4810,9 +3041,9 @@ export default function DriverApplication({
                       <Compass className="w-7 h-7 text-emerald-400 animate-pulse" />
                     </div>
                     <div className="text-center space-y-2">
-                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Uploading Document</h5>
+                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Sending Photo</h5>
                       <p className="text-[10px] text-slate-400 leading-relaxed font-mono max-w-[240px] mx-auto text-center">
-                        Sending your document securely...
+                        Sending your photo to Admin securely...
                       </p>
                     </div>
                     <div className="w-full max-w-[200px] h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800/80">

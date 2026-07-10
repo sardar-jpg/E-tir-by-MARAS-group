@@ -37,15 +37,15 @@ export default function FileUploadModal({
       <div className="bg-slate-900 p-5.5 border border-slate-800/80 rounded-3xl w-full max-w-[320px] space-y-4 shadow-[0_15px_45px_rgba(0,0,0,0.6)] text-xs">
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
           <div>
-            <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Upload Document</h5>
-            <p className="text-[9px] text-slate-500 mt-0.5">Delivery, customs, or other shipment paperwork you need to send to Admin</p>
+            <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Send Photo/File</h5>
+            <p className="text-[9px] text-slate-500 mt-0.5">Send a photo or file to Admin — delivery, customs, or other shipment paperwork</p>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors cursor-pointer border-0 bg-transparent p-1"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="space-y-3.5">
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Upload document photo or PDF</label>
+            <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Choose photo or file</label>
             <input
               type="file"
               accept="image/*,application/pdf,.doc,.docx"
@@ -101,7 +101,7 @@ export default function FileUploadModal({
             ) : (
               <Camera className="w-4 h-4 shrink-0" />
             )}
-            <span>{isUploading ? "Uploading document..." : "Attach Document"}</span>
+            <span>{isUploading ? "Sending..." : "Send to Admin"}</span>
           </button>
         </div>
       </div>

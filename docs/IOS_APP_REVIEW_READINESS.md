@@ -97,11 +97,14 @@ Reviewer-facing / policy-facing items, current state as of this PR:
       §4); re-confirm current production status before submitting, don't
       assume it's unchanged since the last check.
 - [ ] **Google Maps key configured and restricted** — GPS Tracking Map
-      (admin), Client Shipment Map, and Driver Application map all render
-      via `@vis.gl/react-google-maps` and need `GOOGLE_MAPS_PLATFORM_KEY`
-      set and HTTP-referrer-restricted (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`
-      §9). A missing key shows a "Google Maps Platform Key Required"
-      setup card instead of a broken map (fixed in PR #63) — but a
+      (admin) and Client Shipment Map render via `@vis.gl/react-google-maps`
+      and need `GOOGLE_MAPS_PLATFORM_KEY` set and HTTP-referrer-restricted
+      (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §9). (The Driver app's own
+      map card was removed in PR #72 as part of the driver UI
+      simplification — drivers no longer see a map, just their job details;
+      background GPS reporting to the admin tracking map is unaffected.) A
+      missing key shows a "Google Maps Platform Key Required" setup card
+      instead of a broken map (fixed in PR #63) — but a
       reviewer should see a working map, not that card.
 - [ ] **Privacy policy present and accurate** — `PrivacyPolicyModal.tsx`
       exists and is reachable from the login screen. See §5 for the
@@ -650,19 +653,28 @@ for the general flow, `driver-1`/`murat_yilmaz` — whose seeded shipment
 carries the demo CMR document — to see the read-only view link render for a
 real `cmr`-category document).
 
-**Deferred to a future PR** (kept PR #71 focused on the CMR
-upload/view contradiction specifically): trimming
-`DriverApplication`'s non-CMR admin-dashboard-style sections (Quick Cockpit
-Actions, Trip Estimate simulator, Smart Transit Route Tracker) — confirmed
-during PR #71's review that none of them leak admin/customer/accounting
-data, so this is a cosmetic simplification pass, not a safety fix. See
-`docs/FOLLOW_UP_ROADMAP.md` for one more small, unrelated gap found along
-the way (seeded demo chat messages predate the `channel` field so don't
-appear to driver/client sessions in a fresh local `SEED_DEMO_DATA=true` dev
-environment).
+**Done in PR #72** (`feature/driver-simple-mobile-ux-cleanup`, cosmetic
+simplification, not a safety fix — PR #71's review already confirmed
+none of these sections leaked admin/customer/accounting data). Trimmed
+`DriverApplication`'s non-CMR admin-dashboard-style sections: the
+"Smart Transit Route Tracker" map card, the "Proof of Delivery"
+signature panel, the "Trip Estimate" road-condition simulator, and the
+Menu tab's "Pilot Operations" block (ELD Hours of Service, Fuel & Route
+Calculator, and a duplicate "System Configuration" toggle set). "Quick
+Cockpit Actions" was simplified to a plain 2-button "Quick Actions"
+panel. See `docs/FOLLOW_UP_ROADMAP.md` for the full list of what was
+removed/simplified and the wording changes (Scan Document → Take
+Photo, Upload File/Upload Doc → Send File/Send Photo, "... Updates
+Terminal" → "Update Shipment Status"). None of this touched the CMR
+read-only rule, `documentAccess.ts`, or the server-side CMR-upload
+rejection from PR #71 — the Documents from Admin panel's CMR/View
+links are unchanged. See `docs/FOLLOW_UP_ROADMAP.md` for one more
+small, unrelated gap found along the way in PR #71 (seeded demo chat
+messages predate the `channel` field so don't appear to driver/client
+sessions in a fresh local `SEED_DEMO_DATA=true` dev environment).
 
 **Local/dev manual-review scenario (login credentials, exact shipment
 fixture, what should/shouldn't appear):** see
 `docs/FOLLOW_UP_ROADMAP.md` § "Driver review demo scenario (local/dev
-only — PR #71)" — `demo_driver` / `DemoDriver123!` with
-`SEED_DEMO_DATA=true`, local only, never seeded in production.
+only — PR #71, re-verified PR #72)" — `demo_driver` / `DemoDriver123!`
+with `SEED_DEMO_DATA=true`, local only, never seeded in production.
