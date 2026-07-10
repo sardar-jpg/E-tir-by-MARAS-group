@@ -2,15 +2,17 @@ import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
-// BUG-25: AdminPanel and DriverApplication are the two largest components
-// in the app (10k+ and 4k+ lines) but only ever needed by an admin or
-// driver session respectively — never by a public tracking visitor or a
-// client. Loading them lazily keeps them out of the initial bundle for
-// everyone else.
+// BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
+// needed by an admin, driver, or client session respectively — never by a
+// public tracking visitor or a session of one of the other two roles.
+// Loading them lazily keeps each out of the initial bundle for everyone
+// else. ClientDashboard also pulls in @vis.gl/react-google-maps (via
+// ClientShipmentMap), so this keeps the Maps SDK out of the initial bundle
+// for admin/driver/public sessions too.
 const AdminPanel = lazy(() => import("./components/AdminPanel"));
 const DriverApplication = lazy(() => import("./components/DriverApplication"));
+const ClientDashboard = lazy(() => import("./components/ClientDashboard"));
 import PublicTracking from "./components/PublicTracking";
-import ClientDashboard from "./components/ClientDashboard";
 import LoginPage from "./components/LoginPage";
 import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
 import TermsModal from "./components/TermsModal";
@@ -800,14 +802,16 @@ export default function App() {
     return (
       <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
         <main className="flex-1 overflow-y-auto py-6 px-4">
-          <ClientDashboard
-            lang={lang}
-            clientCompanyName={session.client?.companyName || "Customer"}
-            clientEmail={session.client?.email || ""}
-            clientId={session.client?.id || ""}
-            onLogout={handleLogout}
-            viewOnly={!!(session.client?.isEmployee)}
-          />
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <ClientDashboard
+              lang={lang}
+              clientCompanyName={session.client?.companyName || "Customer"}
+              clientEmail={session.client?.email || ""}
+              clientId={session.client?.id || ""}
+              onLogout={handleLogout}
+              viewOnly={!!(session.client?.isEmployee)}
+            />
+          </Suspense>
         </main>
       </div>
     );

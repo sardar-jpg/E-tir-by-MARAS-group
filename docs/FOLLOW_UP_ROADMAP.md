@@ -28,8 +28,67 @@ next so the work isn't lost between sessions.
 ## Chat & documents
 - ~~**Customer Chat File Upload UI**~~ — **Done in PR #62** (`feature/customer-chat-file-upload-ui`). Client Owner/Client Staff can now attach one file (paperclip button, existing `PDF/JPG/PNG/WebP/DOC(X)/XLS(X)` allowlist via `validateUpload`, `src/lib/uploadValidation.ts`) alongside or instead of text in the customer/admin (`client_admin`) chat in `ClientDashboard.tsx`, reusing the existing `/api/upload` + `POST /api/shipments/:id/chat` flow (channel still server-forced to `client_admin` for client sessions — unchanged). Uploads stay chat-only by default: `shouldSaveChatFileAsShipmentDocument` (`src/lib/chatVisibility.ts`) was narrowed from channel-only to channel **and** sender — only an *admin-sent* `client_admin` attachment still auto-mirrors into `shipment.documents` (preserving the existing admin publish-a-document-via-chat feature from PR #35/#39/#44); a customer/client-staff-sent attachment no longer does, so it can't reach the public share link without review. Message rendering shows file name + category + an authenticated download link, never a raw URL as plain text. Driver/other-client/public-tracking exposure unaffected — those surfaces don't read `client_admin` chat at all (pre-existing `filterChatMessagesByRole`, `chatVisibility.ts`, and `PublicTracking.tsx` never touching chat data). Converting a customer's chat upload into an official approved document is intentionally out of scope — no such approval flow exists yet.
 - **Document category future schema** — revisit `DocumentCategory` as new document types are needed.
-- **Driver-uploaded CMR/customs scan approval flow** — add an admin approval step for driver-submitted CMR/customs scans.
+- ~~**Driver-uploaded CMR/customs scan approval flow**~~ — **superseded by the CMR product decision below** (added in PR #69, docs-only). Adding an approval step for driver-submitted CMRs is no longer the direction: the decision is that drivers must not create, generate, sign, stamp, approve, or upload CMR at all — CMR becomes admin-only end-to-end, with drivers getting read-only view/download access. See "Driver App Simplification + CMR Read-Only Review" below.
 - **Notification Dismiss behavior** — review how notifications are dismissed/cleared across roles.
+
+## Driver app simplification (added in PR #69, docs-only — not implemented)
+
+Product decision recorded here for a **future dedicated PR**. Not
+implemented in PR #69 (`feature/ios-app-review-performance-readiness-pack`)
+— documentation only, no code changed for this item. See
+`docs/IOS_APP_REVIEW_READINESS.md` §12 for the mobile/App-Review-facing
+cross-reference.
+
+**Important product decision: the Driver app must stay simple and
+operational — not become an admin-style dashboard.** Driver app should
+focus on:
+- current assigned job
+- accept job
+- pickup/dropoff details
+- simple status updates
+- view/download Admin-generated CMR
+- receive a CMR-ready notification
+- show CMR at the border
+- `driver_admin` chat
+- agreed driver amount, if intended
+
+**CMR rule (this is a behavior change from today, not just a new
+restriction):**
+- Driver must **not** create, generate, sign, stamp, or approve a CMR.
+- Driver must **not** upload a CMR.
+- CMR must be created, stamped, signed, approved, and published only by
+  MARAS/Admin/company from `AdminPanel`, using MARAS's own dedicated CMR
+  design and shipment data.
+- Driver CMR access must be **read-only**: view, download, and show at
+  the border. Nothing else.
+- **Current state does not match this yet** — checked as part of adding
+  this item: `DriverApplication.tsx` today actively invites the driver to
+  upload a CMR ("Scan CMR / Paperwork" in the document-upload UI, a
+  driver-facing prompt reading "Please upload the signed CMR document as
+  soon as possible.", and a `cmr` option in the upload category picker,
+  same as `src/components/driver/FileUploadModal.tsx`). The future PR
+  implementing this decision needs to **remove** that driver-upload-CMR
+  path (not just decline to add an approval step for it, per the
+  now-superseded roadmap item above), not only add the read-only
+  view/download surface.
+
+**Also to document/implement in that future PR:**
+- Remove or hide unnecessary counters, charts, analytics, and
+  admin-style dashboard sections from `DriverApplication` — a dedicated
+  scoping pass, not folded into PR #69.
+- Driver must never see: customer company name, Client Staff identity,
+  customer price/payment status, cost statements, vendor costs,
+  profit/margin, invoices, internal notes, `client_admin` chat, or
+  `internal_staff` chat. **Note:** the customer-identity/price part of
+  this already holds today per PR #68's browser smoke test (driver
+  dashboard shows only its own assigned job — cargo description, own
+  payout/truck, no customer company name or Client Staff identity) —
+  the future PR should re-confirm this hasn't regressed, not assume it
+  needs to be built from scratch.
+- The future PR should include a real mobile-size browser smoke test for
+  `DriverApplication` (narrow viewport, not just a desktop-sized
+  headless browser window), matching the browser-driven verification
+  standard set by PR #68's client-staff smoke test.
 
 ## Dashboard
 - **Revenue KPI** — add a revenue-based KPI tile to the admin dashboard.
@@ -50,8 +109,11 @@ next so the work isn't lost between sessions.
 - ~~**Seed demo Client Staff account**~~ — **Done in PR #67** (`feature/seed-demo-client-staff-account`). Added a `demo_client_staff` / `client.staff@demo.local` entry to `DEMO_ACCOUNTS` in `server.ts`, seeded as its own `Client` memory record (`id: "demo-client-staff"`, `isEmployee: true`) attached to the same `companyName: "Demo Client Co."` as the existing `demo_client` owner account, so it gets identical customer-safe shipment/document/chat scoping via the existing company-name matching in `requireShipmentAccess`/the shipments/notifications routes — no new access-control code needed since `clientAccess.ts`'s `isClientStaffAccount`/`canClientSelfDeleteAccount`/`canClientSendChatMessage` already fully implement Client Staff behavior (from the earlier `feature/client-staff-accounts-safety-review` and `feature/customer-chat-file-upload-ui` work). Same `IS_LOCAL_DEV`/`DEMO_ACCOUNTS` gating as every other demo account — never seeded when `NODE_ENV=production`, independent of `SEED_DEMO_DATA`.
 - ~~**Client Staff Browser Smoke Test / Safety Review**~~ — **Done in PR #68** (`feature/client-staff-browser-smoke-test-safety-review`), a browser-driven follow-up to PR #67's code-level review. Ran `npm run dev` (memory fallback, `STRICT_PERSISTENCE` briefly relaxed in a local, gitignored `.env.local` only to let the Admin UI create temporary test data, then reverted) and drove the real UI with a scripted Playwright session — not just curl — across all four demo roles. Created two temporary shipments (one for "Demo Client Co.", one for a newly added, temporary "Other Test Co." client) to actually exercise cross-company isolation in the browser rather than assume it from code reading; both are in-memory-only and gone on server restart. Confirmed end-to-end with screenshots: `demo_client_staff` logs in, lands on `ClientDashboard` (never `AdminPanel`), sees a "Client Staff" badge, sees only its own company's shipment (the other company's "Other Co Secret Cargo" shipment never appears), sees no `agreedAmount`/internal notes/margin on shipment details, has no "Delete Account" button (owner does), can send a `client_admin` chat text message (sender name shows the company, per existing `chatVisibility.ts` behavior) and select a file via the PR #62 upload UI (filename preview + remove button both work); the actual upload attempt correctly 503s with "File storage is temporarily unavailable... your file was NOT saved" since no live Firebase Storage is configured locally — expected and consistent with `docs/REAL_FIREBASE_VERIFICATION.md`. Notifications panel shows "0 unread updates matching your shipments" with no internal/admin entries. Logout returns to the login page. Client Owner (`demo_client`) verified separately: same shipment, same shared chat thread (sees the staff account's message), "Delete Account" button present, no "Client Staff" badge. Super Admin (`admin@demo.local`) Clients Registry lists both `demo_client` and `demo_client_staff` under "Demo Client Co.", staff row visibly tagged "CLIENT STAFF"; admin's Chat Center "Client Channel" for the shipment shows both the staff's and owner's messages. Driver (`demo_driver`) dashboard shows only its own assigned job — cargo description, own payout/truck — no customer company name or Client Staff identity. Server-side (`curl`, memory fallback): `GET /api/cost-statements` and `GET /api/logs` both 401 for the Client Staff session; `DELETE /api/clients/:id` on its own record 403s ("Client Staff accounts can only be removed by MARAS Admin."). No bugs found — no code changes were needed. `npm run lint`/`test`/`build`/`check-firebase-readiness` all pass unchanged.
 - **Repository Cleanup / Legacy Files Review** — review `Etir/e-tir-by-maras` and `etir-new` scaffold directories for removal.
-- **Performance / Bundle Size Optimization** — address the existing Vite chunk-size warnings (`AdminPanel` and main bundle both exceed 500kB gzip-minified).
+- ~~**Performance / Bundle Size Optimization**~~ — **Partially done in PR #69** (`feature/ios-app-review-performance-readiness-pack`). `ClientDashboard` (was statically imported in `App.tsx`, pulling `@vis.gl/react-google-maps` into the main bundle for every session) is now lazy-loaded, matching the existing `AdminPanel`/`DriverApplication` pattern (main bundle 813.42 kB → 720.62 kB gzip 223.16 → 196.83 kB). `jsPDF` in `AdminPanel.tsx`'s `handleDownloadPDF` is now dynamically imported at the point of use instead of statically at the top of the file (AdminPanel chunk 1,310.72 kB → 917.96 kB, gzip 355.86 → 227.84 kB). Both >500kB Vite warnings remain (smaller, not gone) — see `docs/IOS_APP_REVIEW_READINESS.md` §7 for full before/after numbers and the larger, explicitly-deferred follow-ups (splitting `AdminPanel.tsx` itself, further map-library isolation, `manualChunks` vendor splitting).
+- **iOS Info.plist missing usage-description strings** — found during PR #69's App Review readiness pass, not fixed there (native-level change, out of scope for a docs/performance PR). `ios/App/App/Info.plist` has no `NSLocationWhenInUseUsageDescription`, `NSCameraUsageDescription`, or `NSPhotoLibraryUsageDescription`/`NSPhotoLibraryAddUsageDescription`, despite the app using `navigator.geolocation` (driver GPS) and native file/photo pickers (document/photo uploads, all three roles). See `docs/IOS_APP_REVIEW_READINESS.md` §8 — this is both an App Review risk and a possible on-device crash, and needs a dedicated native-config PR plus a new TestFlight build.
+- **Privacy policy / Terms contact email mismatch** — found during PR #69. `PrivacyPolicyModal.tsx`/`TermsModal.tsx` list `info@maras.iq`; the rest of the live app (`LoginPage.tsx`, `AdminPanel.tsx` Settings) uses `support@etir.app`. Not changed in PR #69 since privacy-policy copy is legal-adjacent and deserves a deliberate edit. See `docs/IOS_APP_REVIEW_READINESS.md` §5.
 - **Mobile / Responsive Review** — pass over mobile/tablet layouts beyond the existing `lg:hidden` tab bar.
 
 ## AI / monitoring
 - **MARAS AI Monitor Foundation** — foundation work for the MARAS AI header drawer feature (currently UI-only, no backend/provider wired up).
+- **MARAS AI Assistant roadmap — clarified in PR #69 (documentation only, no code changed):** MARAS AI is an **Admin-only** feature, permanently — never available to Client, Client Staff, Driver, or Public Tracking sessions. Verified this already holds today (the existing drawer only renders inside `AdminPanel.tsx`, is UI-only, not wired to any provider). Full roadmap (start with Super Admin-only, expand to Operation/Accounts only via role-safe data projections mirroring `adminAccess.ts`'s existing `canView*` checks, never bypass existing permissions, external-provider integration requires its own dedicated PR + privacy-policy coverage + explicit approval) is in `docs/IOS_APP_REVIEW_READINESS.md` §10 — that's now the canonical version of this roadmap item.
