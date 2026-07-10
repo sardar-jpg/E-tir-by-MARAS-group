@@ -49,6 +49,11 @@ const TrackingMap = React.lazy(() => import("./TrackingMap"));
 const ChatCenter = React.lazy(() => import("./admin/ChatCenter"));
 const AdminReportsSection = React.lazy(() => import("./admin/sections/AdminReportsSection"));
 const AdminCostsSection = React.lazy(() => import("./admin/sections/AdminCostsSection"));
+const AdminClientsSection = React.lazy(() => import("./admin/sections/AdminClientsSection"));
+const AdminVendorsSection = React.lazy(() => import("./admin/sections/AdminVendorsSection"));
+const AdminAuditSection = React.lazy(() => import("./admin/sections/AdminAuditSection"));
+const AdminTeamSection = React.lazy(() => import("./admin/sections/AdminTeamSection"));
+const AdminSettingsSection = React.lazy(() => import("./admin/sections/AdminSettingsSection"));
 
 const LAZY_SECTION_LOADING_LABEL: Record<Language, string> = {
   en: "Loading…",
@@ -5062,875 +5067,107 @@ MARAS Group etir Center`;
 
       {/* Clients Tab */}
       {activeTab === 'clients' && (
-        <div className="space-y-6 animate-fade-in font-sans">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900 leading-tight">
-                {lang === 'tr' ? "Müşteri Veritabanı" : (lang === 'ar' ? "قاعدة بيانات العملاء" : "Clients Database")}
-              </h2>
-              <p className="text-slate-500 text-xs mt-0.5 font-medium">
-                {lang === 'tr' ? "Sistemdeki tüm kayıtlı göndericileri yönetin, siparişlerini ve takip bağlantılarını inceleyin." : (lang === 'ar' ? "إدارة شاحني البضائع المسجلين، والتحقق من طلباتهم، ومشاركة روابط التتبع." : "Manage corporate freight shippers, check order histories, and share real-time tracking links.")}
-              </p>
-            </div>
-            {canWriteClients && (
-              <button
-                onClick={() => setIsAddClientOpen(true)}
-                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0"
-              >
-                <UserPlus className="w-4 h-4" />
-                <span>{lang === 'tr' ? "Yeni Müşteri Ekle" : (lang === 'ar' ? "إضافة عميل جديد" : "Add New Client")}</span>
-              </button>
-            )}
-          </div>
-
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            {/* Search and Filters Bar */}
-            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="relative w-full max-w-sm">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder={lang === 'tr' ? "Müşteri veya yetkili ara..." : (lang === 'ar' ? "البحث عن عميل أو جهة اتصال..." : "Search client company, contact...")}
-                  value={clientSearchQuery}
-                  onChange={(e) => setClientSearchQuery(e.target.value)}
-                  className="pl-9 pr-4 py-2 w-full text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500"
-                />
-              </div>
-              <div className="text-xs text-slate-500 font-semibold">
-                {clients.filter(c => 
-                  c.companyName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                  c.contactName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                  c.email.toLowerCase().includes(clientSearchQuery.toLowerCase())
-                ).length} {lang === 'tr' ? "müşteri bulundu" : (lang === 'ar' ? "العملاء الذين تم العثور عليهم" : "clients found")}
-              </div>
-            </div>
-
-            {/* Clients Grid/Table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs md:text-sm">
-                <thead className="bg-slate-100 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
-                  <tr>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Şirket / Kuruluş" : (lang === 'ar' ? "الشركة / المؤسسة" : "Company / Organization")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Yetkili Temsilci" : (lang === 'ar' ? "جهة الاتصال" : "Representative")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "İletişim Bilgileri" : (lang === 'ar' ? "معلومات الاتصال" : "Contact Details")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Sipariş Sayısı" : (lang === 'ar' ? "عدد الطلبات" : "Orders Count")}</th>
-                    <th className="px-5 py-3.5 text-right">{lang === 'tr' ? "İşlemler" : (lang === 'ar' ? "الإجراءات" : "Actions")}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {clients.filter(c => 
-                    c.companyName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                    c.contactName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                    c.email.toLowerCase().includes(clientSearchQuery.toLowerCase())
-                  ).length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-12 text-center text-slate-400 text-xs">
-                        {lang === 'tr' ? "Herhangi bir kayıtlı müşteri bulunamadı." : (lang === 'ar' ? "لم يتم العثور على أي عملاء مسجلين." : "No registered clients found matching filter.")}
-                      </td>
-                    </tr>
-                  ) : (
-                    clients
-                      .filter(c => 
-                        c.companyName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                        c.contactName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-                        c.email.toLowerCase().includes(clientSearchQuery.toLowerCase())
-                      )
-                      .map((client) => {
-                        const clientShipments = shipments.filter(s => s.companyName.toLowerCase().trim() === client.companyName.toLowerCase().trim());
-                        const isExpanded = expandedClientOrdersCompanyName === client.companyName;
-                        
-                        return (
-                          <React.Fragment key={client.id}>
-                            <tr className={`hover:bg-slate-50/50 transition-colors ${isExpanded ? 'bg-orange-50/10' : ''}`}>
-                              <td className="px-5 py-4">
-                                <div className="font-extrabold text-slate-800 leading-snug">{client.companyName}</div>
-                                <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                                  {lang === 'tr' ? "Kayıt:" : (lang === 'ar' ? "التسجيل:" : "Registered:")} {new Date(client.createdAt).toLocaleDateString()}
-                                </div>
-                                {client.notes && (
-                                  <div className="text-[10px] text-slate-500 italic mt-1 max-w-xs truncate" title={client.notes}>
-                                    {client.notes}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="px-5 py-4 font-bold text-slate-700">
-                                <div className="flex items-center gap-2">
-                                  <span>{client.contactName}</span>
-                                  {client.isEmployee && (
-                                    <span className="px-1.5 py-0.5 bg-orange-50 border border-orange-200 text-orange-600 text-[9px] font-black uppercase rounded tracking-wider">
-                                      {lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "طاقم العميل" : "Client Staff")}
-                                    </span>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-5 py-4 space-y-0.5">
-                                <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                                  <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                  <span className="font-medium">{client.email || '—'}</span>
-                                </div>
-                                <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                                  <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                  <span className="font-mono">{client.phone || '—'}</span>
-                                </div>
-                              </td>
-                              <td className="px-5 py-4">
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
-                                  clientShipments.length > 0 
-                                    ? "bg-orange-50 text-orange-600 border border-orange-100" 
-                                    : "bg-slate-50 text-slate-400 border border-slate-100"
-                                }`}>
-                                  {clientShipments.length} {lang === 'tr' ? "Sipariş" : (lang === 'ar' ? "طلبات" : "Orders")}
-                                </span>
-                              </td>
-                              <td className="px-5 py-4 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  {canWriteClients && (
-                                    <button
-                                      onClick={() => openEditClient(client)}
-                                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
-                                    >
-                                      <Pencil className="w-3.5 h-3.5" />
-                                      <span>{lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}</span>
-                                    </button>
-                                  )}
-                                  <button
-                                    onClick={() => {
-                                      setExpandedClientOrdersCompanyName(isExpanded ? null : client.companyName);
-                                    }}
-                                    className="px-2.5 py-1.5 bg-orange-100 hover:bg-orange-200 text-orange-700 hover:text-orange-800 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
-                                  >
-                                    <ClipboardList className="w-3.5 h-3.5" />
-                                    <span>
-                                      {isExpanded
-                                        ? (lang === 'tr' ? "Gizle" : (lang === 'ar' ? "إخفاء" : "Hide Details"))
-                                        : (lang === 'tr' ? "İncele" : (lang === 'ar' ? "عرض الطلبات" : "Check Orders"))
-                                      }
-                                    </span>
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-
-                            {/* Expanded Client Orders Section */}
-                            {isExpanded && (
-                              <tr>
-                                <td colSpan={5} className="px-5 py-4 bg-slate-50/50">
-                                  <div className="border border-slate-200 rounded-xl bg-white p-4 shadow-xs space-y-3">
-                                    <h4 className="font-extrabold text-sm text-slate-800 flex items-center gap-1.5">
-                                      <Ship className="w-4 h-4 text-orange-500" />
-                                      <span>{client.companyName} — {lang === 'tr' ? "Sipariş Geçmişi" : (lang === 'ar' ? "سجل الطلبات" : "Shipment Order History")}</span>
-                                    </h4>
-
-                                    {clientShipments.length === 0 ? (
-                                      <div className="py-6 text-center text-xs text-slate-400 italic">
-                                        {lang === 'tr' ? "Bu müşteriye ait aktif sipariş bulunmamaktadır." : (lang === 'ar' ? "لا يوجد أي طلبات بضائع لهذا العميل حالياً." : "No orders are currently linked with this client company name.")}
-                                      </div>
-                                    ) : (
-                                      <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto pr-1">
-                                        {clientShipments.map((shipment) => {
-                                          return (
-                                            <div key={shipment.id} className="py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
-                                              <div className="space-y-1">
-                                                <div className="flex items-center gap-2">
-                                                  <span className="font-black text-slate-800 text-sm selectable">#{shipment.shipmentNumber}</span>
-                                                  <span className={`px-1.5 py-0.5 rounded-sm font-bold text-[10px] uppercase border ${
-                                                    shipment.status === "Delivered" || shipment.status === "Closed"
-                                                      ? "bg-green-50 text-green-700 border-green-200"
-                                                      : "bg-orange-50 text-orange-700 border-orange-200"
-                                                  }`}>
-                                                    {shipment.status}
-                                                  </span>
-                                                </div>
-                                                <div className="text-slate-600 font-extrabold">
-                                                  {shipment.loadingCity} ({shipment.loadingCountry}) ➔ {shipment.deliveryCity} ({shipment.deliveryCountry})
-                                                </div>
-                                                <div className="text-[10px] text-slate-400">
-                                                  {lang === 'tr' ? "Yük:" : (lang === 'ar' ? "الحمولة:" : "Cargo:")} {shipment.cargoDescription} ({shipment.cargoWeight} kg)
-                                                </div>
-                                              </div>
-
-                                              {/* Actions: Copy or Share tracking links */}
-                                              <div className="flex items-center flex-wrap gap-2 pt-2 md:pt-0">
-                                                {/* Direct Link */}
-                                                <button
-                                                  onClick={() => {
-                                                    const link = getDirectLink(shipment.shareToken);
-                                                    navigator.clipboard.writeText(link);
-                                                    triggerToast(lang === 'tr' ? "Takip linki kopyalandı!" : (lang === 'ar' ? "تم نسخ رابط التتبع بالنجاح!" : "Tracking link copied to clipboard!"));
-                                                  }}
-                                                  className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 rounded-md font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border-0"
-                                                  title={lang === "tr" ? "Link Kopyala" : (lang === "ar" ? "نسخ الرابط" : "Copy Shared Link")}
-                                                >
-                                                  <Share2 className="w-3.5 h-3.5" />
-                                                  <span>{lang === 'tr' ? "Linki Kopyala" : (lang === 'ar' ? "نسخ" : "Copy Link")}</span>
-                                                </button>
-
-                                                {/* WhatsApp Share */}
-                                                <a
-                                                  href={getWhatsAppLink(shipment.shipmentNumber, shipment.shareToken, shipment.loadingCity, shipment.deliveryCity)}
-                                                  target="_blank"
-                                                  rel="noreferrer"
-                                                  className="px-2.5 py-1.5 bg-green-50 hover:bg-green-100 text-green-700 hover:text-green-800 rounded-md font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border-0 no-underline"
-                                                >
-                                                  <MessageSquare className="w-3.5 h-3.5" />
-                                                  <span>WhatsApp</span>
-                                                </a>
-
-                                                {/* Gmail Prepopulate */}
-                                                <button
-                                                  onClick={() => {
-                                                    handlePrepopulateGmail(shipment.id);
-                                                    setActiveTab('gmail');
-                                                    triggerToast(lang === 'tr' ? "Gmail Konsolu yüklendi!" : (lang === 'ar' ? "تم التجهيز في لوحة Gmail!" : "Loaded inside Gmail Console!"));
-                                                  }}
-                                                  className="px-2.5 py-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 hover:text-orange-800 rounded-md font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border-0"
-                                                  title={lang === 'tr' ? 'Müşteriye Gmail Gönder' : (lang === 'ar' ? 'إرسال بريد Gmail' : 'Compose Operator Gmail')}
-                                                >
-                                                  <Mail className="w-3.5 h-3.5" />
-                                                  <span>{lang === 'tr' ? 'E-Posta Hazırla' : (lang === 'ar' ? 'تجهيز' : 'Compose')}</span>
-                                                </button>
-                                              </div>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
-                                  </div>
-                                </td>
-                              </tr>
-                            )}
-                          </React.Fragment>
-                        );
-                      })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Edit Client Modal */}
-          {editClientTarget && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[200] p-4 animate-fade-in">
-              <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <div>
-                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                      <Pencil className="text-orange-500 w-5 h-5" />
-                      <span>{lang === 'tr' ? "Müşteriyi Düzenle" : (lang === 'ar' ? "تعديل بيانات العميل" : "Edit Client")}</span>
-                    </h3>
-                    <p className="text-[11px] text-slate-500 mt-0.5 font-mono">{editClientTarget.companyName}</p>
-                  </div>
-                  <button
-                    onClick={() => setEditClientTarget(null)}
-                    className="p-1 px-2 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 border-0 cursor-pointer text-xs font-bold rounded-md"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <form onSubmit={handleEditClientSubmit} className="space-y-4 text-xs font-sans">
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Yetkili Kişi" : (lang === 'ar' ? "اسم جهة الاتصال" : "Contact Representative Name")} *</label>
-                    <input
-                      type="text"
-                      required
-                      value={editClientContactName}
-                      onChange={(e) => setEditClientContactName(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "E-Posta" : (lang === 'ar' ? "البريد الإلكتروني" : "Email")}</label>
-                      <input
-                        type="email"
-                        value={editClientEmail}
-                        onChange={(e) => setEditClientEmail(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Telefon" : (lang === 'ar' ? "الهاتف" : "Phone")}</label>
-                      <input
-                        type="text"
-                        value={editClientPhone}
-                        onChange={(e) => setEditClientPhone(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Adres" : (lang === 'ar' ? "العنوان" : "Address")}</label>
-                    <input
-                      type="text"
-                      value={editClientAddress}
-                      onChange={(e) => setEditClientAddress(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Notlar" : (lang === 'ar' ? "الملاحظات" : "Notes")}</label>
-                    <textarea
-                      value={editClientNotes}
-                      onChange={(e) => setEditClientNotes(e.target.value)}
-                      rows={2}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium opacity-90"
-                    />
-                  </div>
-
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
-                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={editClientIsEmployee}
-                        onChange={(e) => setEditClientIsEmployee(e.target.checked)}
-                        className="w-4 h-4 accent-orange-600 cursor-pointer"
-                      />
-                      <span className="font-bold text-slate-700 text-xs">
-                        {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
-                      </span>
-                    </label>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Kullanıcı Adı" : (lang === 'ar' ? "اسم المستخدم" : "Username")}
-                        </label>
-                        <input
-                          type="text"
-                          value={editClientUsername}
-                          onChange={(e) => setEditClientUsername(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Yeni Şifre" : (lang === 'ar' ? "كلمة مرور جديدة" : "New Password")}
-                          <span className="font-normal normal-case ml-1 text-slate-400">(leave blank to keep)</span>
-                        </label>
-                        <PasswordInput
-                          placeholder="Leave blank to keep current"
-                          value={editClientPassword}
-                          onChange={(e) => setEditClientPassword(e.target.value)}
-                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                          toggleClassName={passwordToggleClasses}
-                          showLabel={showPasswordLabel}
-                          hideLabel={hidePasswordLabel}
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Yeni Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور الجديدة" : "Confirm New Password")}
-                        </label>
-                        <PasswordInput
-                          placeholder="Leave blank to keep current"
-                          value={editClientConfirmPassword}
-                          onChange={(e) => setEditClientConfirmPassword(e.target.value)}
-                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                          toggleClassName={passwordToggleClasses}
-                          showLabel={showPasswordLabel}
-                          hideLabel={hidePasswordLabel}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-[10px] text-amber-700 font-semibold flex items-start gap-2">
-                    <Lock className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                    <span>{lang === 'ar' ? "اسم الشركة ثابت ولا يمكن تغييره — لإعادة ربط الحساب بشركة أخرى يجب حذفه وإنشاء حساب جديد." : lang === 'tr' ? "Şirket adı değiştirilemez — farklı bir şirkete bağlamak için hesabı silin ve yeniden oluşturun." : "Company name cannot be changed here — to re-scope to a different company, delete and recreate the account."}</span>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => setEditClientTarget(null)}
-                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg cursor-pointer border-0"
-                    >
-                      {lang === 'tr' ? "İptal" : (lang === 'ar' ? "إلغاء" : "Cancel")}
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isSubmittingEditClient}
-                      className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg shadow-sm disabled:opacity-50 cursor-pointer border-0 inline-flex items-center gap-1"
-                    >
-                      {isSubmittingEditClient ? (lang === 'tr' ? "Kaydediliyor..." : (lang === 'ar' ? "جاري الحفظ..." : "Saving...")) : (lang === 'tr' ? "Değişiklikleri Kaydet" : (lang === 'ar' ? "حفظ التعديلات" : "Save Changes"))}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-
-          {/* Add Client Modal */}
-          {isAddClientOpen && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[200] p-4 animate-fade-in">
-              <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                    <UserPlus className="text-orange-500 w-5 h-5" />
-                    <span>{lang === 'tr' ? "Yeni Müşteri Oluştur" : (lang === 'ar' ? "تسجيل عميل جديد" : "Create New Customer / Client")}</span>
-                  </h3>
-                  <button 
-                    onClick={() => setIsAddClientOpen(false)}
-                    className="p-1 px-2 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 border-0 cursor-pointer text-xs font-bold rounded-md"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <form onSubmit={handleAddClientSubmit} className="space-y-4 text-xs font-sans">
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Şirket Adı" : (lang === 'ar' ? "اسم الشركة" : "Company / Corporate Name")} *</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Al-Mansour Industries"
-                      value={newClientCompanyName}
-                      onChange={(e) => setNewClientCompanyName(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Yetkili Kişi" : (lang === 'ar' ? "اسم جهة الاتصال" : "Contact Representative Name")} *</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Ahmad Al-Mansour"
-                      value={newClientContactName}
-                      onChange={(e) => setNewClientContactName(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "E-Posta Adresi" : (lang === 'ar' ? "البريد الإلكتروني" : "Email Address")}</label>
-                      <input
-                        type="email"
-                        placeholder="e.g. contact@domain.com"
-                        value={newClientEmail}
-                        onChange={(e) => setNewClientEmail(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Telefon Numarası" : (lang === 'ar' ? "رقم الهاتف" : "Phone Number")}</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. +964 770 111 2233"
-                        value={newClientPhone}
-                        onChange={(e) => setNewClientPhone(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Ofis Adresi" : (lang === 'ar' ? "العنوان" : "Physical Office Address")}</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Karrada District, Baghdad"
-                      value={newClientAddress}
-                      onChange={(e) => setNewClientAddress(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Dahili Notlar" : (lang === 'ar' ? "ملاحظات إضافية" : "Internal Notes")}</label>
-                    <textarea
-                      placeholder="Special logistics preferences, VIP rating..."
-                      value={newClientNotes}
-                      onChange={(e) => setNewClientNotes(e.target.value)}
-                      rows={2}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium opacity-90"
-                    />
-                  </div>
-
-                  {/* Client Staff / Login Account Section */}
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
-                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={newClientIsEmployee}
-                        onChange={(e) => setNewClientIsEmployee(e.target.checked)}
-                        className="w-4 h-4 accent-orange-600 cursor-pointer"
-                      />
-                      <span className="font-bold text-slate-700 text-xs">
-                        {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
-                      </span>
-                    </label>
-
-                    {newClientIsEmployee && (
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Hangi Şirketin Altında?" : (lang === 'ar' ? "تحت أي شركة؟" : "Attach to existing company")} *
-                        </label>
-                        <select
-                          required={newClientIsEmployee}
-                          value={newClientCompanyName}
-                          onChange={(e) => setNewClientCompanyName(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 text-xs font-medium bg-white"
-                        >
-                          <option value="">{lang === 'tr' ? "Şirket seçin..." : (lang === 'ar' ? "اختر الشركة..." : "Select company...")}</option>
-                          {[...new Set(clients.filter(c => !c.isEmployee).map(c => c.companyName))].sort().map(name => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Kullanıcı Adı" : (lang === 'ar' ? "اسم المستخدم" : "Username")}
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. ahmed.ali"
-                          value={newClientUsername}
-                          onChange={(e) => setNewClientUsername(e.target.value)}
-                          className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Şifre" : (lang === 'ar' ? "كلمة المرور" : "Password")}
-                        </label>
-                        <PasswordInput
-                          placeholder="Set login password"
-                          value={newClientPassword}
-                          onChange={(e) => setNewClientPassword(e.target.value)}
-                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                          toggleClassName={passwordToggleClasses}
-                          showLabel={showPasswordLabel}
-                          hideLabel={hidePasswordLabel}
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                          {lang === 'tr' ? "Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور" : "Confirm Password")}
-                        </label>
-                        <PasswordInput
-                          placeholder="Confirm login password"
-                          value={newClientConfirmPassword}
-                          onChange={(e) => setNewClientConfirmPassword(e.target.value)}
-                          inputClassName="w-full p-2.5 pe-9 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
-                          toggleClassName={passwordToggleClasses}
-                          showLabel={showPasswordLabel}
-                          hideLabel={hidePasswordLabel}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => setIsAddClientOpen(false)}
-                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg cursor-pointer border-0"
-                    >
-                      {t('cancel')}
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isSubmittingClient}
-                      className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg shadow-sm disabled:opacity-50 cursor-pointer border-0 inline-flex items-center gap-1"
-                    >
-                      {isSubmittingClient ? (lang === 'tr' ? "Kaydediliyor..." : (lang === 'ar' ? "جاري الحفظ..." : "Saving Client...")) : (lang === 'tr' ? "Müşteriyi Kaydet" : (lang === 'ar' ? "حفظ ملف العميل" : "Save Client"))}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-        </div>
+        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+          <AdminClientsSection
+            lang={lang}
+            t={t}
+            canWriteClients={canWriteClients}
+            clients={clients}
+            shipments={shipments}
+            clientSearchQuery={clientSearchQuery}
+            setClientSearchQuery={setClientSearchQuery}
+            expandedClientOrdersCompanyName={expandedClientOrdersCompanyName}
+            setExpandedClientOrdersCompanyName={setExpandedClientOrdersCompanyName}
+            isAddClientOpen={isAddClientOpen}
+            setIsAddClientOpen={setIsAddClientOpen}
+            isSubmittingClient={isSubmittingClient}
+            handleAddClientSubmit={handleAddClientSubmit}
+            editClientTarget={editClientTarget}
+            setEditClientTarget={setEditClientTarget}
+            openEditClient={openEditClient}
+            isSubmittingEditClient={isSubmittingEditClient}
+            handleEditClientSubmit={handleEditClientSubmit}
+            newClientCompanyName={newClientCompanyName}
+            setNewClientCompanyName={setNewClientCompanyName}
+            newClientContactName={newClientContactName}
+            setNewClientContactName={setNewClientContactName}
+            newClientPhone={newClientPhone}
+            setNewClientPhone={setNewClientPhone}
+            newClientEmail={newClientEmail}
+            setNewClientEmail={setNewClientEmail}
+            newClientAddress={newClientAddress}
+            setNewClientAddress={setNewClientAddress}
+            newClientNotes={newClientNotes}
+            setNewClientNotes={setNewClientNotes}
+            newClientIsEmployee={newClientIsEmployee}
+            setNewClientIsEmployee={setNewClientIsEmployee}
+            newClientUsername={newClientUsername}
+            setNewClientUsername={setNewClientUsername}
+            newClientPassword={newClientPassword}
+            setNewClientPassword={setNewClientPassword}
+            newClientConfirmPassword={newClientConfirmPassword}
+            setNewClientConfirmPassword={setNewClientConfirmPassword}
+            editClientContactName={editClientContactName}
+            setEditClientContactName={setEditClientContactName}
+            editClientPhone={editClientPhone}
+            setEditClientPhone={setEditClientPhone}
+            editClientEmail={editClientEmail}
+            setEditClientEmail={setEditClientEmail}
+            editClientAddress={editClientAddress}
+            setEditClientAddress={setEditClientAddress}
+            editClientNotes={editClientNotes}
+            setEditClientNotes={setEditClientNotes}
+            editClientIsEmployee={editClientIsEmployee}
+            setEditClientIsEmployee={setEditClientIsEmployee}
+            editClientUsername={editClientUsername}
+            setEditClientUsername={setEditClientUsername}
+            editClientPassword={editClientPassword}
+            setEditClientPassword={setEditClientPassword}
+            editClientConfirmPassword={editClientConfirmPassword}
+            setEditClientConfirmPassword={setEditClientConfirmPassword}
+            passwordToggleClasses={passwordToggleClasses}
+            showPasswordLabel={showPasswordLabel}
+            hidePasswordLabel={hidePasswordLabel}
+            triggerToast={triggerToast}
+            getDirectLink={getDirectLink}
+            getWhatsAppLink={getWhatsAppLink}
+            handlePrepopulateGmail={handlePrepopulateGmail}
+            setActiveTab={setActiveTab}
+          />
+        </React.Suspense>
       )}
 
       {/* Vendors Tab */}
       {activeTab === 'vendors' && (
-        <div className="space-y-6 animate-fade-in font-sans">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900 leading-tight">
-                {lang === 'tr' ? "Tedarikçi ve Çözüm Ortakları" : (lang === 'ar' ? "قاعدة بيانات الموردين" : "Vendor & Partner Directory")}
-              </h2>
-              <p className="text-slate-500 text-xs mt-0.5 font-medium">
-                {lang === 'tr' ? "Gümrük acenteleri, limanlar, armatörler ve nakliye tedarikçilerinizi yönetin, maliyet ilişkilendirmelerini inceleyin." : (lang === 'ar' ? "إدارة مخلصي الجمارك، والموانئ، وخطوط الشحن، والموردين الخارجيين مع رصد لبيانات التكلفة." : "Manage customs clearance dispatchers, harbor terminals, shipping lines, and operational trade vendors.")}
-              </p>
-            </div>
-            {canWriteVendors && (
-              <button
-                onClick={() => setIsAddVendorOpen(true)}
-                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg shadow-sm hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border-0 w-full sm:w-auto"
-              >
-                <UserPlus className="w-4 h-4" />
-                <span>{lang === 'tr' ? "Yeni Tedarikçi Ekle" : (lang === 'ar' ? "إضافة مورد جديد" : "Add New Vendor")}</span>
-              </button>
-            )}
-          </div>
-
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            {/* Search and Filters Bar */}
-            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="relative w-full max-w-sm">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder={lang === 'tr' ? "Tedarikçi veya yetkili ara..." : (lang === 'ar' ? "البحث عن مورد أو شريك..." : "Search corporate vendors, custom brokers...")}
-                  value={vendorSearchQuery}
-                  onChange={(e) => setVendorSearchQuery(e.target.value)}
-                  className="pl-9 pr-4 py-2 w-full text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-semibold"
-                />
-              </div>
-              <div className="text-xs text-slate-500 font-semibold">
-                {vendors.filter(v => 
-                  v.companyName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                  v.contactName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                  v.serviceType.toLowerCase().includes(vendorSearchQuery.toLowerCase())
-                ).length} {lang === 'tr' ? "tedarikçi bulundu" : (lang === 'ar' ? "الموردين الذين تم العثور عليهم" : "vendors found")}
-              </div>
-            </div>
-
-            {/* Vendors Table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs md:text-sm">
-                <thead className="bg-slate-100 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
-                  <tr>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Tedarikçi Adı" : (lang === 'ar' ? "اسم المورد" : "Partner Name")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Hizmet Türü" : (lang === 'ar' ? "نوع الخدمة" : "Service Category")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Yetkili Kişi" : (lang === 'ar' ? "جهة الاتصال" : "Representative")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "İletişim" : (lang === 'ar' ? "الاتصال" : "Contact Details")}</th>
-                    <th className="px-5 py-3.5">{lang === 'tr' ? "Kayıtlı Gider" : (lang === 'ar' ? "المصاريف المرتبطة" : "Linked Expenses")}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {vendors.filter(v => 
-                    v.companyName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                    v.contactName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                    v.serviceType.toLowerCase().includes(vendorSearchQuery.toLowerCase())
-                  ).length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-12 text-center text-slate-400 text-xs">
-                        {lang === 'tr' ? "Kriterlere uygun kayıtlı tedarikçi bulunamadı." : (lang === 'ar' ? "لم يتم العثور على أي موردين مطابقين." : "No registered partners found matching filter.")}
-                      </td>
-                    </tr>
-                  ) : (
-                    vendors
-                      .filter(v => 
-                        v.companyName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                        v.contactName.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
-                        v.serviceType.toLowerCase().includes(vendorSearchQuery.toLowerCase())
-                      )
-                      .map((vendor) => {
-                        // Calculate Linked Expenses
-                        const linkedItemsCount = costStatements
-                          .flatMap(cs => cs.items || [])
-                          .filter(item => (item.supplierName || '').toLowerCase().trim() === vendor.companyName.toLowerCase().trim()).length;
-                        
-                        // Get beautiful service type colors
-                        const getServiceTypeColor = (type: string) => {
-                          const t = type.toLowerCase();
-                          if (t.includes('customs')) return 'bg-purple-50 text-purple-700 border-purple-100';
-                          if (t.includes('port')) return 'bg-cyan-50 text-cyan-700 border-cyan-100';
-                          if (t.includes('sea') || t.includes('ship')) return 'bg-blue-50 text-blue-700 border-blue-100';
-                          if (t.includes('transit') || t.includes('fuel')) return 'bg-amber-50 text-amber-700 border-amber-100';
-                          if (t.includes('truck') || t.includes('road') || t.includes('land')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
-                          return 'bg-slate-50 text-slate-600 border-slate-100';
-                        };
-
-                        return (
-                          <tr key={vendor.id} className="hover:bg-slate-50/50 transition-colors">
-                            <td className="px-5 py-4">
-                              <div className="font-extrabold text-slate-800 leading-snug">{vendor.companyName}</div>
-                              <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                                Registered: {new Date(vendor.createdAt).toLocaleDateString()}
-                              </div>
-                              {vendor.address && (
-                                <div className="text-[10px] text-slate-500 mt-1 max-w-xs truncate" title={vendor.address}>
-                                  📍 {vendor.address}
-                                </div>
-                              )}
-                              {vendor.notes && (
-                                <div className="text-[10px] text-slate-400 italic mt-0.5 max-w-xs truncate" title={vendor.notes}>
-                                  Note: {vendor.notes}
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-5 py-4">
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-black border uppercase tracking-wider ${getServiceTypeColor(vendor.serviceType)}`}>
-                                {vendor.serviceType}
-                              </span>
-                            </td>
-                            <td className="px-5 py-4 font-bold text-slate-700">
-                              {vendor.contactName}
-                            </td>
-                            <td className="px-5 py-4 space-y-0.5">
-                              {vendor.email && (
-                                <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                                  <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                  <span className="font-medium font-mono">{vendor.email}</span>
-                                </div>
-                              )}
-                              {vendor.phone && (
-                                <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                                  <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                  <span className="font-mono">{vendor.phone}</span>
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-5 py-4">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
-                                linkedItemsCount > 0 
-                                  ? "bg-orange-50 text-orange-600 border border-orange-100" 
-                                  : "bg-slate-50 text-slate-400 border border-slate-100"
-                              }`}>
-                                {linkedItemsCount} {lang === 'tr' ? "Maliyet Satırı" : (lang === 'ar' ? "بنود التكلفة" : "Cost Items")}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Add New Vendor slideover/Modal Overlay */}
-          {isAddVendorOpen && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in text-slate-900">
-              <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up">
-                <div className="bg-slate-900 text-white p-5 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-black text-sm tracking-tight uppercase text-orange-500">
-                      {lang === 'tr' ? "Yeni Tedarikçi Tanımla" : (lang === 'ar' ? "إضافة شريك توريد" : "Register Freight Supplier")}
-                    </h3>
-                    <h2 className="text-xl font-black">
-                      {lang === 'tr' ? "Sistem Tedarikçi Kartı" : (lang === 'ar' ? "بطاقة المورد الجديدة" : "Add New Logistics Supplier")}
-                    </h2>
-                  </div>
-                  <button 
-                    onClick={() => setIsAddVendorOpen(false)}
-                    className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer border-0"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-
-                <form onSubmit={handleAddVendorSubmit} className="p-6 space-y-4 text-xs font-sans">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-1.5 md:col-span-2 text-slate-900">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Şirket / Kuruluş Adı" : (lang === 'ar' ? "اسم الشركة" : "Company / Firm Name")} *</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. Erbil Transit Customs Brokerage"
-                        value={newVendorCompanyName}
-                        onChange={(e) => setNewVendorCompanyName(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-bold bg-white text-slate-900"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5 text-slate-900">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Yetkili Temsilci" : (lang === 'ar' ? "الشخص المسؤول" : "Contact Representative")} *</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. Saman Ahmed"
-                        value={newVendorContactName}
-                        onChange={(e) => setNewVendorContactName(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium bg-white text-slate-900"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5 text-slate-900 overflow-hidden">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Hizmet Kategorisi" : (lang === 'ar' ? "تصنيف الخدمة" : "Service Category")} *</label>
-                      <select
-                        value={newVendorServiceType}
-                        onChange={(e) => setNewVendorServiceType(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 bg-white font-bold text-slate-900"
-                      >
-                        <option value="Customs Clearance">{lang === 'tr' ? "Gümrük Müşavirliği" : "Customs Clearance"}</option>
-                        <option value="Port Services">{lang === 'tr' ? "Liman Hizmetleri" : "Port Services"}</option>
-                        <option value="Shipping Line">{lang === 'tr' ? "Denizyolu Acentesi" : "Shipping Line"}</option>
-                        <option value="Transit & Fuel">{lang === 'tr' ? "Transit Geçiş & Yakıt" : "Transit & Fuel"}</option>
-                        <option value="Inland Trucking">{lang === 'tr' ? "Çekici & Dorse Nakliye" : "Inland Trucking"}</option>
-                        <option value="Other Service">{lang === 'tr' ? "Diğer Hizmet Sağlayıcı" : "Other Service"}</option>
-                      </select>
-                    </div>
-
-                    <div className="space-y-1.5 text-slate-900">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "E-posta Adresi" : (lang === 'ar' ? "البريد الإلكتروني" : "Email Address")}</label>
-                      <input
-                        type="email"
-                        placeholder="e.g. ops@erbilcustoms.iq"
-                        value={newVendorEmail}
-                        onChange={(e) => setNewVendorEmail(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono bg-white text-slate-900"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5 text-slate-900">
-                      <label className="block font-bold text-slate-700">{lang === 'tr' ? "Telefon Numarası" : (lang === 'ar' ? "رقم الهاتف" : "Phone Number")} *</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. +964 750 111 2233"
-                        value={newVendorPhone}
-                        onChange={(e) => setNewVendorPhone(e.target.value)}
-                        className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium font-mono bg-white text-slate-900"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5 text-slate-900">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Hizmet / Ofis Adresi" : (lang === 'ar' ? "العنوان بالتفصيل" : "Operational Office Address")}</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Ibrahim Khalil Border Gate Office #4, Zakho"
-                      value={newVendorAddress}
-                      onChange={(e) => setNewVendorAddress(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium bg-white text-slate-900"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5 text-slate-900">
-                    <label className="block font-bold text-slate-700">{lang === 'tr' ? "Ek Notlar / Anlaşma Detayları" : (lang === 'ar' ? "ملاحظات وشروط" : "Internal Notes & Credit Terms")}</label>
-                    <textarea
-                      placeholder="e.g. 30 days payment credit term. Net cash only for borders."
-                      value={newVendorNotes}
-                      onChange={(e) => setNewVendorNotes(e.target.value)}
-                      rows={2}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-medium opacity-90 bg-white text-slate-900"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 text-slate-900">
-                    <button
-                      type="button"
-                      onClick={() => setIsAddVendorOpen(false)}
-                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg cursor-pointer border-0"
-                    >
-                      {t('cancel')}
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isSubmittingVendor}
-                      className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg shadow-sm disabled:opacity-50 cursor-pointer border-0 inline-flex items-center gap-1"
-                    >
-                      {isSubmittingVendor ? (lang === 'tr' ? "Kaydediliyor..." : "Saving Vendor...") : (lang === 'tr' ? "Çözüm Ortağını Kaydet" : "Save Vendor")}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-        </div>
+        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+          <AdminVendorsSection
+            lang={lang}
+            t={t}
+            canWriteVendors={canWriteVendors}
+            vendors={vendors}
+            costStatements={costStatements}
+            vendorSearchQuery={vendorSearchQuery}
+            setVendorSearchQuery={setVendorSearchQuery}
+            isAddVendorOpen={isAddVendorOpen}
+            setIsAddVendorOpen={setIsAddVendorOpen}
+            isSubmittingVendor={isSubmittingVendor}
+            handleAddVendorSubmit={handleAddVendorSubmit}
+            newVendorCompanyName={newVendorCompanyName}
+            setNewVendorCompanyName={setNewVendorCompanyName}
+            newVendorContactName={newVendorContactName}
+            setNewVendorContactName={setNewVendorContactName}
+            newVendorServiceType={newVendorServiceType}
+            setNewVendorServiceType={setNewVendorServiceType}
+            newVendorEmail={newVendorEmail}
+            setNewVendorEmail={setNewVendorEmail}
+            newVendorPhone={newVendorPhone}
+            setNewVendorPhone={setNewVendorPhone}
+            newVendorAddress={newVendorAddress}
+            setNewVendorAddress={setNewVendorAddress}
+            newVendorNotes={newVendorNotes}
+            setNewVendorNotes={setNewVendorNotes}
+          />
+        </React.Suspense>
       )}
 
       {/* 5. Audit Log Tracker */}
@@ -5941,41 +5178,9 @@ MARAS Group etir Center`;
           activeTab were ever set to 'audit' by anything other than the
           hidden sidebar entry, it rendered regardless of adminType. */}
       {activeTab === 'audit' && resolvedAdminType === 'super' && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="p-5 border-b border-slate-100 flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-orange-500" />
-                {t('auditLogsTitle')}
-              </h2>
-              <p className="text-slate-500 text-xs">Immutable security operations logs of ship authorizations and file modifications</p>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs md:text-sm">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-100 text-slate-500 font-semibold">
-                  <th className="p-4">{t('actor')}</th>
-                  <th className="p-4">Shipment #</th>
-                  <th className="p-4">{t('action')}</th>
-                  <th className="p-4 text-right">{t('time')}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-mono text-xs">
-                {activityLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-50/50">
-                    <td className="p-4 font-bold text-slate-800">{log.actor}</td>
-                    <td className="p-4 text-orange-600 font-bold">#{log.shipmentNumber}</td>
-                    <td className="p-4 text-slate-700">
-                      {lang === 'en' ? log.actionEn : (lang === 'tr' ? log.actionTr : log.actionAr)}
-                    </td>
-                    <td className="p-4 text-right text-slate-400">{new Date(log.timestamp).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+          <AdminAuditSection lang={lang} t={t} activityLogs={activityLogs} />
+        </React.Suspense>
       )}
 
       {/* Operation Team Section.
@@ -5985,213 +5190,31 @@ MARAS Group etir Center`;
           activeTab were somehow set to 'team' by something other than that
           sidebar entry. */}
       {activeTab === 'team' && resolvedAdminType === 'super' && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2">
-                  <UserPlus className="w-5 h-5 text-indigo-600" />
-                  {lang === 'tr' ? 'Operasyon ve Hesap Yönetim Ekibi' : (lang === 'ar' ? 'فريق العمليات والحسابات' : 'Operations & Account Team')}
-                </h2>
-                <p className="text-slate-500 text-xs">
-                  {lang === 'tr' 
-                    ? 'Yönetim paneline sınırlı erişim sağlayacak operasyon veya hesap liderleri yetkilendirin' 
-                    : (lang === 'ar' 
-                      ? 'قم بإضافة مسؤولي عمليات أو حسابات بصلاحيات محدودة للعمل على لوحة التحكم' 
-                      : 'Provision other operation and accounts administrators with limited visual panel boundaries')
-                  }
-                </p>
-              </div>
-              <button 
-                onClick={() => {
-                  setAdminFormError(null);
-                  setIsAddAdminOpen(true);
-                }}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>{lang === 'tr' ? 'Ekip Üyesi Ekle' : (lang === 'ar' ? 'إضافة عضو فريق' : 'Add Team Member')}</span>
-              </button>
-            </div>
-
-            <div className="p-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* Master Owner administrator Card */}
-                <div className="bg-slate-950 rounded-xl border border-slate-800 p-5 relative overflow-hidden text-white shadow-md">
-                  <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl pointer-events-none"></div>
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="inline-flex items-center gap-1 text-[9px] font-bold text-orange-500 bg-orange-500/10 uppercase tracking-widest px-2 py-0.5 rounded-full mb-3">
-                        Owner / Super Admin
-                      </span>
-                      <h3 className="text-sm font-bold truncate">Sardar (MARAS Office)</h3>
-                      <p className="text-slate-400 text-xs font-mono select-all truncate mt-1">sardar@maras.iq</p>
-                    </div>
-                    <div className="p-2 bg-slate-900 rounded-lg border border-slate-800 text-orange-500">
-                      <ShieldCheck className="w-4 h-4" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Database fetched admins list */}
-                {adminsList.map((adm: any) => {
-                  const isAccountAdmin = adm.adminType === 'accounts' || adm.adminType === 'account';
-                  return (
-                    <div key={adm.id} className="bg-white rounded-xl border border-slate-200 p-5 relative overflow-hidden hover:shadow-md transition">
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mb-3 ${
-                            isAccountAdmin 
-                              ? 'text-teal-600 bg-teal-50' 
-                              : 'text-indigo-600 bg-indigo-50'
-                          }`}>
-                            {isAccountAdmin 
-                              ? (lang === 'tr' ? 'Muhasebe Ekibi' : 'Accounts Admin') 
-                              : (lang === 'tr' ? 'Operasyon Ekibi' : 'Operations Admin')
-                            }
-                          </span>
-                          <h3 className="text-sm font-bold text-slate-900 truncate">{adm.name}</h3>
-                          <p className="text-slate-500 text-xs font-mono select-all truncate mt-1">{adm.email}</p>
-                        </div>
-                        <button
-                          onClick={() => handleDeleteAdmin(adm.id)}
-                          className="p-1.5 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-400 rounded-md transition cursor-pointer border-0"
-                          title="Revoke Access"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-
-                      <div className="border-t border-slate-100 mt-4 pt-3 space-y-1 text-[11px] text-slate-500">
-                        {adm.createdAt && (
-                          <div className="flex items-center justify-between text-[10px] text-slate-400">
-                            <span>{lang === 'tr' ? 'Yetkilendirildi' : 'Authorized'}</span>
-                            <span>{new Date(adm.createdAt).toLocaleDateString()}</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {adminsList.length === 0 && (
-                  <div className="col-span-full border border-dashed border-slate-200 rounded-xl p-8 text-center bg-slate-50/50">
-                    <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="text-slate-500 text-xs">
-                      {lang === 'tr' ? 'Ek operasyonel ekip bulunmuyor.' : 'No additional operational or finance accounts provisioned yet.'}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* New Admin Creation Dialog Backdrop */}
-          {isAddAdminOpen && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
-              <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
-                <div className="p-6 bg-slate-950 text-white relative">
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-full blur-xl pointer-events-none"></div>
-                  <h3 className="text-base font-black flex items-center gap-2">
-                    <UserPlus className="w-5 h-5 text-indigo-400" />
-                    <span>{lang === 'tr' ? 'Yeni Ekip Üyesi Yetkilendir' : (lang === 'ar' ? 'تفويض عضو فريق جديد' : 'Authorize New Team Member')}</span>
-                  </h3>
-                  <p className="text-slate-400 text-[11px] mt-1">
-                    {lang === 'tr' ? 'Ekip üyesinin mail adresini ve şifresini belirleyin.' : 'Specify name, restricted login credentials, and permission boundaries.'}
-                  </p>
-                </div>
-
-                <form onSubmit={handleCreateAdmin} className="p-6 space-y-4">
-                  {adminFormError && (
-                    <div className="p-3 bg-red-50 text-red-600 rounded-lg text-xs font-semibold select-all">
-                      {adminFormError}
-                    </div>
-                  )}
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">{lang === 'tr' ? 'Tam Adı' : 'Full Name'}</label>
-                    <input 
-                      type="text" 
-                      required
-                      value={newAdminName}
-                      onChange={(e) => setNewAdminName(e.target.value)}
-                      placeholder="e.g. John Doe"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">Email Address</label>
-                    <input 
-                      type="email" 
-                      required
-                      value={newAdminEmail}
-                      onChange={(e) => setNewAdminEmail(e.target.value)}
-                      placeholder="john@maras.iq"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">Password Key</label>
-                    <PasswordInput
-                      required
-                      value={newAdminPassword}
-                      onChange={(e) => setNewAdminPassword(e.target.value)}
-                      placeholder="Strong unique key"
-                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                      toggleClassName={passwordToggleClasses}
-                      showLabel={showPasswordLabel}
-                      hideLabel={hidePasswordLabel}
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">Confirm Password Key</label>
-                    <PasswordInput
-                      required
-                      value={newAdminConfirmPassword}
-                      onChange={(e) => setNewAdminConfirmPassword(e.target.value)}
-                      placeholder="Repeat the key above"
-                      inputClassName="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 pe-9 text-slate-900 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                      toggleClassName={passwordToggleClasses}
-                      showLabel={showPasswordLabel}
-                      hideLabel={hidePasswordLabel}
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">Permission Boundary / Role</label>
-                    <select
-                      value={newAdminType}
-                      onChange={(e) => setNewAdminType(e.target.value as any)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-xs font-semibold focus:ring-1 focus:ring-indigo-500 outline-none"
-                    >
-                      <option value="operation">Operations Administrator (No Accounts / Finance Statements access)</option>
-                      <option value="accounts">Accounts Accountant (No Shipments GPS trackers / Drivers chats access)</option>
-                    </select>
-                  </div>
-
-                  <div className="pt-2 flex items-center justify-end gap-2.5">
-                    <button 
-                      type="button"
-                      onClick={() => setIsAddAdminOpen(false)}
-                      className="px-4 py-2 text-slate-500 hover:text-slate-800 text-xs font-extrabold cursor-pointer hover:bg-slate-50 rounded-lg transition border-0 bg-transparent"
-                    >
-                      {lang === 'tr' ? 'Vazgeç' : (lang === 'ar' ? 'إلغاء' : 'Cancel')}
-                    </button>
-                    <button 
-                      type="submit"
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold rounded-lg shadow-sm transition border-0 cursor-pointer"
-                    >
-                      {lang === 'tr' ? 'Yetkilendir' : (lang === 'ar' ? 'تفعيل الحساب' : 'Authorize Member')}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-        </div>
+        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+          <AdminTeamSection
+            lang={lang}
+            adminsList={adminsList}
+            isAddAdminOpen={isAddAdminOpen}
+            setIsAddAdminOpen={setIsAddAdminOpen}
+            adminFormError={adminFormError}
+            setAdminFormError={setAdminFormError}
+            newAdminName={newAdminName}
+            setNewAdminName={setNewAdminName}
+            newAdminEmail={newAdminEmail}
+            setNewAdminEmail={setNewAdminEmail}
+            newAdminPassword={newAdminPassword}
+            setNewAdminPassword={setNewAdminPassword}
+            newAdminConfirmPassword={newAdminConfirmPassword}
+            setNewAdminConfirmPassword={setNewAdminConfirmPassword}
+            newAdminType={newAdminType}
+            setNewAdminType={setNewAdminType}
+            handleCreateAdmin={handleCreateAdmin}
+            handleDeleteAdmin={handleDeleteAdmin}
+            passwordToggleClasses={passwordToggleClasses}
+            showPasswordLabel={showPasswordLabel}
+            hidePasswordLabel={hidePasswordLabel}
+          />
+        </React.Suspense>
       )}
 
       {/* My Account tab — visible to every admin type (unlike 'team' above,
@@ -6400,206 +5423,15 @@ MARAS Group etir Center`;
           hides those tabs from the sidebar for other admin types, so
           Settings does not grant any admin type new access. */}
       {activeTab === 'settings' && (
-        <div className="space-y-6 max-w-6xl">
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-            <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2 mb-1">
-              <Settings className="w-5 h-5 text-indigo-600" />
-              {lang === 'tr' ? 'Ayarlar' : (lang === 'ar' ? 'الإعدادات' : 'Settings')}
-            </h2>
-            <p className="text-slate-500 text-xs">
-              {lang === 'tr'
-                ? 'Hesap, bildirim ve sistem tercihleriniz için tek merkez.'
-                : (lang === 'ar'
-                  ? 'المركز الموحّد لإعدادات حسابك والإشعارات والنظام.'
-                  : 'The central place for your account, notification, and system preferences.')}
-            </p>
-          </div>
-
-          {/* My Profile + Notification Preferences — visible to all admin
-              types, kept prominent as a two-up row on wider screens. */}
-          <div className="grid lg:grid-cols-2 gap-6 items-start">
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 h-full">
-              <h3 className="text-sm font-bold text-slate-900 mb-2">
-                {lang === 'tr' ? 'Profilim' : (lang === 'ar' ? 'ملفي الشخصي' : 'My Profile')}
-              </h3>
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div>
-                  <p className="text-slate-700 text-xs font-semibold">{adminEmail}</p>
-                  <span className={`inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mt-1 ${
-                    adminType === 'super' ? 'text-orange-600 bg-orange-50' : adminType === 'accounts' ? 'text-teal-600 bg-teal-50' : 'text-indigo-600 bg-indigo-50'
-                  }`}>
-                    {adminType === 'super'
-                      ? (lang === 'tr' ? 'Süper Yönetici' : (lang === 'ar' ? 'مسؤول أعلى' : 'Super Admin'))
-                      : adminType === 'accounts'
-                        ? (lang === 'tr' ? 'Muhasebe Ekibi' : (lang === 'ar' ? 'فريق الحسابات' : 'Accounts Admin'))
-                        : (lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operations Admin'))}
-                  </span>
-                  <p className="text-slate-400 text-[10px] mt-1.5">
-                    {lang === 'tr'
-                      ? 'Dil tercihi üst menüdeki dil seçiciden değiştirilebilir.'
-                      : (lang === 'ar'
-                        ? 'يمكن تغيير تفضيل اللغة من محدد اللغة في الأعلى.'
-                        : 'Language preference can be changed from the language selector in the top header.')}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveTab('my_account')}
-                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0 shrink-0"
-                >
-                  {lang === 'tr' ? 'Şifre ve Hesabı Yönet' : (lang === 'ar' ? 'إدارة كلمة المرور والحساب' : 'Manage Password & Account')}
-                </button>
-              </div>
-            </div>
-
-            {/* Notification Preferences — visible to all admin types.
-                Foundation UI only: no preference is actually wired to a
-                backend yet, and security/system alerts cannot be disabled. */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 h-full">
-              <h3 className="text-sm font-bold text-slate-900 mb-1">
-                {lang === 'tr' ? 'Bildirim Tercihleri' : (lang === 'ar' ? 'تفضيلات الإشعارات' : 'Notification Preferences')}
-              </h3>
-              <p className="text-slate-500 text-xs mb-3">
-                {lang === 'tr'
-                  ? 'Bu kategoriler yakında ayarlanabilir hale gelecek. Kritik güvenlik/sistem uyarıları her zaman açık kalır ve kapatılamaz.'
-                  : (lang === 'ar'
-                    ? 'ستصبح هذه الفئات قابلة للتعديل قريباً. تبقى تنبيهات الأمان/النظام الحرجة مفعّلة دائماً ولا يمكن إيقافها.'
-                    : 'These categories can be adjusted here soon. Critical security/system alerts always stay on and cannot be turned off.')}
-              </p>
-              <div className="space-y-1.5">
-                {[
-                  { key: 'shipment', label: lang === 'tr' ? 'Sevkiyat Güncellemeleri' : (lang === 'ar' ? 'تحديثات الشحنات' : 'Shipment updates') },
-                  { key: 'customer', label: lang === 'tr' ? 'Müşteri Mesajları' : (lang === 'ar' ? 'رسائل العملاء' : 'Customer messages') },
-                  { key: 'driver', label: lang === 'tr' ? 'Sürücü Mesajları' : (lang === 'ar' ? 'رسائل السائقين' : 'Driver messages') },
-                  { key: 'documents', label: lang === 'tr' ? 'Belge Yüklemeleri' : (lang === 'ar' ? 'رفع المستندات' : 'Document uploads') },
-                  { key: 'cmr_pod', label: lang === 'tr' ? 'CMR/POD' : (lang === 'ar' ? 'CMR/POD' : 'CMR / POD') },
-                  { key: 'delays', label: lang === 'tr' ? 'Gecikmeler/Sınır Bekleme' : (lang === 'ar' ? 'التأخيرات/انتظار الحدود' : 'Delays / border waiting') },
-                  { key: 'accounting', label: lang === 'tr' ? 'Muhasebe Uyarıları' : (lang === 'ar' ? 'تنبيهات المحاسبة' : 'Accounting alerts') },
-                ].map((row) => (
-                  <div key={row.key} className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 border border-slate-100">
-                    <span className="text-xs font-semibold text-slate-600">{row.label}</span>
-                    <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
-                      {lang === 'tr' ? 'Yakında' : (lang === 'ar' ? 'قريباً' : 'Coming soon')}
-                    </span>
-                  </div>
-                ))}
-                <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-amber-50 border border-amber-100">
-                  <span className="text-xs font-bold text-amber-700">
-                    {lang === 'tr' ? 'Güvenlik/Sistem Uyarıları' : (lang === 'ar' ? 'تنبيهات الأمان/النظام' : 'Security / system alerts')}
-                  </span>
-                  <span className="text-[9px] font-bold uppercase tracking-widest text-amber-700 bg-white border border-amber-200 px-2 py-0.5 rounded-full">
-                    {lang === 'tr' ? 'Her Zaman Açık' : (lang === 'ar' ? 'مفعّل دائماً' : 'Always on')}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Staff & Permissions / Google Workspace / Security & Activity —
-              super admin only (same gates as the existing 'team' / 'gmail'
-              / 'audit' tabs), laid out as a responsive card grid since
-              each is just a link, not a full form. */}
-          {resolvedAdminType === 'super' && (
-            <div className="grid md:grid-cols-3 gap-6">
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 mb-1">
-                    {lang === 'tr' ? 'Personel ve Yetkiler' : (lang === 'ar' ? 'الموظفون والصلاحيات' : 'Staff & Permissions')}
-                  </h3>
-                  <p className="text-slate-500 text-xs">
-                    {lang === 'tr' ? 'Yönetici ekip üyelerini ve rollerini yönetin.' : (lang === 'ar' ? 'إدارة أعضاء فريق الإدارة وأدوارهم.' : 'Manage admin team members and their roles.')}
-                  </p>
-                </div>
-                <button onClick={() => setActiveTab('team')} className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0 flex items-center justify-center gap-1.5">
-                  <UserPlus className="w-3.5 h-3.5" />
-                  {lang === 'tr' ? 'Ekibi Yönet' : (lang === 'ar' ? 'إدارة الفريق' : 'Open Staff & Permissions')}
-                </button>
-              </div>
-
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 mb-1">
-                    {lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace')}
-                  </h3>
-                  <p className="text-slate-500 text-xs">
-                    {lang === 'tr' ? 'Gmail, Drive ve Takvim entegrasyonlarını görüntüleyin.' : (lang === 'ar' ? 'عرض تكاملات Gmail وDrive والتقويم.' : 'View Gmail, Drive, and Calendar integrations.')}
-                  </p>
-                </div>
-                <button onClick={() => setActiveTab('gmail')} className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0 flex items-center justify-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5" />
-                  {lang === 'tr' ? "Google Workspace'i Aç" : (lang === 'ar' ? 'فتح جوجل وورك سبيس' : 'Open Google Workspace')}
-                </button>
-              </div>
-
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 mb-1">
-                    {lang === 'tr' ? 'Güvenlik ve Etkinlik' : (lang === 'ar' ? 'الأمان والنشاط' : 'Security & Activity')}
-                  </h3>
-                  <p className="text-slate-500 text-xs">
-                    {lang === 'tr' ? 'Denetim günlüklerini ve sistem etkinliğini görüntüleyin.' : (lang === 'ar' ? 'عرض سجلات التدقيق ونشاط النظام.' : 'View audit logs and system activity.')}
-                  </p>
-                </div>
-                <button onClick={() => setActiveTab('audit')} className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0 flex items-center justify-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  {lang === 'tr' ? 'Denetim Günlüklerini Aç' : (lang === 'ar' ? 'فتح سجلات التدقيق' : 'Open Audit Logs')}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Company / System Settings — super admin only, read-only
-              placeholders for now (per PR #56 scope: no backend changes).
-              Kept full width with a wider field grid since it holds more
-              fields than the link-only cards above. */}
-          {resolvedAdminType === 'super' && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-              <h3 className="text-sm font-bold text-slate-900 mb-1">
-                {lang === 'tr' ? 'Şirket / Sistem Ayarları' : (lang === 'ar' ? 'إعدادات الشركة / النظام' : 'Company / System Settings')}
-              </h3>
-              <p className="text-slate-500 text-xs mb-3">
-                {lang === 'tr' ? 'Bu alanlar yakında düzenlenebilir olacak.' : (lang === 'ar' ? 'ستصبح هذه الحقول قابلة للتعديل قريباً.' : 'These fields will become editable soon.')}
-              </p>
-              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                {[
-                  { label: lang === 'tr' ? 'Şirket Adı' : (lang === 'ar' ? 'اسم الشركة' : 'Company name'), value: 'MARAS Group' },
-                  { label: lang === 'tr' ? 'Destek E-postası' : (lang === 'ar' ? 'بريد الدعم' : 'Support email'), value: 'support@etir.app' },
-                  { label: lang === 'tr' ? 'Varsayılan Para Birimi' : (lang === 'ar' ? 'العملة الافتراضية' : 'Default currency'), value: lang === 'tr' ? 'Sevkiyat bazında ayarlanır' : (lang === 'ar' ? 'يُحدد حسب الشحنة' : 'Set per shipment') },
-                  { label: lang === 'tr' ? 'Diller' : (lang === 'ar' ? 'اللغات' : 'Languages'), value: 'EN / TR / AR' },
-                  { label: lang === 'tr' ? 'Genel Takip Varsayılanları' : (lang === 'ar' ? 'إعدادات التتبع العام' : 'Public tracking defaults'), value: lang === 'tr' ? 'Planlandı' : (lang === 'ar' ? 'مخطط له' : 'Planned') },
-                  { label: lang === 'tr' ? 'Sipariş Numarası Formatı' : (lang === 'ar' ? 'تنسيق رقم الطلب' : 'Order number format'), value: 'MAR-YYYY-####' },
-                  { label: lang === 'tr' ? 'Belge Paylaşım Varsayılanları' : (lang === 'ar' ? 'إعدادات مشاركة المستندات' : 'Document sharing defaults'), value: lang === 'tr' ? 'Belge bazında ayarlanır' : (lang === 'ar' ? 'يُحدد حسب المستند' : 'Set per document') },
-                ].map((row) => (
-                  <div key={row.label} className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
-                    <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{row.label}</p>
-                    <p className="text-xs font-semibold text-slate-600 mt-0.5">{row.value}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* About eTIR — visible to all admin types. Plain card, not the
-              heavy dark treatment used for the Gmail/dashboard hero
-              banners, since this is just static reference info. */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-            <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
-              <Ship className="w-4 h-4 text-orange-600" />
-              {lang === 'tr' ? 'eTIR Hakkında' : (lang === 'ar' ? 'عن eTIR' : 'About eTIR')}
-            </h3>
-            <div className="text-xs text-slate-500 space-y-1">
-              <p>eTIR by MARAS Group</p>
-              <p>etir.app</p>
-              <p>support@etir.app</p>
-              <p>
-                {lang === 'tr' ? 'Ortam' : (lang === 'ar' ? 'البيئة' : 'Environment')}:{' '}
-                {(import.meta as any).env?.DEV
-                  ? (lang === 'tr' ? 'Geliştirme' : (lang === 'ar' ? 'تطوير' : 'Development'))
-                  : (lang === 'tr' ? 'Üretim' : (lang === 'ar' ? 'إنتاج' : 'Production'))}
-              </p>
-              <p>{lang === 'tr' ? 'Sürüm' : (lang === 'ar' ? 'الإصدار' : 'Version')}: —</p>
-            </div>
-          </div>
-        </div>
+        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+          <AdminSettingsSection
+            lang={lang}
+            adminEmail={adminEmail}
+            adminType={adminType}
+            resolvedAdminType={resolvedAdminType}
+            onNavigateTab={setActiveTab}
+          />
+        </React.Suspense>
       )}
 
       {/* 6. Gmail Workspace Active Tab Card.
