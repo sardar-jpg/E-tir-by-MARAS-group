@@ -3843,7 +3843,6 @@ MARAS Group etir Center`;
                   <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
                   {lang === 'tr' ? "Sistem Aktif" : (lang === 'ar' ? "النظام نشط" : "Gateway Active")}
                 </span>
-                <span className="text-slate-400 font-mono text-xs">v2.4.1 SECURE</span>
               </div>
               <h2 className="text-2xl font-black tracking-tight text-white mb-1">
                 {lang === 'tr' ? "Lojistik Kontrol Merkezi" : (lang === 'ar' ? "مركز المراقبة والتحكم" : "Logistics Command Hub")}
@@ -3856,7 +3855,16 @@ MARAS Group etir Center`;
                 <span className="text-slate-600">•</span>
                 <span className="flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span>{gmailUser?.email || "sardar@maras.iq"} ({lang === 'tr' ? 'Seçkin Yönetici' : lang === 'ar' ? 'إداري أول' : 'Senior Administrator'})</span>
+                  <span>
+                    {adminEmail || gmailUser?.email || (lang === 'tr' ? 'MARAS Yöneticisi' : lang === 'ar' ? 'مسؤول MARAS' : 'MARAS Admin')}
+                    {' '}(
+                    {adminType === 'super'
+                      ? (lang === 'tr' ? 'Süper Yönetici' : (lang === 'ar' ? 'مسؤول أعلى' : 'Super Admin'))
+                      : adminType === 'accounts'
+                        ? (lang === 'tr' ? 'Muhasebe Ekibi' : (lang === 'ar' ? 'فريق الحسابات' : 'Accounts Admin'))
+                        : (lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operations Admin'))}
+                    )
+                  </span>
                 </span>
               </div>
             </div>
