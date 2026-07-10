@@ -51,6 +51,17 @@ const AMBIGUOUS_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set(["i
  * driver-safe types) is withheld — a driver has no relation to customer
  * invoices/accounting/cost documents, and 'other' is an unclassified
  * catch-all that could contain any of those.
+ *
+ * 'cmr' being driver-visible here is read-only view/download of a document
+ * Admin already published — it is not permission to create one. Driver App
+ * simplification / CMR Read-Only Review removed the driver-facing upload UI
+ * that used to let a driver pick 'cmr' as the category of a file *they*
+ * were sending (DriverApplication.tsx, FileUploadModal.tsx); this function
+ * and its category set were already correct and needed no change. The
+ * upload-direction rule itself is enforced by
+ * canDriverUploadDocumentCategory below, which server.ts's chat and
+ * document-center upload routes now check against the caller's *session*
+ * role — removing the UI option alone doesn't stop a direct API call.
  */
 const DRIVER_VISIBLE_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set([
   "cmr",
@@ -61,6 +72,24 @@ const DRIVER_VISIBLE_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Se
 
 export function isDocumentVisibleToDriver(doc: Pick<ShipmentDocument, "category">): boolean {
   return DRIVER_VISIBLE_DOCUMENT_CATEGORIES.has(doc.category);
+}
+
+/**
+ * Upload-direction counterpart to isDocumentVisibleToDriver (read
+ * direction) — whether a driver session may set this category on a
+ * document/chat attachment *they* are sending. CMR is the one category a
+ * driver must never originate: it is created, signed, stamped, approved,
+ * and published only by MARAS/Admin (docs/FOLLOW_UP_ROADMAP.md, "Driver
+ * app simplification"). Every other category a driver already sends
+ * operational uploads under (photo, delivery_proof, customs, packing_list,
+ * invoice, other) stays allowed here — this only blocks 'cmr'.
+ *
+ * `category` is typed loosely (not DocumentCategory) because it comes
+ * straight off an unvalidated request body — an absent/unrecognized value
+ * must not be treated as "cmr" and rejected.
+ */
+export function canDriverUploadDocumentCategory(category: unknown): boolean {
+  return category !== "cmr";
 }
 
 /**

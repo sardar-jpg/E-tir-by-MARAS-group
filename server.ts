@@ -50,7 +50,7 @@ import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
-import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally } from "./src/lib/documentAccess";
+import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
@@ -1202,7 +1202,44 @@ const initialShipments: Shipment[] = [
     currency: "TRY",
     internalNotes: "Needs temperature tracking, even though products are shelf-stable, keep ventilated.",
     status: "Accepted",
-    documents: [],
+    // Driver App Simplification / CMR Read-Only Review (PR #71): this is the
+    // local/dev manual-review fixture for the demo_driver account (see
+    // docs/FOLLOW_UP_ROADMAP.md, "Driver review demo scenario") — one
+    // admin-sent CMR (view/download only, isDocumentVisibleToDriver allows
+    // 'cmr'), one admin-sent non-CMR operational document, and one
+    // admin-sent invoice that must NOT be visible to the driver
+    // (isDocumentVisibleToDriver blocks 'invoice' — this is the
+    // "internal/accounting/customer document" a reviewer should confirm
+    // stays hidden).
+    documents: [
+      {
+        id: "doc-1003-cmr",
+        name: "CMR_MAR-2026-1003.pdf",
+        url: "#",
+        category: "cmr",
+        uploadedBy: "Admin",
+        uploadedAt: "2026-05-31T15:00:00Z",
+        isSharedExternally: true
+      },
+      {
+        id: "doc-1003-packing",
+        name: "PackingList_MAR-2026-1003.pdf",
+        url: "#",
+        category: "packing_list",
+        uploadedBy: "Admin",
+        uploadedAt: "2026-05-31T15:05:00Z",
+        isSharedExternally: false
+      },
+      {
+        id: "doc-1003-invoice",
+        name: "Invoice_DemoClientCo-1003.pdf",
+        url: "#",
+        category: "invoice",
+        uploadedBy: "Admin",
+        uploadedAt: "2026-05-31T15:10:00Z",
+        isSharedExternally: false
+      }
+    ],
     timeline: [
       {
         timestamp: "2026-05-31T09:00:00Z",
@@ -1289,6 +1326,45 @@ const initialChatMessages: ChatMessage[] = [
     type: "text",
     text: "Yes, I have the original sealed packing list in my cabin. I am handing it over to the clearance officer now.",
     timestamp: "2026-05-31T10:22:00Z"
+  },
+  // Driver App Simplification / CMR Read-Only Review (PR #71): shipment-1003
+  // is the local/dev manual-review fixture for the demo_driver account (see
+  // docs/FOLLOW_UP_ROADMAP.md, "Driver review demo scenario"). msg-1 through
+  // msg-5 above predate the `channel` field, so they're invisible to
+  // driver/client sessions (filterChatMessagesByRole withholds untagged
+  // messages) — these three are explicitly tagged so a fresh
+  // `SEED_DEMO_DATA=true` local run has a real, channel-correct
+  // driver_admin thread to review, plus one client_admin message to confirm
+  // it never leaks into the driver's chat tab.
+  {
+    id: "msg-1003-1",
+    shipmentId: "shipment-1003",
+    sender: "admin",
+    senderName: "MARAS Operations Office",
+    type: "text",
+    text: "Hi Demo Driver, your CMR document for MAR-2026-1003 has been uploaded and is ready to view — please download it and keep a copy for the Erbil checkpoint.",
+    timestamp: "2026-05-31T15:20:00Z",
+    channel: "driver_admin"
+  },
+  {
+    id: "msg-1003-2",
+    shipmentId: "shipment-1003",
+    sender: "driver",
+    senderName: "Demo Driver",
+    type: "text",
+    text: "Received, thank you. Loading is in progress, will confirm once cargo is secured.",
+    timestamp: "2026-05-31T15:35:00Z",
+    channel: "driver_admin"
+  },
+  {
+    id: "msg-1003-3",
+    shipmentId: "shipment-1003",
+    sender: "admin",
+    senderName: "MARAS Operations Office",
+    type: "text",
+    text: "Hi Demo Client, your invoice for MAR-2026-1003 has been finalized — let us know if you need anything else.",
+    timestamp: "2026-05-31T15:25:00Z",
+    channel: "client_admin"
   }
 ];
 
@@ -3203,6 +3279,16 @@ async function startServer() {
         return res.status(403).json({ error: "You do not have permission to post to this channel." });
       }
 
+      // Driver App Simplification / CMR Read-Only Review: removing the
+      // CMR option from the driver-facing upload UI (DriverApplication.tsx,
+      // FileUploadModal.tsx) only stops the app's own UI from offering it —
+      // this endpoint can be called directly, so the same rule has to be
+      // enforced here too. A driver session may never attach a 'cmr'
+      // category file/document to chat; CMR is admin-published only.
+      if (req.session!.role === "driver" && !canDriverUploadDocumentCategory(fileCategory)) {
+        return res.status(403).json({ error: "Drivers cannot upload CMR documents. CMR documents must be sent by Admin." });
+      }
+
       const { sender, senderName } = await resolveChatSenderIdentity(req);
 
       // BUG-03: which audience (driver_admin, client_admin, or
@@ -3343,6 +3429,16 @@ async function startServer() {
       if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
       const shipmentId = req.params.id;
       const { name, url, category, uploadedBy, isSharedExternally } = req.body;
+
+      // Driver App Simplification / CMR Read-Only Review: this route skips
+      // the chat trail and files a document directly (see the comment
+      // above), so it's the more direct of the two upload paths a driver
+      // session can reach — the same CMR-upload block as /chat applies
+      // here too. CMR is admin-published only; a driver may still view one
+      // (isDocumentVisibleToDriver), just never create one.
+      if (req.session!.role === "driver" && !canDriverUploadDocumentCategory(category)) {
+        return res.status(403).json({ error: "Drivers cannot upload CMR documents. CMR documents must be sent by Admin." });
+      }
 
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);

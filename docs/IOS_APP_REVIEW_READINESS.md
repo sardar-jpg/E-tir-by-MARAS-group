@@ -602,12 +602,13 @@ console errors**, confirming the two lazy-loading changes in §7 don't
 break any of the three role UIs at runtime, not just at build/typecheck
 time.
 
-## 12. Future: Driver App Simplification + CMR Read-Only Review
+## 12. Driver App Simplification + CMR Read-Only Review
 
-**Documentation only — not implemented in this PR.** Full item lives in
-`docs/FOLLOW_UP_ROADMAP.md` ("Driver app simplification" section); this is
-a short cross-reference for the App-Review-facing angle, since the Driver
-role is one of the three reviewed login flows in §3's reviewer notes
+**CMR upload/view contradiction fixed in PR #71**
+(`feature/driver-app-simplification-cmr-documents-review`). Full detail
+lives in `docs/FOLLOW_UP_ROADMAP.md` ("Driver app simplification" section);
+this is a short cross-reference for the App-Review-facing angle, since the
+Driver role is one of the three reviewed login flows in §3's reviewer notes
 template.
 
 Product decision: the Driver app (`DriverApplication.tsx`, currently the
@@ -619,17 +620,49 @@ dashboard with counters/charts/analytics.
 
 **CMR is the key access-control angle for this doc:** the decision is
 that a driver may only ever **view and download** an admin-published CMR,
-never create/generate/sign/stamp/approve/upload one. This is a real
-`src/lib/documentAccess.ts`-level change from current behavior (today's
-`DriverApplication.tsx` actively prompts the driver to scan/upload a CMR
-— see `docs/FOLLOW_UP_ROADMAP.md` for the exact locations found), so the
-future PR implementing it should be treated as an access-control change
-requiring the same care as any other `adminAccess.ts`/`documentAccess.ts`
-review in this codebase's history (PR #58/#59/#63 pattern: check both the
-UI gate and the server-side route, not just one or the other) — not a
-purely cosmetic simplification.
+never create/generate/sign/stamp/approve/upload one. `src/lib/documentAccess.ts`
+needed no change on the *read* side —
+`isDocumentVisibleToDriver`/`DRIVER_VISIBLE_DOCUMENT_CATEGORIES` already
+correctly treated `cmr` as driver-visible-for-*viewing* (checked, per the
+PR #58/#59/#63 pattern, at both the UI gate and the server-side route —
+`buildShipmentViewForRole` filters `shipment.documents` through it on every
+driver-facing `GET`). The contradiction was on the driver-*upload* side, and
+was fixed at both layers:
+- **UI**: `DriverApplication.tsx` and
+  `src/components/driver/FileUploadModal.tsx` no longer offer `cmr` as a
+  category the driver can pick for a file *they* are sending, and the
+  driver-facing chat prompt modeling an admin asking the driver to upload a
+  signed CMR is gone.
+- **Server**: removing the UI option alone doesn't stop a direct API call,
+  so `POST /api/shipments/:id/chat` and `POST /api/shipments/:id/documents`
+  both now call the new `canDriverUploadDocumentCategory(category)`
+  (`src/lib/documentAccess.ts`) and reject with `403` (`"Drivers cannot
+  upload CMR documents. CMR documents must be sent by Admin."`) whenever the
+  session role is `driver` and the category is `cmr` — same access-control
+  rigor as the PR #58/#59/#63 pattern this doc already holds the Driver role
+  to, applied to the *write* direction this time.
 
-When that PR ships, add its own mobile-viewport browser smoke test for
-`DriverApplication` (per `docs/FOLLOW_UP_ROADMAP.md`) before relying on it
-— this PR's own smoke test (§11) used a default desktop-sized headless
-browser window, which is not a substitute for that.
+The Documents panel (previously non-interactive — document rows had no
+click target at all) now renders each admin-sent document as an actual
+view/download link, which is the read-only half of the decision. Verified
+browser-driven at both desktop and a 390×844 mobile viewport (`demo_driver`
+for the general flow, `driver-1`/`murat_yilmaz` — whose seeded shipment
+carries the demo CMR document — to see the read-only view link render for a
+real `cmr`-category document).
+
+**Deferred to a future PR** (kept PR #71 focused on the CMR
+upload/view contradiction specifically): trimming
+`DriverApplication`'s non-CMR admin-dashboard-style sections (Quick Cockpit
+Actions, Trip Estimate simulator, Smart Transit Route Tracker) — confirmed
+during PR #71's review that none of them leak admin/customer/accounting
+data, so this is a cosmetic simplification pass, not a safety fix. See
+`docs/FOLLOW_UP_ROADMAP.md` for one more small, unrelated gap found along
+the way (seeded demo chat messages predate the `channel` field so don't
+appear to driver/client sessions in a fresh local `SEED_DEMO_DATA=true` dev
+environment).
+
+**Local/dev manual-review scenario (login credentials, exact shipment
+fixture, what should/shouldn't appear):** see
+`docs/FOLLOW_UP_ROADMAP.md` § "Driver review demo scenario (local/dev
+only — PR #71)" — `demo_driver` / `DemoDriver123!` with
+`SEED_DEMO_DATA=true`, local only, never seeded in production.

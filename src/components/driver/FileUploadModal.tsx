@@ -15,7 +15,6 @@ interface FileUploadModalProps {
 function categoryForFile(file: File): DocumentCategory | null {
   const name = file.name.toLowerCase();
   if (file.type.startsWith("image/")) return "photo";
-  if (name.includes("cmr")) return "cmr";
   if (name.includes("invoice")) return "invoice";
   if (name.includes("packing")) return "packing_list";
   if (name.includes("customs")) return "customs";
@@ -39,7 +38,7 @@ export default function FileUploadModal({
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
           <div>
             <h5 className="font-extrabold text-[#f97316] uppercase tracking-wider font-mono">Upload Document</h5>
-            <p className="text-[9px] text-slate-500 mt-0.5">CMR, proof of delivery, invoice, or other shipment paperwork</p>
+            <p className="text-[9px] text-slate-500 mt-0.5">Delivery, customs, or other shipment paperwork you need to send to Admin</p>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors cursor-pointer border-0 bg-transparent p-1"><X className="w-4 h-4" /></button>
         </div>
@@ -69,7 +68,7 @@ export default function FileUploadModal({
             <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">File Name</label>
             <input
               type="text"
-              placeholder="e.g. CMR_DOC_BORDER_GATE_A.pdf"
+              placeholder="e.g. DELIVERY_PHOTO_BORDER_GATE_A.jpg"
               value={fileName}
               onChange={(e) => onFileNameChange(e.target.value)}
               className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl font-mono text-xs focus:border-[#f97316] outline-none transition-all"
@@ -83,7 +82,6 @@ export default function FileUploadModal({
               onChange={(e) => onCategoryChange(e.target.value as DocumentCategory)}
               className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
             >
-              <option value="cmr" className="bg-slate-950 text-white font-bold">CMR Document (Shipment Protocol)</option>
               <option value="invoice" className="bg-slate-950 text-white font-bold">Invoice Receipt</option>
               <option value="packing_list" className="bg-slate-950 text-white font-bold">Packing Sheet</option>
               <option value="customs" className="bg-slate-950 text-white font-bold">Customs Clearance Receipt</option>
