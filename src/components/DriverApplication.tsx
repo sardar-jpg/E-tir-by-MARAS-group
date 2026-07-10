@@ -25,9 +25,9 @@ import DriverHome from "./driver/DriverHome";
 import {
   MessageSquare, Truck, Send, CheckCircle2,
   X, Camera, FileUp, User,
-  Edit2, Phone, Shield, Check, Activity, Briefcase, Paperclip, Search, Languages,
+  Edit2, Phone, Shield, Check, Activity, Briefcase, Paperclip, Search,
   Settings, Trash2, ShieldAlert,
-  Compass, Sun, Moon, Play, Lock
+  Sun, Moon, Play, Lock
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -40,64 +40,7 @@ interface DriverApplicationProps {
   isMobile?: boolean;
 }
 
-const CHAT_TRANSLATIONS_DICT: Record<string, Record<"tr" | "ar" | "en", string>> = {
-  "customs clearance approved. please execute route.": {
-    en: "Customs clearance approved. Please execute route.",
-    tr: "Gümrük izni onaylandı. Lütfen rotayı takip edin gidin.",
-    ar: "تمت الموافقة على التخليص الجمركي. يرجى اتباع المسار."
-  },
-  "what is your current eta at zakho border?": {
-    en: "What is your current ETA at Zakho Border?",
-    tr: "Zaho Sınır Kapısındaki güncel tahmini varış süreniz (ETA) nedir?",
-    ar: "ما هو وقت الوصول المقدر الحالي الخاص بك في منفذ زاخو؟"
-  },
-  "your cmr document has been uploaded and is ready to view.": {
-    en: "Your CMR document has been uploaded and is ready to view.",
-    tr: "CMR belgeniz sisteme yüklendi ve görüntülemeye hazır.",
-    ar: "تم تحميل مستند CMR الخاص بك وهو جاهز للعرض."
-  },
-  "are you experiencing any delays?": {
-    en: "Are you experiencing any delays?",
-    tr: "Herhangi bir gecikme yaşıyor musunuz?",
-    ar: "هل تواجه أي تأخيرات حالياً؟"
-  },
-  "consignment processed through initial customs clearance.": {
-    en: "Consignment processed through initial customs clearance.",
-    tr: "Sevkiyat ilk gümrükleme işleminden geçti.",
-    ar: "تمت معالجة الشحنة من خلال التخليص الجمركي الأولي."
-  },
-  "we detected offline state. confirm physical status.": {
-    en: "We detected offline state. Confirm physical status.",
-    tr: "Çevrimdışı durum tespit ettik. Fiziksel transiti doğrulayın.",
-    ar: "لقد اكتشفنا حالة عدم اتصال بالشبكة. يرجى تأكيد الوضع الفعلي للشحنة."
-  }
-};
-
-const QUICK_TEMPLATES: Record<"tr" | "ar" | "en", { label: string; text: string }[]> = {
-  en: [
-    { label: "📍 Border Arrived", text: "I have arrived at the customs border check-point. Ready to declare transport documents." },
-    { label: "⏱️ ETA 1 hour", text: "Latest status update: My estimated time of arrival is approximately 1 hour." },
-    { label: "⛽ Rest Stop", text: "Currently at rest stop / refuelling. Resuming transit shortly." },
-    { label: "📦 Cargo Loaded", text: "Cargo loading completed. Paperwork holds in progress." },
-    { label: "⚠️ Border Delay", text: "Operational warning: Facing transit delays due to custom clearance lines." }
-  ],
-  tr: [
-    { label: "📍 Sınıra Gelindi", text: "Gümrük sınır kapısı kontrol noktasına ulaştım. İşlemler için hazırım." },
-    { label: "⏱️ ETA 1 Saat", text: "Güncelleme: Tahmini varış sürem yaklaşık 1 saattir." },
-    { label: "⛽ Kısa Mola / Yakıt", text: "Zorunlu yakıt ve dinlenme molasındayım. Yakında yola devam edeceğim." },
-    { label: "📦 Yükleme Bitti", text: "Yükleme tamamlandı. Evrakların sisteme girilmesini bekliyorum." },
-    { label: "⚠️ Sınır Gecikmesi", text: "Sınır kapısında yoğunluk nedeniyle transit gecikmesi yaşanmaktadır." }
-  ],
-  ar: [
-    { label: "📍 وصلت المعبر", text: "لقد وصلت إلى منفذ التفتيش الجمركي الحدودي. مستعد لتخليص المستندات." },
-    { label: "⏱️ وصول خلال ساعة", text: "تحديث: الوقت المقدر للوصول هو حوالي ساعة واحدة تقريبا." },
-    { label: "⛽ استراحة وتزود", text: "في استراحة قصيرة والتزود بالوقود حاليا. سأستأنف الرحلة قريباً." },
-    { label: "📦 تم الاستلام بالكامل", text: "تم تحميل الشحنة بالكامل. بانتظار الانتهاء من فحص الأوراق الجمركية." },
-    { label: "⚠️ تأخير بالحدود", text: "نواجه تأخيراً تشغيلياً على الحدود بسبب طوابير الانتظار الجمركية." }
-  ]
-};
-
-export default function DriverApplication({ 
+export default function DriverApplication({
   lang, 
   loggedInDriverId = null, 
   loggedInDriver = null, 
@@ -118,7 +61,7 @@ export default function DriverApplication({
       profileTitle: "My Driver Profile",
       personalData: "Personal & Vehicle Data",
       fullName: "Full Name",
-      username: "Username Hash",
+      username: "Username",
       phone: "Contact phone",
       truckNumber: "Plate Number / Truck ID",
       truckType: "Truck Type / Category",
@@ -160,7 +103,7 @@ export default function DriverApplication({
     profileTitle: "My Driver Profile",
     personalData: "Personal & Vehicle Data",
     fullName: "Full Name",
-    username: "Username Hash",
+    username: "Username",
     phone: "Contact phone",
     truckNumber: "Plate Number / Truck ID",
     saveProfile: "Save Changes",
@@ -251,11 +194,8 @@ export default function DriverApplication({
   // Input states
   const [newMessageText, setNewMessageText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const statusFormRef = useRef<HTMLFormElement>(null);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
-  const [translatedMessages, setTranslatedMessages] = useState<Record<string, string>>({});
-  const [isTranslatingId, setIsTranslatingId] = useState<string | null>(null);
   const [remarks, setRemarks] = useState("");
   const [selectedStatusVal, setSelectedStatusVal] = useState<ShipmentStatus>("Accepted");
   
@@ -325,15 +265,6 @@ export default function DriverApplication({
   const [simFileUrl, setSimFileUrl] = useState("#");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-
-  // Camera Document Scanner states
-  const [isScanOpen, setIsScanOpen] = useState(false);
-  const [scanState, setScanState] = useState<'scanning' | 'review' | 'uploading'>('scanning');
-  const [capturedImage, setCapturedImage] = useState<string | null>(null);
-  const [scanFilter, setScanFilter] = useState<'color' | 'grayscale' | 'mono'>('color');
-  const [scanCategory, setScanCategory] = useState<DocumentCategory>("photo");
-  const [scanDocName, setScanDocName] = useState("");
-  const [flashLight, setFlashLight] = useState(false);
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
@@ -979,144 +910,6 @@ export default function DriverApplication({
     }
   };
 
-  // Translate individual message text for driver comprehension
-  const handleTranslate = (msgId: string, originalText: string) => {
-    if (translatedMessages[msgId]) {
-      // Toggle off
-      setTranslatedMessages(prev => {
-        const copy = { ...prev };
-        delete copy[msgId];
-        return copy;
-      });
-      return;
-    }
-
-    setIsTranslatingId(msgId);
-    setTimeout(() => {
-      const cleanText = originalText.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
-
-      // Only known dispatch phrases have a real translation. We do not
-      // fabricate a translation for arbitrary free text.
-      const dictMatch = CHAT_TRANSLATIONS_DICT[cleanText];
-      if (dictMatch && dictMatch[lang]) {
-        setTranslatedMessages(prev => ({
-          ...prev,
-          [msgId]: dictMatch[lang]
-        }));
-      } else {
-        triggerToast(
-          lang === 'tr'
-            ? "Bu mesaj için çeviri mevcut değil."
-            : (lang === 'ar' ? "لا تتوفر ترجمة لهذه الرسالة." : "Translation not available for this message.")
-        );
-      }
-      setIsTranslatingId(null);
-    }, 450);
-  };
-
-  const handleUploadScannedDocument = async () => {
-    if (!activeShipment || !scanDocName.trim() || !capturedImage) return;
-
-    setScanState("uploading");
-
-    try {
-      let finalFileUrl = capturedImage;
-
-      // 1. Post to our highly available central media gateway route
-      try {
-        const uploadRes = await apiFetch("/api/upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            base64DataUrl: capturedImage,
-            filename: scanDocName
-          })
-        });
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          finalFileUrl = uploadData.url;
-          console.log("Scanned document uploaded via central media gateway:", finalFileUrl);
-        }
-      } catch (uploadGatewayErr) {
-        console.log("Local media gateway fallback for camera scan:", uploadGatewayErr);
-      }
-
-      // 2. Add message + document record
-      const scanPayload = {
-        sender: "driver",
-        senderName: getDriverName(),
-        type: "file",
-        fileName: scanDocName,
-        fileCategory: scanCategory,
-        fileUrl: finalFileUrl,
-        text: `Scanned & processed official document [${scanCategory.toUpperCase()}]: ${scanDocName}`
-      };
-
-      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(scanPayload)
-      });
-
-      if (res.ok) {
-        setScanDocName("");
-        setCapturedImage(null);
-        setIsScanOpen(false);
-        triggerToast("🎉 Scanned document uploaded and synchronized successfully!");
-        fetchData();
-      } else {
-        triggerToast("❌ Failed to upload scanned document. Please try again.");
-      }
-    } catch (e) {
-      console.error(e);
-      triggerToast("Failed to process scanned document upload");
-    } finally {
-      setScanState("scanning");
-    }
-  };
-
-  const startCamera = async () => {
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" }
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      }
-    } catch (err) {
-      console.warn("navigator.mediaDevices.getUserMedia not available or blocked in sandbox iframe:", err);
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
-  };
-
-  const captureCameraSnapshot = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const video = videoRef.current;
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/png");
-        setCapturedImage(dataUrl);
-        setScanState("review");
-        stopCamera();
-      }
-    } else {
-      triggerToast("❌ Camera not available. Please allow camera access or upload a file instead.");
-    }
-  };
-
   // Simulate Document or Photo upload inside Chat
   const handleSimulateUpload = async () => {
     if (!activeShipment || !simFileName.trim()) return;
@@ -1425,17 +1218,6 @@ export default function DriverApplication({
                     }
                     setActiveTab('chat');
                   }}
-                  onUploadDocument={() => {
-                    if (homeActiveJob) {
-                      setActiveShipment(homeActiveJob);
-                      setSelectedStatusVal(homeActiveJob.status);
-                      setSimFileName("");
-                      setSimFileCategory("photo");
-                      setSimFileUrl("#");
-                      setSelectedFile(null);
-                      setFileSimOpen(true);
-                    }
-                  }}
                   onViewJobs={() => setActiveTab('shipments')}
                   lang={lang}
                 />
@@ -1558,42 +1340,42 @@ export default function DriverApplication({
                     en: {
                       title: "Quick Actions",
                       subtitle: "Common actions for this job",
-                      startShipment: "Start Shipment",
-                      startShipmentSubAction: "Accept Shipment",
-                      startShipmentSubTransit: "Set In-Transit",
-                      startShipmentSubActive: "Driving Live",
-                      addDoc: "Send Photo",
-                      addDocSub: "Send a photo to Admin"
+                      start: "Start",
+                      startSubAccept: "Accept Job",
+                      startSubTransit: "Set In-Transit",
+                      startSubActive: "Driving Live",
+                      status: "Status",
+                      statusSub: "Update shipment status"
                     },
                     tr: {
                       title: "Hızlı Eylemler",
                       subtitle: "Bu sefer için yaygın eylemler",
-                      startShipment: "Sevkiyatı Başlat",
-                      startShipmentSubAction: "Sevkiyatı Kabul Et",
-                      startShipmentSubTransit: "Yola Çık",
-                      startShipmentSubActive: "Yolculuk Aktif",
-                      addDoc: "Fotoğraf Gönder",
-                      addDocSub: "Admin'e fotoğraf gönder"
+                      start: "Başlat",
+                      startSubAccept: "Sevkiyatı Kabul Et",
+                      startSubTransit: "Yola Çık",
+                      startSubActive: "Yolculuk Aktif",
+                      status: "Durum",
+                      statusSub: "Durumu güncelle"
                     },
                     ar: {
                       title: "إجراءات سريعة",
                       subtitle: "الإجراءات الشائعة لهذه المهمة",
-                      startShipment: "بدء الشحن",
-                      startShipmentSubAction: "قبول الشحنة",
-                      startShipmentSubTransit: "تغيير إلى في الطريق",
-                      startShipmentSubActive: "التتبع جاري",
-                      addDoc: "إرسال صورة",
-                      addDocSub: "إرسال صورة إلى الإدارة"
+                      start: "بدء",
+                      startSubAccept: "قبول الشحنة",
+                      startSubTransit: "تغيير إلى في الطريق",
+                      startSubActive: "التتبع جاري",
+                      status: "الحالة",
+                      statusSub: "تحديث الحالة"
                     }
                   }[lang as 'en' | 'tr' | 'ar'] || {
                     title: "Quick Actions",
                     subtitle: "Common actions for this job",
-                    startShipment: "Start Shipment",
-                    startShipmentSubAction: "Accept Shipment",
-                    startShipmentSubTransit: "Set In-Transit",
-                    startShipmentSubActive: "Driving Live",
-                    addDoc: "Send Photo",
-                    addDocSub: "Send a photo to Admin"
+                    start: "Start",
+                    startSubAccept: "Accept Job",
+                    startSubTransit: "Set In-Transit",
+                    startSubActive: "Driving Live",
+                    status: "Status",
+                    statusSub: "Update shipment status"
                   };
 
                   const handleQuickStart = async () => {
@@ -1626,12 +1408,8 @@ export default function DriverApplication({
                     }
                   };
 
-                  const handleQuickAddDoc = () => {
-                    setSimFileName("");
-                    setSimFileCategory("photo");
-                    setSimFileUrl("#");
-                    setSelectedFile(null);
-                    setFileSimOpen(true);
+                  const handleQuickStatus = () => {
+                    statusFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
                   };
 
                   // Check highlight or active state
@@ -1669,33 +1447,33 @@ export default function DriverApplication({
                             <Play className={`w-5 h-5 ${isAssigned ? "text-white" : isTransit ? "text-emerald-400" : "text-orange-500"}`} />
                           </div>
                           <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
-                            {quickT.startShipment}
+                            {quickT.start}
                           </span>
                           <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
                             {isAssigned
-                              ? quickT.startShipmentSubAction
+                              ? quickT.startSubAccept
                               : isPreTransit
-                              ? quickT.startShipmentSubTransit
+                              ? quickT.startSubTransit
                               : isTransit
-                              ? quickT.startShipmentSubActive
+                              ? quickT.startSubActive
                               : activeShipment.status}
                           </span>
                         </button>
 
-                        {/* 2. SEND PHOTO */}
+                        {/* 2. STATUS SHORTCUT */}
                         <button
                           type="button"
-                          onClick={handleQuickAddDoc}
+                          onClick={handleQuickStatus}
                           className="flex flex-col items-center justify-center p-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-100 hover:border-slate-700 transition-all transform active:scale-95 cursor-pointer h-24 text-center"
                         >
                           <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-orange-500">
-                            <Camera className="w-5 h-5 text-orange-400" />
+                            <Activity className="w-5 h-5 text-orange-400" />
                           </div>
                           <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
-                            {quickT.addDoc}
+                            {quickT.status}
                           </span>
                           <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
-                            {quickT.addDocSub}
+                            {quickT.statusSub}
                           </span>
                         </button>
                       </div>
@@ -1829,15 +1607,15 @@ export default function DriverApplication({
                     );
                   }
                   return (
-                    <form onSubmit={handleStatusUpdate} className="p-5 bg-slate-900 border border-slate-800 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
+                    <form ref={statusFormRef} onSubmit={handleStatusUpdate} className="p-5 bg-slate-900 border border-slate-800 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
                       <div className="border-b border-slate-800 pb-2">
                         <h4 className="font-black text-xs text-white uppercase tracking-wider font-mono">
                           {lang === 'en' ? 'Update Shipment Status' : lang === 'tr' ? 'Sevkiyat Durumunu Güncelle' : 'تحديث حالة الشحنة'}
                         </h4>
                       </div>
-                      
+
                       <div className="space-y-1">
-                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Target Logistics State</label>
+                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Shipment Status</label>
                         <select
                           value={selectedStatusVal}
                           onChange={(e) => setSelectedStatusVal(e.target.value as ShipmentStatus)}
@@ -1850,8 +1628,8 @@ export default function DriverApplication({
                       </div>
 
                       <div className="space-y-1">
-                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Remarks / Cargo Incident Logs</label>
-                        <input 
+                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Notes to Admin</label>
+                        <input
                           type="text" 
                           placeholder={t('remarksPlaceholder')}
                           value={remarks}
@@ -1872,54 +1650,16 @@ export default function DriverApplication({
 
 
 
-                {/* Documents from Admin — read-only CMR/POD/customs paperwork
+                {/* Admin Documents — read-only CMR/POD/customs paperwork
                     published by MARAS/Admin (isDocumentVisibleToDriver,
                     documentAccess.ts). Driver never creates, signs, stamps,
                     approves, or uploads a CMR here — only views/downloads
-                    what Admin already sent. The Scan/Upload buttons below
-                    are a separate action: they send an operational photo
-                    (delivery/border/issue) to Admin via driver_admin chat,
-                    they do not add to this list. */}
+                    what Admin already sent. Sending a photo/file to Admin
+                    happens in Chat, not here — this panel is view-only. */}
                 <div className="space-y-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]">
-                  <div className="border-b border-slate-800 pb-2 flex items-center justify-between gap-2">
-                    <div className="flex flex-col">
-                      <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block">Documents</span>
-                      <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Documents from Admin</h4>
-                    </div>
-                    {!(activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') && (
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                            setScanCategory("photo");
-                            setCapturedImage(null);
-                            setScanFilter("color");
-                            setScanState("scanning");
-                            setIsScanOpen(true);
-                            startCamera();
-                          }}
-                          className="p-1 px-2.5 bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-emerald-400 hover:text-white font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95"
-                        >
-                          <Camera className="w-3 h-3 shrink-0 animate-pulse text-emerald-400" />
-                          <span>Scan Photo</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSimFileName("");
-                            setSimFileCategory("photo");
-                            setSimFileUrl("#");
-                            setSelectedFile(null);
-                            setFileSimOpen(true);
-                          }}
-                          className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[8.5px] uppercase tracking-wider font-mono rounded-lg flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
-                        >
-                          <FileUp className="w-3 h-3 shrink-0" />
-                          <span>Send File</span>
-                        </button>
-                      </div>
-                    )}
+                  <div className="border-b border-slate-800 pb-2 flex flex-col">
+                    <span className="text-[8px] font-black text-[#f97316] uppercase tracking-widest font-mono block">Documents</span>
+                    <h4 className="text-white font-black text-xs uppercase tracking-wider font-mono text-left">Admin Documents</h4>
                   </div>
                   {activeShipment.documents && activeShipment.documents.length > 0 ? (
                     <div className="space-y-2">
@@ -1972,40 +1712,14 @@ export default function DriverApplication({
                         <div>
                           <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">MARAS Admin Chat</h4>
                           <span className="text-[9px] text-[#f97316] font-mono font-bold">
-                            {isShipmentFinished 
+                            {isShipmentFinished
                               ? (lang === 'tr' ? `Tamamlanan Görev #${activeShipment.shipmentNumber}` : lang === 'ar' ? `المهمة المكتملة #${activeShipment.shipmentNumber}` : `Finished Duty #${activeShipment.shipmentNumber}`)
                               : `Transit Duty #${activeShipment.shipmentNumber}`
                             }
                           </span>
                         </div>
                       </div>
-                      {!isShipmentFinished && (
-                          <div className="flex gap-1.5 items-center">
-                            <button
-                              onClick={() => {
-                                setScanDocName(`SCAN_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                                setScanCategory("photo");
-                                setCapturedImage(null);
-                                setScanFilter("color");
-                                setScanState("scanning");
-                                setIsScanOpen(true);
-                                startCamera();
-                              }}
-                              className="p-1 px-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer shadow-[0_2px_10px_rgba(16,185,129,0.25)] transition-all active:scale-95 border-0"
-                            >
-                              <Camera className="w-3 h-3 shrink-0 animate-pulse" />
-                              <span>Take Photo</span>
-                            </button>
-                            <button
-                              onClick={() => setFileSimOpen(true)}
-                              className="p-1 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[9px] uppercase tracking-wider font-mono rounded-full inline-flex items-center gap-1 cursor-pointer transition-all active:scale-95 border border-slate-700"
-                            >
-                              <FileUp className="w-3 h-3 shrink-0" />
-                              <span>Send File</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                    </div>
 
                     {/* Chat Search Input */}
                     <div className="px-3.5 py-2 bg-slate-950 border-b border-slate-900 flex items-center gap-2 shrink-0 transition-all select-none">
@@ -2079,18 +1793,7 @@ export default function DriverApplication({
                                     )}
                                   </div>
                                 ) : (
-                                  <div className="space-y-1">
-                                    <p>{msg.text}</p>
-                                    {translatedMessages[msg.id] && (
-                                      <div className="mt-1.5 pt-1.5 border-t border-slate-800 text-orange-400 italic text-[11px] font-sans">
-                                        <div className="flex items-center gap-1 mb-0.5 text-[8px] text-slate-500 not-italic font-bold uppercase tracking-wider">
-                                          <Languages className="w-2.5 h-2.5 text-orange-400" />
-                                          <span>{lang === 'tr' ? "Tercüme Edildi" : lang === 'ar' ? "تمت الترجمة" : "Translated"}</span>
-                                        </div>
-                                        <span>{translatedMessages[msg.id]}</span>
-                                      </div>
-                                    )}
-                                  </div>
+                                  <p>{msg.text}</p>
                                 )}
                               </div>
                               <div className="flex items-center gap-1.5 mt-0.5 text-[8px] text-slate-500 font-mono">
@@ -2099,26 +1802,6 @@ export default function DriverApplication({
                                   <span className={`inline-flex items-center gap-0.5 ${msg.status === 'seen' ? 'text-emerald-400 font-bold' : 'text-slate-500'}`}>
                                     • {msg.status === 'seen' ? '✓✓ Seen' : '✓ Sent'}
                                   </span>
-                                )}
-                                {!isMe && msg.text && (
-                                  <>
-                                    <span>•</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleTranslate(msg.id, msg.text || "")}
-                                      className="text-[8px] text-slate-400 hover:text-orange-400 inline-flex items-center gap-0.5 cursor-pointer underline bg-transparent border-0 p-0 font-bold"
-                                      disabled={isTranslatingId === msg.id}
-                                    >
-                                      <Languages className="w-2.5 h-2.5 shrink-0" />
-                                      <span>
-                                        {isTranslatingId === msg.id 
-                                          ? (lang === 'tr' ? "Çevriliyor..." : "Translating...") 
-                                          : translatedMessages[msg.id] 
-                                            ? (lang === 'tr' ? "Gizle" : lang === 'ar' ? "إخفاء" : "Hide")
-                                            : (lang === 'tr' ? "Türkçe" : lang === 'ar' ? "العربية" : "Translate")}
-                                      </span>
-                                    </button>
-                                  </>
                                 )}
                               </div>
                             </div>
@@ -2147,22 +1830,6 @@ export default function DriverApplication({
                       <div ref={messagesEndRef} />
                     </div>
 
-                    {/* Quick response chips list */}
-                    {!isShipmentFinished && (
-                      <div className="bg-slate-950 px-3 py-2 border-t border-slate-900 overflow-x-auto shrink-0 flex gap-2 items-center scroll-smooth no-scrollbar select-none">
-                        {(QUICK_TEMPLATES[lang] || QUICK_TEMPLATES.en).map((chip, index) => (
-                          <button
-                            key={index}
-                            type="button"
-                            onClick={() => setNewMessageText(chip.text)}
-                            className="px-3 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800/80 text-slate-300 hover:text-white rounded-lg text-[9px] font-bold whitespace-nowrap transition-all cursor-pointer shadow-sm select-none active:scale-95"
-                          >
-                            {chip.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
                     {/* Message input */}
                     {isShipmentFinished ? (
                       <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 font-mono text-[10px] select-none">
@@ -2170,18 +1837,18 @@ export default function DriverApplication({
                       </div>
                     ) : (
                       <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-900 flex items-center gap-2.5 shrink-0 select-none">
-                        <button 
-                          type="button" 
+                        <button
+                          type="button"
                           onClick={() => setFileSimOpen(true)}
-                          title="Attach Document / Photo"
+                          title={lang === 'tr' ? 'Ekle' : lang === 'ar' ? 'إرفاق' : 'Attach'}
                           className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
                         >
                           <Paperclip className="w-4 h-4 shrink-0" />
                         </button>
 
-                        <input 
-                          type="text" 
-                          placeholder={t('typeMessage')}
+                        <input
+                          type="text"
+                          placeholder={lang === 'tr' ? 'Bir mesaj yazın...' : lang === 'ar' ? 'اكتب رسالة...' : 'Type a message...'}
                           value={newMessageText}
                           onChange={(e) => setNewMessageText(e.target.value)}
                           className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono"
@@ -2744,17 +2411,6 @@ export default function DriverApplication({
                           </div>
                         </div>
                       </div>
-
-                      {onLogout && (
-                        <button
-                          type="button"
-                          onClick={onLogout}
-                          className="w-full py-2.5 bg-slate-950 hover:bg-red-950/40 border border-slate-800 hover:border-red-500/30 text-slate-400 hover:text-red-400 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <X className="w-4 h-4 shrink-0 text-red-500" />
-                          <span>{profileT.logout}</span>
-                        </button>
-                      )}
                     </>
                   );
                 })()}
@@ -2781,278 +2437,6 @@ export default function DriverApplication({
                 onSubmit={handleSimulateUpload}
                 isUploading={isUploading}
               />
-            )}
-
-            {/* Immersive Mobile Document Scanner Overlay Modal */}
-            {isScanOpen && (
-              <div className="absolute inset-0 bg-slate-950/95 z-50 flex flex-col justify-between overflow-hidden select-none animate-fade-in text-xs font-sans">
-                {/* Header HUD */}
-                <div className="bg-slate-900 border-b border-slate-800 p-4.5 flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                    <div>
-                      <h5 className="font-extrabold text-[#10b981] uppercase tracking-widest font-mono text-left">Take Photo</h5>
-                      <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">Align the photo inside the frame</span>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => {
-                      stopCamera();
-                      setIsScanOpen(false);
-                    }} 
-                    className="text-slate-400 hover:text-white transition-colors cursor-pointer border-0 bg-slate-950 p-2 rounded-full hover:bg-slate-800"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Main Scan Viewfinder */}
-                {scanState === "scanning" && (
-                  <div className="flex-1 flex flex-col justify-between p-4 relative overflow-hidden bg-slate-950">
-                    <div className="absolute inset-0 z-0 flex items-center justify-center">
-                      {/* Active video element or high-tech dynamic drawing fallback vector */}
-                      {videoRef ? (
-                        <video 
-                          ref={videoRef}
-                          autoPlay 
-                          playsInline 
-                          muted 
-                          className="w-full h-full object-cover opacity-80"
-                        />
-                      ) : null}
-
-                      {/* Fallback Vector Viewfinder illustration if video stream is not initialized yet */}
-                      <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-slate-950/80 z-0">
-                        <div className="border border-slate-700/60 bg-slate-900/60 rounded-xl p-5.5 max-w-[240px] text-center space-y-3.5 shadow-2xl relative">
-                          <Compass className="w-10 h-10 text-emerald-400 mx-auto animate-spin" style={{ animationDuration: "12s" }} />
-                          <div className="space-y-1">
-                            <h6 className="font-extrabold text-slate-200 text-xs font-mono uppercase font-black">Align the document inside the frame</h6>
-                            <p className="text-[10px] text-slate-400 leading-normal">
-                              Place the document flat and make sure it fits within the frame.
-                            </p>
-                          </div>
-                          {/* Live edge finder boxes */}
-                          <div className="absolute -top-1.5 -left-1.5 w-6 h-6 border-t-2 border-l-2 border-[#10b981] rounded-tl-lg" />
-                          <div className="absolute -top-1.5 -right-1.5 w-6 h-6 border-t-2 border-r-2 border-[#10b981] rounded-tr-lg" />
-                          <div className="absolute -bottom-1.5 -left-1.5 w-6 h-6 border-b-2 border-l-2 border-[#10b981] rounded-bl-lg" />
-                          <div className="absolute -bottom-1.5 -right-1.5 w-6 h-6 border-b-2 border-r-2 border-[#10b981] rounded-br-lg" />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Laser Scanner Line and HUD Overlay */}
-                    <div className="absolute inset-0 pointer-events-none z-10">
-                      {/* Laser beam scan */}
-                      <div className="absolute left-0 w-full h-[3px] bg-gradient-to-r from-transparent via-[#10b981] to-transparent shadow-[0_0_12px_#10b981] animate-pulse" />
-                      
-                      {/* Scanner Corners */}
-                      <div className="absolute top-8 left-8 w-12 h-12 border-t-4 border-l-4 border-emerald-400/80 rounded-tl-2xl" />
-                      <div className="absolute top-8 right-8 w-12 h-12 border-t-4 border-r-4 border-emerald-400/80 rounded-tr-2xl" />
-                      <div className="absolute bottom-8 left-8 w-12 h-12 border-b-4 border-l-4 border-emerald-400/80 rounded-bl-2xl" />
-                      <div className="absolute bottom-8 right-8 w-12 h-12 border-b-4 border-r-4 border-emerald-400/80 rounded-br-2xl" />
-
-                      {/* Continuous Edge confidence marker */}
-                      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 border border-emerald-400/25 text-[#10b981] rounded-full px-4 py-1.5 text-[9.5px] font-mono tracking-wider font-extrabold flex items-center gap-1.5 backdrop-blur-md">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-                        <span>Camera ready</span>
-                      </div>
-                    </div>
-
-                    {/* Viewfinder Controls */}
-                    <div className="z-20 flex justify-end items-center text-[10px] font-mono select-none">
-                      <button
-                        type="button"
-                        onClick={() => setFlashLight(!flashLight)}
-                        className={`p-1.5 px-3 rounded-full flex items-center gap-1 cursor-pointer transition-all ${flashLight ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-slate-900 border border-slate-800 text-slate-300'}`}
-                      >
-                        <span>🔦 Flash</span>
-                      </button>
-                    </div>
-
-                    <div className="z-20 space-y-2 text-left">
-                      {/* Primary Trigger Actions bar */}
-                      <div className="flex items-center justify-between gap-4 pt-1 select-none">
-                        {/* Custom photo uploader label alias */}
-                        <label
-                          title="Choose from Gallery"
-                          aria-label="Choose from Gallery"
-                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 shrink-0"
-                        >
-                          <FileUp className="w-4 h-4" />
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                setScanDocName(file.name);
-                                setScanCategory("photo");
-                                const reader = new FileReader();
-                                reader.onload = (evt) => {
-                                  const b64 = evt.target?.result as string;
-                                  setCapturedImage(b64);
-                                  setScanState("review");
-                                  stopCamera();
-                                };
-                                reader.readAsDataURL(file);
-                              }
-                            }}
-                            className="hidden"
-                          />
-                        </label>
-
-                        {/* Capture Shutter Switch Button */}
-                        <button
-                          type="button"
-                          onClick={captureCameraSnapshot}
-                          className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs rounded-2xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_20px_rgba(16,185,129,0.35)] active:scale-95"
-                        >
-                          <div className="w-4 h-4 rounded-full border-2 border-slate-950 shrink-0 bg-transparent flex items-center justify-center">
-                            <div className="w-2 h-2 rounded-full bg-slate-950" />
-                          </div>
-                          <span>Capture Photo</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Review, Enhancements and metadata assignment screen */}
-                {scanState === "review" && (
-                  <div className="flex-1 flex flex-col justify-between p-5 overflow-y-auto bg-slate-900 space-y-4">
-                    
-                    {/* Captured visual buffer */}
-                    <div className="p-1 px-1.5 bg-slate-950 rounded-2xl border border-slate-800 shadow-inner flex flex-col items-center justify-center relative overflow-hidden min-h-[220px]">
-                      <span className="absolute top-2.5 right-2.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-mono font-bold text-[8px] uppercase tracking-wider px-2 py-0.5 rounded">
-                        {scanFilter === "mono" ? "Black & White" : scanFilter === "grayscale" ? "Grayscale" : "Original Color"}
-                      </span>
-                      {capturedImage && (
-                        <img 
-                          src={capturedImage}
-                          alt="Captured Scan Preview"
-                          className="max-h-[220px] rounded-lg shadow-md transition-all object-contain"
-                          style={{
-                            filter: scanFilter === "mono" 
-                              ? "contrast(180%) brightness(110%) grayscale(100%)" 
-                              : scanFilter === "grayscale" 
-                              ? "grayscale(100%) contrast(120%)" 
-                              : "none"
-                          }}
-                        />
-                      )}
-                    </div>
-
-                    {/* Metadata attributes */}
-                    <div className="space-y-3 pt-1 select-none text-left">
-                      
-                      {/* Interactive Optimization Filter Bar */}
-                      <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-wider font-mono">Photo Style</label>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {[
-                            { val: "color", label: "Color Photo", desc: "Original colors" },
-                            { val: "grayscale", label: "Grayscale", desc: "Clean scan copy" },
-                            { val: "mono", label: "Black & White", desc: "High contrast" }
-                          ].map(f => (
-                            <button
-                              key={f.val}
-                              type="button"
-                              onClick={() => setScanFilter(f.val as any)}
-                              className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
-                                scanFilter === f.val 
-                                  ? 'bg-emerald-500/10 border-emerald-500/35 text-white font-extrabold shadow-sm' 
-                                  : 'bg-slate-950 border-slate-800 hover:border-slate-800 text-slate-400'
-                              }`}
-                            >
-                              <span className="text-[10px] block font-bold leading-normal">{f.label}</span>
-                              <span className="text-[7.5px] opacity-60 block leading-tight mt-0.5">{f.desc}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* File Handle input */}
-                      <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">File Name</label>
-                        <input 
-                          type="text" 
-                          placeholder="e.g. CUSTOMS_CLEARANCE_STAMP.png" 
-                          value={scanDocName}
-                          onChange={(e) => setScanDocName(e.target.value)}
-                          className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl font-mono text-xs focus:border-emerald-500 outline-none transition-all"
-                        />
-                      </div>
-
-                      {/* Document Category dropdown */}
-                      <div className="space-y-1">
-                        <label className="text-[9px] font-black text-slate-500 block uppercase tracking-wider font-mono">Document Category</label>
-                        <select
-                          value={scanCategory}
-                          onChange={(e) => {
-                            const newCategory = e.target.value as DocumentCategory;
-                            setScanCategory(newCategory);
-                            // Auto reset mock file layout name with date prefix
-                            setScanDocName(`SCAN_${newCategory.toUpperCase()}_${new Date().toISOString().slice(0,10).replace(/-/g, "")}_${Math.floor(1000 + Math.random() * 9000)}.png`);
-                          }}
-                          className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
-                        >
-                          <option value="invoice" className="bg-slate-950 text-white font-bold">Invoice Receipt</option>
-                          <option value="packing_list" className="bg-slate-950 text-white font-bold">Packing Sheet</option>
-                          <option value="customs" className="bg-slate-950 text-white font-bold">Customs Clearance Receipt</option>
-                          <option value="delivery_proof" className="bg-slate-950 text-white font-bold">Delivery Voucher (POD)</option>
-                          <option value="photo" className="bg-slate-950 text-white font-bold">Cargo Live Photo</option>
-                          <option value="other" className="bg-slate-950 text-white font-bold">Other Sworn Document</option>
-                        </select>
-                      </div>
-
-                    </div>
-
-                    {/* Interactive review trigger actions */}
-                    <div className="flex gap-3 shrink-0 pt-2 select-none">
-                      <button 
-                        onClick={() => {
-                          setCapturedImage(null);
-                          setScanState("scanning");
-                          startCamera();
-                        }}
-                        className="p-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
-                      >
-                        <Trash2 className="w-4 h-4 text-red-500" />
-                        <span className="font-bold text-[10px] uppercase">Retake</span>
-                      </button>
-
-                      <button 
-                        onClick={handleUploadScannedDocument}
-                        disabled={!scanDocName.trim()}
-                        className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-40 text-slate-950 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 border-0 shadow-[0_4px_15px_rgba(16,185,129,0.3)] active:scale-95"
-                      >
-                        <Send className="w-4 h-4 shrink-0 text-slate-950" />
-                        <span>Send to Admin</span>
-                      </button>
-                    </div>
-
-                  </div>
-                )}
-
-                {/* Secure sync progress HUD */}
-                {scanState === "uploading" && (
-                  <div className="flex-1 flex flex-col justify-center items-center p-6 bg-slate-950 space-y-6 select-none animate-pulse">
-                    <div className="w-16 h-16 border-4 border-[#10b981] border-t-transparent rounded-full animate-spin flex items-center justify-center shadow-lg">
-                      <Compass className="w-7 h-7 text-emerald-400 animate-pulse" />
-                    </div>
-                    <div className="text-center space-y-2">
-                      <h5 className="font-extrabold text-[#10b981] text-sm font-mono uppercase tracking-widest">Sending Photo</h5>
-                      <p className="text-[10px] text-slate-400 leading-relaxed font-mono max-w-[240px] mx-auto text-center">
-                        Sending your photo to Admin securely...
-                      </p>
-                    </div>
-                    <div className="w-full max-w-[200px] h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800/80">
-                      <div className="h-full bg-[#10b981] animate-pulse" style={{ width: "85%" }} />
-                    </div>
-                  </div>
-                )}
-
-              </div>
             )}
 
           </div>

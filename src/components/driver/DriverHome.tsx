@@ -8,7 +8,6 @@ interface DriverHomeProps {
   driverId: string;
   onContinueJob: () => void;
   onChatWithAdmin: () => void;
-  onUploadDocument: () => void;
   onViewJobs: () => void;
   lang: Language;
 }
@@ -53,7 +52,6 @@ export default function DriverHome({
   driverId,
   onContinueJob,
   onChatWithAdmin,
-  onUploadDocument,
   onViewJobs,
   lang,
 }: DriverHomeProps) {
@@ -88,7 +86,6 @@ export default function DriverHome({
             driverId={driverId}
             onContinueJob={onContinueJob}
             onChatWithAdmin={onChatWithAdmin}
-            onUploadDocument={onUploadDocument}
             lang={lang}
           />
         ) : (

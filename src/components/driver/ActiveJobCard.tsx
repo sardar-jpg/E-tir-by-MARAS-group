@@ -1,4 +1,4 @@
-import { ChevronRight, MessageSquare, FileUp } from 'lucide-react';
+import { ChevronRight, MessageSquare } from 'lucide-react';
 import type { Shipment, Language } from '../../types';
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from '../../lib/driverVisibility';
 
@@ -7,17 +7,16 @@ interface ActiveJobCardProps {
   driverId: string;
   onContinueJob: () => void;
   onChatWithAdmin: () => void;
-  onUploadDocument: () => void;
   lang: Language;
 }
 
 const LABELS: Record<Language, {
-  continueJob: string; chat: string; upload: string;
+  continueJob: string; chat: string;
   route: string; cargo: string; payout: string; from: string; to: string; notSpecified: string; truck: string;
 }> = {
-  en: { continueJob: 'Continue Job', chat: 'Chat', upload: 'Send Photo/File', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified', truck: 'Truck' },
-  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', upload: 'Fotoğraf/Dosya Gönder', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş', truck: 'Araç' },
-  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', upload: 'إرسال صورة/ملف', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد', truck: 'الشاحنة' },
+  en: { continueJob: 'Continue Job', chat: 'Chat', route: 'Route', cargo: 'Cargo', payout: 'Your Payout', from: 'From', to: 'To', notSpecified: 'Not specified', truck: 'Truck' },
+  tr: { continueJob: 'İşi Sürdür', chat: 'Mesaj', route: 'Güzergah', cargo: 'Kargo', payout: 'Ödemeniz', from: 'Nereden', to: 'Nereye', notSpecified: 'Belirtilmemiş', truck: 'Araç' },
+  ar: { continueJob: 'متابعة المهمة', chat: 'محادثة', route: 'المسار', cargo: 'الشحنة', payout: 'مستحقاتك', from: 'من', to: 'إلى', notSpecified: 'غير محدد', truck: 'الشاحنة' },
 };
 
 export default function ActiveJobCard({
@@ -25,7 +24,6 @@ export default function ActiveJobCard({
   driverId,
   onContinueJob,
   onChatWithAdmin,
-  onUploadDocument,
   lang,
 }: ActiveJobCardProps) {
   const label = LABELS[lang] ?? LABELS.en;
@@ -120,7 +118,7 @@ export default function ActiveJobCard({
       </div>
 
       {/* Quick action buttons */}
-      <div className="grid grid-cols-3 gap-2 pt-1 relative z-10">
+      <div className="grid grid-cols-2 gap-2 pt-1 relative z-10">
         <button
           type="button"
           onClick={onContinueJob}
@@ -136,14 +134,6 @@ export default function ActiveJobCard({
         >
           <MessageSquare className="w-4 h-4 text-orange-400" />
           <span>{label.chat}</span>
-        </button>
-        <button
-          type="button"
-          onClick={onUploadDocument}
-          className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-2xl bg-slate-900 hover:bg-slate-800 active:bg-slate-700 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white font-black text-[9px] uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-        >
-          <FileUp className="w-4 h-4 text-orange-400" />
-          <span>{label.upload}</span>
         </button>
       </div>
     </div>
