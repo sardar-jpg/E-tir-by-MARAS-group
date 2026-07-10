@@ -463,10 +463,12 @@ these; native config changes are out of the explicit scope given for this
 PR ("conservative," no large/risky changes) and deserve a dedicated,
 reviewed native-config PR of their own.
 
-- **Missing iOS location/camera/photo-library usage-description strings.**
-  `ios/App/App/Info.plist` has no `NSLocationWhenInUseUsageDescription`,
+- ~~**Missing iOS location/camera/photo-library usage-description
+  strings.**~~ — **Fixed in PR #70**
+  (`feature/ios-info-plist-usage-descriptions-fix`).
+  `ios/App/App/Info.plist` had no `NSLocationWhenInUseUsageDescription`,
   `NSCameraUsageDescription`, or `NSPhotoLibraryUsageDescription` /
-  `NSPhotoLibraryAddUsageDescription` keys. But the app does call:
+  `NSPhotoLibraryAddUsageDescription` keys, even though the app does call:
   - `navigator.geolocation.getCurrentPosition` in
     `src/components/DriverApplication.tsx` (driver GPS check-in/live
     tracking), twice.
@@ -477,11 +479,24 @@ reviewed native-config PR of their own.
 
   Without the corresponding Info.plist usage-description strings, iOS
   either silently denies the permission or the app can crash when the
-  permission is requested — this is both an App Review rejection risk
+  permission is requested — this was both an App Review rejection risk
   (Apple explicitly checks for this) and a real runtime bug on device,
-  independent of review. **This requires a native-level change**
-  (Info.plist edit + a new archive/TestFlight build per §1) — flagged
-  here for a dedicated follow-up, not fixed in this docs/performance PR.
+  independent of review. PR #70 added all four keys directly to
+  `ios/App/App/Info.plist`:
+
+  | Key | Value |
+  |---|---|
+  | `NSLocationWhenInUseUsageDescription` | "eTIR uses your location while the app is open to update shipment tracking for assigned deliveries." |
+  | `NSCameraUsageDescription` | "eTIR uses the camera to let you take shipment-related photos and document images for your assigned deliveries." |
+  | `NSPhotoLibraryUsageDescription` | "eTIR uses your photo library so you can choose shipment-related photos or document images to upload." |
+  | `NSPhotoLibraryAddUsageDescription` | "eTIR may save shipment-related documents or images to your photo library when you choose to download or save them." |
+
+  Validated with `plutil -lint`. No `capacitor.config.ts` or
+  `project.pbxproj` changes were needed — neither mirrors usage-description
+  strings. **Still open:** this is a source-only change; per §1, a new
+  Xcode archive + TestFlight upload (with `CURRENT_PROJECT_VERSION`
+  incremented) is required before this fix reaches an actual submitted
+  build.
 - **`aps-environment` is `development`** in `ios/App/App/App.entitlements`.
   Xcode normally swaps this automatically to `production` based on the
   distribution provisioning profile used at archive/export time (per the

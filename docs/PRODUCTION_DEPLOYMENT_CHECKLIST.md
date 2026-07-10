@@ -548,10 +548,13 @@ referenced here rather than duplicated:
   (`ClientDashboard` and `jsPDF` now lazy/dynamically loaded); the two
   >500kB Vite warnings remain, smaller. See
   `docs/IOS_APP_REVIEW_READINESS.md` §7.
-- **iOS Info.plist missing location/camera/photo-library usage-description
-  strings** — found in PR #69, not fixed (native-level change). App Review
-  risk and possible on-device crash. See
-  `docs/IOS_APP_REVIEW_READINESS.md` §8.
+- ~~iOS Info.plist missing location/camera/photo-library usage-description
+  strings~~ — **Done in PR #70** (`feature/ios-info-plist-usage-descriptions-fix`).
+  `NSLocationWhenInUseUsageDescription`, `NSCameraUsageDescription`,
+  `NSPhotoLibraryUsageDescription`, and `NSPhotoLibraryAddUsageDescription`
+  added to `ios/App/App/Info.plist`. **A new archive/TestFlight build is
+  still required to ship this** — see `docs/IOS_APP_REVIEW_READINESS.md`
+  §8 and §1's "new native build" procedure.
 - Mobile / Responsive Review
 - MARAS AI Monitor Foundation — roadmap clarified (Admin-only, permanently)
   in PR #69, see `docs/IOS_APP_REVIEW_READINESS.md` §10
