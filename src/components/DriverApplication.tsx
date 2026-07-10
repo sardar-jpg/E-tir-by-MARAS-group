@@ -20,14 +20,13 @@ import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
 import ShipmentCard from "./driver/ShipmentCard";
-import FileUploadModal from "./driver/FileUploadModal";
 import DriverHome from "./driver/DriverHome";
 import {
   MessageSquare, Truck, Send, CheckCircle2,
   X, Camera, FileUp, User,
   Edit2, Phone, Shield, Check, Activity, Briefcase, Paperclip, Search,
   Settings, Trash2, ShieldAlert,
-  Sun, Moon, Play, Lock
+  Sun, Moon, Lock
 } from 'lucide-react';
 
 const fetch = apiFetch;
@@ -37,14 +36,16 @@ interface DriverApplicationProps {
   loggedInDriverId?: string | null;
   loggedInDriver?: Driver | null;
   onLogout?: () => void;
+  onLanguageChange?: (lang: Language) => void;
   isMobile?: boolean;
 }
 
 export default function DriverApplication({
-  lang, 
-  loggedInDriverId = null, 
-  loggedInDriver = null, 
+  lang,
+  loggedInDriverId = null,
+  loggedInDriver = null,
   onLogout,
+  onLanguageChange,
   isMobile = false
 }: DriverApplicationProps) {
   const isMobileMode = isMobile || useIsMobile(768);
@@ -258,12 +259,8 @@ export default function DriverApplication({
     }
   };
 
-  // Custom file sim trigger
-  const [fileSimOpen, setFileSimOpen] = useState(false);
-  const [simFileName, setSimFileName] = useState("");
-  const [simFileCategory, setSimFileCategory] = useState<DocumentCategory>("photo");
-  const [simFileUrl, setSimFileUrl] = useState("#");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // Native chat attachment (paperclip -> hidden file input -> auto-send)
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
@@ -910,72 +907,76 @@ export default function DriverApplication({
     }
   };
 
-  // Simulate Document or Photo upload inside Chat
-  const handleSimulateUpload = async () => {
-    if (!activeShipment || !simFileName.trim()) return;
-    
+  // Native chat attachment: paperclip -> OS file picker -> auto-send to Admin.
+  // Category is derived from the file's MIME type, never chosen by the
+  // driver, and is restricted to "photo"/"other" — CMR is not reachable
+  // from this flow (see documentAccess.ts / PR #71 server-side rejection).
+  const handleAttachmentSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !activeShipment) return;
+
     setIsUploading(true);
 
     try {
-      let finalFileUrl = simFileUrl;
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (evt) => resolve(evt.target?.result as string);
+        reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+        reader.readAsDataURL(file);
+      });
+
+      const fileCategory: DocumentCategory = file.type.startsWith("image/") ? "photo" : "other";
+      let finalFileUrl = "#";
       let uploadFailed = false;
 
-      if (selectedFile && simFileUrl && simFileUrl.startsWith("data:")) {
-        try {
-          const uploadRes = await apiFetch("/api/upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              base64DataUrl: simFileUrl,
-              filename: simFileName || selectedFile.name
-            })
-          });
-          if (uploadRes.ok) {
-            const uploadData = await uploadRes.json();
-            finalFileUrl = uploadData.url;
-            console.log("File uploaded successfully via media gateway:", finalFileUrl);
-          } else {
-            uploadFailed = true;
-          }
-        } catch (uploadGatewayErr) {
+      try {
+        const uploadRes = await apiFetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base64DataUrl: dataUrl,
+            filename: file.name
+          })
+        });
+        if (uploadRes.ok) {
+          const uploadData = await uploadRes.json();
+          finalFileUrl = uploadData.url;
+        } else {
           uploadFailed = true;
-          console.warn("Upload request failed:", uploadGatewayErr);
         }
+      } catch (uploadGatewayErr) {
+        uploadFailed = true;
+        console.warn("Upload request failed:", uploadGatewayErr);
       }
-
-      const mockFilePayload = {
-        sender: "driver",
-        senderName: getDriverName(),
-        type: "file",
-        fileName: simFileName,
-        fileCategory: simFileCategory,
-        fileUrl: finalFileUrl || "#",
-        text: `Sent a document [${simFileCategory.toUpperCase()}]: ${simFileName}`
-      };
 
       const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mockFilePayload)
+        body: JSON.stringify({
+          sender: "driver",
+          senderName: getDriverName(),
+          type: "file",
+          fileName: file.name,
+          fileCategory,
+          fileUrl: finalFileUrl,
+          text: `Sent a document [${fileCategory.toUpperCase()}]: ${file.name}`
+        })
       });
 
       if (res.ok) {
-        setSimFileName("");
-        setSimFileUrl("#");
-        setSelectedFile(null);
-        setFileSimOpen(false);
         if (uploadFailed) {
           triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for dispatch.");
         } else {
-          triggerToast("Attachment uploaded and synchronized successfully!");
+          triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
         }
         fetchData();
       } else {
-        triggerToast("❌ Failed to upload attachment. Please try again.");
+        triggerToast("❌ Failed to send attachment. Please try again.");
       }
     } catch (e) {
       console.error(e);
-      triggerToast("Failed to upload files");
+      triggerToast("❌ Failed to send attachment.");
     } finally {
       setIsUploading(false);
     }
@@ -1334,153 +1335,6 @@ export default function DriverApplication({
                   </button>
                 </div>
 
-                {/* QUICK ACTIONS */}
-                {!isShipmentFinished && (() => {
-                  const quickT = {
-                    en: {
-                      title: "Quick Actions",
-                      subtitle: "Common actions for this job",
-                      start: "Start",
-                      startSubAccept: "Accept Job",
-                      startSubTransit: "Set In-Transit",
-                      startSubActive: "Driving Live",
-                      status: "Status",
-                      statusSub: "Update shipment status"
-                    },
-                    tr: {
-                      title: "Hızlı Eylemler",
-                      subtitle: "Bu sefer için yaygın eylemler",
-                      start: "Başlat",
-                      startSubAccept: "Sevkiyatı Kabul Et",
-                      startSubTransit: "Yola Çık",
-                      startSubActive: "Yolculuk Aktif",
-                      status: "Durum",
-                      statusSub: "Durumu güncelle"
-                    },
-                    ar: {
-                      title: "إجراءات سريعة",
-                      subtitle: "الإجراءات الشائعة لهذه المهمة",
-                      start: "بدء",
-                      startSubAccept: "قبول الشحنة",
-                      startSubTransit: "تغيير إلى في الطريق",
-                      startSubActive: "التتبع جاري",
-                      status: "الحالة",
-                      statusSub: "تحديث الحالة"
-                    }
-                  }[lang as 'en' | 'tr' | 'ar'] || {
-                    title: "Quick Actions",
-                    subtitle: "Common actions for this job",
-                    start: "Start",
-                    startSubAccept: "Accept Job",
-                    startSubTransit: "Set In-Transit",
-                    startSubActive: "Driving Live",
-                    status: "Status",
-                    statusSub: "Update shipment status"
-                  };
-
-                  const handleQuickStart = async () => {
-                    if (activeShipment.status === "Assigned") {
-                      await handleAcceptAssignment(activeShipment);
-                    } else if (activeShipment.status === "In Transit") {
-                      triggerToast(lang === 'tr' ? "ℹ️ Yolculuk zaten aktif. GPS verici düzgün çalışıyor." : "ℹ️ Transit is already active. GPS transmitter running normally.");
-                    } else {
-                      try {
-                        const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
-                          method: "PUT",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            status: "In Transit",
-                            remarksDesc: "Transit auto-started via Quick Actions.",
-                            updaterName: getDriverName(),
-                            role: "driver"
-                          })
-                        });
-                        if (res.ok) {
-                          triggerToast(lang === 'tr' ? "🚀 Yolculuk Başlatıldı!" : "🚀 Transit Started!");
-                          fetchData();
-                        } else {
-                          triggerToast("❌ Failed to start transit. Please try again.");
-                        }
-                      } catch (err) {
-                        console.error("Quick Start transit error:", err);
-                        triggerToast("❌ Could not reach the server.");
-                      }
-                    }
-                  };
-
-                  const handleQuickStatus = () => {
-                    statusFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  };
-
-                  // Check highlight or active state
-                  const isAssigned = activeShipment.status === "Assigned";
-                  const isPreTransit = ["Accepted", "Loading", "Loaded"].includes(activeShipment.status);
-                  const isTransit = activeShipment.status === "In Transit";
-
-                  return (
-                    <div id="driver-quick-actions" className="p-5 bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-3xl space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.5)] select-none">
-                      <div className="flex flex-col text-left">
-                        <span className="text-[9px] font-black tracking-widest text-[#f97316] uppercase font-mono">
-                          {quickT.title}
-                        </span>
-                        <span className="text-[10px] text-slate-400 mt-0.5">
-                          {quickT.subtitle}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3.5">
-                        {/* 1. START SHIPMENT */}
-                        <button
-                          type="button"
-                          onClick={handleQuickStart}
-                          className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border transition-all duration-300 transform active:scale-95 cursor-pointer max-w-full text-center relative overflow-hidden h-24 ${
-                            isAssigned
-                              ? "bg-orange-500 text-white border-orange-600 shadow-[0_4px_18px_rgba(249,115,22,0.4)] animate-pulse"
-                              : isPreTransit
-                              ? "bg-slate-900 hover:bg-slate-800 text-orange-400 border-orange-500/30 animate-shimmer"
-                              : isTransit
-                              ? "bg-emerald-950/40 text-emerald-400 border-emerald-500/30"
-                              : "bg-slate-950/80 text-slate-500 border-slate-900"
-                          }`}
-                        >
-                          <div className={`p-2 rounded-xl mb-1.5 ${isAssigned ? "bg-white/10" : "bg-slate-950/60"}`}>
-                            <Play className={`w-5 h-5 ${isAssigned ? "text-white" : isTransit ? "text-emerald-400" : "text-orange-500"}`} />
-                          </div>
-                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
-                            {quickT.start}
-                          </span>
-                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
-                            {isAssigned
-                              ? quickT.startSubAccept
-                              : isPreTransit
-                              ? quickT.startSubTransit
-                              : isTransit
-                              ? quickT.startSubActive
-                              : activeShipment.status}
-                          </span>
-                        </button>
-
-                        {/* 2. STATUS SHORTCUT */}
-                        <button
-                          type="button"
-                          onClick={handleQuickStatus}
-                          className="flex flex-col items-center justify-center p-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-100 hover:border-slate-700 transition-all transform active:scale-95 cursor-pointer h-24 text-center"
-                        >
-                          <div className="p-2 rounded-xl bg-slate-950/60 mb-1.5 text-orange-500">
-                            <Activity className="w-5 h-5 text-orange-400" />
-                          </div>
-                          <span className="text-[10px] font-black uppercase tracking-wider block truncate w-full">
-                            {quickT.status}
-                          </span>
-                          <span className="text-[8px] text-slate-400 mt-0.5 truncate block w-full">
-                            {quickT.statusSub}
-                          </span>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })()}
-
                 {/* Driver views parameters */}
                 <div className="p-5 bg-slate-900 border border-slate-800/80 rounded-3xl space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)] relative overflow-hidden group">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-2xl group-hover:bg-orange-500/10 transition-all duration-500" />
@@ -1837,13 +1691,25 @@ export default function DriverApplication({
                       </div>
                     ) : (
                       <form onSubmit={handleSendMessage} className="bg-slate-950 p-3.5 border-t border-slate-900 flex items-center gap-2.5 shrink-0 select-none">
+                        <input
+                          ref={attachmentInputRef}
+                          type="file"
+                          accept="image/*,application/pdf,.doc,.docx"
+                          className="hidden"
+                          onChange={handleAttachmentSelected}
+                        />
                         <button
                           type="button"
-                          onClick={() => setFileSimOpen(true)}
+                          onClick={() => attachmentInputRef.current?.click()}
+                          disabled={isUploading}
                           title={lang === 'tr' ? 'Ekle' : lang === 'ar' ? 'إرفاق' : 'Attach'}
-                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95"
+                          className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          <Paperclip className="w-4 h-4 shrink-0" />
+                          {isUploading ? (
+                            <div className="w-4 h-4 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Paperclip className="w-4 h-4 shrink-0" />
+                          )}
                         </button>
 
                         <input
@@ -2287,24 +2153,24 @@ export default function DriverApplication({
                       subtitle: "Manage your driver app preferences",
                       statusActive: "Active & Online",
                       truckId: "Truck ID",
-                      activeLang: "Application Language",
-                      activeLangSub: "Active language selected for dispatcher text"
+                      activeLang: "Language",
+                      activeLangSub: "Choose app language"
                     },
                     tr: {
                       title: "Ayarlar",
                       subtitle: "Sürücü uygulaması tercihlerinizi yönetin",
                       statusActive: "Aktif ve Çevrimiçi",
                       truckId: "Araç Plaka",
-                      activeLang: "Uygulama Dili",
-                      activeLangSub: "Sevk sorumlusu metni için seçilen aktif dil"
+                      activeLang: "Dil",
+                      activeLangSub: "Uygulama dilini seçin"
                     },
                     ar: {
                       title: "الإعدادات",
                       subtitle: "إدارة تفضيلات تطبيق السائق الخاص بك",
                       statusActive: "نشط ومتصل بالإنترنت",
                       truckId: "رقم الشاحنة",
-                      activeLang: "لغة التطبيق",
-                      activeLangSub: "اللغة النشطة لرسائل وتوجيهات الإرسال"
+                      activeLang: "اللغة",
+                      activeLangSub: "اختر لغة التطبيق"
                     }
                   };
                   const menuT = menuOptions[lang] || menuOptions.en;
@@ -2399,15 +2265,37 @@ export default function DriverApplication({
                             </button>
                           </div>
 
-                          {/* Application Selected Language Indicator Card */}
-                          <div className="flex items-center justify-between py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs text-left">
+                          {/* Language Selector */}
+                          <div className="py-1 bg-slate-950/40 p-2 rounded-xl border border-slate-800 text-xs text-left space-y-2">
                             <div className="space-y-0.5">
                               <span className="text-[11px] font-bold text-white block">{menuT.activeLang}</span>
                               <span className="text-[9px] text-slate-600 block leading-tight">{menuT.activeLangSub}</span>
                             </div>
-                            <span className="px-2.5 py-1 bg-orange-500/10 text-orange-400 font-extrabold text-[10px] rounded border border-orange-500/20 font-mono uppercase">
-                              {lang === 'tr' ? "🇹🇷 Türkçe" : (lang === 'ar' ? "🇸🇦 العربية" : "🇺🇸 English")}
-                            </span>
+                            <div className="grid grid-cols-3 gap-1.5">
+                              {([
+                                { value: 'en', flag: '🇺🇸', label: 'English' },
+                                { value: 'ar', flag: '🇸🇦', label: 'العربية' },
+                                { value: 'tr', flag: '🇹🇷', label: 'Türkçe' },
+                              ] as { value: Language; flag: string; label: string }[]).map(opt => {
+                                const isActive = lang === opt.value;
+                                return (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => onLanguageChange?.(opt.value)}
+                                    aria-pressed={isActive}
+                                    className={`px-2 py-2 rounded-lg border font-mono text-[10px] font-bold flex flex-col items-center gap-0.5 transition-all cursor-pointer ${
+                                      isActive
+                                        ? 'bg-orange-500/15 border-orange-500/40 text-orange-400'
+                                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-white'
+                                    }`}
+                                  >
+                                    <span className="text-sm">{opt.flag}</span>
+                                    <span>{opt.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -2418,27 +2306,6 @@ export default function DriverApplication({
               </div>
             )}
 
-            {/* Custom simulated file uploads modal overlay inside mobile frame */}
-            {fileSimOpen && (
-              <FileUploadModal
-                fileName={simFileName}
-                onFileNameChange={setSimFileName}
-                category={simFileCategory}
-                onCategoryChange={setSimFileCategory}
-                onFileSelected={(file, dataUrl, detectedCategory) => {
-                  setSelectedFile(file);
-                  setSimFileName(file.name);
-                  if (detectedCategory) {
-                    setSimFileCategory(detectedCategory);
-                  }
-                  setSimFileUrl(dataUrl);
-                }}
-                onClose={() => setFileSimOpen(false)}
-                onSubmit={handleSimulateUpload}
-                isUploading={isUploading}
-              />
-            )}
-
           </div>
 
           {/* Bottom Dock Navigation Tabs menu */}
@@ -2447,7 +2314,6 @@ export default function DriverApplication({
             chatDisabled={!activeShipment}
             onSelect={(tab) => {
               setActiveTab(tab);
-              setFileSimOpen(false);
             }}
           />
 

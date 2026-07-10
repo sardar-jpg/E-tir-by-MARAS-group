@@ -89,7 +89,7 @@ export default function ActiveJobCard({
           <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
             {label.cargo}
           </span>
-          <p className="text-[11px] font-bold text-slate-200 truncate">{s.cargoDescription}</p>
+          <p className="text-[11px] font-bold text-slate-200 line-clamp-2 leading-snug">{s.cargoDescription}</p>
           <p className="text-[9px] text-slate-500 font-mono">
             {typeof s.cargoWeight === 'number' ? `${s.cargoWeight.toLocaleString()} kg` : label.notSpecified}
           </p>
@@ -112,7 +112,7 @@ export default function ActiveJobCard({
             <span className="text-[8.5px] font-bold text-slate-500 uppercase tracking-widest font-mono block">
               {label.truck}
             </span>
-            <p className="text-[11px] font-bold text-slate-200 font-mono truncate">{truckNumber}</p>
+            <p className="text-[11px] font-bold text-slate-200 font-mono break-all">{truckNumber}</p>
           </div>
         )}
       </div>
