@@ -20,7 +20,12 @@ or secrets. It is documentation only.
 
 See also `docs/REAL_FIREBASE_VERIFICATION.md` for the step-by-step
 procedure to actually prove the real Firestore/Storage/Auth path (§4, §17
-below) works — not just that these env vars are set.
+below) works — not just that these env vars are set. See
+`docs/IOS_APP_REVIEW_READINESS.md` for the iOS/TestFlight/App Store
+Connect side of a launch (existing-app update rule, App Review checklist,
+reviewer account plan, privacy/metadata checklist, and a safe
+bundle-size/performance review) — this checklist stays focused on the
+backend/Firebase/access side.
 
 ## 2. Production domain
 
@@ -539,6 +544,14 @@ referenced here rather than duplicated:
   see `docs/FOLLOW_UP_ROADMAP.md`
 - Repository Cleanup / Legacy Files Review (`Etir/e-tir-by-maras`,
   `etir-new` scaffold directories)
-- Performance / Bundle Size Optimization (Vite chunk-size warnings)
+- ~~Performance / Bundle Size Optimization~~ — **partially done in PR #69**
+  (`ClientDashboard` and `jsPDF` now lazy/dynamically loaded); the two
+  >500kB Vite warnings remain, smaller. See
+  `docs/IOS_APP_REVIEW_READINESS.md` §7.
+- **iOS Info.plist missing location/camera/photo-library usage-description
+  strings** — found in PR #69, not fixed (native-level change). App Review
+  risk and possible on-device crash. See
+  `docs/IOS_APP_REVIEW_READINESS.md` §8.
 - Mobile / Responsive Review
-- MARAS AI Monitor Foundation
+- MARAS AI Monitor Foundation — roadmap clarified (Admin-only, permanently)
+  in PR #69, see `docs/IOS_APP_REVIEW_READINESS.md` §10

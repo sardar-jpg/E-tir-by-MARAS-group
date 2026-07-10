@@ -38,7 +38,6 @@ import { canManageClients, canManageVendors, canViewCostStatements, canViewAudit
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { buildCostStatementRows, filterCostStatementRows, resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
-import { jsPDF } from "jspdf";
 
 const fetch = apiFetch;
 
@@ -1755,15 +1754,19 @@ MARAS Group etir Center`;
     document.body.removeChild(link);
   };
 
-  const handleDownloadPDF = (elementId?: string) => {
+  const handleDownloadPDF = async (elementId?: string) => {
     if (!selectedCostStatement) {
       triggerToast(lang === 'tr' ? "Aktif maliyet tablosu seçilmedi." : "Error: No active cost statement selected.");
       return;
     }
-    
+
     triggerToast(lang === 'tr' ? "PDF Dosyası Hazırlanıyor..." : "Generating high-fidelity PDF Document...");
-    
+
     try {
+      // Dynamically imported so jsPDF (and its bundled dependencies) only
+      // load when an admin actually exports a cost statement PDF, instead
+      // of being part of every AdminPanel load.
+      const { jsPDF } = await import("jspdf");
       const doc = new jsPDF({
         orientation: "portrait",
         unit: "mm",
