@@ -828,6 +828,7 @@ export default function App() {
               loggedInDriverId={session.driver?.id}
               loggedInDriver={session.driver}
               onLogout={handleLogout}
+              onLanguageChange={setLang}
             />
           </Suspense>
         </main>
