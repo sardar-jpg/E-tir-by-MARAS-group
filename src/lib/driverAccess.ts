@@ -67,6 +67,22 @@ export function getAssignableDrivers(drivers: Driver[]): Driver[] {
 }
 
 /**
+ * Server-side assignment safety check (PR #83, Shipment Registry review):
+ * POST/PUT /api/shipments assign whatever driver id the client sends
+ * without re-checking status — the client-side dropdown filtering
+ * (getAssignableDrivers/getCoreDriverSelectOptions, AdminPanel.tsx) never
+ * offers a pending/rejected driver as an option, but nothing stopped a
+ * direct API call from sending one anyway. Same principle as PR #80's
+ * driver-login hardening: enforce it server-side, not only by hiding UI.
+ * A driver id that doesn't resolve to any known record (`null`/`undefined`
+ * — already-deleted or never valid) is not this function's concern; each
+ * route's own existing "driver not found" handling covers that case.
+ */
+export function isDriverAssignmentSafe(driver: Driver | null | undefined): boolean {
+  return !driver || isDriverApproved(driver);
+}
+
+/**
  * Options for a "Core Driver" select that already has a value (editing an
  * existing shipment): assignable drivers, plus the currently-assigned
  * driver even if they're no longer assignable (e.g. rejected after being

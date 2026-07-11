@@ -48,7 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
-import { findDuplicateDriverField, resolveDriverLoginBlock } from "./src/lib/driverAccess";
+import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe } from "./src/lib/driverAccess";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
@@ -2377,6 +2377,23 @@ async function startServer() {
       const driver = driversList.find(d => d.id === data.assignedDriverId);
       const assignedDriverName = driver ? driver.name : "Unassigned";
 
+      // Assignment safety: the client-side driver-select dropdowns already
+      // exclude pending/rejected drivers (getAssignableDrivers,
+      // src/lib/driverAccess.ts), but nothing stopped a direct API call
+      // from sending one anyway. Enforced here server-side, matching PR
+      // #80's driver-login hardening principle.
+      if (!isDriverAssignmentSafe(driver)) {
+        return res.status(400).json({ error: "Cannot assign a pending or rejected driver to a shipment." });
+      }
+      if (Array.isArray(data.additionalDrivers)) {
+        for (const ad of data.additionalDrivers) {
+          const adDriver = driversList.find(d => d.id === ad?.driverId);
+          if (!isDriverAssignmentSafe(adDriver)) {
+            return res.status(400).json({ error: "Cannot assign a pending or rejected driver as an additional driver." });
+          }
+        }
+      }
+
       const initialStatus = data.status || (data.freightType === "sea" || data.freightType === "air" ? "Booking Confirmed" : (data.assignedDriverId ? "Assigned" : "New"));
       const initialTimeline: LocationUpdate = {
         timestamp: new Date().toISOString(),
@@ -2717,6 +2734,38 @@ async function startServer() {
       const oldDriverId = original.assignedDriverId;
       const newDriverId = data.assignedDriverId;
 
+      // Fetch the new primary driver once, up front, and reuse it below for
+      // both the assignment-safety check and the stats/name resolution
+      // (previously fetched twice — once to bump activeShipmentsCount,
+      // again just to read the name — with no validation in between).
+      let driverObj: Driver | null = null;
+      if (newDriverId) {
+        const ndDoc = await getDoc(doc(db, "drivers", newDriverId));
+        if (ndDoc.exists()) {
+          driverObj = ndDoc.data() as Driver;
+        }
+      }
+
+      // Assignment safety: the client-side driver-select dropdowns already
+      // exclude pending/rejected drivers (getAssignableDrivers/
+      // getCoreDriverSelectOptions, AdminPanel.tsx), but nothing stopped a
+      // direct API call from sending one anyway. Enforced here server-side,
+      // matching PR #80's driver-login hardening principle. Checked before
+      // any mutation below (driver stats, shipment write) so a rejected
+      // request never has a partial side effect.
+      if (!isDriverAssignmentSafe(driverObj)) {
+        return res.status(400).json({ error: "Cannot assign a pending or rejected driver to a shipment." });
+      }
+      if (Array.isArray(data.additionalDrivers)) {
+        for (const ad of data.additionalDrivers) {
+          if (!ad?.driverId) continue;
+          const adDoc = await getDoc(doc(db, "drivers", ad.driverId));
+          if (adDoc.exists() && !isDriverAssignmentSafe(adDoc.data() as Driver)) {
+            return res.status(400).json({ error: "Cannot assign a pending or rejected driver as an additional driver." });
+          }
+        }
+      }
+
       // Handle shift in driver statistics
       if (oldDriverId !== newDriverId) {
         if (oldDriverId) {
@@ -2728,26 +2777,12 @@ async function startServer() {
             await setDoc(odRef, od);
           }
         }
-        if (newDriverId) {
-          const ndRef = doc(db, "drivers", newDriverId);
-          const ndDoc = await getDoc(ndRef);
-          if (ndDoc.exists()) {
-            const nd = ndDoc.data() as Driver;
-            nd.activeShipmentsCount += 1;
-            await setDoc(ndRef, nd);
-          }
+        if (newDriverId && driverObj) {
+          await setDoc(doc(db, "drivers", newDriverId), { ...driverObj, activeShipmentsCount: driverObj.activeShipmentsCount + 1 });
         }
       }
 
-      let assignedDriverName = "Unassigned";
-      let driverObj: Driver | null = null;
-      if (newDriverId) {
-        const dDocs = await getDoc(doc(db, "drivers", newDriverId));
-        if (dDocs.exists()) {
-          driverObj = dDocs.data() as Driver;
-          assignedDriverName = driverObj.name;
-        }
-      }
+      const assignedDriverName = driverObj ? driverObj.name : "Unassigned";
 
       let finalStatus = data.status !== undefined ? data.status : original.status;
       const timelineCopy = [...(original.timeline || [])];
@@ -2975,6 +3010,17 @@ async function startServer() {
         if (!owns) return res.status(403).json({ error: "You are not assigned to this shipment." });
       } else if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update shipment status." });
+      } else if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
+        // PR #83 (Shipment Registry review): this route used bare
+        // requireAuth with no adminType check at all, unlike every other
+        // shipment-mutating route (POST/PUT /api/shipments both use
+        // requireFullAdmin) — an accounts-type admin session could update
+        // any shipment's status directly, even though the whole Shipment
+        // Registry tab (and its only client-side call site for this route,
+        // the shipment details modal) is hidden from them. Not reachable
+        // via the UI today, but the same defense-in-depth gap shape this
+        // codebase has fixed repeatedly elsewhere (BUG-08, BUG-26, etc.).
+        return res.status(403).json({ error: "Accounts-role admins cannot update shipment status." });
       }
 
       const previousStatus = item.status;
