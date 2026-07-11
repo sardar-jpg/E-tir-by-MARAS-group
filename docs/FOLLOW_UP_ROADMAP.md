@@ -4,6 +4,191 @@ Deferred items identified during PR #56 (Settings Center Foundation) and prior
 reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
+## Shipment Registry review (PR #83)
+Review and hardening pass over the existing Shipment Registry (the
+`shipments` tab in `AdminPanel.tsx` — list/search/filter, Create/Edit
+Shipment modals, the shipment Details modal, status updates, driver
+assignment) plus the server routes and role-based view helpers behind it.
+The feature already existed and worked; this PR found and fixed two real
+server-side gaps, with everything else confirmed already correct.
+
+**Fixed:**
+- **Pending/rejected drivers could still be assigned via a direct API
+  call.** `POST /api/shipments` and `PUT /api/shipments/:id` both took
+  `assignedDriverId`/`additionalDrivers[].driverId` straight from the
+  request body with no status check — the client-side dropdown filtering
+  (`getAssignableDrivers`/`getCoreDriverSelectOptions`, added in PR #80)
+  only stops the *UI* from offering a pending/rejected driver as an
+  option, it never stopped the server from accepting one sent directly.
+  Added `isDriverAssignmentSafe` (`src/lib/driverAccess.ts`) and applied
+  it to both routes for the primary driver and every `additionalDrivers`
+  entry, before any mutation runs — matching the same "enforce
+  server-side, not only by hiding UI" principle PR #80 already established
+  for driver login. While fixing `PUT /api/shipments/:id`, also removed a
+  pre-existing redundant double-fetch of the same new-driver document
+  (previously fetched once to bump `activeShipmentsCount`, then fetched
+  again just to read the name) — consolidated into one fetch, reused for
+  both, with the validation check now sitting between them.
+- **An accounts-type admin session could update any shipment's status
+  directly.** `PUT /api/shipments/:id/status` used bare `requireAuth`
+  (any authenticated session) with its own inline role check that
+  explicitly handled `driver`/`client` but had no `adminType` branch at
+  all — unlike every other shipment-mutating route (`POST`/`PUT
+  /api/shipments` both use `requireFullAdmin`, which blocks
+  `accounts`). Not reachable via the UI today (the whole Shipment
+  Registry tab, and the Details modal that's this route's only
+  client-side call site, are both hidden from accounts admins via
+  `canViewShipmentRegistry`), but the same defense-in-depth gap shape
+  this codebase has fixed repeatedly before (BUG-08, BUG-26, and others —
+  "relying on 'no button happens to reach it today' is exactly the kind
+  of assumption a future change could quietly invalidate"). Added an
+  `else if` branch reusing the existing `canViewShipmentRegistry`
+  function, matching the exact guard already used to gate `GET
+  /api/shipments` and the tab itself. Driver/client logic is unchanged.
+
+**Reviewed, found already correct, no change needed:**
+- **Role access**: `GET /api/shipments` (the list), the `shipments` tab's
+  content-block gate, and both Create/Edit modals are all
+  `canViewShipmentRegistry`-gated (super/operation only); an accounts
+  admin gets a 403 from the server directly, confirmed via the existing
+  guard, unchanged in this PR. `GET /api/shipments/:id` (single-shipment
+  fetch) and `requireShipmentAccess` (chat/documents/share/subscribe)
+  deliberately allow *any* admin type through, with a pre-existing "Admins
+  can view any shipment" comment — reviewed and left unchanged: this
+  matches how the Costs tab's accounts admins already legitimately see
+  `agreedAmount` via `CostStatement` snapshot fields (PR #60), so a direct
+  single-shipment fetch isn't a new leak, just a different existing path
+  to already-permitted data, and narrowing it wasn't a confirmed bug.
+- **Driver/Client/Public scoping**: `buildShipmentViewForRole`
+  (`src/lib/shipmentView.ts`, unit-tested, unchanged) strips
+  `internalNotes`, `agreedAmount` (except a driver's own, on their own
+  shipment), `companyName`, customer emails/notification history, and
+  pickup/delivery contact numbers for driver/client sessions, restoring
+  the identity fields only for the shipment's own client. `GET
+  /api/shipments` scopes the list itself to a driver's own
+  assigned/co-assigned shipments or a client's own company before this
+  redaction even runs. `buildSecureShareView`
+  (`src/lib/publicShareView.ts`, unit-tested, unchanged) is even
+  narrower for the anonymous public-tracking audience — no
+  `companyName`, `agreedAmount`, `internalNotes`, contact numbers, or raw
+  Storage URLs (documents/photos get a same-origin proxy path that
+  re-checks visibility per request, not a permanent signed URL).
+- **Documents**: `documentAccess.ts`'s category-visibility policy
+  (unit-tested, unchanged) — CMR stays admin-published/driver-read-only
+  (`canDriverUploadDocumentCategory` rejects a driver session setting
+  `cmr`), `invoice`/`other` are treated as ambiguous and require an
+  explicit `isSharedExternally` opt-in before reaching a client or the
+  public link, and the public share view re-validates document visibility
+  at request time rather than trusting a stale flag.
+- **Assignment display**: existing assignments remain visible when
+  editing a shipment whose driver has since become pending/rejected
+  (`getCoreDriverSelectOptions`, PR #80/#81, reconfirmed unchanged);
+  `additionalDrivers` is only overwritten when the request body actually
+  includes it (`data.additionalDrivers !== undefined ? ... :
+  original.additionalDrivers`), so editing unrelated fields can't corrupt
+  or drop existing additional-driver entries.
+- **Status updates**: the Shipment Registry table shows a real
+  progress bar/percentage/timing label derived from
+  `analyzeShipmentTiming`/`getShipmentProgressPercentage` (both
+  pre-existing, already reviewed for "no fake live tracking wording" in
+  earlier PRs — GPS-coordinate-based when a driver has live telemetry,
+  a documented status-based fallback otherwise, never a randomized or
+  invented figure). Delivered/Closed handling is consistent between the
+  dedicated status route and the general edit route (both push a
+  timeline entry, notify customer watchers, and — on `Delivered`
+  specifically — decrement the driver's active count and increment
+  completed count once).
+- **Search/filters**: `filteredShipments` (search text + status + freight
+  type) is a single client-side filter pass over already-fetched data, no
+  extra requests triggered by typing/filtering; empty state
+  (`noShipmentsMatched`) renders correctly when a filter matches nothing.
+  No pagination on the registry table — consistent with every other list
+  in `AdminPanel.tsx` (Clients, Vendors, Drivers all render unpaginated
+  too), not a regression specific to this tab, so left unchanged.
+
+**Verification:** `npm run lint`/`test`/`build`/`check-firebase-readiness`
+all pass (285/285 tests, 3 new in `driverAccess.test.ts` for
+`isDriverAssignmentSafe`). Bundle size unaffected (`AdminPanel` chunk
+unchanged at 312.33 kB — this PR only touched `server.ts` and
+`src/lib/driverAccess.ts`, no `AdminPanel.tsx` changes). Browser-driven
+(Playwright/Chromium, `npm run dev`, memory-fallback persistence):
+- Super Admin opens the Shipment Registry, the shipment Details modal
+  (Shipment Overview/Route & Freight Details/Parties & Assignment/Internal
+  Admin Notes all render), and the Create Shipment modal, all with zero
+  console errors.
+- A temporary Operations Admin (created/deleted via the real "Add Team
+  Member" flow) opens the same Shipment Registry with zero console
+  errors, and a direct API probe with its own session token confirms
+  `PUT /api/shipments/:id/status` still succeeds (`200`) — unchanged.
+- A temporary Accounts Admin has no Shipment Registry nav item anywhere;
+  direct API probes with its own session token confirm `GET
+  /api/shipments` and `POST /api/shipments` stay `403` (unchanged,
+  pre-existing) and `PUT /api/shipments/:id/status` now also correctly
+  returns `403` with `"Accounts-role admins cannot update shipment
+  status."` (previously this exact call would have succeeded).
+- A driver registered through the real registration form (left
+  `pending`), then assigned via a direct `POST /api/shipments` API call
+  with its own id as `assignedDriverId`: confirmed `400` ("Cannot assign a
+  pending or rejected driver to a shipment."); the same driver approved
+  via the real Approve button, then the identical `POST /api/shipments`
+  call: confirmed `201` — the fix rejects only while pending, not once
+  approved.
+- Separately, a second pending driver added to an *existing* real
+  shipment's `additionalDrivers` array via a direct `PUT
+  /api/shipments/:id` call: confirmed `400` ("Cannot assign a pending or
+  rejected driver as an additional driver.") — the `additionalDrivers`
+  validation path specifically, not just the primary-driver path. A
+  follow-up `PUT` on the same shipment changing only `cargoDescription`
+  (no `assignedDriverId` in the diff) confirmed the response's
+  `assignedDriverId` was byte-identical to the pre-edit value — editing
+  an unrelated field never disturbs an existing assignment.
+- The seeded `demo_driver` session's `GET /api/shipments` returns exactly
+  its own one assigned shipment, with `companyName`/`internalNotes` both
+  absent from the response (redacted, not just empty strings).
+- A seeded shipment's public tracking link (`isLinkShared` toggled on via
+  the real `POST /api/shipments/:id/share` endpoint, then reverted off
+  afterward) returns exactly the `buildSecureShareView` field set — no
+  `companyName`, `agreedAmount`, `internalNotes`, or contact-number
+  fields present at all.
+- Mobile (390×844): dashboard and the off-canvas drawer both render
+  correctly, with "Shipment Registry" listed as its own nav item
+  identically to desktop; the drawer's tab list did not get clicked
+  through to the registry table itself in this pass (a test-script
+  selector issue, not an app issue — the drawer's role-filtered content
+  was already visually confirmed correct).
+
+**Final consolidated pass** (one script, run clean against a freshly
+restarted server, all 19 checks passed): registered one driver left
+`pending` and a second explicitly `PATCH`-ed to `rejected`, then exercised
+all four assignment vectors against each — `POST /api/shipments`
+`assignedDriverId`, `POST /api/shipments` `additionalDrivers`, `PUT
+/api/shipments/:id` `assignedDriverId`, `PUT /api/shipments/:id`
+`additionalDrivers` — confirmed `400` in every one of the 8 combinations.
+Confirmed an approved driver and a seeded legacy driver with no `status`
+field at all (`driver-1`) both remain assignable (`201`) via the same
+`assignedDriverId` path. Confirmed a temporary Operations Admin's registry
+access and status-update capability are both unchanged, a temporary
+Accounts Admin is blocked on the nav, `GET /api/shipments`, and `PUT
+/api/shipments/:id/status` simultaneously, `demo_driver` sees only its own
+shipment with no `companyName`/`internalNotes`, `demo_client` sees its own
+company's shipment with no `agreedAmount`/`internalNotes`, a driver
+session's direct `POST .../documents` with `category: "cmr"` gets a `403`
+("CMR documents must be sent by Admin") while the identical call with
+`category: "photo"` succeeds (`201`) — confirming the CMR block is
+category-specific, not an overbroad upload lockout — and a real
+`isLinkShared` toggle confirms the public share view's safe field set.
+All temporary drivers and admins were deleted via their real
+delete/PATCH-reject flows before the run ended; the two flag toggles
+performed directly against seed data (driver approval, `isLinkShared`)
+were reverted or are otherwise inert once the dev server (memory-fallback
+only) is stopped.
+
+All temporary drivers/admins/shipments existed only in this run's
+in-memory fallback store and were discarded by stopping the dev server
+afterward; the two flag toggles performed directly against real data
+(the driver's approval, the shipment's `isLinkShared`) were reverted
+before doing so had any lasting effect anyway.
+
 ## Google Workspace module review (PR #82)
 Review and hardening pass over the existing Google Workspace integration
 (the `gmail` tab in `AdminPanel.tsx` — Gmail send, Google Drive shipment

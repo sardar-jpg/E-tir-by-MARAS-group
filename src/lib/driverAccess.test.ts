@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   findDuplicateDriverField,
   isDriverApproved,
+  isDriverAssignmentSafe,
   getAssignableDrivers,
   getCoreDriverSelectOptions,
   resolveDriverLoginBlock,
@@ -103,6 +104,23 @@ describe("isDriverApproved / getAssignableDrivers", () => {
       makeDriver({ id: "d4", status: undefined }),
     ];
     expect(getAssignableDrivers(drivers).map(d => d.id)).toEqual(["d1", "d4"]);
+  });
+});
+
+describe("isDriverAssignmentSafe", () => {
+  it("allows an approved driver and a legacy driver with no status field", () => {
+    expect(isDriverAssignmentSafe(makeDriver({ status: "approved" }))).toBe(true);
+    expect(isDriverAssignmentSafe(makeDriver({ status: undefined }))).toBe(true);
+  });
+
+  it("blocks a pending or rejected driver", () => {
+    expect(isDriverAssignmentSafe(makeDriver({ status: "pending" }))).toBe(false);
+    expect(isDriverAssignmentSafe(makeDriver({ status: "rejected" }))).toBe(false);
+  });
+
+  it("treats a missing/unresolved driver (null or undefined) as safe — 'driver not found' is a different route concern, not an assignment-safety rejection", () => {
+    expect(isDriverAssignmentSafe(null)).toBe(true);
+    expect(isDriverAssignmentSafe(undefined)).toBe(true);
   });
 });
 
