@@ -4,6 +4,201 @@ Deferred items identified during PR #56 (Settings Center Foundation) and prior
 reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
+## Firebase production-readiness review (PR #84)
+
+Full, non-destructive review of the app's Firebase architecture (client init,
+Admin SDK, Firestore rules, Storage rules, session/auth, persistence
+fallback, CORS, logging/privacy) against `docs/REAL_FIREBASE_VERIFICATION.md`
+and `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`. No deploy, no rules
+publish, no production data touched, no secrets created/rotated/exposed.
+Found and fixed one confirmed production-reliability bug and one confirmed
+(low-severity) information-disclosure pattern; everything else reviewed was
+already correct or is a documented, deliberate tradeoff from earlier PRs.
+
+**Fixed — reads silently used the empty memory fallback under
+`STRICT_PERSISTENCE`, unlike writes.** `server.ts`'s `setDoc`/`updateDoc`/
+`deleteDoc`/`addDoc`/`allocateNextShipmentSequence` all already refuse to
+touch the in-memory store and throw a `ServiceUnavailableError` (503) when
+`useMemoryFallback` is true and `STRICT_PERSISTENCE` is on (the production
+default) — but the read wrappers, `getDoc`/`getDocs`, had no equivalent
+guard. In production, if Firestore ever became unreachable mid-session
+(auth failure, outage, timeout), every `GET` endpoint would keep responding
+200 with whatever happens to be in the in-memory store — which is a
+completely separate, unrelated dataset that is empty unless
+`SEED_DEMO_DATA=true` (off by default in production). The practical effect:
+during an outage, shipments/drivers/clients/chat/logs would all appear to
+have silently vanished (empty lists, not an error), while writes correctly
+failed loudly with a 503 — a confusing and dangerous mismatch that could
+easily be misread as real data loss. Fixed by adding the identical
+`if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();` guard to
+both `getDoc` and `getDocs`, mirroring the existing write-path pattern
+exactly. No behavior change when Firestore is healthy, and no behavior
+change in local dev (`STRICT_PERSISTENCE=false` by convention there).
+
+**Fixed — four routes echoed the raw `err.message` back to the client.**
+`POST /api/verify-session` (unauthenticated), `GET
+/api/shipments/:id/distance-matrix`, `GET /api/system/datadog`, and `GET
+/api/chat/unread` all included a `details: err.message` (or `err?.message`)
+field in their 500 JSON response. None leaked a stack trace or a
+credential, but raw SDK/JS error text (Firestore, Google Maps, Node
+internals) has no legitimate client-facing use and is exactly the kind of
+"Firebase error exposes internal detail" pattern this PR was asked to rule
+out — `/api/verify-session` in particular is reachable pre-authentication.
+Removed `details` from all four responses; `console.error` server-side
+logging of the full error is unchanged (and was added at `/api/system/datadog`,
+which previously had none). No frontend code read `.details` from any
+response (`grep -rn "\.details\b" src` returned nothing), so this is a
+no-op from the client's perspective.
+
+**Reviewed, confirmed already correct — no change:**
+- **Firestore/Storage rules architecture.** Both `firestore.rules` and
+  `storage.rules` deny everything except one hardcoded server-account UID;
+  all real per-role authorization happens in `server.ts` middleware
+  (`requireAuth`/`requireRole`/`requireFullAdmin`/`requireShipmentAccess`/
+  `canView*`/`canWrite*`), which is the intentional, documented
+  architecture (see the rules files' own comments and
+  `docs/REAL_FIREBASE_VERIFICATION.md` §5). Nothing was found reachable
+  directly from a signed-in end user's own Firebase identity — only the
+  server's own dedicated account can touch Firestore/Storage at all.
+- **Session/auth.** `/api/verify-session` treats the client-supplied
+  role/id/email as untrusted hints only, verifies the Firebase ID token
+  server-side via the Admin SDK (`adminAuth.verifyIdToken`), and matches
+  the *verified* uid/email against Firestore records before issuing an app
+  session — Firebase identity alone never grants a role. Session tokens
+  (`src/lib/auth.ts`) are HMAC-signed with `SESSION_SECRET`, timing-safe
+  compared, and expire after 24h. Pending/rejected drivers are blocked at
+  both `/api/login` and `/api/verify-session` via
+  `resolveDriverLoginBlock`. Passwords are never returned to the client
+  (checked all three verify-session branches and `/api/login`).
+- **CORS.** `src/lib/cors.ts` is an explicit allowlist
+  (`https://etir.app`/`https://www.etir.app` always included); it never
+  reflects an arbitrary Origin or falls back to `*`, and
+  `check-firebase-readiness` independently blocks a wildcard entry in any
+  origin env var as a production launch blocker.
+- **Firestore indexes / query readiness.** No `firestore.indexes.json`
+  exists, and `server.ts` never uses Firestore `where`/`orderBy` — every
+  collection read is `getDocs(collection(db, "..."))` (a full-collection
+  fetch), filtered/sorted in JS. There is therefore nothing to add an
+  index for today. This is a systemic, pre-existing pattern across the
+  entire app, not something introduced or fixable in this PR — see
+  "Deferred" below.
+- **Document/upload visibility.** `canDriverUploadDocumentCategory` blocks
+  driver-originated CMR uploads at both call sites; document visibility
+  (`isDocumentVisibleForShare`) is re-checked per-request by the
+  share-document proxy rather than trusted from a stored flag; upload
+  storage paths are scoped `uploads/{role}/{id}/{timestamp}-{random}-{filename}`
+  (not enumerable/guessable); public tracking never receives a raw
+  Firebase Storage URL (proxied through `/api/share/:token/...` instead —
+  see `buildPublicShareDocumentPath`).
+- **Cost/accounting/vendor privacy.** `shipmentView.ts` strips
+  `agreedAmount`/`internalNotes` from driver/client views (except a
+  driver's own primary-shipment amount, existing intended behavior);
+  `publicShareView.ts`'s `buildSecureShareView` contains no cost, margin,
+  or internal-notes fields at all.
+- **Client Staff separation.** `canClientSelfDeleteAccount`
+  (`src/lib/clientAccess.ts`) blocks a Client Staff session from deleting
+  its own company account server-side; company-level management is
+  admin-only by construction.
+- **Push tokens.** `canDeletePushToken` strictly matches both the caller's
+  own `userId` and `role` — no cross-user or admin-override path.
+- **Activity-log `actor` field.** `POST /api/logs` accepts a free-text
+  `actor` field (capped to 300 chars by `sanitizeLogInput`) that isn't
+  cross-checked against the caller's session identity — but the only
+  legitimate call site (`AdminPanel.tsx`'s Google Workspace backup/log
+  actions) intentionally logs the signed-in *Google* account, which is a
+  genuinely different identity from the app session by design, and the
+  route is already restricted to super/operation admins
+  (`requireCanWriteAuditLogs`). Already reviewed and deliberately
+  mitigated (length cap, trusted-role-only), not a new finding — left
+  unchanged.
+- **Persistence/readiness reporting.** `GET /api/system/storage-status`
+  already honestly reports `usingMemoryFallback` with a loud warning;
+  `scripts/check-firebase-readiness.ts` already treats
+  production-configured memory-fallback, a missing `SESSION_SECRET`/
+  `SUPER_ADMIN_PASSWORD_HASH`, a wildcard CORS origin, a committed
+  service-account-shaped JSON file, and a firestore/storage rules UID
+  mismatch as launch blockers. `POST /api/upload` already refuses to
+  silently store into memory (503) regardless of `STRICT_PERSISTENCE`.
+
+**Deferred (not fixed in this PR — larger design changes, out of scope for
+a "harden without redesigning" pass):**
+- **Full-collection-scan read pattern.** Every server-side read fetches an
+  entire collection and filters/sorts in JS rather than using Firestore
+  `where`/`orderBy`/`limit`. Fine at today's data volume; at production
+  scale this becomes a latency and Firestore read-cost concern (e.g.
+  `GET /api/shipments`, `GET /api/logs`, `GET /api/chat/unread` all
+  re-fetch their entire collection on every call). Addressing this would
+  mean adding real Firestore queries (and the composite indexes they'd
+  require) across dozens of routes — a genuine redesign, not a low-risk
+  fix.
+- **No server-side session revocation/blocklist.** Session tokens are
+  stateless HMAC-signed values with a 24h expiry and no server-side store
+  — there is no way to force-invalidate a specific token before it
+  expires (e.g. after a suspected compromise or an admin account being
+  disabled). A real fix needs a session store/blocklist design, which is
+  a larger architectural addition than this PR's scope.
+- **Brief startup race window.** `app.listen()` starts accepting requests
+  immediately; `startFirestoreConnection()` (which performs the real
+  Firestore auth/connectivity check) runs afterward, in the background,
+  inside the `listen` callback. For the first few seconds after a cold
+  start (up to ~23s across the three retry attempts), `useMemoryFallback`
+  is still at its initial `false` default even though the server hasn't
+  actually confirmed Firestore connectivity yet — a request in that
+  window would hit the real Firestore SDK path, most likely fail
+  (unauthenticated), and only then flip to the fallback (now correctly
+  gated by this PR's fix). This is a narrow, transient window, not a
+  silent-wrong-data risk (any read/write in that window either succeeds
+  for real or now fails loudly) — reordering startup to block on
+  Firestore connectivity before binding the port would risk breaking
+  Cloud Run's expectation of a fast port bind, so it's left as a
+  documented limitation rather than changed here.
+- **Server-account UID / Google Cloud Console items** already called out
+  in `docs/REAL_FIREBASE_VERIFICATION.md` §5a and
+  `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` (confirming the real
+  `SERVER_FIREBASE_EMAIL` account's UID matches the rules, confirming the
+  Google Maps API key's HTTP-referrer restriction) — these require
+  Firebase/Google Cloud Console access this environment doesn't have and
+  were already flagged as manual steps by prior PRs, not new to this one.
+
+**Verification:**
+- `npm run lint` (tsc --noEmit): clean.
+- `npm test` (vitest run): 285/285 passing, unchanged — this PR's fixes are
+  in `server.ts` control flow only (mirroring an existing tested pattern),
+  no new pure/extractable logic was introduced.
+- `npm run build`: succeeds, bundle size unaffected.
+- `npm run check-firebase-readiness`: no blocking problems, in both default
+  and `NODE_ENV=production` simulation.
+- Local/API verification performed (memory-fallback only — this
+  environment has no real Firebase credentials, consistent with every
+  prior PR in this series):
+  - **Locally verified:** with `STRICT_PERSISTENCE=false` (normal local
+    dev), login and `GET /api/shipments` for admin/driver/client all work
+    identically to before the fix — no regression. With
+    `STRICT_PERSISTENCE=true` and no Firestore credentials (simulating an
+    outage from boot), `POST /api/login` now correctly fails loudly
+    (`500`) instead of silently succeeding against seeded demo data, and
+    `GET /api/system/storage-status` (itself requiring auth) still
+    reports the true fallback state once a session exists. `POST
+    /api/verify-session` with a garbage ID token returns the existing
+    generic 401 with no `details` field. Confirmed via `git status`/`grep`
+    that no scratch files, logs, or `.details` frontend usages remain.
+  - **Statically reviewed (not exercised live):** Firestore/Storage rules
+    content, CORS allowlist logic, `check-firebase-readiness` script
+    logic, all `logActivity`/`pushNotification` call sites, document/cost/
+    push-token access-control helpers — read and traced through code, not
+    re-run against a live server in this pass (most were also covered by
+    live verification in the PRs that introduced them, e.g. PR #80–#83).
+  - **Requires real Firebase verification later (cannot be done in this
+    environment):** the actual "Firestore becomes unreachable mid-session
+    while previously connected" transition (this environment never
+    reaches a connected-to-real-Firestore state at all, so only the
+    "never connects" boot path was exercised); confirming the
+    `SERVER_FIREBASE_EMAIL` account's real UID matches
+    `firestore.rules`/`storage.rules`; confirming the
+    `GOOGLE_MAPS_PLATFORM_KEY` HTTP-referrer restriction in Google Cloud
+    Console. See `docs/REAL_FIREBASE_VERIFICATION.md` for the full
+    procedure.
+
 ## Shipment Registry review (PR #83)
 Review and hardening pass over the existing Shipment Registry (the
 `shipments` tab in `AdminPanel.tsx` — list/search/filter, Create/Edit
