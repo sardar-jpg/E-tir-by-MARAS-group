@@ -425,6 +425,17 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutErrorMsg:
 
 async function getDocs(queryRef: any) {
   if (useMemoryFallback) {
+    // PR #84 (Firebase production readiness): every write wrapper below
+    // (setDoc/updateDoc/deleteDoc/addDoc/allocateNextShipmentSequence)
+    // already refuses to silently use the memory fallback when
+    // STRICT_PERSISTENCE is on — but reads didn't, so a mid-session
+    // Firestore outage in production used to make every GET endpoint
+    // return successfully with data from an empty, unrelated in-memory
+    // store (SEED_DEMO_DATA is off in prod) instead of failing loudly.
+    // That looks exactly like every shipment/driver/client record just
+    // vanished, while writes correctly 500'd — a confusing and dangerous
+    // mismatch. Reads must fail the same way writes do.
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleGetDocsMemory(queryRef);
   }
   try {
@@ -433,12 +444,15 @@ async function getDocs(queryRef: any) {
     console.warn("Firestore getDocs failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleGetDocsMemory(queryRef);
   }
 }
 
 async function getDoc(docRef: any) {
   if (useMemoryFallback) {
+    // See getDocs above — same reasoning, same fix.
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleGetDocMemory(docRef);
   }
   try {
@@ -447,6 +461,7 @@ async function getDoc(docRef: any) {
     console.warn("Firestore getDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleGetDocMemory(docRef);
   }
 }
@@ -2715,7 +2730,7 @@ async function startServer() {
       }
     } catch (err: any) {
       console.error("Error in Distance Matrix Endpoint:", err);
-      res.status(500).json({ error: "Failed to process distance matrix", details: err?.message });
+      res.status(500).json({ error: "Failed to process distance matrix" });
     }
   });
 
@@ -4109,7 +4124,7 @@ async function startServer() {
       return res.status(400).json({ success: false, message: "Invalid session role specified." });
     } catch (err: any) {
       console.error("Error verifying session server-side:", err);
-      res.status(500).json({ error: "Session verification failed.", details: err.message });
+      res.status(500).json({ error: "Session verification failed." });
     }
   });
 
@@ -4139,7 +4154,8 @@ async function startServer() {
         }
       });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to retrieve configuration status", details: err.message });
+      console.error("Error retrieving system configuration status:", err);
+      res.status(500).json({ error: "Failed to retrieve configuration status" });
     }
   });
 
@@ -5151,7 +5167,7 @@ async function startServer() {
       res.json(unreadMsgs);
     } catch (err: any) {
       console.error(err);
-      res.status(500).json({ error: "Failed to fetch unread chat messages", details: err.message });
+      res.status(500).json({ error: "Failed to fetch unread chat messages" });
     }
   });
 

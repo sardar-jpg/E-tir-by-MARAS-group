@@ -380,6 +380,16 @@ as concrete real-Firebase checks (not just tab visibility) — see
       — see `DEMO_ACCOUNTS` in `server.ts`, gated on `IS_LOCAL_DEV`)
 - [ ] Confirm no `SEED_DEMO_DATA`-seeded dataset (drivers/shipments/chat
       from `initialDrivers`/`initialShipments`/etc.) is present
+- [ ] **(PR #84)** With real Firebase already connected, deliberately break
+      connectivity mid-session (e.g. temporarily revoke the server
+      account's access or block network to Firestore) and confirm `GET`
+      endpoints (`/api/shipments`, `/api/drivers`, etc.) now return `503`
+      instead of silently succeeding with empty results — `getDoc`/`getDocs`
+      in `server.ts` respect `STRICT_PERSISTENCE` exactly like every write
+      path already did. This specific transition (connected → disconnected
+      mid-session) could not be exercised in an environment with no real
+      Firebase credentials; only the "never connects" boot-time path was
+      verified there.
 
 ## 10. Required commands
 
