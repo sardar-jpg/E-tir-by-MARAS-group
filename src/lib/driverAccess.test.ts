@@ -63,6 +63,22 @@ describe("findDuplicateDriverField", () => {
     const withBlankEmail = [makeDriver({ id: "driver-2", username: "cemal", email: "", phone: "+90 555 222 2222" })];
     expect(findDuplicateDriverField(withBlankEmail, { username: "yusuf", email: "", phone: "+90 555 333 3333" })).toBeNull();
   });
+
+  it("does not treat the 'No phone' display-fallback placeholder as a real duplicate phone value", () => {
+    // POST /api/drivers/self-register (server.ts) stores "No phone" on
+    // newDriver when no phone was submitted, purely as a display fallback.
+    // The duplicate check must be run against the caller's RAW phone input
+    // (undefined/empty here), never that placeholder — otherwise a second
+    // genuinely different registrant who also omits a phone number gets
+    // incorrectly rejected as a duplicate of the first.
+    const withPlaceholderPhone = [makeDriver({ id: "driver-2", username: "cemal", email: "cemal@example.com", phone: "No phone" })];
+    expect(
+      findDuplicateDriverField(withPlaceholderPhone, { username: "yusuf", email: "yusuf@example.com", phone: undefined })
+    ).toBeNull();
+    expect(
+      findDuplicateDriverField(withPlaceholderPhone, { username: "yusuf", email: "yusuf@example.com", phone: "" })
+    ).toBeNull();
+  });
 });
 
 describe("isDriverApproved / getAssignableDrivers", () => {

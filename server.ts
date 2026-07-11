@@ -4401,9 +4401,19 @@ async function startServer() {
       // every driver (see the "3. Driver login" branch of POST /api/login
       // below) — a silent duplicate here would make one of the two
       // colliding accounts unreachable, or ambiguous, at login time.
+      //
+      // Checked against the raw submitted fields, never newDriver's
+      // display-fallback placeholders ("No phone", a generated username,
+      // etc.) — those are cosmetic-only and would otherwise collide with
+      // each other across unrelated drivers, producing false-positive
+      // duplicate rejections for anyone who omitted the same field.
       const driversSnapshot = await getDocs(collection(db, "drivers"));
       const existingDrivers = driversSnapshot.docs.map(d => d.data() as Driver);
-      const duplicateField = findDuplicateDriverField(existingDrivers, newDriver);
+      const duplicateField = findDuplicateDriverField(existingDrivers, {
+        username: data.username,
+        email: data.email,
+        phone: data.phone,
+      });
       if (duplicateField) {
         const fieldLabel = duplicateField === "username" ? "Username" : duplicateField === "email" ? "Email address" : "Phone number";
         return res.status(409).json({ error: `${fieldLabel} is already registered to another driver.` });
