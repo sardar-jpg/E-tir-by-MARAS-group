@@ -4,6 +4,139 @@ Deferred items identified during PR #56 (Settings Center Foundation) and prior
 reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
+## Driver registration & pending approval (PR #80)
+Review and hardening pass over the existing driver self-registration +
+admin pending-approval flow (`LoginPage.tsx`'s registration form,
+`POST /api/drivers/self-register`, `PATCH /api/drivers/:id/status`, the
+Driver Alliance tab's "Pending Driver Approvals" section). The flow already
+existed and worked end to end — this PR found and fixed four gaps, added a
+`src/lib/driverAccess.ts` module (pure, unit-tested, same pattern as
+`adminAccess.ts`/`clientAccess.ts`/`documentAccess.ts`), and left one
+gap as a documented product decision rather than a code change.
+
+**Fixed:**
+- **No duplicate username/email/phone check on self-registration.** Login
+  matches an identifier against every driver's username/email/phone
+  (`POST /api/login`'s driver branch), so two drivers registering with the
+  same username left the second one permanently unable to log in (or
+  ambiguously matched against the first), with no error surfaced anywhere.
+  `findDuplicateDriverField` (`src/lib/driverAccess.ts`) now checks new
+  registrations against every existing driver (case-insensitive,
+  whitespace-insensitive for phone) and `POST /api/drivers/self-register`
+  returns `409` with a clear message on a collision. The admin-side
+  `POST /api/drivers` create route has the same pre-existing gap but was
+  left unchanged — that path is behind `requireFullAdmin` (a trusted actor
+  entering data deliberately, not a public self-service form), which is a
+  materially different risk profile from an anonymous registration
+  endpoint; worth applying the same check there as a follow-up.
+- **No server-side password length check on self-registration.** The
+  client enforced a 6-character minimum, but `POST
+  /api/drivers/self-register` accepted anything when called directly.
+  Added the same check server-side (only when a password was actually
+  sent — the no-password/Google-sign-in path still generates its own
+  random one).
+- **Pending/rejected drivers could still appear in shipment
+  driver-assignment selectors.** `AdminPanel.tsx`'s four driver `<select>`s
+  (Create Shipment's Core Driver + Additional Driver, Edit Shipment's same
+  two) all mapped over the raw `drivers` array with no status filter, so a
+  driver who hadn't been approved yet (or had been rejected) could still be
+  assigned to a shipment. Now filtered through `getAssignableDrivers`
+  (status `undefined`/`"approved"` only); the Edit Shipment Core Driver
+  select uses `getCoreDriverSelectOptions` instead, which also keeps a
+  shipment's *currently* assigned driver visible in the dropdown even if
+  they're no longer assignable, so editing an existing shipment never
+  silently mismatches its own value or drops a real prior assignment. The
+  Dashboard's "Fleet Utilization" KPI (`X / Y capacity allocated`) had the
+  same problem — `Y` was every registered driver including pending/rejected
+  — now scoped to the assignable roster.
+- **Driver registration submitted / approved / rejected were not in
+  `activityLogs`.** This PR's roadmap already flagged "driver approve/reject"
+  as a known audit-logging gap (see "Access & permissions" below). Added
+  `logActivity` calls to `POST /api/drivers/self-register` and `PATCH
+  /api/drivers/:id/status` (both approve and reject branches, actor =
+  `Super Admin`/`Operation Admin` from the session). The approve/reject
+  route also now skips the log + push notification on a no-op repeated
+  request (status already equal to the requested one) so double-clicking
+  Approve/Reject can't spam duplicate log entries/notifications — the
+  write itself was already idempotent, this only quiets the side effects.
+
+**Also reviewed, found already correct, no change needed:**
+- Registration form: all fields required client-side, email format check,
+  password-confirmation match, new drivers always created with
+  `status: "pending"`, no auto-approval path anywhere.
+- Pending/rejected block is enforced **server-side** at both driver login
+  paths (`POST /api/login`'s driver branch and the Firebase-verified
+  `POST /api/verify-session`) — a pending/rejected driver never receives a
+  session token, so no operational endpoint or screen is reachable
+  regardless of client-side UI. Consolidated the two previously-duplicated
+  message strings into `resolveDriverLoginBlock`
+  (`src/lib/driverAccess.ts`) so both paths show identical wording.
+- Admin Pending Approval area: pending drivers are visually separated
+  (amber "Pending Driver Approvals" card) with Approve/Reject buttons above
+  the main roster grid; `canViewDriverRoster` already limits the whole
+  Driver Alliance tab to super/operation.
+- Approve/reject: `PATCH /api/drivers/:id/status` is behind
+  `requireFullAdmin`, which 403s both a driver session (role `"driver"`)
+  and an accounts-type admin session server-side — not just UI-hidden.
+  Verified end to end: a temporary Accounts Admin created via the real
+  "Add Team Member" flow has no Driver Alliance nav item, and a direct
+  `PATCH /api/drivers/:id/status` API call with its own session token
+  returns `403 {"error":"Accounts-role admins cannot perform this
+  action."}`. A driver session can never pass `requireFullAdmin` at all, so
+  self-approval isn't reachable by construction.
+- Assignment safety: existing assignments to a driver who is later
+  rejected/pending are unaffected by the new dropdown filtering (see
+  `getCoreDriverSelectOptions` above); `drivers.find(...)`-based lookups
+  elsewhere (shipment cards, chat, GPS map) were left untouched since they
+  read an *existing* assignment, not a picker of new ones.
+
+**Missing product decision (not implemented — no code change):**
+- **Suspended / inactive / archived driver statuses don't exist.**
+  `Driver.status` (`src/types.ts`) only supports `"pending" | "approved" |
+  "rejected"` — there is no way today to deactivate an approved driver
+  (e.g. a driver who leaves, or whose account needs a temporary hold)
+  short of manually editing their record. Adding these statuses is a real
+  product decision (what happens to their active shipments/assignments at
+  the moment of suspension, whether it's reversible, who can do it) and a
+  larger change than this hardening pass — out of scope here, but the
+  login-block/assignment-filter plumbing added in this PR
+  (`resolveDriverLoginBlock`, `isDriverApproved`/`getAssignableDrivers`) is
+  already structured so adding new blocked statuses later is a small,
+  localized change (extend the status union + those two functions) rather
+  than a new mechanism.
+- **An already-issued driver session isn't re-validated per request.**
+  Login blocks pending/rejected drivers from ever getting a session token,
+  but once a driver has a valid token (24h TTL, `SESSION_TTL_MS` in
+  `src/lib/auth.ts`), nothing re-checks their current `status` on
+  subsequent requests — so a driver rejected/suspended *after* logging in
+  keeps working operational access until their token expires. This matches
+  the app's existing session model for every role (an admin whose account
+  is deleted mid-session keeps access the same way — no role gets live
+  per-request revalidation today), so singling out drivers for it would be
+  an inconsistent, asymmetric change with a real cost (an extra Firestore
+  read on every authenticated driver request, including the ~3.5s chat
+  poll and GPS sync intervals). Flagging as a deliberate product/infra
+  decision rather than fixing silently: if same-session revocation ever
+  becomes a requirement, it should apply consistently across all
+  roles (a session-store/blocklist mechanism), not just drivers.
+
+**Verification:** `npm run lint`/`test`/`build`/`check-firebase-readiness`
+all pass (278/278 tests, 21 new in `src/lib/driverAccess.test.ts`).
+Browser-driven end to end (Playwright against real Chrome, `npm run dev`
+with `SEED_DEMO_DATA=true STRICT_PERSISTENCE=false`, memory-fallback
+persistence): registered a temporary driver through the real UI, confirmed
+`Pending` status and login block, approved it as Super Admin and confirmed
+login then worked with no unauthorized shipment data shown, confirmed the
+driver now appears in the shipment driver-assignment dropdown (absent
+before approval); registered and rejected a second temporary driver,
+confirmed the block message; confirmed a duplicate-username registration
+attempt is rejected with a clear error; confirmed a temporary Accounts
+Admin (created and deleted via the real "Add Team Member" flow) has no
+Driver Alliance access client- or server-side; registration form and
+pending screen both verified at 390×844 mobile width. All temporary
+drivers/admin existed only in this run's in-memory fallback store and were
+discarded by stopping the dev server afterward.
+
 ## Access & permissions
 - ~~**Admin Data Fetch / AdminType Access Review**~~ — **Done in PR #58** (`feature/admin-data-fetch-admin-type-access-review`). GET/POST `/api/logs` and GET `/api/cost-statements(/:shipmentId)` used `requireRole("admin")` with no `adminType` check, so any admin type could fetch the audit ledger or the accounting/cost-statement data directly, and AdminPanel's `fetchData()` fetched both unconditionally into browser state for every admin type regardless of which tabs `filteredAdminTabs` showed them. Also found and fixed: the Dashboard's "Operational Activity Stream" widget rendered the last 5 `activityLogs` entries (with a "Full Audit" button routing into the hidden `audit` tab) unconditionally for every admin type, since the Dashboard tab itself is shown to all three. See `canViewAuditLogs`/`canViewCostStatements` (`src/lib/adminAccess.ts`) and their `requireCanViewAuditLogs`/`requireCanViewCostStatements` server guards.
 - ~~**Cost statement write access for accounts admins**~~ — **Done in PR #61** (`feature/accounts-cost-statement-write-access`). Product decision: **Option A** — Accounts Admin owns accounting end-to-end (cost items, supplier names, quantities, unit prices, totals, paid amount, notes, payment status), so write access mirrors the existing read access. `POST /api/cost-statements/:shipmentId` moved from `requireFullAdmin` (super/operation only) to a new `requireCanWriteCostStatements` guard backed by `canWriteCostStatements` (`src/lib/adminAccess.ts`), which allows `super`/`accounts` and still blocks `operation` entirely. This grants nothing beyond the cost-statements route — accounts admins still cannot GET `/api/shipments`, `/api/logs`, or `/api/admins`. The route already sources `agreedAmount`/`truckNumber` from the authoritative shipment record rather than the client payload when the shipment exists (PR #60), so that protection is unaffected by the wider caller set.
@@ -11,7 +144,7 @@ next so the work isn't lost between sessions.
 - **Permissions & Roles Settings Review** — decide whether Staff & Permissions needs finer-grained roles beyond `super` / `operation` / `accounts`.
 - **Centralized 401/403 denied-access logging** — log denied-access attempts (401/403) in one place instead of ad hoc per route.
 - **`/api/verify-session` audit logging** — add logging to the session-verification endpoint so failed/forged session checks are visible in audit logs.
-- **Admin create/delete, driver approve/reject, cost-statement read/export, document visibility audit events** — expand `activityLogs` coverage to these actions, which aren't currently logged.
+- **Admin create/delete, driver approve/reject, cost-statement read/export, document visibility audit events** — expand `activityLogs` coverage to these actions, which aren't currently logged. ~~Driver approve/reject (and registration submitted)~~ — **done in PR #80**, see "Driver registration & pending approval" above. Admin create/delete, cost-statement read/export, and document-visibility events remain unlogged.
 - **Audit Logging Completion** — broader pass once the above event types are enumerated.
 
 - ~~**Admin Sidebar Usability + Role Navigation Safety + Safe Lazy Loading**~~ — **Done in PR #76** (`feature/admin-collapsible-sidebar-review`). Three findings from the review, all fixed the same way as prior `audit`/`team`/`costs`/`reports`/`tracking_map`/`drivers`/`shipments` defense-in-depth gaps (content block re-checks the access function, not just sidebar visibility):

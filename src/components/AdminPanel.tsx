@@ -34,6 +34,7 @@ import type { ChatCenterFocus } from "./admin/ChatCenter";
 import PasswordInput from "./PasswordInput";
 import { apiFetch, safeGetItem, safeSetItem } from "../lib/api";
 import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics, canViewGpsTracking, canViewDriverRoster, canViewShipmentRegistry } from "../lib/adminAccess";
+import { getAssignableDrivers, getCoreDriverSelectOptions } from "../lib/driverAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
@@ -4111,10 +4112,16 @@ MARAS Group etir Center`;
                   {lang === 'tr' ? "Sürücü Doluluk Oranı" : (lang === 'ar' ? "إشغال أسطول السائقين" : "Fleet Utilization")}
                 </span>
                 <p className="text-3xl font-black text-indigo-700">
-                  {drivers.length > 0 ? `${Math.round((drivers.filter(d => shipments.some(s => s.assignedDriverId === d.id && s.status !== "Delivered" && s.status !== "Closed")).length / drivers.length) * 100)}%` : "0%"}
+                  {(() => {
+                    const activeFleet = getAssignableDrivers(drivers);
+                    return activeFleet.length > 0 ? `${Math.round((activeFleet.filter(d => shipments.some(s => s.assignedDriverId === d.id && s.status !== "Delivered" && s.status !== "Closed")).length / activeFleet.length) * 100)}%` : "0%";
+                  })()}
                 </p>
                 <div className="text-[10px] font-bold text-slate-500">
-                  <span>{drivers.filter(d => shipments.some(s => s.assignedDriverId === d.id && s.status !== "Delivered" && s.status !== "Closed")).length} / {drivers.length} {lang === 'tr' ? "aktif sürücü görevde" : (lang === 'ar' ? "سائل مكلف حالياً" : "capacity allocated")}</span>
+                  {(() => {
+                    const activeFleet = getAssignableDrivers(drivers);
+                    return <span>{activeFleet.filter(d => shipments.some(s => s.assignedDriverId === d.id && s.status !== "Delivered" && s.status !== "Closed")).length} / {activeFleet.length} {lang === 'tr' ? "aktif sürücü görevde" : (lang === 'ar' ? "سائل مكلف حالياً" : "capacity allocated")}</span>;
+                  })()}
                 </div>
               </div>
               <div className="p-3 bg-indigo-50 text-indigo-600 rounded-lg group-hover:bg-indigo-100 transition-colors">
@@ -7793,7 +7800,7 @@ MARAS Group etir Center`;
                           className="w-full p-2.5 bg-slate-50 border border-slate-200 focus:border-slate-500 rounded-lg outline-none text-xs"
                         >
                           <option value="">-- {t('selectDriver')} --</option>
-                          {drivers.map(d => (
+                          {getAssignableDrivers(drivers).map(d => (
                             <option key={d.id} value={d.id}>
                               {d.name} ({d.truckNumber} - Active: {d.activeShipmentsCount})
                             </option>
@@ -7884,7 +7891,7 @@ MARAS Group etir Center`;
                             }}
                           >
                             <option value="">-- {lang === 'tr' ? "Yüklemek İçin Sürücü Ekle..." : "Choose Additional Driver/Truck..."} --</option>
-                            {drivers.map(d => (
+                            {getAssignableDrivers(drivers).map(d => (
                               <option key={d.id} value={d.id}>
                                 {d.name} ({d.truckNumber} - {d.truckType || "standard"})
                               </option>
@@ -8643,7 +8650,7 @@ MARAS Group etir Center`;
                         className="w-full p-2.5 border border-slate-200 rounded-lg outline-none bg-white text-xs"
                       >
                         <option value="">-- {t('selectDriver')} --</option>
-                        {drivers.map(d => (
+                        {getCoreDriverSelectOptions(drivers, editingShipment.assignedDriverId).map(d => (
                           <option key={d.id} value={d.id}>{d.name} ({d.truckNumber})</option>
                         ))}
                       </select>
@@ -8732,7 +8739,7 @@ MARAS Group etir Center`;
                           }}
                         >
                           <option value="">-- {lang === 'tr' ? "Yüklemek İçin Sürücü Ekle..." : "Choose Additional Driver..."} --</option>
-                          {drivers.map(d => (
+                          {getAssignableDrivers(drivers).map(d => (
                             <option key={d.id} value={d.id}>
                               {d.name} ({d.truckNumber})
                             </option>
