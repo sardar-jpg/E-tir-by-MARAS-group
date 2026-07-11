@@ -12,6 +12,7 @@ import {
   canViewCostStatements,
   canWriteCostStatements,
   canViewAuditLogs,
+  canWriteAuditLogs,
   canViewLogisticsAnalytics,
   resolveFullAdminStatus,
   sanitizeCreatedAdminType,
@@ -131,6 +132,26 @@ describe("canViewAuditLogs", () => {
     expect(canViewAuditLogs("operation")).toBe(false);
     expect(canViewAuditLogs("accounts")).toBe(false);
     expect(canViewAuditLogs(undefined)).toBe(false);
+  });
+});
+
+describe("canWriteAuditLogs", () => {
+  it("allows super and operation — operation admins can reach the Google Workspace tab and must be able to log those actions", () => {
+    expect(canWriteAuditLogs("super")).toBe(true);
+    expect(canWriteAuditLogs("operation")).toBe(true);
+  });
+
+  it("blocks accounts and missing adminType", () => {
+    expect(canWriteAuditLogs("accounts")).toBe(false);
+    expect(canWriteAuditLogs(undefined)).toBe(false);
+  });
+
+  it("is strictly broader than canViewAuditLogs — write access is a superset of read access here, not the usual write-never-exceeds-read pattern", () => {
+    for (const adminType of ["super", "operation", "accounts", undefined] as const) {
+      if (canViewAuditLogs(adminType)) {
+        expect(canWriteAuditLogs(adminType)).toBe(true);
+      }
+    }
   });
 });
 

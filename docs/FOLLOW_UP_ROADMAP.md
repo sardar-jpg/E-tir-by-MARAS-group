@@ -4,6 +4,161 @@ Deferred items identified during PR #56 (Settings Center Foundation) and prior
 reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
+## Google Workspace module review (PR #82)
+Review and hardening pass over the existing Google Workspace integration
+(the `gmail` tab in `AdminPanel.tsx` — Gmail send, Google Drive shipment
+backups, Google Calendar scheduling — plus `src/googleAuth.ts`'s OAuth
+connect/disconnect flow). The feature already existed and worked; this PR
+found and fixed one real bug (an audit-logging gap for operation admins)
+and left everything else unchanged, including two pre-existing design
+tradeoffs documented below as deferred rather than fixed.
+
+**Fixed:**
+- **Operation admins' Google Workspace actions were never logged.**
+  `POST /api/logs` (the endpoint `AdminPanel.tsx` calls after a successful
+  Gmail send, Drive backup, or Calendar event creation) shared
+  `requireCanViewAuditLogs` (super-only) with `GET /api/logs`. But the
+  `gmail` tab's content-block gate is `resolvedAdminType === 'super' ||
+  resolvedAdminType === 'operation'` — operation admins can reach it via
+  the Shipments tab's "Gmail Alert" shortcut (`canViewShipmentRegistry`,
+  not super-only) — so every Workspace action an operation admin actually
+  performed silently 403'd on the logging call and was never recorded,
+  even though the UI explicitly grants them the capability to perform it.
+  The PR #58 comment that originally justified sharing the super-only
+  guard between GET and POST ("every current client call site for the
+  POST route is inside the super-only Google Workspace flow") turned out
+  to be false once operation gained `gmail`-tab access — this was a real
+  audit-completeness gap, not an intentional restriction. Added
+  `canWriteAuditLogs` (`src/lib/adminAccess.ts`, super or operation) and a
+  new `requireCanWriteAuditLogs` server guard, applied only to `POST
+  /api/logs` — `GET /api/logs` and the `audit` tab are unchanged and still
+  super-only, so operation admins can now log their own Workspace actions
+  but still can never read the full ledger back. Also fixed the client
+  side symptom of the same bug: the Gmail-send success handler
+  unconditionally re-fetched `GET /api/logs` afterward to refresh the
+  local `activityLogs` state — harmless for super admins but a guaranteed
+  403 for operation admins — now gated on `canViewAuditLogs(resolvedAdminType)`
+  first, matching the same guard already used elsewhere in this file
+  (`fetchData()`'s SWR loader).
+
+**Reviewed, found already correct, no change needed:**
+- **Role access**: `gmail` tab content-block already gated to
+  super/operation; the Settings "Google Workspace" card is separately
+  gated to super-only inside `AdminSettingsSection.tsx`
+  (`resolvedAdminType === 'super'`) — an operation admin reaches the tab
+  only via the Shipments shortcut, never via Settings, matching the
+  existing comment at the `gmail` content block. Accounts admins can
+  never set `activeTab` to `'gmail'` at all (outer gate blocks the
+  content, and no accounts-visible UI path — Settings card and Shipments
+  tab are both hidden from them). `isCurrentlyAdmin` in `App.tsx` (`session
+  && session.role === "admin"`) is the sole gate on mounting `AdminPanel`
+  at all — Client/Driver/Public sessions never reach the Workspace UI,
+  confirmed unchanged.
+- **No tokens exposed in the UI itself**: the header only ever renders
+  `gmailUser.email`/`.displayName`/`.photoURL` — the raw OAuth
+  `gmailToken` is never interpolated into any rendered text, attribute, or
+  console statement anywhere in the `gmail` tab or `googleAuth.ts`.
+- **No secrets logged**: none of the three `POST /api/logs` calls (Gmail
+  send, Drive backup, Calendar event) include the token, email body,
+  attachment content, or any Drive/Calendar payload — only shipment
+  number, a masked recipient (`maskEmailForLog`, already existing — same
+  first-letter-plus-domain masking as `maskLoginIdentifier`), and a short
+  fixed description. Verified all three call sites individually.
+- **No accidental customer/internal data leak via email**: the "Compose"
+  pre-fill (`handlePrepopulateGmail`) only ever populates public-tracking-safe
+  fields (shipment number, company name, status, cities, truck number, and
+  a `?token=` tracking link) — no `agreedAmount`, `internalNotes`, vendor
+  costs, or margin. The send handler also already calls
+  `containsRawPrivateDocumentUrl` (`src/lib/emailSafety.ts`) on both
+  subject and body before allowing send, blocking raw private
+  Storage/Firestore document URLs from being emailed — pre-existing,
+  unit-tested, unchanged.
+- **Reliability**: Gmail/Drive/Calendar each have distinct loading, empty,
+  and error states (`driveLoading`/`calendarLoading` spinners, "No files
+  found"/"No upcoming calendar slots" empty states, red error banners
+  surfacing the Google API's own error message — appropriate here since
+  the audience is already-authorized admins debugging their own action,
+  not end customers). No polling: the data-fetch `useEffect` only fires on
+  `activeTab`/`workspaceSubTab` changes, never on an interval. No
+  console/network spam for unauthorized roles: accounts admins can never
+  reach a state where this `useEffect` or any Workspace fetch fires at
+  all, confirmed via the access-rule review above.
+- **Lazy-loading**: evaluated fresh this PR, not just carried over from
+  the PR #78 note. Decision unchanged: **not extracted**. Unlike the seven
+  tabs already extracted (PR #76/#78/#81), the Gmail send handler is ~110
+  lines of real business logic (MIME construction, base64url encoding,
+  the Gmail API call, masked logging, and a shared-state `setActivityLogs`
+  refresh) written *inline* as the `<form onSubmit>` in JSX — not a
+  pre-extracted named function like `analyzeShipmentTiming`/`getShipmentProgressPercentage`
+  were for the Dashboard extraction. Extracting the tab would mean either
+  first pulling that inline handler into a named function (a real,
+  security-sensitive-code-touching change with no test coverage over this
+  exact flow, done only to enable an unrelated refactor) or passing a
+  ~110-line inline arrow function down as a prop (doesn't actually reduce
+  risk or complexity, just relocates it). It also reaches into
+  `activityLogs`/`setActivityLogs`, state shared far more broadly than any
+  extracted section's own props. Given recharts is already fully out of
+  `AdminPanel`'s chunk (PR #81), the remaining estimated saving here
+  (~20–25 kB, per the PR #78 estimate) isn't worth that risk. Bundle size
+  measured unaffected by this PR's actual change: `AdminPanel` chunk
+  312.32 kB → 312.33 kB (the one added `if` guard).
+
+**Reviewed, found real but deliberately left unchanged (deferred, not a
+bug — see "Google Workspace" section below for the pre-existing tracked
+items these update):**
+- **The Google OAuth access token is persisted to `localStorage`**
+  (`gmail_access_token`, `src/googleAuth.ts`), not just held in React
+  state. This is consistent with the rest of the app's session model
+  (`etir_session` is also `localStorage`-persisted) rather than a uniquely
+  worse practice introduced here — changing it would mean redesigning the
+  app's client-side credential storage strategy generally, out of scope
+  for a Workspace-specific hardening pass. Noted for awareness, not fixed.
+- **The requested Drive OAuth scope is the full `drive` scope**, not the
+  narrower `drive.file` (app-created-files-only) scope — already tracked
+  below as "Google Drive Scope Review." Confirmed why it's broad:
+  `fetchDriveFiles()` lists the account's general Drive folder
+  (`orderBy=createdTime desc` across all files, not scoped to app-created
+  ones), so narrowing to `drive.file` would break "browse recent Drive
+  files" entirely — a real behavior change requiring a product decision,
+  not a mechanical hardening fix. Left unchanged.
+
+**Verification:** `npm run lint`/`test`/`build`/`check-firebase-readiness`
+all pass (282/282 tests, 3 new in `adminAccess.test.ts` for
+`canWriteAuditLogs`). Browser-driven (Playwright/Chromium, `npm run dev`,
+memory-fallback persistence), scoped to what's actually testable without a
+real Google account (this environment has no live Google OAuth
+credential, so the popup-based connect flow itself, and everything gated
+on an actual `gmailToken` — Gmail/Drive/Calendar sub-tabs, a real send —
+could not be exercised end to end; noted here rather than assumed):
+- Super Admin: sees the Settings "Open Google Workspace" card, opens the
+  `gmail` tab, sees the not-connected "Authorize with Google" state
+  (screenshotted, desktop). Direct API probe with its own session token:
+  `GET /api/logs` → 200, `POST /api/logs` → 201 (unchanged).
+- A temporary Operations Admin (created/deleted via the real "Add Team
+  Member" flow): confirmed **no** "Open Google Workspace" card in
+  Settings (matches the code's `resolvedAdminType === 'super'` gate in
+  `AdminSettingsSection.tsx`). The Shipments tab's "Gmail Alert" shortcut
+  itself is conditional on that specific shipment's public-tracking
+  toggle (`isLinkShared`) being on — not a role restriction — and wasn't
+  reachable on the seeded demo shipment used in this pass; its
+  reachability by operation admins is confirmed instead by code (the
+  `gmail` content block's own gate, `resolvedAdminType === 'super' ||
+  resolvedAdminType === 'operation'`, has no further restriction on this
+  button) and, more importantly, by the actual fix: a direct API probe
+  with this admin's own session token shows `POST /api/logs` now returns
+  **201** (was 403 before this PR's fix) while `GET /api/logs` correctly
+  stays **403** (unchanged, read access still super-only) — this is the
+  exact route the real Gmail-send/Drive-backup/Calendar-create handlers
+  call, so this confirms the fix functions correctly for the flow it's
+  fixing.
+- A temporary Accounts Admin: confirmed no Google Workspace access
+  anywhere in the UI; direct probes confirm `POST /api/logs` stays 403
+  (not widened beyond super/operation) and an unrelated route
+  (`GET /api/drivers`) still 403s too, i.e. nothing else was accidentally
+  broadened.
+- All three temporary admins were created and deleted via the real UI;
+  no leftover data (confirmed via a post-cleanup roster check).
+
 ## Driver registration & pending approval (PR #80)
 Review and hardening pass over the existing driver self-registration +
 admin pending-approval flow (`LoginPage.tsx`'s registration form,
@@ -192,7 +347,8 @@ discarded by stopping the dev server afterward.
 
 ## Google Workspace
 - **Google Drive Shipment Folder Structure** — define a consistent per-shipment folder layout for Drive backups.
-- **Google Drive Scope Review** — re-check requested OAuth scopes are the minimum needed (no scope changes were made in PR #56).
+- **Google Drive Scope Review** — re-check requested OAuth scopes are the minimum needed (no scope changes were made in PR #56). **Reviewed in PR #82** (see "Google Workspace module review" above): the full `drive` scope is confirmed still necessary today, since `fetchDriveFiles()` browses the account's general Drive folder rather than only app-created files — narrowing to `drive.file` would require also changing that behavior (a product decision), so no scope change was made. Still open if a future PR wants to scope Drive backups to an app-managed folder instead.
+- **Google OAuth token storage** — added in PR #82: the connected account's OAuth access token is persisted to `localStorage` (`gmail_access_token`, `src/googleAuth.ts`), consistent with this app's existing `etir_session` storage pattern but worth a dedicated look if the app's client-side credential storage strategy is ever revisited generally (out of scope for a Workspace-specific pass).
 
 ## Chat & documents
 - ~~**Customer Chat File Upload UI**~~ — **Done in PR #62** (`feature/customer-chat-file-upload-ui`). Client Owner/Client Staff can now attach one file (paperclip button, existing `PDF/JPG/PNG/WebP/DOC(X)/XLS(X)` allowlist via `validateUpload`, `src/lib/uploadValidation.ts`) alongside or instead of text in the customer/admin (`client_admin`) chat in `ClientDashboard.tsx`, reusing the existing `/api/upload` + `POST /api/shipments/:id/chat` flow (channel still server-forced to `client_admin` for client sessions — unchanged). Uploads stay chat-only by default: `shouldSaveChatFileAsShipmentDocument` (`src/lib/chatVisibility.ts`) was narrowed from channel-only to channel **and** sender — only an *admin-sent* `client_admin` attachment still auto-mirrors into `shipment.documents` (preserving the existing admin publish-a-document-via-chat feature from PR #35/#39/#44); a customer/client-staff-sent attachment no longer does, so it can't reach the public share link without review. Message rendering shows file name + category + an authenticated download link, never a raw URL as plain text. Driver/other-client/public-tracking exposure unaffected — those surfaces don't read `client_admin` chat at all (pre-existing `filterChatMessagesByRole`, `chatVisibility.ts`, and `PublicTracking.tsx` never touching chat data). Converting a customer's chat upload into an official approved document is intentionally out of scope — no such approval flow exists yet.

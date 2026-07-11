@@ -49,7 +49,7 @@ import {
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { findDuplicateDriverField, resolveDriverLoginBlock } from "./src/lib/driverAccess";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
@@ -2074,7 +2074,9 @@ async function startServer() {
    * POST /api/logs used requireRole("admin"), which let any admin type read
    * or append to the immutable security/activity ledger directly, even
    * though the AdminPanel UI never shows the 'audit' tab to anyone but
-   * super. See canViewAuditLogs (adminAccess.ts).
+   * super. See canViewAuditLogs (adminAccess.ts). Guards GET only — POST
+   * uses the separate, intentionally broader requireCanWriteAuditLogs below
+   * (PR #82, see canWriteAuditLogs for why).
    */
   function requireCanViewAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (!req.session || req.session.role !== "admin") {
@@ -2082,6 +2084,27 @@ async function startServer() {
     }
     if (!canViewAuditLogs(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view audit logs." });
+    }
+    next();
+  }
+
+  /**
+   * PR #82 (Google Workspace review): POST /api/logs previously shared
+   * requireCanViewAuditLogs (super-only) with GET, but operation admins can
+   * reach the Google Workspace 'gmail' tab (Gmail send, Drive backup,
+   * Calendar scheduling — all reachable via the Shipments tab's Gmail Alert
+   * shortcut, canViewShipmentRegistry) and every one of those actions POSTs
+   * here to record itself. Sharing the super-only guard meant every such
+   * action an operation admin performed silently failed to log at all. See
+   * canWriteAuditLogs (adminAccess.ts) — read access (GET, the 'audit' tab)
+   * is unaffected and stays super-only.
+   */
+  function requireCanWriteAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!req.session || req.session.role !== "admin") {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    if (!canWriteAuditLogs(req.session.adminType)) {
+      return res.status(403).json({ error: "You do not have permission to write to the audit log." });
     }
     next();
   }
@@ -5046,7 +5069,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/logs", requireCanViewAuditLogs, async (req, res) => {
+  app.post("/api/logs", requireCanWriteAuditLogs, async (req, res) => {
     try {
       const { shipmentId, shipmentNumber, actor, actionEn, actionTr, actionAr } = sanitizeLogInput(req.body || {});
       await logActivity(
