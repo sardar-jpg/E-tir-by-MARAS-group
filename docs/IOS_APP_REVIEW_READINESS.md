@@ -124,9 +124,9 @@ Reviewer-facing / policy-facing items, current state as of this PR:
       reviewer — low-priority cleanup, not a review blocker (see §9).
 - [x] **Support email is `support@etir.app`** — confirmed live in the UI:
       `LoginPage.tsx` (`SUPPORT_EMAIL` constant, "need help" link) and
-      `AdminPanel.tsx`'s Settings page both use it. **Exception found:**
-      `PrivacyPolicyModal.tsx` and `TermsModal.tsx` both list
-      `info@maras.iq` instead — see §5.
+      `AdminPanel.tsx`'s Settings page both use it. `PrivacyPolicyModal.tsx`
+      and `TermsModal.tsx` previously listed `info@maras.iq` instead — see
+      §5; **resolved in PR #85**, both now use `support@etir.app` too.
 - [x] **Domain is `etir.app`** — `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`
       §2/§10 already documents `https://etir.app` as the production domain
       and confirms it's always-allowed in CORS
@@ -258,7 +258,7 @@ invented here.
 | Chat messages | Yes — customer↔admin and driver↔admin channels (`src/lib/chatVisibility.ts`) | All three roles | Confirm the policy mentions chat message storage/retention |
 | Account/login data | Yes — email, hashed password, company name (client), assigned jobs (driver) | All roles | Standard — confirm covered |
 | Notifications | Yes — in-app + push via FCM (`@capacitor/push-notifications`, `firebase-admin`) | All roles | Confirm push notification data use is mentioned (device token storage — see `src/lib/pushTokenAccess.ts`) |
-| Support contact | `support@etir.app` used live in `LoginPage.tsx`/`AdminPanel.tsx` | — | **Mismatch found:** `PrivacyPolicyModal.tsx` and `TermsModal.tsx` both list `info@maras.iq` as the contact email instead of `support@etir.app`. Recommend aligning these to one address before submission — this document does not change the wording, since privacy-policy copy is legal-adjacent and should be a deliberate edit, not a side effect of a performance PR. |
+| Support contact | `support@etir.app` used live in `LoginPage.tsx`/`AdminPanel.tsx` | — | **Resolved in PR #85.** `PrivacyPolicyModal.tsx` and `TermsModal.tsx` previously listed `info@maras.iq` instead of `support@etir.app`; owner confirmed `support@etir.app` is the official contact and both modals were updated to match. |
 | Data retention/deletion | Partial — Client Owner can self-delete their account (`canClientSelfDeleteAccount`, `src/lib/clientAccess.ts`); Client Staff cannot (admin-only removal). No explicit data-retention-period language found in the reviewed modals. | — | Add a plain-language retention/deletion note if App Privacy answers require one (don't invent a specific retention period that isn't actually implemented — state the truth: account deletion removes the account; shipment/document records tied to a company's shipments are retained for the business's own operational/accounting needs unless a separate deletion request is made). |
 | User roles / business purpose | Admin / Operation Admin / Accounts Admin / Driver / Client Owner / Client Staff — each role's actual access is fully documented in `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7's role matrix | — | Useful as source material for the App Privacy questionnaire's "why do you collect this" answers — reuse the existing, accurate role matrix rather than re-describing access from scratch |
 
@@ -508,8 +508,8 @@ reviewed native-config PR of their own.
   real archive that push notifications still work end-to-end in the
   submitted build, since a stale `development` value in the shipped
   binary would silently break production APNs delivery.
-- **Privacy policy / Terms contact email mismatch** — see §5; both modals
-  say `info@maras.iq`, the rest of the live app says `support@etir.app`.
+- ~~Privacy policy / Terms contact email mismatch~~ — **resolved in PR
+  #85**; see §5.
 
 ## 9. Non-blocking cleanup noted, not done
 
@@ -687,7 +687,8 @@ a direct API call). Fixed to normalize case/whitespace before comparing.
 This does not change anything described above — the product decision and
 UI behavior are unchanged; this closes a server-side enforcement gap in
 the same rule. See `docs/FOLLOW_UP_ROADMAP.md` ("Production release
-readiness..." PR #85 section) for the full writeup, and note the
+readiness..." PR #85 section) for the full writeup. The
 `info@maras.iq` vs `support@etir.app` mismatch flagged in §5 of this
-document is, as of PR #85, still unresolved in the live code.
+document is also resolved as of PR #85's follow-up commit — the owner
+confirmed `support@etir.app` is official and both modals were updated.
 with `SEED_DEMO_DATA=true`, local only, never seeded in production.

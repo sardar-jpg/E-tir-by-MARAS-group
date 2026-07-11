@@ -179,20 +179,28 @@ pre-approved `applereviewer` driver account with a sample job
 account-deletion/business-model items from round 1 are named only as a
 list in these docs, with no further detail recorded.
 
-**Still open, found live in current code during this PR**: the exact
-privacy-policy contact-email mismatch this project's own docs already
-flagged twice before (PR #69, and `docs/IOS_APP_REVIEW_READINESS.md` §5)
-is still present as of this PR — `PrivacyPolicyModal.tsx:209` and
-`TermsModal.tsx:166` both hardcode `info@maras.iq`, while
-`LoginPage.tsx:22` and `AdminSettingsSection.tsx` both use
-`support@etir.app`. **Not changed in this PR** — same reasoning as PR #69:
-privacy-policy/terms copy is legal-adjacent, and picking which address is
-the *correct* one (a single unified support address, or a deliberate
-split between a legal/privacy contact and a product-support contact) is
-the owner's call, not something to silently normalize as a side effect of
-a readiness review. **Exact fix required**: the owner decides which email
-is authoritative for the Privacy Policy/Terms contact, then both modals
-get updated to match it in a dedicated, deliberate edit.
+**Resolved in this PR (follow-up commit).** The privacy-policy
+contact-email mismatch this project's own docs flagged twice before
+(PR #69, and `docs/IOS_APP_REVIEW_READINESS.md` §5) — `PrivacyPolicyModal.tsx:209`
+and `TermsModal.tsx:166` hardcoding `info@maras.iq` while
+`LoginPage.tsx:22`/`AdminSettingsSection.tsx` used `support@etir.app` — was
+left unchanged in the initial version of this PR pending a deliberate
+owner decision, since privacy-policy/terms copy is legal-adjacent. The
+owner has since confirmed **`support@etir.app` is the official eTIR
+support/contact email**. Both modals' "CONTACT COMPLIANCE BLOCK" email
+lines were updated from `info@maras.iq` to `support@etir.app` to match.
+The block's company name ("MARAS Logistics & Supply Chain HQ") and
+website line (`www.maras.iq`) were deliberately left unchanged — those
+are unrelated MARAS corporate branding/website references, not the
+mismatched contact email this finding was about. Also deliberately left
+unchanged: `sardar@maras.iq` (the real super-admin's own login identity,
+throughout `server.ts`/`App.tsx`/`LoginPage.tsx`/`AdminTeamSection.tsx`/tests)
+and `financials@maras.iq` (a billing/invoice-letterhead contact inside
+the Cost Statement PDF header in `AdminPanel.tsx`, lines ~2261/~8705) —
+both are unrelated MARAS business contacts, not eTIR
+privacy/terms/support/App-Review contacts, and a repo-wide search
+confirmed no other `info@maras.iq` reference exists in any user-facing
+file.
 
 **Exact App Review notes recommended for the next submission** (building
 on the existing template in `docs/IOS_APP_REVIEW_READINESS.md` §3): state
@@ -233,10 +241,13 @@ invented to fill that gap.
 
 ### Manual actions still required before any App Store submission
 
-1. Resolve the `info@maras.iq` vs `support@etir.app` contact mismatch
-   (owner decision, see above).
+1. ~~Resolve the `info@maras.iq` vs `support@etir.app` contact
+   mismatch~~ — **resolved**: owner confirmed `support@etir.app` is
+   official; both modals updated (see above).
 2. Confirm `https://etir.app` and its Privacy Policy/Terms links render
-   correctly in a real browser (not verified live in this pass).
+   correctly in a real browser (re-verified locally in this follow-up —
+   see Browser verification below; the live production domain itself
+   still wasn't re-checked).
 3. Locate the real Apple App Review rejection message/screenshot if it
    still exists, to attach to the next submission (not available in this
    repo or environment).
@@ -281,8 +292,9 @@ were executed in this PR:
 15. Wait for Apple's processing to complete.
 16. Assign the new build to the existing TestFlight group.
 17. **Do not submit for App Review** until the still-open items above
-    (contact-email mismatch, live etir.app/privacy check, real rejection
-    message if recoverable, reviewer account confirmation) are resolved.
+    (live `etir.app`/privacy check in a real browser against production,
+    real rejection message if recoverable, reviewer account confirmation)
+    are resolved — the contact-email mismatch itself is now resolved.
 
 ### Verification
 
@@ -1287,7 +1299,7 @@ documents must be sent by Admin." }` (`canDriverUploadDocumentCategory`,
 - **Repository Cleanup / Legacy Files Review** — review `Etir/e-tir-by-maras` and `etir-new` scaffold directories for removal.
 - ~~**Performance / Bundle Size Optimization**~~ — **Partially done in PR #69** (`feature/ios-app-review-performance-readiness-pack`). `ClientDashboard` (was statically imported in `App.tsx`, pulling `@vis.gl/react-google-maps` into the main bundle for every session) is now lazy-loaded, matching the existing `AdminPanel`/`DriverApplication` pattern (main bundle 813.42 kB → 720.62 kB gzip 223.16 → 196.83 kB). `jsPDF` in `AdminPanel.tsx`'s `handleDownloadPDF` is now dynamically imported at the point of use instead of statically at the top of the file (AdminPanel chunk 1,310.72 kB → 917.96 kB, gzip 355.86 → 227.84 kB). Both >500kB Vite warnings remain (smaller, not gone) — see `docs/IOS_APP_REVIEW_READINESS.md` §7 for full before/after numbers and the larger, explicitly-deferred follow-ups (splitting `AdminPanel.tsx` itself, further map-library isolation, `manualChunks` vendor splitting).
 - ~~**iOS Info.plist missing usage-description strings**~~ — **Done in PR #70** (`feature/ios-info-plist-usage-descriptions-fix`). Found during PR #69's App Review readiness pass; `ios/App/App/Info.plist` had no `NSLocationWhenInUseUsageDescription`, `NSCameraUsageDescription`, `NSPhotoLibraryUsageDescription`, or `NSPhotoLibraryAddUsageDescription`, despite the app using `navigator.geolocation` (driver GPS) and native file/photo pickers (document/photo uploads, all three roles). All four keys added with App-Review-safe wording; no Capacitor config mirroring was needed (`capacitor.config.ts` doesn't declare these). See `docs/IOS_APP_REVIEW_READINESS.md` §8. **Still open:** this only edits the checked-in Info.plist source — a new Xcode archive + TestFlight upload (per that doc's §1 "new native build" procedure) is required before the fix actually reaches a submitted build.
-- **Privacy policy / Terms contact email mismatch** — found during PR #69. `PrivacyPolicyModal.tsx`/`TermsModal.tsx` list `info@maras.iq`; the rest of the live app (`LoginPage.tsx`, `AdminPanel.tsx` Settings) uses `support@etir.app`. Not changed in PR #69 since privacy-policy copy is legal-adjacent and deserves a deliberate edit. See `docs/IOS_APP_REVIEW_READINESS.md` §5.
+- **Privacy policy / Terms contact email mismatch — RESOLVED in PR #85.** Found during PR #69: `PrivacyPolicyModal.tsx`/`TermsModal.tsx` listed `info@maras.iq`; the rest of the live app (`LoginPage.tsx`, `AdminPanel.tsx` Settings) uses `support@etir.app`. Not changed in PR #69 since privacy-policy copy is legal-adjacent and deserved a deliberate edit. Owner confirmed `support@etir.app` is the official eTIR contact; both modals updated to match in PR #85's follow-up commit. See `docs/IOS_APP_REVIEW_READINESS.md` §5.
 - **Mobile / Responsive Review** — pass over mobile/tablet layouts beyond the existing `lg:hidden` tab bar.
 
 ## AI / monitoring
