@@ -184,6 +184,13 @@ This build does not offer Google Sign-In as a login method — please do
 not attempt "Sign in with Google" during review; it is not present on the
 login screen. Use the credentials below for each role instead.
 
+Fill every `<placeholder>` below with the real production reviewer
+accounts from §4 ("Real reviewer account plan") — **never** the
+`*.demo.local` / `demo_driver` / `demo_client` local-dev-only accounts
+documented in §4's "Local/demo accounts" table. Those don't exist in
+production at all and won't work in the build Apple installs; see §4's
+"Precise re-verification of this gating" note for exactly why.
+
 ADMIN LOGIN
   Email: <admin reviewer email>
   Password: <admin reviewer password>
@@ -283,6 +290,49 @@ changes in this PR (§7) and for reproducing role behavior, but **must
 never be what a real App Store reviewer logs in with** — they don't exist
 in production (`IS_LOCAL_DEV` gate) and wouldn't work against
 `https://etir.app` anyway.
+
+**Precise re-verification of this gating (PR #85, third follow-up),
+because it's easy to conflate two separate flags here:**
+- **These three account *records themselves*** (`admin@demo.local`,
+  `demo_driver`, `demo_client`, plus `demo_client_staff`) are gated
+  **only** by `IS_LOCAL_DEV` (`NODE_ENV !== "production"`) in
+  `server.ts`'s `DEMO_ACCOUNTS` constant — **not** by `SEED_DEMO_DATA`.
+  Confirmed live: with `NODE_ENV` unset (local dev) and
+  `SEED_DEMO_DATA=false`, all three still log in successfully.
+- **Their pre-populated content is a separate gate: `SEED_DEMO_DATA`.**
+  Confirmed live, same run: with `SEED_DEMO_DATA=false`, the successfully
+  logged-in Driver and Client demo accounts saw **zero** shipments each,
+  and the Admin dashboard saw **zero** shipments/vendors (only the demo
+  accounts themselves as the sole driver/client records) — i.e. they log
+  in but have nothing to show, reproducing the exact "demo accounts
+  lacked pre-populated content" rejection reason. With
+  `SEED_DEMO_DATA=true` (the setting these docs' own local-dev
+  instructions always specify), the same accounts show 3 shipments / 5
+  drivers / 5 clients / 4 vendors (Admin), 1 assigned/accepted shipment
+  (Driver), and 1 company shipment (Client) — confirmed live in this same
+  pass.
+- **Neither flag has any effect on production.** `NODE_ENV=production`
+  alone makes `DEMO_ACCOUNTS` `null` — these three accounts cannot exist
+  at all in production, regardless of `SEED_DEMO_DATA`, regardless of
+  memory-fallback state. `SEED_DEMO_DATA` only ever populates the
+  **in-memory fallback store** (`getMemoryStore()`); it has no code path
+  into real Firestore at all (`seedDatabaseIfEmpty()` — the one function
+  that seeds *Firestore* — separately checks `SEED_DEMO_DATA` itself and
+  is skipped whenever `useMemoryFallback` is false, i.e. whenever real
+  Firestore is actually connected).
+- **The actual backend the shipped iOS/TestFlight app talks to is the
+  live production Cloud Run service** — confirmed directly in
+  `capacitor.config.ts`: `server.url` is hardcoded to
+  `https://e-tir-by-maras-v2-282009674985.europe-west1.run.app`, the same
+  Cloud Run service that serves `https://etir.app` (no separate staging
+  backend exists — `docs/REAL_FIREBASE_VERIFICATION.md` §1 already
+  documents this). That service runs with `NODE_ENV=production`
+  (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §3). **Conclusion: `admin@demo.local`
+  / `demo_driver` / `demo_client` cannot ever work against the app Apple
+  actually reviews — not "hidden," not "conditionally available," simply
+  absent from that environment's data by construction.** They must never
+  be included in real App Review Notes (they already aren't — see the
+  `<placeholder>` form used in §3's template below, not these values).
 
 ### Real reviewer account plan (for actual App Review submission)
 

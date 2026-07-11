@@ -343,6 +343,56 @@ credentials (Driver notably usable via phone or email); note all three
 accounts already have sample content populated; no offline/demo mode,
 active internet connection required.
 
+### Local demo-account gating precisely re-verified (PR #85, third follow-up)
+
+A follow-up request asked to verify the three `*.demo.local` credentials
+(`admin@demo.local`, `demo_driver`, `demo_client`) specifically. Important
+correction to how that request framed the gating — verified precisely
+against the actual code, not assumed:
+
+- **The account records themselves are gated only by `NODE_ENV`**
+  (`IS_LOCAL_DEV = NODE_ENV !== "production"` controls `server.ts`'s
+  `DEMO_ACCOUNTS` constant), **not by `SEED_DEMO_DATA`.** Confirmed live:
+  with `SEED_DEMO_DATA=false` (and no `NODE_ENV` set, i.e. local dev),
+  all three still logged in successfully.
+- **Their pre-populated content is gated separately, by `SEED_DEMO_DATA`.**
+  Confirmed live in the same run: with `SEED_DEMO_DATA=false`, the
+  logged-in Driver and Client saw 0 shipments each, and Admin saw 0
+  shipments/vendors — accounts exist but are empty, reproducing the
+  exact "lacked pre-populated content" rejection reason. Restarted with
+  `SEED_DEMO_DATA=true`: Admin 3 shipments/5 drivers/5 clients/4 vendors,
+  Driver 1 assigned shipment, Client 1 company shipment — matching the
+  second follow-up's earlier results exactly.
+- **Neither flag reaches production.** `NODE_ENV=production` alone makes
+  `DEMO_ACCOUNTS` `null` — these three accounts cannot exist in
+  production under any combination of the other flags.
+  `SEED_DEMO_DATA` only ever populates the in-memory fallback store,
+  never real Firestore (`seedDatabaseIfEmpty`, the function that could
+  seed Firestore, independently checks `SEED_DEMO_DATA` and is skipped
+  whenever Firestore is actually connected).
+- **Backend confirmed**: `capacitor.config.ts`'s `server.url` is
+  hardcoded to the production Cloud Run URL
+  (`https://e-tir-by-maras-v2-282009674985.europe-west1.run.app`) — the
+  same service behind `https://etir.app`, not a staging backend and not
+  local/demo memory data. That service runs `NODE_ENV=production`
+  (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §3).
+
+**Conclusion: `admin@demo.local`/`demo_driver`/`demo_client` will never
+work against the actual app Apple reviews, under any local-environment
+flag combination — this is by construction, not something to fix.** The
+App Review Notes template (`docs/IOS_APP_REVIEW_READINESS.md` §3) already
+used generic `<placeholder>` values, never these literal demo.local
+credentials, and now has an explicit line telling whoever fills it in to
+use the real §4 reviewer accounts instead. Google Workspace
+("Connect Gmail" — send status emails, Drive backups, Calendar) remains
+confirmed as an optional, Admin-only, post-login feature with zero
+dependency from Driver/Client roles (`DriverApplication.tsx`/
+`ClientDashboard.tsx` only import the shared Firebase `auth` object for
+an unrelated account-self-deletion call, `auth.currentUser.delete()` —
+nothing Google-Workspace-related). Not required for Apple to complete
+the main app review as long as reviewer notes point Apple at the
+credential-based login only.
+
 ### Manual actions still required before any App Store submission
 
 1. ~~Resolve the `info@maras.iq` vs `support@etir.app` contact
