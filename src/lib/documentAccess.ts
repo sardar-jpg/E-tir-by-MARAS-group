@@ -87,9 +87,20 @@ export function isDocumentVisibleToDriver(doc: Pick<ShipmentDocument, "category"
  * `category` is typed loosely (not DocumentCategory) because it comes
  * straight off an unvalidated request body — an absent/unrecognized value
  * must not be treated as "cmr" and rejected.
+ *
+ * PR #85 (production release readiness E2E): this used to be a strict
+ * `category !== "cmr"` check — a driver session could bypass the block
+ * entirely just by sending a differently-cased or padded variant
+ * ("CMR", " cmr", "Cmr") in the request body, since server.ts's two call
+ * sites (POST /api/shipments/:id/documents, POST /api/shipments/:id/chat)
+ * pass the raw, unvalidated body field straight through. The real UI only
+ * ever sends the canonical lowercase "cmr" literal (DocumentCategory is a
+ * TypeScript union), so this was never reachable by a legitimate client —
+ * only by a direct, deliberately-crafted API call. Normalized so any
+ * case/whitespace variant of "cmr" is still blocked.
  */
 export function canDriverUploadDocumentCategory(category: unknown): boolean {
-  return category !== "cmr";
+  return typeof category !== "string" || category.trim().toLowerCase() !== "cmr";
 }
 
 /**

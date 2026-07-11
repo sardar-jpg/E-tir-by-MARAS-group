@@ -677,4 +677,17 @@ sessions in a fresh local `SEED_DEMO_DATA=true` dev environment).
 fixture, what should/shouldn't appear):** see
 `docs/FOLLOW_UP_ROADMAP.md` § "Driver review demo scenario (local/dev
 only — PR #71, re-verified PR #72)" — `demo_driver` / `DemoDriver123!`
+
+**Case-bypass of the CMR-upload block fixed in PR #85.**
+`canDriverUploadDocumentCategory` (above) did a strict
+`category !== "cmr"` check — sending `"CMR"`/`"Cmr"`/`" cmr"` in the
+request body bypassed the block entirely (not reachable via the real UI,
+which only ever sends the canonical lowercase literal, but reachable via
+a direct API call). Fixed to normalize case/whitespace before comparing.
+This does not change anything described above — the product decision and
+UI behavior are unchanged; this closes a server-side enforcement gap in
+the same rule. See `docs/FOLLOW_UP_ROADMAP.md` ("Production release
+readiness..." PR #85 section) for the full writeup, and note the
+`info@maras.iq` vs `support@etir.app` mismatch flagged in §5 of this
+document is, as of PR #85, still unresolved in the live code.
 with `SEED_DEMO_DATA=true`, local only, never seeded in production.
