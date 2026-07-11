@@ -48,6 +48,7 @@ import {
 } from "./src/lib/chatVisibility";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
+import { findDuplicateDriverField, resolveDriverLoginBlock } from "./src/lib/driverAccess";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
@@ -3797,13 +3798,13 @@ async function startServer() {
           await setDoc(doc(db, "drivers", matchedDriver.id), { ...matchedDriver, password: newHash });
         });
         if (matched) {
-          if (matchedDriver.status === "pending") {
-            logActivity("", "", maskLoginIdentifier(matchedDriver.email || matchedDriver.username), "Driver login blocked - account pending approval", "Sürücü girişi engellendi - hesap onay bekliyor", "تم حظر تسجيل دخول السائق - الحساب بانتظار الموافقة");
-            return res.status(403).json({ error: "Your driver account is pending admin approval. Please check back soon." });
-          }
-          if (matchedDriver.status === "rejected") {
-            logActivity("", "", maskLoginIdentifier(matchedDriver.email || matchedDriver.username), "Driver login blocked - registration rejected", "Sürücü girişi engellendi - kayıt reddedildi", "تم حظر تسجيل دخول السائق - تم رفض التسجيل");
-            return res.status(403).json({ error: "Your driver registration was not approved. Please contact MARAS Group support." });
+          const loginBlock = resolveDriverLoginBlock(matchedDriver.status);
+          if (loginBlock.blocked) {
+            const reason = matchedDriver.status === "pending" ? "account pending approval" : "registration rejected";
+            const reasonTr = matchedDriver.status === "pending" ? "hesap onay bekliyor" : "kayıt reddedildi";
+            const reasonAr = matchedDriver.status === "pending" ? "الحساب بانتظار الموافقة" : "تم رفض التسجيل";
+            logActivity("", "", maskLoginIdentifier(matchedDriver.email || matchedDriver.username), `Driver login blocked - ${reason}`, `Sürücü girişi engellendi - ${reasonTr}`, `تم حظر تسجيل دخول السائق - ${reasonAr}`);
+            return res.status(403).json({ error: loginBlock.message });
           }
           clearLoginRateLimit(req, normalizedQuery);
           logActivity("", "", matchedDriver.email || matchedDriver.username || "Driver", "Driver login succeeded", "Sürücü girişi başarılı", "تم تسجيل دخول السائق بنجاح");
@@ -3986,11 +3987,9 @@ async function startServer() {
         if (!foundDriver) {
           return res.status(404).json({ success: false, message: "Forbid: No driver account is linked to this identity." });
         }
-        if (foundDriver.status === "pending") {
-          return res.status(403).json({ success: false, message: "Your driver account is pending admin approval." });
-        }
-        if (foundDriver.status === "rejected") {
-          return res.status(403).json({ success: false, message: "Your driver registration was not approved." });
+        const loginBlock = resolveDriverLoginBlock(foundDriver.status);
+        if (loginBlock.blocked) {
+          return res.status(403).json({ success: false, message: loginBlock.message });
         }
 
         const sessionPayload: SessionPayload = {
@@ -4361,6 +4360,15 @@ async function startServer() {
   app.post("/api/drivers/self-register", async (req, res) => {
     try {
       const data = req.body;
+
+      // The client already enforces a 6-character minimum, but that's
+      // trivially bypassable by calling this endpoint directly — only
+      // checked when a password was actually sent; the no-password/Google
+      // sign-in path below generates its own strong random one.
+      if (data.password && data.password.length < 6) {
+        return res.status(400).json({ error: "Password must be at least 6 characters." });
+      }
+
       // uid is normally a real Firebase Auth uid (from the Gmail or
       // email/password flow), but the manual registration form can
       // reach this point with no uid at all if Firebase Auth account
@@ -4388,7 +4396,29 @@ async function startServer() {
         truckType: data.truckType || "reefer",
         status: "pending"
       };
+
+      // Login matches an identifier against username/email/phone across
+      // every driver (see the "3. Driver login" branch of POST /api/login
+      // below) — a silent duplicate here would make one of the two
+      // colliding accounts unreachable, or ambiguous, at login time.
+      const driversSnapshot = await getDocs(collection(db, "drivers"));
+      const existingDrivers = driversSnapshot.docs.map(d => d.data() as Driver);
+      const duplicateField = findDuplicateDriverField(existingDrivers, newDriver);
+      if (duplicateField) {
+        const fieldLabel = duplicateField === "username" ? "Username" : duplicateField === "email" ? "Email address" : "Phone number";
+        return res.status(409).json({ error: `${fieldLabel} is already registered to another driver.` });
+      }
+
       await setDoc(doc(db, "drivers", newDriver.id), newDriver);
+
+      await logActivity(
+        "",
+        "",
+        `${newDriver.name} (@${newDriver.username})`,
+        "Driver registration submitted - pending approval",
+        "Sürücü kaydı gönderildi - onay bekliyor",
+        "تم تقديم تسجيل السائق - بانتظار الموافقة"
+      );
 
       // No session token here. A self-registered driver is "pending"
       // until an admin approves them (see PATCH /api/drivers/:id/status
@@ -4435,20 +4465,44 @@ async function startServer() {
         return res.status(404).json({ error: "Driver not found." });
       }
       const driverData = driverDoc.data() as Driver;
+      const statusChanged = driverData.status !== status;
       await setDoc(docRef, { ...driverData, status });
 
-      if (status === "approved") {
-        await pushNotification(
-          "",
-          "",
-          "driver_registration",
-          "Driver Approved",
-          "Surucu Onaylandi",
-          "تمت الموافقة على السائق",
-          `${driverData.name} has been approved and can now sign in.`,
-          `${driverData.name} onaylandi ve artik giris yapabilir.`,
-          `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`
-        );
+      // Only notify/log on an actual transition — a repeated approve/reject
+      // request (double-click, retried request) is still a safe no-op, but
+      // shouldn't spam a duplicate notification or audit entry every time.
+      if (statusChanged) {
+        const actor = req.session!.adminType === "super" ? "Super Admin" : "Operation Admin";
+        if (status === "approved") {
+          await logActivity(
+            "",
+            "",
+            actor,
+            `Approved driver ${driverData.name} (@${driverData.username})`,
+            `${driverData.name} (@${driverData.username}) isimli sürücü onaylandı`,
+            `تمت الموافقة على السائق ${driverData.name} (@${driverData.username})`
+          );
+          await pushNotification(
+            "",
+            "",
+            "driver_registration",
+            "Driver Approved",
+            "Surucu Onaylandi",
+            "تمت الموافقة على السائق",
+            `${driverData.name} has been approved and can now sign in.`,
+            `${driverData.name} onaylandi ve artik giris yapabilir.`,
+            `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`
+          );
+        } else {
+          await logActivity(
+            "",
+            "",
+            actor,
+            `Rejected driver ${driverData.name} (@${driverData.username})`,
+            `${driverData.name} (@${driverData.username}) isimli sürücü reddedildi`,
+            `تم رفض السائق ${driverData.name} (@${driverData.username})`
+          );
+        }
       }
 
       res.json({ success: true, status });
