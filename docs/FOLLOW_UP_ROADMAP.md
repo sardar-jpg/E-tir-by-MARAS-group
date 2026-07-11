@@ -239,6 +239,110 @@ keywords, category, age rating, or screenshots are recorded anywhere in
 this repository (App Store Connect-only fields) — nothing here was
 invented to fill that gap.
 
+### Apple reviewer-access verification — final (PR #85, second follow-up)
+
+The owner has since provided the actual prior Apple rejection text and
+confirmed reviewer accounts already exist for all three roles. This
+section records what was verified in code/locally against that
+now-confirmed information — no production account was created (none was
+needed; the owner confirmed all three already exist), and no password
+is printed here or anywhere in this repo.
+
+**Confirmed exact prior rejection reasons** (owner-provided, supersedes
+the earlier after-the-fact paraphrase): (1) Apple could not access Google
+Workspace login, (2) Apple could not access a driver account, (3) demo
+accounts lacked pre-populated content, (4) Google login displayed an
+error, (5) driver registration was blocked because the verification
+email was not received. See `docs/IOS_APP_REVIEW_READINESS.md` §3 for
+the full status of each, cross-referenced against this codebase.
+
+**Verified login methods by role** (code inspection + live local calls):
+- **Admin/Super reviewer**: username/email + password via `POST
+  /api/login`, same screen as the other two roles. No Google Sign-In
+  step in this flow.
+- **Driver reviewer**: username, email, **or phone number** + password,
+  all via the same `POST /api/login` route (`server.ts`'s driver branch
+  matches against `username`/`email`/`phone`/`name`) — confirmed live
+  with a local demo driver account, logging in successfully with its
+  phone number alone and, separately, with its email alone, both
+  returning `200` and an identical session.
+- **Client reviewer**: username/email/company-name + password via the
+  same route, identical shape to Admin.
+
+**Google login status: hidden, not reachable, not fully removed from the
+codebase.** `LoginPage.tsx`'s "Sign in with Google" button is gated
+behind `const GOOGLE_LOGIN_ENABLED = false` — a hardcoded constant, not a
+remote/env toggle, so it cannot be switched back on without a code
+change and redeploy. The button never renders; there is no UI path to
+it. The `googleSignIn()` function/import and the Firebase Google-auth
+plumbing (`src/googleAuth.ts`) still exist in the codebase because a
+*separate*, unrelated feature — the Admin-only "Connect Gmail" button
+inside the Google Workspace settings tab (`AdminPanel.tsx`) — still uses
+the same underlying helper to let an *already-logged-in* admin connect
+their own Gmail/Drive/Calendar for sending status emails and backups.
+That feature requires the admin to already have an app session; it is
+not a login mechanism and is not required to review the core app.
+**Conclusion for reviewer notes: do not tell Apple to test Google
+login — it is not present in the login flow.**
+
+**Reviewer accounts found:**
+- Admin: `sardar@maras.iq` (real production super-admin — documented in
+  `ETIR-PROJECT-REFERENCE.md` §1; password lives in the team's password
+  manager, never in this repo).
+- Driver: `applereviewer` (real production, pre-approved, with a sample
+  job already assigned — documented in the same place).
+- Client: **owner-confirmed to now exist** in production (this was an
+  open action item as of the previous PR #85 pass — resolved by the
+  owner since then). This PR did not create it and could not
+  independently inspect its real production content (no live Firebase
+  access in this environment).
+
+**Pre-populated content status:**
+- Verified **locally** (memory-fallback demo data, standing in for the
+  same pattern the real reviewer accounts use): Admin sees a full
+  operational dataset (3 shipments, 5 drivers, 5 clients, 4 vendors in
+  the local seed); Driver sees exactly 1 assigned/accepted shipment with
+  a full workflow (status timeline, chat, view-only CMR); Client sees
+  exactly 1 company shipment. This confirms the underlying
+  seeded-data/scoping mechanism genuinely produces populated dashboards
+  for all three roles, not empty states.
+- **Not independently verified against real production** in this pass:
+  whether the actual `sardar@maras.iq`, `applereviewer`, and the
+  Client reviewer accounts currently have this same populated content
+  live on `https://etir.app` — no live Firebase credentials are
+  available in this environment. `applereviewer` having a sample job is
+  already documented as an established, maintained fact
+  (`ETIR-PROJECT-REFERENCE.md` §1); the Client reviewer account's
+  content specifically has not been confirmed since the owner reported
+  it now exists. **Recommend one quick manual check before the next
+  submission**: log into all three real reviewer accounts and confirm
+  each still shows populated content, exactly as `applereviewer` is
+  already kept up to date.
+
+**Email-verification dependency: reconfirmed removed.** `POST
+/api/drivers/self-register` creates no Firebase Auth account and never
+calls `sendEmailVerification` — a new driver's only gate is admin
+approval, and the post-registration screen says so accurately ("pending
+admin approval — you will be able to sign in once an admin approves
+it"), not "check your email." The only remaining
+`sendEmailVerification` call in the codebase is in `LoginPage.tsx`'s
+legacy Firebase-auth login fallback (pre-existing Firebase-authenticated
+accounts attempting to log in, not the registration path), unrelated to
+a new driver's registration/approval flow.
+
+**Missing account/data gap found:** none requiring a new account to be
+created — all three reviewer roles are owner-confirmed to already
+exist. The only open item is the *quick verification* of the Client
+account's content described above, which is a check, not a gap.
+
+**Final recommended App Review Notes** are in
+`docs/IOS_APP_REVIEW_READINESS.md` §3 (updated template) — summary: state
+this is an update to the existing app; explicitly tell Apple not to
+attempt Google Sign-In since it isn't offered; give Admin/Driver/Client
+credentials (Driver notably usable via phone or email); note all three
+accounts already have sample content populated; no offline/demo mode,
+active internet connection required.
+
 ### Manual actions still required before any App Store submission
 
 1. ~~Resolve the `info@maras.iq` vs `support@etir.app` contact
@@ -248,12 +352,13 @@ invented to fill that gap.
    correctly in a real browser (re-verified locally in this follow-up —
    see Browser verification below; the live production domain itself
    still wasn't re-checked).
-3. Locate the real Apple App Review rejection message/screenshot if it
-   still exists, to attach to the next submission (not available in this
-   repo or environment).
-4. Confirm a dedicated Client-role reviewer account exists
-   (`docs/IOS_APP_REVIEW_READINESS.md` §4 notes this was still an open
-   action item as of that doc).
+3. ~~Locate the real Apple App Review rejection message/screenshot~~ —
+   **resolved**: owner provided the confirmed rejection text (see above);
+   the original literal message/screenshot itself still doesn't exist in
+   this repo, but the substance is now captured accurately.
+4. ~~Confirm a dedicated Client-role reviewer account exists~~ —
+   **resolved**: owner confirmed it exists; recommend one quick manual
+   content check before submission (see above) — not an open account gap.
 5. Confirm the real `SERVER_FIREBASE_UID`/Google Maps key restrictions in
    Firebase/Google Cloud Console (carried over from PR #84, unchanged).
 6. A physical-iPhone test, Archive, and TestFlight upload — not performed

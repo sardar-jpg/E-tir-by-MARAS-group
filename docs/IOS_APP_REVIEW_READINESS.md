@@ -131,6 +131,40 @@ Reviewer-facing / policy-facing items, current state as of this PR:
       §2/§10 already documents `https://etir.app` as the production domain
       and confirms it's always-allowed in CORS
       (`src/lib/cors.ts` `DEFAULT_ALLOWED_ORIGINS`), independent of this PR.
+- [x] **Google Sign-In is hidden from the login screen (PR #85 follow-up,
+      verified in code).** `LoginPage.tsx` gates the entire "Sign in with
+      Google" button behind `const GOOGLE_LOGIN_ENABLED = false` (a
+      hardcoded module constant, not an env/remote toggle) — the button is
+      never rendered, and there is no in-app way for a user or a reviewer
+      to re-enable it without a code change and a new deployment. A
+      reviewer using the current build cannot reach it at all. **Do not
+      instruct Apple to test Google Sign-In as a login method** — it isn't
+      part of the login flow anymore (see §3). Separately, an unrelated
+      **"Connect Gmail" feature still exists inside the Admin-only Google
+      Workspace settings tab** (`AdminPanel.tsx`, wired via
+      `handleConnectGmail`/`googleAuth.ts`) — this is an optional,
+      already-authenticated admin connecting their own Gmail/Drive/Calendar
+      for sending status-update emails and backups, not a login mechanism,
+      and is not required to review the core app.
+- [x] **Driver login accepts phone number, email, or username (verified
+      live, PR #85 follow-up).** `POST /api/login`'s driver branch
+      (`server.ts`) matches the submitted identifier against the driver's
+      `username`, `email`, `phone` (whitespace-normalized), or `name` —
+      confirmed via direct local login calls with each of phone and email
+      for the same account, both succeeding. `LoginPage.tsx`'s field is
+      labeled "Email / Phone / Username" accordingly.
+- [x] **Driver registration no longer depends on email verification
+      (re-confirmed, PR #85 follow-up).** `POST /api/drivers/self-register`
+      creates the driver record directly (pbkdf2 password, no Firebase
+      Auth account, no `sendEmailVerification` call anywhere in this path)
+      and gates access on **admin approval only** — the post-registration
+      screen tells the applicant exactly that ("pending admin approval —
+      you will be able to sign in once an admin approves it"), not
+      "check your email." The one remaining `sendEmailVerification` call
+      in the codebase is in `LoginPage.tsx`'s *legacy* Firebase-auth login
+      fallback (pre-existing Firebase-authenticated accounts only), not
+      the registration path a new driver — including a reviewer — goes
+      through.
 
 ## 3. Reviewer notes template
 
@@ -139,9 +173,16 @@ Paste into App Store Connect's "Notes for Review" field, filling in the
 commit the filled-in version anywhere):
 
 ```
-Etir is a freight/logistics tracking app for MARAS Group (Iraq-based
-freight company) with three separate login experiences: Admin, Driver,
-and Client (customer). All three log in from the same screen.
+Etir is an update to our existing app (same app, same Bundle ID, same
+Apple Developer Team as the prior submission) — a freight/logistics
+tracking app for MARAS Group (Iraq-based freight company) with three
+separate login experiences: Admin, Driver, and Client (customer). All
+three log in from the same screen using a username/email/phone +
+password form.
+
+This build does not offer Google Sign-In as a login method — please do
+not attempt "Sign in with Google" during review; it is not present on the
+login screen. Use the credentials below for each role instead.
 
 ADMIN LOGIN
   Email: <admin reviewer email>
@@ -150,35 +191,74 @@ ADMIN LOGIN
   already exist), GPS Tracking Map, Driver Alliance, Chat, Settings.
 
 DRIVER LOGIN
-  Username/Email: <driver reviewer account>
+  Username/Email/Phone: <driver reviewer account>
   Password: <driver reviewer password>
-  Note: this account should already be approved and have at least one
-  sample shipment/job assigned — a driver account with nothing to show
-  was flagged in a prior review round (see ETIR-PROJECT-REFERENCE.md §6,
-  "no-demo-driver-content"). Confirm this before submitting, every time.
+  This account logs in with either its email or its phone number, in
+  addition to its username. It is already approved and has at least one
+  sample shipment/job assigned, so its dashboard is populated
+  immediately after login — a driver account with nothing to show was
+  flagged in a prior review round. Confirm this before submitting, every
+  time.
 
 CLIENT LOGIN
   Email: <client reviewer email>
   Password: <client reviewer password>
-  What to check: shipment tracking view, chat with the admin, document
-  upload.
+  What to check: shipment tracking view (a sample shipment for this
+  company should already exist), chat with the admin, document upload.
 
 The app requires an active internet connection — it loads live data from
 our backend for all three roles; there is no offline/demo mode.
 
 Location permission is used only by the Driver role, to report the
 driver's live position while an assigned job is active (used for the
-customer/admin-facing GPS tracking map). Camera/photo library access is
-used to attach shipment documents/photos (all three roles) and delivery
-proof photos (driver role).
+customer/admin-facing GPS tracking map) — never in the background.
+Camera/photo library access is used to attach shipment documents/photos
+(all three roles) and delivery proof photos (driver role).
 ```
 
-Two prior rejection rounds are recorded in `ETIR-PROJECT-REFERENCE.md` §6:
+**The confirmed prior App Review rejection** (owner-provided, as of PR
+#85's follow-up — supersedes the earlier paraphrased "two rounds" summary
+below) cited exactly these five points:
+1. Apple could not access Google Workspace login.
+2. Apple could not access a driver account.
+3. Demo accounts lacked pre-populated content.
+4. Google login displayed an error.
+5. Driver registration was blocked because the verification email was
+   not received.
+
+Status of each, verified in this codebase as of PR #85's follow-up:
+1/4. **Addressed by removal, not by fixing the error.** Google Sign-In
+   is no longer offered as a login method at all (`GOOGLE_LOGIN_ENABLED
+   = false` in `LoginPage.tsx`) — there is nothing for Apple to click,
+   so the prior popup/native-WebView error (also tracked separately as
+   Guideline 2.1a, commit `baf8a0f`) cannot recur through the login
+   screen. The reviewer notes above tell Apple not to attempt it.
+2. **Addressed** — the dedicated `applereviewer` driver account exists,
+   pre-approved, with a sample job assigned (see §4).
+3. **Addressed** — Admin/Driver/Client reviewer accounts each carry
+   pre-populated operational data (dashboard content for Admin, an
+   assigned/accepted shipment for Driver, a company shipment for Client)
+   — verified against this PR's local demo-data equivalent; see §4 for
+   what's confirmed in the real production accounts versus what could
+   only be verified locally.
+5. **Addressed** — `POST /api/drivers/self-register` no longer creates a
+   Firebase Auth account or sends a verification email at all; a new
+   driver's only gate is admin approval, communicated accurately in the
+   post-registration screen.
+
+This is a more precise, now-confirmed version of the "two rounds of
+rejections" this project's own docs previously reconstructed
+after-the-fact (`ETIR-PROJECT-REFERENCE.md` §6:
 name/icon/Google-sign-in-bug/demo-credentials/account-deletion/
 business-model, then Google-login-error/no-demo-driver-content/
-email-verification-not-received. Re-check each of those specific points
-still holds before resubmitting — they're exactly the kind of thing that
-regresses silently.
+email-verification-not-received) — that reconstruction and the owner's
+now-confirmed rejection text describe the same underlying issues. Two
+items from that original reconstruction aren't covered by the confirmed
+five points above and have no further detail recorded anywhere in this
+repo: the name/icon item and the account-deletion/business-model item
+from the first round. Re-check all of these specific points still hold
+before resubmitting — they're exactly the kind of thing that regresses
+silently.
 
 ## 4. Reviewer demo account plan
 
@@ -216,6 +296,21 @@ used dedicated reviewer accounts:
   sees populated content instead of an empty state (this addressed the
   "no-demo-driver-content" rejection reason from a prior round)
 
+**Update (PR #85 follow-up):** the owner has confirmed a dedicated
+**Client reviewer account also now exists** in production, alongside the
+Admin and Driver accounts above — this PR did not create it (no
+production account was created or touched here; there was no real
+Firebase access in this environment to do so, and none was needed since
+the account was already confirmed present). Its real content (whether it
+has at least one sample company shipment, matching the Driver account's
+pattern) was **not independently verified against production** in this
+pass — only the underlying mechanism was re-confirmed locally (a Client
+session with a company shipment on record correctly sees it; see
+`docs/FOLLOW_UP_ROADMAP.md`). Recommend one quick manual check in
+production before the next submission: log into the real Client reviewer
+account and confirm at least one sample shipment is visible, the same
+way the `applereviewer` Driver account is already kept populated.
+
 Recommended reviewer coverage for this PR's submission:
 
 - **Client Owner** — a dedicated reviewer client account (not a real
@@ -237,11 +332,12 @@ Recommended reviewer coverage for this PR's submission:
   `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7). Only add if a reviewer
   question specifically asks about it.
 
-**Action before next submission:** create/confirm one dedicated Client
-reviewer account (with a sample shipment) in the real production Firebase
-project, the same way `applereviewer` was already done for Driver. This
-document does not create it — that requires touching production data,
-which is out of scope for this docs/performance PR.
+**Resolved (PR #85 follow-up):** the owner confirmed the dedicated Client
+reviewer account described above already exists in the real production
+Firebase project, the same way `applereviewer` already exists for
+Driver. Remaining action: confirm it still has at least one sample
+shipment visible before the next submission (see the note above) — a
+quick manual check, not an account-creation step.
 
 ## 5. Privacy policy / App Store metadata checklist
 
