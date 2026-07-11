@@ -4946,10 +4946,17 @@ MARAS Group etir Center`;
                             actionAr: `تم إرسال تنبيه بالبريد الإلكتروني عبر حساب Gmail إلى ${maskEmailForLog(gmailTo)}`
                           })
                         });
-                        // Refresh audit logs in background
-                        const logsRes = await apiFetch("/api/logs");
-                        if (logsRes.ok) {
-                          setActivityLogs(await logsRes.json());
+                        // Refresh audit logs in background — only for roles that
+                        // can actually view the ledger (canViewAuditLogs,
+                        // adminAccess.ts). Operation admins can reach this send
+                        // flow and can now write to the log (canWriteAuditLogs,
+                        // PR #82), but still can't read the full trail back, so
+                        // this GET would just 403 for them.
+                        if (canViewAuditLogs(resolvedAdminType)) {
+                          const logsRes = await apiFetch("/api/logs");
+                          if (logsRes.ok) {
+                            setActivityLogs(await logsRes.json());
+                          }
                         }
                       } catch (auditErr) {
                         console.error("Audit log failed for Gmail broadcast", auditErr);

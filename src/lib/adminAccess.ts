@@ -147,15 +147,38 @@ export function canWriteCostStatements(adminType: AdminType | undefined): boolea
  * POST that appends to it) used requireRole("admin") — any adminType could
  * read or write the immutable security/activity ledger directly, even though
  * the AdminPanel UI's filteredAdminTabs only ever shows the 'audit' tab to
- * 'super'. Every current client call site for the POST route is inside the
- * super-only Google Workspace (gmail) flow, so restricting both directions
- * to super doesn't remove any operation/accounts capability that exists
- * today — it closes a gap where either type could otherwise read the full
- * audit trail, or write forged entries into it, by calling the route
- * directly.
+ * 'super'. Restricting GET to super closes a gap where operation/accounts
+ * could otherwise read the full audit trail directly.
+ *
+ * POST is a separate decision — see canWriteAuditLogs below (PR #82): the
+ * "every POST call site is super-only" assumption this comment originally
+ * relied on turned out to be false (the Google Workspace 'gmail' tab that
+ * writes these entries is reachable by operation admins too, via the
+ * Shipments tab's Gmail Alert shortcut — canViewShipmentRegistry, not
+ * super-only), so GET and POST now have their own functions.
  */
 export function canViewAuditLogs(adminType: AdminType | undefined): boolean {
   return isSuperAdmin(adminType);
+}
+
+/**
+ * POST /api/logs — appending a new entry to the activity ledger. Broader
+ * than canViewAuditLogs on purpose (PR #82, Google Workspace review):
+ * operation admins can reach the Google Workspace tab (send Gmail, back up
+ * a shipment to Drive, schedule a Calendar event — see the 'gmail' content
+ * block's adminType gate in AdminPanel.tsx) and every one of those actions
+ * calls this route to record itself. Before this function existed, POST
+ * shared canViewAuditLogs (super-only), so every Workspace action an
+ * operation admin performed silently failed to be logged at all — a real
+ * audit-completeness gap, not an intentional restriction (nothing suggests
+ * operation admins' Workspace actions were meant to go unrecorded, and the
+ * UI grants them the capability in the first place). Read access is
+ * unchanged: operation admins can still never view the full ledger
+ * (canViewAuditLogs, GET /api/logs, the 'audit' tab) — only append to it
+ * via the specific actions they're already allowed to take.
+ */
+export function canWriteAuditLogs(adminType: AdminType | undefined): boolean {
+  return adminType === "super" || adminType === "operation";
 }
 
 /** POST/PUT/DELETE /api/clients — accounts admins are read-only here; only super/operation may create/edit/delete clients. */
