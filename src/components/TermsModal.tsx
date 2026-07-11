@@ -163,7 +163,7 @@ export default function TermsModal({ isOpen, onClose, lang = "en" }: TermsModalP
                   </div>
                   <div className="flex items-center gap-2 bg-slate-900/40 p-1.5 rounded border border-slate-800">
                     <Mail className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Email: <strong>info@maras.iq</strong></span>
+                    <span>Email: <strong>support@etir.app</strong></span>
                   </div>
                 </div>
                 <p className="text-[10px] text-slate-500 italic mt-1 bg-slate-905/20 p-2 rounded">

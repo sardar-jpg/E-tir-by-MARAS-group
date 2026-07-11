@@ -97,6 +97,19 @@ describe("canDriverUploadDocumentCategory", () => {
     expect(canDriverUploadDocumentCategory(null)).toBe(true);
     expect(canDriverUploadDocumentCategory("")).toBe(true);
   });
+
+  it("blocks a case- or whitespace-varied bypass of the 'cmr' block (PR #85)", () => {
+    expect(canDriverUploadDocumentCategory("CMR")).toBe(false);
+    expect(canDriverUploadDocumentCategory("Cmr")).toBe(false);
+    expect(canDriverUploadDocumentCategory(" cmr")).toBe(false);
+    expect(canDriverUploadDocumentCategory("cmr ")).toBe(false);
+    expect(canDriverUploadDocumentCategory("CMR ")).toBe(false);
+  });
+
+  it("still allows a non-string category value through (not a 'cmr' bypass vector)", () => {
+    expect(canDriverUploadDocumentCategory(123)).toBe(true);
+    expect(canDriverUploadDocumentCategory({})).toBe(true);
+  });
 });
 
 describe("isDocumentVisibleToClient", () => {

@@ -124,13 +124,47 @@ Reviewer-facing / policy-facing items, current state as of this PR:
       reviewer — low-priority cleanup, not a review blocker (see §9).
 - [x] **Support email is `support@etir.app`** — confirmed live in the UI:
       `LoginPage.tsx` (`SUPPORT_EMAIL` constant, "need help" link) and
-      `AdminPanel.tsx`'s Settings page both use it. **Exception found:**
-      `PrivacyPolicyModal.tsx` and `TermsModal.tsx` both list
-      `info@maras.iq` instead — see §5.
+      `AdminPanel.tsx`'s Settings page both use it. `PrivacyPolicyModal.tsx`
+      and `TermsModal.tsx` previously listed `info@maras.iq` instead — see
+      §5; **resolved in PR #85**, both now use `support@etir.app` too.
 - [x] **Domain is `etir.app`** — `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`
       §2/§10 already documents `https://etir.app` as the production domain
       and confirms it's always-allowed in CORS
       (`src/lib/cors.ts` `DEFAULT_ALLOWED_ORIGINS`), independent of this PR.
+- [x] **Google Sign-In is hidden from the login screen (PR #85 follow-up,
+      verified in code).** `LoginPage.tsx` gates the entire "Sign in with
+      Google" button behind `const GOOGLE_LOGIN_ENABLED = false` (a
+      hardcoded module constant, not an env/remote toggle) — the button is
+      never rendered, and there is no in-app way for a user or a reviewer
+      to re-enable it without a code change and a new deployment. A
+      reviewer using the current build cannot reach it at all. **Do not
+      instruct Apple to test Google Sign-In as a login method** — it isn't
+      part of the login flow anymore (see §3). Separately, an unrelated
+      **"Connect Gmail" feature still exists inside the Admin-only Google
+      Workspace settings tab** (`AdminPanel.tsx`, wired via
+      `handleConnectGmail`/`googleAuth.ts`) — this is an optional,
+      already-authenticated admin connecting their own Gmail/Drive/Calendar
+      for sending status-update emails and backups, not a login mechanism,
+      and is not required to review the core app.
+- [x] **Driver login accepts phone number, email, or username (verified
+      live, PR #85 follow-up).** `POST /api/login`'s driver branch
+      (`server.ts`) matches the submitted identifier against the driver's
+      `username`, `email`, `phone` (whitespace-normalized), or `name` —
+      confirmed via direct local login calls with each of phone and email
+      for the same account, both succeeding. `LoginPage.tsx`'s field is
+      labeled "Email / Phone / Username" accordingly.
+- [x] **Driver registration no longer depends on email verification
+      (re-confirmed, PR #85 follow-up).** `POST /api/drivers/self-register`
+      creates the driver record directly (pbkdf2 password, no Firebase
+      Auth account, no `sendEmailVerification` call anywhere in this path)
+      and gates access on **admin approval only** — the post-registration
+      screen tells the applicant exactly that ("pending admin approval —
+      you will be able to sign in once an admin approves it"), not
+      "check your email." The one remaining `sendEmailVerification` call
+      in the codebase is in `LoginPage.tsx`'s *legacy* Firebase-auth login
+      fallback (pre-existing Firebase-authenticated accounts only), not
+      the registration path a new driver — including a reviewer — goes
+      through.
 
 ## 3. Reviewer notes template
 
@@ -139,9 +173,23 @@ Paste into App Store Connect's "Notes for Review" field, filling in the
 commit the filled-in version anywhere):
 
 ```
-Etir is a freight/logistics tracking app for MARAS Group (Iraq-based
-freight company) with three separate login experiences: Admin, Driver,
-and Client (customer). All three log in from the same screen.
+Etir is an update to our existing app (same app, same Bundle ID, same
+Apple Developer Team as the prior submission) — a freight/logistics
+tracking app for MARAS Group (Iraq-based freight company) with three
+separate login experiences: Admin, Driver, and Client (customer). All
+three log in from the same screen using a username/email/phone +
+password form.
+
+This build does not offer Google Sign-In as a login method — please do
+not attempt "Sign in with Google" during review; it is not present on the
+login screen. Use the credentials below for each role instead.
+
+Fill every `<placeholder>` below with the real production reviewer
+accounts from §4 ("Real reviewer account plan") — **never** the
+`*.demo.local` / `demo_driver` / `demo_client` local-dev-only accounts
+documented in §4's "Local/demo accounts" table. Those don't exist in
+production at all and won't work in the build Apple installs; see §4's
+"Precise re-verification of this gating" note for exactly why.
 
 ADMIN LOGIN
   Email: <admin reviewer email>
@@ -150,35 +198,74 @@ ADMIN LOGIN
   already exist), GPS Tracking Map, Driver Alliance, Chat, Settings.
 
 DRIVER LOGIN
-  Username/Email: <driver reviewer account>
+  Username/Email/Phone: <driver reviewer account>
   Password: <driver reviewer password>
-  Note: this account should already be approved and have at least one
-  sample shipment/job assigned — a driver account with nothing to show
-  was flagged in a prior review round (see ETIR-PROJECT-REFERENCE.md §6,
-  "no-demo-driver-content"). Confirm this before submitting, every time.
+  This account logs in with either its email or its phone number, in
+  addition to its username. It is already approved and has at least one
+  sample shipment/job assigned, so its dashboard is populated
+  immediately after login — a driver account with nothing to show was
+  flagged in a prior review round. Confirm this before submitting, every
+  time.
 
 CLIENT LOGIN
   Email: <client reviewer email>
   Password: <client reviewer password>
-  What to check: shipment tracking view, chat with the admin, document
-  upload.
+  What to check: shipment tracking view (a sample shipment for this
+  company should already exist), chat with the admin, document upload.
 
 The app requires an active internet connection — it loads live data from
 our backend for all three roles; there is no offline/demo mode.
 
 Location permission is used only by the Driver role, to report the
 driver's live position while an assigned job is active (used for the
-customer/admin-facing GPS tracking map). Camera/photo library access is
-used to attach shipment documents/photos (all three roles) and delivery
-proof photos (driver role).
+customer/admin-facing GPS tracking map) — never in the background.
+Camera/photo library access is used to attach shipment documents/photos
+(all three roles) and delivery proof photos (driver role).
 ```
 
-Two prior rejection rounds are recorded in `ETIR-PROJECT-REFERENCE.md` §6:
+**The confirmed prior App Review rejection** (owner-provided, as of PR
+#85's follow-up — supersedes the earlier paraphrased "two rounds" summary
+below) cited exactly these five points:
+1. Apple could not access Google Workspace login.
+2. Apple could not access a driver account.
+3. Demo accounts lacked pre-populated content.
+4. Google login displayed an error.
+5. Driver registration was blocked because the verification email was
+   not received.
+
+Status of each, verified in this codebase as of PR #85's follow-up:
+1/4. **Addressed by removal, not by fixing the error.** Google Sign-In
+   is no longer offered as a login method at all (`GOOGLE_LOGIN_ENABLED
+   = false` in `LoginPage.tsx`) — there is nothing for Apple to click,
+   so the prior popup/native-WebView error (also tracked separately as
+   Guideline 2.1a, commit `baf8a0f`) cannot recur through the login
+   screen. The reviewer notes above tell Apple not to attempt it.
+2. **Addressed** — the dedicated `applereviewer` driver account exists,
+   pre-approved, with a sample job assigned (see §4).
+3. **Addressed** — Admin/Driver/Client reviewer accounts each carry
+   pre-populated operational data (dashboard content for Admin, an
+   assigned/accepted shipment for Driver, a company shipment for Client)
+   — verified against this PR's local demo-data equivalent; see §4 for
+   what's confirmed in the real production accounts versus what could
+   only be verified locally.
+5. **Addressed** — `POST /api/drivers/self-register` no longer creates a
+   Firebase Auth account or sends a verification email at all; a new
+   driver's only gate is admin approval, communicated accurately in the
+   post-registration screen.
+
+This is a more precise, now-confirmed version of the "two rounds of
+rejections" this project's own docs previously reconstructed
+after-the-fact (`ETIR-PROJECT-REFERENCE.md` §6:
 name/icon/Google-sign-in-bug/demo-credentials/account-deletion/
 business-model, then Google-login-error/no-demo-driver-content/
-email-verification-not-received. Re-check each of those specific points
-still holds before resubmitting — they're exactly the kind of thing that
-regresses silently.
+email-verification-not-received) — that reconstruction and the owner's
+now-confirmed rejection text describe the same underlying issues. Two
+items from that original reconstruction aren't covered by the confirmed
+five points above and have no further detail recorded anywhere in this
+repo: the name/icon item and the account-deletion/business-model item
+from the first round. Re-check all of these specific points still hold
+before resubmitting — they're exactly the kind of thing that regresses
+silently.
 
 ## 4. Reviewer demo account plan
 
@@ -204,6 +291,49 @@ never be what a real App Store reviewer logs in with** — they don't exist
 in production (`IS_LOCAL_DEV` gate) and wouldn't work against
 `https://etir.app` anyway.
 
+**Precise re-verification of this gating (PR #85, third follow-up),
+because it's easy to conflate two separate flags here:**
+- **These three account *records themselves*** (`admin@demo.local`,
+  `demo_driver`, `demo_client`, plus `demo_client_staff`) are gated
+  **only** by `IS_LOCAL_DEV` (`NODE_ENV !== "production"`) in
+  `server.ts`'s `DEMO_ACCOUNTS` constant — **not** by `SEED_DEMO_DATA`.
+  Confirmed live: with `NODE_ENV` unset (local dev) and
+  `SEED_DEMO_DATA=false`, all three still log in successfully.
+- **Their pre-populated content is a separate gate: `SEED_DEMO_DATA`.**
+  Confirmed live, same run: with `SEED_DEMO_DATA=false`, the successfully
+  logged-in Driver and Client demo accounts saw **zero** shipments each,
+  and the Admin dashboard saw **zero** shipments/vendors (only the demo
+  accounts themselves as the sole driver/client records) — i.e. they log
+  in but have nothing to show, reproducing the exact "demo accounts
+  lacked pre-populated content" rejection reason. With
+  `SEED_DEMO_DATA=true` (the setting these docs' own local-dev
+  instructions always specify), the same accounts show 3 shipments / 5
+  drivers / 5 clients / 4 vendors (Admin), 1 assigned/accepted shipment
+  (Driver), and 1 company shipment (Client) — confirmed live in this same
+  pass.
+- **Neither flag has any effect on production.** `NODE_ENV=production`
+  alone makes `DEMO_ACCOUNTS` `null` — these three accounts cannot exist
+  at all in production, regardless of `SEED_DEMO_DATA`, regardless of
+  memory-fallback state. `SEED_DEMO_DATA` only ever populates the
+  **in-memory fallback store** (`getMemoryStore()`); it has no code path
+  into real Firestore at all (`seedDatabaseIfEmpty()` — the one function
+  that seeds *Firestore* — separately checks `SEED_DEMO_DATA` itself and
+  is skipped whenever `useMemoryFallback` is false, i.e. whenever real
+  Firestore is actually connected).
+- **The actual backend the shipped iOS/TestFlight app talks to is the
+  live production Cloud Run service** — confirmed directly in
+  `capacitor.config.ts`: `server.url` is hardcoded to
+  `https://e-tir-by-maras-v2-282009674985.europe-west1.run.app`, the same
+  Cloud Run service that serves `https://etir.app` (no separate staging
+  backend exists — `docs/REAL_FIREBASE_VERIFICATION.md` §1 already
+  documents this). That service runs with `NODE_ENV=production`
+  (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §3). **Conclusion: `admin@demo.local`
+  / `demo_driver` / `demo_client` cannot ever work against the app Apple
+  actually reviews — not "hidden," not "conditionally available," simply
+  absent from that environment's data by construction.** They must never
+  be included in real App Review Notes (they already aren't — see the
+  `<placeholder>` form used in §3's template below, not these values).
+
 ### Real reviewer account plan (for actual App Review submission)
 
 `ETIR-PROJECT-REFERENCE.md` §1 records that a prior submission already
@@ -215,6 +345,21 @@ used dedicated reviewer accounts:
   account with a sample shipment pre-assigned specifically so a reviewer
   sees populated content instead of an empty state (this addressed the
   "no-demo-driver-content" rejection reason from a prior round)
+
+**Update (PR #85 follow-up):** the owner has confirmed a dedicated
+**Client reviewer account also now exists** in production, alongside the
+Admin and Driver accounts above — this PR did not create it (no
+production account was created or touched here; there was no real
+Firebase access in this environment to do so, and none was needed since
+the account was already confirmed present). Its real content (whether it
+has at least one sample company shipment, matching the Driver account's
+pattern) was **not independently verified against production** in this
+pass — only the underlying mechanism was re-confirmed locally (a Client
+session with a company shipment on record correctly sees it; see
+`docs/FOLLOW_UP_ROADMAP.md`). Recommend one quick manual check in
+production before the next submission: log into the real Client reviewer
+account and confirm at least one sample shipment is visible, the same
+way the `applereviewer` Driver account is already kept populated.
 
 Recommended reviewer coverage for this PR's submission:
 
@@ -237,11 +382,12 @@ Recommended reviewer coverage for this PR's submission:
   `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7). Only add if a reviewer
   question specifically asks about it.
 
-**Action before next submission:** create/confirm one dedicated Client
-reviewer account (with a sample shipment) in the real production Firebase
-project, the same way `applereviewer` was already done for Driver. This
-document does not create it — that requires touching production data,
-which is out of scope for this docs/performance PR.
+**Resolved (PR #85 follow-up):** the owner confirmed the dedicated Client
+reviewer account described above already exists in the real production
+Firebase project, the same way `applereviewer` already exists for
+Driver. Remaining action: confirm it still has at least one sample
+shipment visible before the next submission (see the note above) — a
+quick manual check, not an account-creation step.
 
 ## 5. Privacy policy / App Store metadata checklist
 
@@ -258,7 +404,7 @@ invented here.
 | Chat messages | Yes — customer↔admin and driver↔admin channels (`src/lib/chatVisibility.ts`) | All three roles | Confirm the policy mentions chat message storage/retention |
 | Account/login data | Yes — email, hashed password, company name (client), assigned jobs (driver) | All roles | Standard — confirm covered |
 | Notifications | Yes — in-app + push via FCM (`@capacitor/push-notifications`, `firebase-admin`) | All roles | Confirm push notification data use is mentioned (device token storage — see `src/lib/pushTokenAccess.ts`) |
-| Support contact | `support@etir.app` used live in `LoginPage.tsx`/`AdminPanel.tsx` | — | **Mismatch found:** `PrivacyPolicyModal.tsx` and `TermsModal.tsx` both list `info@maras.iq` as the contact email instead of `support@etir.app`. Recommend aligning these to one address before submission — this document does not change the wording, since privacy-policy copy is legal-adjacent and should be a deliberate edit, not a side effect of a performance PR. |
+| Support contact | `support@etir.app` used live in `LoginPage.tsx`/`AdminPanel.tsx` | — | **Resolved in PR #85.** `PrivacyPolicyModal.tsx` and `TermsModal.tsx` previously listed `info@maras.iq` instead of `support@etir.app`; owner confirmed `support@etir.app` is the official contact and both modals were updated to match. |
 | Data retention/deletion | Partial — Client Owner can self-delete their account (`canClientSelfDeleteAccount`, `src/lib/clientAccess.ts`); Client Staff cannot (admin-only removal). No explicit data-retention-period language found in the reviewed modals. | — | Add a plain-language retention/deletion note if App Privacy answers require one (don't invent a specific retention period that isn't actually implemented — state the truth: account deletion removes the account; shipment/document records tied to a company's shipments are retained for the business's own operational/accounting needs unless a separate deletion request is made). |
 | User roles / business purpose | Admin / Operation Admin / Accounts Admin / Driver / Client Owner / Client Staff — each role's actual access is fully documented in `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7's role matrix | — | Useful as source material for the App Privacy questionnaire's "why do you collect this" answers — reuse the existing, accurate role matrix rather than re-describing access from scratch |
 
@@ -298,10 +444,15 @@ App Review specifically):
 - `GOOGLE_MAPS_PLATFORM_KEY` must be set and restricted (§9 of that doc) —
   otherwise every map surface shows the setup-instructions fallback card
   instead of a working map.
-- Google Sign-In (if a reviewer might try it) needs both gates open:
-  Firebase "Authorized domains" including `etir.app`, and the Google OAuth
-  consent screen's Publishing status set to "In production" — both called
-  out in `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §12 and
+- Google Sign-In as a *login* method is no longer reachable by a
+  reviewer at all (`GOOGLE_LOGIN_ENABLED = false` in `LoginPage.tsx` —
+  see §2/§3); the two Google-side gates below only matter for the
+  separate, optional, Admin-only "Connect Gmail" Google Workspace
+  feature, which shares the same underlying OAuth flow but is not part
+  of login and not required to review the core app: Firebase "Authorized
+  domains" including `etir.app`, and the Google OAuth consent screen's
+  Publishing status set to "In production" — both called out in
+  `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §12 and
   `ETIR-PROJECT-REFERENCE.md` §5.
 
 ## 7. Safe performance / bundle-size review
@@ -508,8 +659,8 @@ reviewed native-config PR of their own.
   real archive that push notifications still work end-to-end in the
   submitted build, since a stale `development` value in the shipped
   binary would silently break production APNs delivery.
-- **Privacy policy / Terms contact email mismatch** — see §5; both modals
-  say `info@maras.iq`, the rest of the live app says `support@etir.app`.
+- ~~Privacy policy / Terms contact email mismatch~~ — **resolved in PR
+  #85**; see §5.
 
 ## 9. Non-blocking cleanup noted, not done
 
@@ -677,4 +828,17 @@ sessions in a fresh local `SEED_DEMO_DATA=true` dev environment).
 fixture, what should/shouldn't appear):** see
 `docs/FOLLOW_UP_ROADMAP.md` § "Driver review demo scenario (local/dev
 only — PR #71, re-verified PR #72)" — `demo_driver` / `DemoDriver123!`
-with `SEED_DEMO_DATA=true`, local only, never seeded in production.
+
+**Case-bypass of the CMR-upload block fixed in PR #85.**
+`canDriverUploadDocumentCategory` (above) did a strict
+`category !== "cmr"` check — sending `"CMR"`/`"Cmr"`/`" cmr"` in the
+request body bypassed the block entirely (not reachable via the real UI,
+which only ever sends the canonical lowercase literal, but reachable via
+a direct API call). Fixed to normalize case/whitespace before comparing.
+This does not change anything described above — the product decision and
+UI behavior are unchanged; this closes a server-side enforcement gap in
+the same rule. See `docs/FOLLOW_UP_ROADMAP.md` ("Production release
+readiness..." PR #85 section) for the full writeup. The
+`info@maras.iq` vs `support@etir.app` mismatch flagged in §5 of this
+document is also resolved as of PR #85's follow-up commit — the owner
+confirmed `support@etir.app` is official and both modals were updated.

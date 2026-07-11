@@ -4,6 +4,510 @@ Deferred items identified during PR #56 (Settings Center Foundation) and prior
 reviews. None of these are in scope for that PR — this file only tracks what's
 next so the work isn't lost between sessions.
 
+## Production release readiness, final E2E, TestFlight update prep (PR #85)
+
+Full, non-destructive production-readiness review of the whole app (backend
++ web + existing iOS/TestFlight app), a final role-by-role E2E pass, and a
+documented (not executed) TestFlight update workflow for the *existing*
+App Store Connect app. **No new Apple app was created, no Bundle
+Identifier/Team/signing was changed, no archive/upload/App Review
+submission occurred, no Firebase deploy occurred, no production data was
+touched.**
+
+### Confirmed bug fixed
+
+**CMR driver-upload block could be bypassed with a differently-cased or
+padded category string.** `src/lib/documentAccess.ts`'s
+`canDriverUploadDocumentCategory` did a strict `category !== "cmr"` check.
+Live E2E testing (`POST /api/shipments/:id/documents` and `POST
+/api/shipments/:id/chat` as a driver session) confirmed that sending
+`"category": "CMR"` (or `"Cmr"`, `" cmr"`, `"cmr "`) was **not** blocked —
+the document was created with `category: "CMR"` and no 403, in direct
+contradiction of the driver-app-simplification decision from PR #71 ("a
+driver may only ever view/download an admin-published CMR, never create
+one" — see `docs/IOS_APP_REVIEW_READINESS.md` §12). Not reachable through
+the real UI (`DriverApplication.tsx`/`FileUploadModal.tsx` only ever send
+the canonical lowercase `"cmr"` `DocumentCategory` literal — this is a
+TypeScript union, so the legitimate app can't produce a mis-cased value),
+but trivially reachable via a direct, deliberately-crafted API call — the
+same "enforce server-side, not only by hiding UI" gap shape this codebase
+has fixed repeatedly (PR #80, #83). Fixed by normalizing the comparison:
+`typeof category !== "string" || category.trim().toLowerCase() !== "cmr"`.
+Added 2 tests covering the case/whitespace bypass and non-string inputs.
+Re-verified live after the fix: `"CMR"`, `"Cmr"`, `" cmr"`, `"cmr "` all
+now correctly 403 for a driver session at both call sites; legitimate
+driver `photo` upload and admin `cmr` upload both still succeed unchanged.
+
+### Full E2E verification performed (local, memory-fallback — see Firebase
+boundary note below)
+
+- **Super Admin**: full read access confirmed across shipments, drivers,
+  clients, vendors, cost-statements (via Accounts Admin check below),
+  logs, admins, storage-status — all 200.
+- **Operation Admin**: shipments/drivers 200 (operational access intact);
+  `/api/logs` (view), `/api/admins`, `/api/cost-statements/:id` all 403 —
+  matches PR #82's `canViewAuditLogs`/`canViewAdminRoster`/
+  `canViewCostStatements` (super-only) exactly; write-audit access
+  (`canWriteAuditLogs`, super+operation) was not re-tested here, already
+  covered by PR #82.
+- **Accounts Admin**: `/api/shipments`/`/api/drivers` 403 (no
+  registry/driver-assignment access); `/api/clients`/`/api/vendors` 200
+  read, a write attempt (`POST /api/clients`) correctly 403; cost
+  statements 200; `/api/logs`/`/api/admins` 403 — matches `adminAccess.ts`
+  exactly.
+- **Driver**: sees exactly their own assigned shipment (1 of 3 total, via
+  server-side scoping in `GET /api/shipments`), `internalNotes` absent
+  from the view, customer `loadingContactNumber` absent, `agreedAmount`
+  present (existing, documented intended behavior — a driver's own
+  primary-shipment amount is not internal/vendor cost data). `GET
+  /api/drivers` as a driver session returns exactly 1 record (their own,
+  no password field) even though 5 drivers exist system-wide — confirms
+  `scopeDriverListForSession` is genuinely filtering, not coincidence.
+  CMR upload blocked (see fix above); legitimate `photo` document upload
+  and `driver_admin` chat both still work.
+- **Client Owner**: sees exactly their own company's shipment;
+  `internalNotes`/`agreedAmount` both absent (correctly stricter than the
+  driver's own-shipment exception above); staff self-delete-company
+  blocked (see Client Staff below) — owner's own self-delete path
+  (`canClientSelfDeleteAccount`) was traced in code but not actually
+  executed against the demo account, to avoid destructively deleting the
+  only seeded client mid-verification-run.
+- **Client Staff** (`demo_client_staff`, `viewOnly`): sees the same
+  single company shipment as the owner; a delete-company attempt against
+  the real client id returns `403 "Client Staff accounts can only be
+  removed by MARAS Admin."` — confirms `canClientSelfDeleteAccount` is
+  enforced server-side, not just hidden in the UI.
+- **Public tracking** (`GET /api/share/:token`, no auth): response
+  contains only `buildSecureShareView`'s fields — no
+  `loadingContactNumber`/`deliveryContactNumber`/`internalNotes`/
+  `agreedAmount`/`shareToken`/`companyName`. Only the one document marked
+  `isSharedExternally: true` (the CMR) appears, proxied through
+  `/api/share/:token/documents/:id` — never a raw Storage URL; the
+  internal packing-list/invoice documents and the not-yet-approved photo
+  stay hidden. No chat, no cost fields present at all.
+- **No unauthorized polling / console spam**: `AdminPanel.tsx`'s
+  background polling (12s SWR revalidation, 60s shipment poll) already
+  pauses on `document.hidden`/offline (fixed pre-PR #85, commit
+  `af91314`, "fix: avoid unauthorized admin data polling") — confirmed
+  still intact, not modified by this PR.
+- **Not exercised in this pass (documented limitation)**: visual
+  desktop/mobile-viewport rendering, loading/empty/error UI states, and
+  browser console-error spam were **not** driven through an actual
+  browser in this PR — the ad-hoc `playwright-core` package used for
+  visual verification in PR #83 was a scratch/session-local install, not
+  a project dependency, and is not present after a fresh `npm install`.
+  All role/data-visibility findings above were verified at the API layer
+  instead, which covers what actually crosses the server boundary; pure
+  UI rendering (spinners, skeletons, empty-state copy) was reviewed by
+  reading the relevant component code, not by looking at a rendered page.
+  Recommend a real-browser pass (installing `playwright-core` as an
+  explicit dev dependency, or a manual click-through) before shipping if
+  visual regressions are a specific concern for this release.
+
+### Firebase readiness boundary (per PR #84, re-confirmed, not re-litigated)
+
+No backend/Firebase code changed in this PR beyond the CMR fix above
+(which touches `src/lib/documentAccess.ts` only, no Firebase surface).
+Everything PR #84 already established stands unchanged: strict
+persistence read/write symmetry, Firestore/Storage server-account-only
+rules, CORS allowlist, `SESSION_SECRET`/`SUPER_ADMIN_PASSWORD_HASH`
+launch-blocker checks, Google Maps key restriction as a manual Cloud
+Console action. Re-ran `npm run check-firebase-readiness` in both default
+and `NODE_ENV=production` simulation in this environment (no real
+Firebase credentials here) — same result as PR #84: clean by default,
+and the production simulation correctly reports its usual blockers
+(missing `SESSION_SECRET`/`SUPER_ADMIN_PASSWORD_HASH`/server credentials)
+because this shell has none of the real deployment's env vars set — this
+is expected local-shell behavior, not a new production issue.
+
+### Existing iOS/TestFlight app — inspected only, nothing changed
+
+Confirmed via direct file inspection (no Xcode/native commands run):
+
+- **Bundle Identifier**: `com.maras.etir` (`ios/App/App.xcodeproj/project.pbxproj`,
+  identical in Debug and Release configs) — unchanged, must stay unchanged.
+- **Apple Team**: `7S734U3SAW` (`DEVELOPMENT_TEAM`) — unchanged.
+- **App display name**: `Etir` (`Info.plist` `CFBundleDisplayName`).
+- **Marketing version / build number**: `1.0.3` / `6`
+  (`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`).
+- **Signing**: `CODE_SIGN_STYLE = Automatic`, no hardcoded provisioning
+  profile specifier (consistent with automatic signing).
+- **Capabilities/entitlements**: `ios/App/App/App.entitlements` grants
+  only Push Notifications (`aps-environment`) — no Associated Domains, no
+  Background Modes.
+- **Permission strings** (`Info.plist`): Camera, Photo Library, Photo
+  Library Add, and Location-When-In-Use descriptions are all present,
+  scoped to "while the app is open" for location (no
+  `NSLocationAlwaysAndWhenInUseUsageDescription` key present — no
+  background-location claim in the manifest), and worded around shipment
+  documents/delivery evidence — none overstate functionality.
+  `UIBackgroundModes` is absent entirely — no background execution is
+  declared, consistent with the "while in use" location string.
+- **`capacitor.config.ts`**: `appId: 'com.maras.etir'`, `appName:
+  'Etir'`, `server.url` intentionally points at the real production
+  Cloud Run URL (documented in the file's own comment: needed so
+  Firebase Auth behaves correctly inside the native WebView) — this is
+  existing, reviewed, intentional configuration, not a dev leftover.
+- **Native Firebase**: `ios/App/App/GoogleService-Info.plist` exists
+  (standard Firebase iOS config, not a secret — same category as the web
+  `firebase-applet-config.json`); no Podfile exists — this project uses
+  Swift Package Manager (`ios/App/CapApp-SPM/Package.swift`) instead,
+  with `@capacitor-firebase/authentication` as the native bridge; no
+  separate Firebase pods are declared.
+- **No Fastlane config, no ExportOptions.plist, no `.p12`/`.mobileprovision`/
+  service-account JSON found anywhere in the repo.**
+
+None of these values were changed. See `docs/IOS_APP_REVIEW_READINESS.md`
+§12 for the CMR fix's App-Review-facing cross-reference.
+
+### Previous App Review issue — confirmed, sourced, still-open item found
+
+**Source**: this repo's own prior documentation only —
+`ETIR-PROJECT-REFERENCE.md` §6 and `docs/IOS_APP_REVIEW_READINESS.md`
+§2–3 — **not** an Apple-provided rejection email/PDF, which does not
+exist anywhere in this repository. Quoting `ETIR-PROJECT-REFERENCE.md`:
+"App Store submission: version 1.0.3, build 6, submitted, addressing two
+rounds of rejections (name/icon/Google-sign-in-bug/demo-credentials/
+account-deletion/business-model, then
+Google-login-error/no-demo-driver-content/email-verification-not-received)."
+Per-item fixes already made and traceable to specific commits: the
+Google Sign-In bug (commit `baf8a0f`, tied explicitly to Apple Guideline
+2.1a in its own message) and the email-verification dependency (commit
+`2d0893a`); the no-demo-driver-content item was addressed by a dedicated
+pre-approved `applereviewer` driver account with a sample job
+(`docs/IOS_APP_REVIEW_READINESS.md` §4). The name/icon/demo-credentials/
+account-deletion/business-model items from round 1 are named only as a
+list in these docs, with no further detail recorded.
+
+**Resolved in this PR (follow-up commit).** The privacy-policy
+contact-email mismatch this project's own docs flagged twice before
+(PR #69, and `docs/IOS_APP_REVIEW_READINESS.md` §5) — `PrivacyPolicyModal.tsx:209`
+and `TermsModal.tsx:166` hardcoding `info@maras.iq` while
+`LoginPage.tsx:22`/`AdminSettingsSection.tsx` used `support@etir.app` — was
+left unchanged in the initial version of this PR pending a deliberate
+owner decision, since privacy-policy/terms copy is legal-adjacent. The
+owner has since confirmed **`support@etir.app` is the official eTIR
+support/contact email**. Both modals' "CONTACT COMPLIANCE BLOCK" email
+lines were updated from `info@maras.iq` to `support@etir.app` to match.
+The block's company name ("MARAS Logistics & Supply Chain HQ") and
+website line (`www.maras.iq`) were deliberately left unchanged — those
+are unrelated MARAS corporate branding/website references, not the
+mismatched contact email this finding was about. Also deliberately left
+unchanged: `sardar@maras.iq` (the real super-admin's own login identity,
+throughout `server.ts`/`App.tsx`/`LoginPage.tsx`/`AdminTeamSection.tsx`/tests)
+and `financials@maras.iq` (a billing/invoice-letterhead contact inside
+the Cost Statement PDF header in `AdminPanel.tsx`, lines ~2261/~8705) —
+both are unrelated MARAS business contacts, not eTIR
+privacy/terms/support/App-Review contacts, and a repo-wide search
+confirmed no other `info@maras.iq` reference exists in any user-facing
+file.
+
+**Exact App Review notes recommended for the next submission** (building
+on the existing template in `docs/IOS_APP_REVIEW_READINESS.md` §3): state
+plainly that this is an update to an existing app (same Bundle ID `com.maras.etir`,
+same Team), reference the `applereviewer` driver account and its
+pre-assigned sample job, and explicitly confirm the specific points from
+both prior rejection rounds still hold — **not** by re-testing Google
+Sign-In (superseded finding, corrected below: it is hidden from the
+login screen as of this PR and must not be presented to Apple as a login
+method at all), but by confirming no email-verification dependency
+blocks registration and that demo/reviewer accounts have visible content
+— `docs/IOS_APP_REVIEW_READINESS.md` §2–3 already say this in more
+detail; this PR did not find anything that contradicts that existing
+plan.
+
+**If Apple's original rejection message/screenshot still exists** (App
+Store Connect > App > Activity, or an old email), it should be attached
+to the next submission's internal notes even though this repo doesn't
+have it — this review could only confirm what this project's own
+after-the-fact summary says, not Apple's literal wording.
+
+### App Store metadata reachability — one finding
+
+`https://etir.app` is a client-rendered SPA (`index.html` is just a
+`<div id="root">` + script tag) — a non-JS-executing fetch of the root
+domain in this environment returned only the empty shell, which is
+**inconclusive**, not a confirmed outage (this is expected for any SPA
+fetched without running its JS bundle). This was not re-verified with a
+real browser in this pass (see the browser-verification limitation
+above). The in-repo Privacy Policy/Terms are modals reachable from a
+button visible directly on the pre-login `LoginPage.tsx` (confirmed in
+code — `onViewPrivacy`/`onViewTerms` props render visible links), not a
+separate deep-linkable URL like `/privacy`. This is a common, generally
+accepted SPA pattern for an App Store Connect "Privacy Policy URL" field
+pointed at the app's root domain, but has not been confirmed working in
+an actual browser against the live `etir.app` production deployment in
+this pass — recommend a manual check before submission. No subtitle,
+keywords, category, age rating, or screenshots are recorded anywhere in
+this repository (App Store Connect-only fields) — nothing here was
+invented to fill that gap.
+
+### Apple reviewer-access verification — final (PR #85, second follow-up)
+
+The owner has since provided the actual prior Apple rejection text and
+confirmed reviewer accounts already exist for all three roles. This
+section records what was verified in code/locally against that
+now-confirmed information — no production account was created (none was
+needed; the owner confirmed all three already exist), and no password
+is printed here or anywhere in this repo.
+
+**Confirmed exact prior rejection reasons** (owner-provided, supersedes
+the earlier after-the-fact paraphrase): (1) Apple could not access Google
+Workspace login, (2) Apple could not access a driver account, (3) demo
+accounts lacked pre-populated content, (4) Google login displayed an
+error, (5) driver registration was blocked because the verification
+email was not received. See `docs/IOS_APP_REVIEW_READINESS.md` §3 for
+the full status of each, cross-referenced against this codebase.
+
+**Verified login methods by role** (code inspection + live local calls):
+- **Admin/Super reviewer**: username/email + password via `POST
+  /api/login`, same screen as the other two roles. No Google Sign-In
+  step in this flow.
+- **Driver reviewer**: username, email, **or phone number** + password,
+  all via the same `POST /api/login` route (`server.ts`'s driver branch
+  matches against `username`/`email`/`phone`/`name`) — confirmed live
+  with a local demo driver account, logging in successfully with its
+  phone number alone and, separately, with its email alone, both
+  returning `200` and an identical session.
+- **Client reviewer**: username/email/company-name + password via the
+  same route, identical shape to Admin.
+
+**Google login status: hidden, not reachable, not fully removed from the
+codebase.** `LoginPage.tsx`'s "Sign in with Google" button is gated
+behind `const GOOGLE_LOGIN_ENABLED = false` — a hardcoded constant, not a
+remote/env toggle, so it cannot be switched back on without a code
+change and redeploy. The button never renders; there is no UI path to
+it. The `googleSignIn()` function/import and the Firebase Google-auth
+plumbing (`src/googleAuth.ts`) still exist in the codebase because a
+*separate*, unrelated feature — the Admin-only "Connect Gmail" button
+inside the Google Workspace settings tab (`AdminPanel.tsx`) — still uses
+the same underlying helper to let an *already-logged-in* admin connect
+their own Gmail/Drive/Calendar for sending status emails and backups.
+That feature requires the admin to already have an app session; it is
+not a login mechanism and is not required to review the core app.
+**Conclusion for reviewer notes: do not tell Apple to test Google
+login — it is not present in the login flow.**
+
+**Reviewer accounts found:**
+- Admin: `sardar@maras.iq` (real production super-admin — documented in
+  `ETIR-PROJECT-REFERENCE.md` §1; password lives in the team's password
+  manager, never in this repo).
+- Driver: `applereviewer` (real production, pre-approved, with a sample
+  job already assigned — documented in the same place).
+- Client: **owner-confirmed to now exist** in production (this was an
+  open action item as of the previous PR #85 pass — resolved by the
+  owner since then). This PR did not create it and could not
+  independently inspect its real production content (no live Firebase
+  access in this environment).
+
+**Pre-populated content status:**
+- Verified **locally** (memory-fallback demo data, standing in for the
+  same pattern the real reviewer accounts use): Admin sees a full
+  operational dataset (3 shipments, 5 drivers, 5 clients, 4 vendors in
+  the local seed); Driver sees exactly 1 assigned/accepted shipment with
+  a full workflow (status timeline, chat, view-only CMR); Client sees
+  exactly 1 company shipment. This confirms the underlying
+  seeded-data/scoping mechanism genuinely produces populated dashboards
+  for all three roles, not empty states.
+- **Not independently verified against real production** in this pass:
+  whether the actual `sardar@maras.iq`, `applereviewer`, and the
+  Client reviewer accounts currently have this same populated content
+  live on `https://etir.app` — no live Firebase credentials are
+  available in this environment. `applereviewer` having a sample job is
+  already documented as an established, maintained fact
+  (`ETIR-PROJECT-REFERENCE.md` §1); the Client reviewer account's
+  content specifically has not been confirmed since the owner reported
+  it now exists. **Recommend one quick manual check before the next
+  submission**: log into all three real reviewer accounts and confirm
+  each still shows populated content, exactly as `applereviewer` is
+  already kept up to date.
+
+**Email-verification dependency: reconfirmed removed.** `POST
+/api/drivers/self-register` creates no Firebase Auth account and never
+calls `sendEmailVerification` — a new driver's only gate is admin
+approval, and the post-registration screen says so accurately ("pending
+admin approval — you will be able to sign in once an admin approves
+it"), not "check your email." The only remaining
+`sendEmailVerification` call in the codebase is in `LoginPage.tsx`'s
+legacy Firebase-auth login fallback (pre-existing Firebase-authenticated
+accounts attempting to log in, not the registration path), unrelated to
+a new driver's registration/approval flow.
+
+**Missing account/data gap found:** none requiring a new account to be
+created — all three reviewer roles are owner-confirmed to already
+exist. The only open item is the *quick verification* of the Client
+account's content described above, which is a check, not a gap.
+
+**Final recommended App Review Notes** are in
+`docs/IOS_APP_REVIEW_READINESS.md` §3 (updated template) — summary: state
+this is an update to the existing app; explicitly tell Apple not to
+attempt Google Sign-In since it isn't offered; give Admin/Driver/Client
+credentials (Driver notably usable via phone or email); note all three
+accounts already have sample content populated; no offline/demo mode,
+active internet connection required.
+
+### Local demo-account gating precisely re-verified (PR #85, third follow-up)
+
+A follow-up request asked to verify the three `*.demo.local` credentials
+(`admin@demo.local`, `demo_driver`, `demo_client`) specifically. Important
+correction to how that request framed the gating — verified precisely
+against the actual code, not assumed:
+
+- **The account records themselves are gated only by `NODE_ENV`**
+  (`IS_LOCAL_DEV = NODE_ENV !== "production"` controls `server.ts`'s
+  `DEMO_ACCOUNTS` constant), **not by `SEED_DEMO_DATA`.** Confirmed live:
+  with `SEED_DEMO_DATA=false` (and no `NODE_ENV` set, i.e. local dev),
+  all three still logged in successfully.
+- **Their pre-populated content is gated separately, by `SEED_DEMO_DATA`.**
+  Confirmed live in the same run: with `SEED_DEMO_DATA=false`, the
+  logged-in Driver and Client saw 0 shipments each, and Admin saw 0
+  shipments/vendors — accounts exist but are empty, reproducing the
+  exact "lacked pre-populated content" rejection reason. Restarted with
+  `SEED_DEMO_DATA=true`: Admin 3 shipments/5 drivers/5 clients/4 vendors,
+  Driver 1 assigned shipment, Client 1 company shipment — matching the
+  second follow-up's earlier results exactly.
+- **Neither flag reaches production.** `NODE_ENV=production` alone makes
+  `DEMO_ACCOUNTS` `null` — these three accounts cannot exist in
+  production under any combination of the other flags.
+  `SEED_DEMO_DATA` only ever populates the in-memory fallback store,
+  never real Firestore (`seedDatabaseIfEmpty`, the function that could
+  seed Firestore, independently checks `SEED_DEMO_DATA` and is skipped
+  whenever Firestore is actually connected).
+- **Backend confirmed**: `capacitor.config.ts`'s `server.url` is
+  hardcoded to the production Cloud Run URL
+  (`https://e-tir-by-maras-v2-282009674985.europe-west1.run.app`) — the
+  same service behind `https://etir.app`, not a staging backend and not
+  local/demo memory data. That service runs `NODE_ENV=production`
+  (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §3).
+
+**Conclusion: `admin@demo.local`/`demo_driver`/`demo_client` will never
+work against the actual app Apple reviews, under any local-environment
+flag combination — this is by construction, not something to fix.** The
+App Review Notes template (`docs/IOS_APP_REVIEW_READINESS.md` §3) already
+used generic `<placeholder>` values, never these literal demo.local
+credentials, and now has an explicit line telling whoever fills it in to
+use the real §4 reviewer accounts instead. Google Workspace
+("Connect Gmail" — send status emails, Drive backups, Calendar) remains
+confirmed as an optional, Admin-only, post-login feature with zero
+dependency from Driver/Client roles (`DriverApplication.tsx`/
+`ClientDashboard.tsx` only import the shared Firebase `auth` object for
+an unrelated account-self-deletion call, `auth.currentUser.delete()` —
+nothing Google-Workspace-related). Not required for Apple to complete
+the main app review as long as reviewer notes point Apple at the
+credential-based login only.
+
+### Browser verification (PR #85, email-fix follow-up)
+
+Real-browser check performed against local `npm run dev`, driven via
+Chrome's own remote-debugging protocol (Node's built-in `fetch`/
+`WebSocket` talking to `google-chrome --headless=new
+--remote-debugging-port=...` — no new npm dependency added; the
+scratch driver script was deleted afterward, per this repo's usual
+scratch-file convention):
+
+- Login page loads cleanly at desktop width (1280×900) and mobile width
+  (390×844) — both screenshots confirmed correct rendering, including
+  the "Need help? support@etir.app" line visible pre-login.
+- Clicking "Privacy Policy" opens the modal; `document.body.innerText`
+  confirmed it contains `support@etir.app` and no longer contains
+  `info@maras.iq`, at both desktop and mobile width.
+- Clicking "Terms & Conditions" opens the modal; same confirmation —
+  `support@etir.app` present, `info@maras.iq` absent.
+- Exactly one console message was observed across the whole run: a
+  `favicon.ico` 404 (the browser's automatic favicon request; the app
+  has no file at that exact path, though `apple-touch-icon.png`,
+  `manifest.json`, and `robots.txt` all resolve `200`). Pre-existing,
+  cosmetic, unrelated to this PR's changes — not a regression, not
+  fixed here (out of scope for a contact-email alignment PR).
+- No other console errors of any kind.
+
+This confirms the email fix renders correctly in a real browser, not
+just in the underlying data/API layer. **Not covered by this check**:
+the live `https://etir.app` production domain itself (only local dev
+was exercised) — still an open manual-verification item, see below.
+
+### Manual actions still required before any App Store submission
+
+1. ~~Resolve the `info@maras.iq` vs `support@etir.app` contact
+   mismatch~~ — **resolved**: owner confirmed `support@etir.app` is
+   official; both modals updated (see above).
+2. Confirm `https://etir.app` and its Privacy Policy/Terms links render
+   correctly in a real browser (re-verified locally in this follow-up —
+   see "Browser verification" above; the live production domain itself
+   still wasn't re-checked).
+3. ~~Locate the real Apple App Review rejection message/screenshot~~ —
+   **resolved**: owner provided the confirmed rejection text (see above);
+   the original literal message/screenshot itself still doesn't exist in
+   this repo, but the substance is now captured accurately.
+4. ~~Confirm a dedicated Client-role reviewer account exists~~ —
+   **resolved**: owner confirmed it exists; recommend one quick manual
+   content check before submission (see above) — not an open account gap.
+5. Confirm the real `SERVER_FIREBASE_UID`/Google Maps key restrictions in
+   Firebase/Google Cloud Console (carried over from PR #84, unchanged).
+6. A physical-iPhone test, Archive, and TestFlight upload — not performed
+   in this PR (see the TestFlight update workflow below; explicitly out
+   of scope here).
+
+### Exact TestFlight update workflow for the existing app (documented, not executed)
+
+For the same, already-existing App Store Connect app/TestFlight history
+(Bundle ID `com.maras.etir`, Team `7S734U3SAW`) — none of steps 6+ below
+were executed in this PR:
+
+1. `git pull origin main` on the release Mac (after this PR merges).
+2. `npm install`
+3. `npm run lint`
+4. `npm test`
+5. `npm run build`
+6. Confirm Capacitor is still the native framework in use (it is —
+   `capacitor.config.ts`, `@capacitor/ios`) — no replacement needed.
+7. `npx cap sync ios`
+8. `npx cap open ios`
+9. In Xcode, preserve exactly: app name (`Etir`), Bundle Identifier
+   (`com.maras.etir`), Apple Team (`7S734U3SAW`), Automatic signing,
+   existing entitlements/capabilities, existing App Store Connect
+   listing — do not create a new app record.
+10. Increment **only** `CURRENT_PROJECT_VERSION` (currently `6`) for this
+    upload — leave `MARKETING_VERSION` (`1.0.3`) unchanged unless the
+    release plan specifically calls for a version bump.
+11. Test on a real physical iPhone (required — the prior Google Sign-In
+    rejection was specifically a physical-device-only bug that a
+    simulator wouldn't have caught).
+12. Archive with the Release configuration.
+13. Validate the archive in Xcode Organizer.
+14. Upload to the existing App Store Connect app (same app record — do
+    not create a new one).
+15. Wait for Apple's processing to complete.
+16. Assign the new build to the existing TestFlight group.
+17. **Do not submit for App Review** until the still-open items above
+    (live `etir.app`/privacy check in a real browser against production,
+    real rejection message if recoverable, reviewer account confirmation)
+    are resolved — the contact-email mismatch itself is now resolved.
+
+### Verification
+
+- `npm install`: completed; `npm audit` reports 6 moderate transitive
+  vulnerabilities (`uuid` via `firebase-admin` → `@google-cloud/storage` →
+  `gaxios`/`teeny-request`/`retry-request`) — fixing requires `npm audit
+  fix --force`, which downgrades `firebase-admin` to `10.3.0` (a breaking
+  change). **Deferred, not fixed here** — a dependency downgrade of this
+  kind is exactly the sort of change this review series avoids making as
+  a side effect; needs its own deliberate upgrade-path PR.
+  `npm warn allow-scripts` about 10 packages with unreviewed install
+  scripts — informational only (npm's supply-chain-script-review
+  feature), non-blocking, pre-existing.
+- `npm run lint`: clean.
+- `npm test`: **287/287 passing** (285 carried over + 2 new for the CMR
+  case-bypass fix).
+- `npm run build`: succeeds; bundle sizes unchanged from PR #84's numbers
+  (`AdminPanel` 312.33 kB / 68.86 kB gzip, main `index` bundle 720.87 kB /
+  196.94 kB gzip — the pre-existing >500kB chunk warning is unchanged and
+  already tracked as deferred in `docs/IOS_APP_REVIEW_READINESS.md` §7).
+- `npm run check-firebase-readiness`: no blocking problems by default;
+  `NODE_ENV=production` simulation reports its expected blockers given
+  this shell has no real deployment env vars — not a new issue, matches
+  PR #84 exactly.
+
 ## Firebase production-readiness review (PR #84)
 
 Full, non-destructive review of the app's Firebase architecture (client init,
@@ -983,7 +1487,7 @@ documents must be sent by Admin." }` (`canDriverUploadDocumentCategory`,
 - **Repository Cleanup / Legacy Files Review** — review `Etir/e-tir-by-maras` and `etir-new` scaffold directories for removal.
 - ~~**Performance / Bundle Size Optimization**~~ — **Partially done in PR #69** (`feature/ios-app-review-performance-readiness-pack`). `ClientDashboard` (was statically imported in `App.tsx`, pulling `@vis.gl/react-google-maps` into the main bundle for every session) is now lazy-loaded, matching the existing `AdminPanel`/`DriverApplication` pattern (main bundle 813.42 kB → 720.62 kB gzip 223.16 → 196.83 kB). `jsPDF` in `AdminPanel.tsx`'s `handleDownloadPDF` is now dynamically imported at the point of use instead of statically at the top of the file (AdminPanel chunk 1,310.72 kB → 917.96 kB, gzip 355.86 → 227.84 kB). Both >500kB Vite warnings remain (smaller, not gone) — see `docs/IOS_APP_REVIEW_READINESS.md` §7 for full before/after numbers and the larger, explicitly-deferred follow-ups (splitting `AdminPanel.tsx` itself, further map-library isolation, `manualChunks` vendor splitting).
 - ~~**iOS Info.plist missing usage-description strings**~~ — **Done in PR #70** (`feature/ios-info-plist-usage-descriptions-fix`). Found during PR #69's App Review readiness pass; `ios/App/App/Info.plist` had no `NSLocationWhenInUseUsageDescription`, `NSCameraUsageDescription`, `NSPhotoLibraryUsageDescription`, or `NSPhotoLibraryAddUsageDescription`, despite the app using `navigator.geolocation` (driver GPS) and native file/photo pickers (document/photo uploads, all three roles). All four keys added with App-Review-safe wording; no Capacitor config mirroring was needed (`capacitor.config.ts` doesn't declare these). See `docs/IOS_APP_REVIEW_READINESS.md` §8. **Still open:** this only edits the checked-in Info.plist source — a new Xcode archive + TestFlight upload (per that doc's §1 "new native build" procedure) is required before the fix actually reaches a submitted build.
-- **Privacy policy / Terms contact email mismatch** — found during PR #69. `PrivacyPolicyModal.tsx`/`TermsModal.tsx` list `info@maras.iq`; the rest of the live app (`LoginPage.tsx`, `AdminPanel.tsx` Settings) uses `support@etir.app`. Not changed in PR #69 since privacy-policy copy is legal-adjacent and deserves a deliberate edit. See `docs/IOS_APP_REVIEW_READINESS.md` §5.
+- **Privacy policy / Terms contact email mismatch — RESOLVED in PR #85.** Found during PR #69: `PrivacyPolicyModal.tsx`/`TermsModal.tsx` listed `info@maras.iq`; the rest of the live app (`LoginPage.tsx`, `AdminPanel.tsx` Settings) uses `support@etir.app`. Not changed in PR #69 since privacy-policy copy is legal-adjacent and deserved a deliberate edit. Owner confirmed `support@etir.app` is the official eTIR contact; both modals updated to match in PR #85's follow-up commit. See `docs/IOS_APP_REVIEW_READINESS.md` §5.
 - **Mobile / Responsive Review** — pass over mobile/tablet layouts beyond the existing `lg:hidden` tab bar.
 
 ## AI / monitoring
