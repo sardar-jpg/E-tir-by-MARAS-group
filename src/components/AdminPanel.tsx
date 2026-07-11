@@ -1131,8 +1131,18 @@ MARAS Group etir Center`;
     try {
       const resolvedAdminTypeForSWR = adminType || 'super';
 
-      const resShipments = await apiFetch("/api/shipments");
-      const resDrivers = await apiFetch("/api/drivers");
+      // Same pattern as resLogs/resCostStatements/resAdmins below: skip the
+      // request entirely for an admin type the server already 403s (accounts
+      // admins can't view the shipment/driver registry, adminAccess.ts)
+      // instead of firing it and discarding a 403.
+      let resShipments: Response | null = null;
+      if (canViewShipmentRegistry(resolvedAdminTypeForSWR)) {
+        resShipments = await apiFetch("/api/shipments");
+      }
+      let resDrivers: Response | null = null;
+      if (canViewDriverRoster(resolvedAdminTypeForSWR)) {
+        resDrivers = await apiFetch("/api/drivers");
+      }
       const resClients = await apiFetch("/api/clients");
       const resVendors = await apiFetch("/api/vendors");
       const resNotifs = await apiFetch("/api/notifications");
@@ -1166,8 +1176,8 @@ MARAS Group etir Center`;
         return JSON.parse(text);
       };
 
-      if (resShipments.ok) setShipments(await safeJson(resShipments));
-      if (resDrivers.ok) setDrivers(await safeJson(resDrivers));
+      if (resShipments && resShipments.ok) setShipments(await safeJson(resShipments));
+      if (resDrivers && resDrivers.ok) setDrivers(await safeJson(resDrivers));
       if (resClients.ok) setClients(await safeJson(resClients));
       if (resVendors.ok) setVendors(await safeJson(resVendors));
       if (resLogs && resLogs.ok) setActivityLogs(await safeJson(resLogs));
@@ -1289,6 +1299,10 @@ MARAS Group etir Center`;
     const pollShipments = async () => {
       try {
         if (typeof window !== "undefined" && !navigator.onLine) return;
+        // Accounts admins can't view the shipment registry (adminAccess.ts,
+        // same as fetchData's resShipments above) — skip rather than poll
+        // into a guaranteed 403 every 60s.
+        if (!canViewShipmentRegistry(adminType || 'super')) return;
         const resShipments = await apiFetch("/api/shipments");
         if (resShipments.ok) {
           const text = await resShipments.text();
