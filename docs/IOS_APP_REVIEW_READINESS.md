@@ -444,10 +444,15 @@ App Review specifically):
 - `GOOGLE_MAPS_PLATFORM_KEY` must be set and restricted (§9 of that doc) —
   otherwise every map surface shows the setup-instructions fallback card
   instead of a working map.
-- Google Sign-In (if a reviewer might try it) needs both gates open:
-  Firebase "Authorized domains" including `etir.app`, and the Google OAuth
-  consent screen's Publishing status set to "In production" — both called
-  out in `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §12 and
+- Google Sign-In as a *login* method is no longer reachable by a
+  reviewer at all (`GOOGLE_LOGIN_ENABLED = false` in `LoginPage.tsx` —
+  see §2/§3); the two Google-side gates below only matter for the
+  separate, optional, Admin-only "Connect Gmail" Google Workspace
+  feature, which shares the same underlying OAuth flow but is not part
+  of login and not required to review the core app: Firebase "Authorized
+  domains" including `etir.app`, and the Google OAuth consent screen's
+  Publishing status set to "In production" — both called out in
+  `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §12 and
   `ETIR-PROJECT-REFERENCE.md` §5.
 
 ## 7. Safe performance / bundle-size review
@@ -837,4 +842,3 @@ readiness..." PR #85 section) for the full writeup. The
 `info@maras.iq` vs `support@etir.app` mismatch flagged in §5 of this
 document is also resolved as of PR #85's follow-up commit — the owner
 confirmed `support@etir.app` is official and both modals were updated.
-with `SEED_DEMO_DATA=true`, local only, never seeded in production.

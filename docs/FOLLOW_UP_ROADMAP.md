@@ -207,11 +207,14 @@ on the existing template in `docs/IOS_APP_REVIEW_READINESS.md` §3): state
 plainly that this is an update to an existing app (same Bundle ID `com.maras.etir`,
 same Team), reference the `applereviewer` driver account and its
 pre-assigned sample job, and explicitly confirm the specific points from
-both prior rejection rounds still hold (working Google Sign-In on a
-physical device, no email-verification dependency blocking registration,
-demo/reviewer accounts have visible content) — `docs/IOS_APP_REVIEW_READINESS.md`
-§2–3 already say this in more detail; this PR did not find anything that
-contradicts that existing plan.
+both prior rejection rounds still hold — **not** by re-testing Google
+Sign-In (superseded finding, corrected below: it is hidden from the
+login screen as of this PR and must not be presented to Apple as a login
+method at all), but by confirming no email-verification dependency
+blocks registration and that demo/reviewer accounts have visible content
+— `docs/IOS_APP_REVIEW_READINESS.md` §2–3 already say this in more
+detail; this PR did not find anything that contradicts that existing
+plan.
 
 **If Apple's original rejection message/screenshot still exists** (App
 Store Connect > App > Activity, or an old email), it should be attached
@@ -393,6 +396,36 @@ nothing Google-Workspace-related). Not required for Apple to complete
 the main app review as long as reviewer notes point Apple at the
 credential-based login only.
 
+### Browser verification (PR #85, email-fix follow-up)
+
+Real-browser check performed against local `npm run dev`, driven via
+Chrome's own remote-debugging protocol (Node's built-in `fetch`/
+`WebSocket` talking to `google-chrome --headless=new
+--remote-debugging-port=...` — no new npm dependency added; the
+scratch driver script was deleted afterward, per this repo's usual
+scratch-file convention):
+
+- Login page loads cleanly at desktop width (1280×900) and mobile width
+  (390×844) — both screenshots confirmed correct rendering, including
+  the "Need help? support@etir.app" line visible pre-login.
+- Clicking "Privacy Policy" opens the modal; `document.body.innerText`
+  confirmed it contains `support@etir.app` and no longer contains
+  `info@maras.iq`, at both desktop and mobile width.
+- Clicking "Terms & Conditions" opens the modal; same confirmation —
+  `support@etir.app` present, `info@maras.iq` absent.
+- Exactly one console message was observed across the whole run: a
+  `favicon.ico` 404 (the browser's automatic favicon request; the app
+  has no file at that exact path, though `apple-touch-icon.png`,
+  `manifest.json`, and `robots.txt` all resolve `200`). Pre-existing,
+  cosmetic, unrelated to this PR's changes — not a regression, not
+  fixed here (out of scope for a contact-email alignment PR).
+- No other console errors of any kind.
+
+This confirms the email fix renders correctly in a real browser, not
+just in the underlying data/API layer. **Not covered by this check**:
+the live `https://etir.app` production domain itself (only local dev
+was exercised) — still an open manual-verification item, see below.
+
 ### Manual actions still required before any App Store submission
 
 1. ~~Resolve the `info@maras.iq` vs `support@etir.app` contact
@@ -400,7 +433,7 @@ credential-based login only.
    official; both modals updated (see above).
 2. Confirm `https://etir.app` and its Privacy Policy/Terms links render
    correctly in a real browser (re-verified locally in this follow-up —
-   see Browser verification below; the live production domain itself
+   see "Browser verification" above; the live production domain itself
    still wasn't re-checked).
 3. ~~Locate the real Apple App Review rejection message/screenshot~~ —
    **resolved**: owner provided the confirmed rejection text (see above);
