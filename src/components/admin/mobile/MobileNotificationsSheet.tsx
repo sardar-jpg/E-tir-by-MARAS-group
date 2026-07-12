@@ -1,11 +1,17 @@
 import { Bell, MessageSquare, FileText, ClipboardList, RefreshCw, X } from 'lucide-react';
 import type { AppNotification, Language, Shipment } from '../../../types';
+import { isNotificationReadForUser } from '../../../lib/notificationAccess';
 
 interface MobileNotificationsSheetProps {
   lang: Language;
   isRtl: boolean;
   notifications: AppNotification[];
   shipments: Shipment[];
+  // Notification Phase 1 correction: this admin's own reader id (see
+  // AdminPanel.tsx's ownAdminId) — read state is per-user (readByUserIds),
+  // not the legacy shared `read` flag, so this component needs to know
+  // whose "read" it's computing.
+  currentUserId: string;
   onClose: () => void;
   onMarkAllRead: () => void;
   onMarkOneRead: (id: string) => void;
@@ -26,12 +32,13 @@ export default function MobileNotificationsSheet({
   isRtl,
   notifications,
   shipments,
+  currentUserId,
   onClose,
   onMarkAllRead,
   onMarkOneRead,
   onOpenChat,
 }: MobileNotificationsSheetProps) {
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const unreadCount = notifications.filter((n) => !isNotificationReadForUser(n, currentUserId)).length;
 
   return (
     <div className="lg:hidden fixed inset-0 z-50 bg-white flex flex-col" dir={isRtl ? 'rtl' : 'ltr'}>
@@ -78,7 +85,7 @@ export default function MobileNotificationsSheet({
         ) : (
           notifications.map((notif) => {
             const shipment = shipments.find((s) => s.id === notif.shipmentId);
-            const isUnread = !notif.read;
+            const isUnread = !isNotificationReadForUser(notif, currentUserId);
             return (
               <div
                 key={notif.id}

@@ -76,3 +76,6 @@ verify the app against real Firebase locally.
 - [Code Cleanup Audit](docs/CODE_CLEANUP_AUDIT.md) — unused-code, naming,
   and dependency audit findings, and what was deliberately left for future
   cleanup PRs.
+- [Notification System Audit](docs/NOTIFICATION_SYSTEM_AUDIT.md) —
+  notification architecture, routing, and privacy review; Driver/Client/
+  Admin unread flows; bugs fixed and remaining issues.

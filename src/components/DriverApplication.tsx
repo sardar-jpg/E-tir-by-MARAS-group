@@ -14,6 +14,7 @@ import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
+import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -122,6 +123,13 @@ export default function DriverApplication({
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const knownChatMessageIdsRef = React.useRef<Set<string>>(new Set());
   const gpsCooldownRef = React.useRef<number>(0);
+  // In-flight guard for POST /api/notifications/:id/read — the 12s poll
+  // (fetchData below) can re-run while a previous mark-as-read request for
+  // the same id is still pending, which would otherwise fire a duplicate
+  // request. An id is added here right before its request starts and
+  // removed once that request settles (success or failure), regardless of
+  // outcome.
+  const markingNotifsReadRef = React.useRef<Set<string>>(new Set());
 
   // Keep loggedInDriver in sync with drivers catalog
   useEffect(() => {
@@ -149,11 +157,63 @@ export default function DriverApplication({
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
 
-  // Notifications scoped to this driver's own shipments
-  const myNotifications = useMemo(() => notifications.filter(n =>
-    n.shipmentId && (shipments.some(s => s.id === n.shipmentId) || (activeShipment && activeShipment.id === n.shipmentId))
-  ), [notifications, shipments, activeShipment]);
-  const unreadNotificationCount = useMemo(() => myNotifications.filter(n => !n.read).length, [myNotifications]);
+  // Notifications scoped to this driver's own shipments, plus anything
+  // addressed directly to this driver regardless of shipment (e.g.
+  // "Driver Approved" — see AppNotification.recipientUserId).
+  // isNotificationForDriver is shared with server.ts's own GET
+  // /api/notifications scoping so the two can't silently drift apart.
+  const myNotifications = useMemo(() => {
+    const myShipmentIds = new Set([
+      ...shipments.map(s => s.id),
+      ...(activeShipment ? [activeShipment.id] : [])
+    ]);
+    return notifications.filter(n => isNotificationForDriver(n, loggedInDriverId || "", myShipmentIds));
+  }, [notifications, shipments, activeShipment, loggedInDriverId]);
+  // Notification Phase 1 correction: unread status is per-user
+  // (readByUserIds), not the legacy shared `read` flag — reading the
+  // shared flag here would mean one driver's (or admin's, or client's)
+  // read marks the notification read for every other driver too, since
+  // they all read the same underlying document.
+  const unreadNotificationCount = useMemo(
+    () => myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).length,
+    [myNotifications, loggedInDriverId]
+  );
+
+  // Marks the given notification ids as read via the same authenticated
+  // per-notification endpoint every other role already uses
+  // (POST /api/notifications/:id/read) — never the admin-only
+  // /api/notifications/clear route, which this driver session has no
+  // permission to call anyway. Local state (and therefore the unread
+  // badge) is only updated for an id once its own request actually
+  // succeeds; a failed request leaves that notification unread both on
+  // the server and locally, so it's retried the next time this runs
+  // instead of silently disappearing from the badge count. Only this
+  // driver's own id is added to readByUserIds (addReaderToNotification
+  // preserves whatever ids were already there) — this driver reading a
+  // notification never marks it read for any other driver, admin, or
+  // client.
+  const markNotificationsRead = React.useCallback((ids: string[]) => {
+    const toMark = ids.filter(id => !markingNotifsReadRef.current.has(id));
+    if (toMark.length === 0) return;
+    toMark.forEach(id => markingNotifsReadRef.current.add(id));
+    toMark.forEach(async (id) => {
+      try {
+        const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+        if (res.ok) {
+          setNotifications(prev => prev.map(n => n.id === id
+            ? { ...n, readByUserIds: addReaderToNotification(n.readByUserIds, loggedInDriverId || "") }
+            : n
+          ));
+        } else {
+          console.error(`Failed to mark notification ${id} as read: ${res.status}`);
+        }
+      } catch (err) {
+        console.error(`Failed to mark notification ${id} as read:`, err);
+      } finally {
+        markingNotifsReadRef.current.delete(id);
+      }
+    });
+  }, [loggedInDriverId]);
 
   // Determine the primary active job to feature on the Home screen.
   // Priority: Assigned > In Transit / Border Crossing / Customs Clearance > others (most recently updated first).
@@ -176,6 +236,19 @@ export default function DriverApplication({
   }, [shipments]);
 
   const [activeTab, setActiveTab] = useState<'home' | 'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('home');
+
+  // Opening the Notifications screen marks every currently-visible unread
+  // notification as read. Re-runs whenever the visible list changes (e.g.
+  // a new notification arrives from the 12s poll while this tab is still
+  // open) so it also catches unread items that appear after the initial
+  // open, not just the ones present at the moment of opening.
+  useEffect(() => {
+    if (activeTab !== 'notifications') return;
+    const unreadIds = myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).map(n => n.id);
+    if (unreadIds.length > 0) {
+      markNotificationsRead(unreadIds);
+    }
+  }, [activeTab, myNotifications, markNotificationsRead, loggedInDriverId]);
 
   // Profile Form States
   const [profileName, setProfileName] = useState("");
@@ -378,12 +451,18 @@ export default function DriverApplication({
       if (resNotifs.ok) {
         const rawList: AppNotification[] = await safeJson(resNotifs);
         
-        // Filter list strictly to this driver's shipments
+        // Filter list strictly to this driver's shipments, plus anything
+        // addressed directly to this driver regardless of shipment (e.g.
+        // "Driver Approved" — see AppNotification.recipientUserId). The
+        // backend (GET /api/notifications) already scopes both cases the
+        // same way via the same isNotificationForDriver helper; this
+        // mirrors that so a locally-computed active-job list can't
+        // disagree with it.
         const driverShipmentIds = new Set([
           ...activeShipmentsList.map(s => s.id),
           ...(activeShipment ? [activeShipment.id] : [])
         ]);
-        const list = rawList.filter(n => n.shipmentId && driverShipmentIds.has(n.shipmentId));
+        const list = rawList.filter(n => isNotificationForDriver(n, loggedInDriverId || "", driverShipmentIds));
         
         if (knownNotificationIdsRef.current.size === 0) {
           const initialIds = new Set<string>();

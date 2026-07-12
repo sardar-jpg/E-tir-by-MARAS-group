@@ -52,7 +52,8 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
+import { isNotificationForDriver, addReaderToNotification, canMarkNotificationRead } from "./src/lib/notificationAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -75,6 +76,7 @@ import {
   updateDoc as rawUpdateDoc,
   deleteDoc as rawDeleteDoc,
   runTransaction as rawRunTransaction,
+  arrayUnion,
 } from "firebase/firestore";
 import {
   formatShipmentNumber,
@@ -484,6 +486,66 @@ async function updateDoc(docRef: any, data: any) {
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
+  }
+}
+
+// Notification Phase 1 correction: a dedicated, atomic per-user read
+// marker for AppNotification.readByUserIds — deliberately NOT routed
+// through the generic setDoc/updateDoc wrappers above. setDoc would write
+// the entire notification document back on every read (this function's
+// whole point is to touch only readByUserIds); the generic updateDoc
+// wrapper would work for real Firestore (a raw Firestore arrayUnion()
+// FieldValue survives cleanUndefined() untouched — see its "native class
+// instance" guard), but handleUpdateDocMemory's plain `{ ...existing,
+// ...data }` spread in memory-fallback mode would store the arrayUnion()
+// FieldValue sentinel object itself as the field's value instead of
+// resolving it into an array, silently corrupting readByUserIds in local
+// dev (which runs on the memory fallback by default). This function
+// branches on useMemoryFallback itself so each path gets real, correct,
+// non-destructive array-union semantics:
+//  - Real Firestore: rawUpdateDoc(..., { readByUserIds: arrayUnion(userId) })
+//    is a genuine atomic field update — Firestore guarantees this is safe
+//    under two concurrent writers adding different ids at the same time,
+//    with no read-modify-write race and no transaction needed. It also
+//    only ever touches the readByUserIds field, never the rest of the
+//    document (in particular, never the legacy `read` flag — see the
+//    POST /api/notifications/:id/read route, which intentionally leaves
+//    `read` untouched now).
+//  - Memory fallback: the equivalent idempotent Set-union
+//    (addReaderToNotification, src/lib/notificationAccess.ts) applied by
+//    direct field assignment on the already-stored record — never a full
+//    object replace, and never removes an existing reader id. Safe
+//    without its own transaction: Node's single-threaded event loop means
+//    this synchronous find-and-assign can't interleave with another
+//    concurrent call to this same function the way two real network
+//    requests to Firestore could.
+async function addNotificationReaderId(notificationId: string, userId: string): Promise<void> {
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    handleAddNotificationReaderMemory(notificationId, userId);
+    return;
+  }
+  try {
+    const notifRef = rawDoc(db, "notifications", notificationId);
+    await withTimeout(
+      rawUpdateDoc(notifRef, { readByUserIds: arrayUnion(userId) }),
+      5000,
+      "Firestore readByUserIds update timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore readByUserIds update failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    handleAddNotificationReaderMemory(notificationId, userId);
+  }
+}
+
+function handleAddNotificationReaderMemory(notificationId: string, userId: string): void {
+  const mStore = getMemoryStore();
+  const item = mStore.notifications.find(n => n.id === notificationId);
+  if (item) {
+    item.readByUserIds = addReaderToNotification(item.readByUserIds, userId);
   }
 }
 
@@ -1623,7 +1685,13 @@ async function pushNotification(
   // client_admin chat file attachment, and without a channel here that
   // notification would (like any other non-chat type) page the driver
   // too, even though it originated from a client_admin-only exchange.
-  chatChannel?: ChatChannel
+  chatChannel?: ChatChannel,
+  // Notification Phase 1: session id of a specific user this notification
+  // is directly addressed to, for events with no associated shipment at
+  // all (e.g. a driver being approved). See AppNotification.recipientUserId
+  // in src/types.ts for why this exists — without it, an event like this
+  // reached admins only, never the driver it was actually about.
+  recipientUserId?: string
 ) {
   const newNotif: AppNotification = {
     id: `notif-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -1641,6 +1709,7 @@ async function pushNotification(
   };
   if (excludeUserId) newNotif.excludeUserId = excludeUserId;
   if ((type === "chat" || type === "doc_upload") && chatChannel) newNotif.channel = chatChannel;
+  if (recipientUserId) newNotif.recipientUserId = recipientUserId;
   try {
     await setDoc(doc(db, "notifications", newNotif.id), newNotif);
   } catch (err) {
@@ -1666,6 +1735,12 @@ async function pushNotification(
       if (t.role === "admin") userIds.add(t.userId);
     }
 
+    // Notification Phase 1: a directly-addressed recipient (e.g. a driver
+    // being approved) is targeted regardless of shipmentId — this must
+    // not depend on the shipment lookup below, since events like this
+    // have no associated shipment at all.
+    if (recipientUserId) userIds.add(recipientUserId);
+
     if (shipmentId) {
       const shipDoc = await getDoc(doc(db, "shipments", shipmentId));
       if (shipDoc.exists()) {
@@ -1683,11 +1758,19 @@ async function pushNotification(
           }
         }
         if (includeClient && ship.companyName) {
+          // Notification Phase 1 fix: this previously used .find(), which
+          // only ever resolved the FIRST client account matching the
+          // shipment's company — silently dropping every other account on
+          // the same company (the Owner if a Staff record happened to come
+          // first in the snapshot, or every Staff account if the Owner
+          // came first). resolveClientPushRecipientIds (clientAccess.ts)
+          // returns every active account on the company instead.
           const clientsSnap = await getDocs(collection(db, "clients"));
-          const matchingClient = clientsSnap.docs
-            .map(d => d.data() as Client)
-            .find(c => c.companyName === ship.companyName);
-          if (matchingClient) userIds.add(matchingClient.id);
+          const clientRecipientIds = resolveClientPushRecipientIds(
+            clientsSnap.docs.map(d => d.data() as Client),
+            ship.companyName
+          );
+          for (const id of clientRecipientIds) userIds.add(id);
         }
       }
     }
@@ -4554,7 +4637,17 @@ async function startServer() {
             "تمت الموافقة على السائق",
             `${driverData.name} has been approved and can now sign in.`,
             `${driverData.name} onaylandi ve artik giris yapabilir.`,
-            `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`
+            `تمت الموافقة على ${driverData.name} ويمكنه الآن تسجيل الدخول.`,
+            // Notification Phase 1 fix: this notification has no shipment
+            // (a driver isn't necessarily assigned to one yet at approval
+            // time), so it previously reached admins only — the approved
+            // driver themself never got the push or the in-app
+            // notification, since GET /api/notifications' driver branch
+            // filters strictly by shipmentId. recipientUserId targets this
+            // specific driver directly, independent of any shipment.
+            undefined,
+            undefined,
+            driverData.id
           );
         } else {
           await logActivity(
@@ -4853,7 +4946,15 @@ async function startServer() {
             .filter(s => s.assignedDriverId === driverId || (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId)))
             .map(s => s.id)
         );
-        list = list.filter(n => myShipmentIds.has(n.shipmentId));
+        // Notification Phase 1 fix: also include notifications addressed
+        // directly to this driver via recipientUserId (e.g. "Driver
+        // Approved", which has no shipment at all) — previously this
+        // filter was shipmentId-only, so a recipientUserId-only
+        // notification was silently dropped for every driver, no matter
+        // who it was actually for. isNotificationForDriver (shared with
+        // DriverApplication.tsx's own client-side filtering) is the single
+        // source of truth for this rule.
+        list = list.filter(n => isNotificationForDriver(n, driverId, myShipmentIds));
         // BUG-03: a "chat" notification's title/body carries the sender's
         // name and message text. Only let the driver_admin channel through
         // — legacy untagged chat notifications have no reliable audience,
@@ -4948,21 +5049,29 @@ async function startServer() {
     }
   });
 
+  // Notification Phase 1 correction: this route used to mean "set the
+  // legacy shared `read` flag true on every notification" — which was
+  // exactly the cross-contamination bug the per-user model exists to fix
+  // (one admin's global "clear" would have marked every notification read
+  // for every other admin, every driver, and every client too). It now
+  // means "mark every notification visible to the current admin as read
+  // FOR THIS ADMIN ONLY": the calling admin's own session id is
+  // atomically added to each notification's readByUserIds via
+  // addNotificationReaderId (the same helper POST
+  // /api/notifications/:id/read uses — real Firestore arrayUnion,
+  // idempotent Set-union in memory fallback), never the whole document.
+  // Still admin-only (requireRole("admin"), unchanged); `read` itself is
+  // never read or written by this route anymore; no other admin's,
+  // driver's, or client's readByUserIds entry is ever touched.
   app.post("/api/notifications/clear", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "notifications");
       const snapshot = await getDocs(col);
-      for (const d of snapshot.docs) {
-        const notif = d.data() as AppNotification;
-        if (!notif.read) {
-          notif.read = true;
-          await setDoc(d.ref, notif);
-        }
-      }
+      await Promise.all(snapshot.docs.map(d => addNotificationReaderId(d.id, req.session!.id)));
       res.json({ status: "success" });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: "Failed to clear notifications" });
+      res.status(500).json({ error: "Failed to mark all notifications as read" });
     }
   });
 
@@ -4974,40 +5083,56 @@ async function startServer() {
         const notif = dDoc.data() as AppNotification;
 
         // Non-admins may only mark read a notification belonging to one of
-        // their own shipments.
+        // their own shipments — OR one addressed directly to their own
+        // session id (Notification Phase 1: recipientUserId, for events
+        // like "Driver Approved" with no associated shipment at all;
+        // strictly narrower than shipment ownership, since it only ever
+        // matches the caller's own id) — AND, either way, only within
+        // their own audience channel. canMarkNotificationRead
+        // (notificationAccess.ts) is the single source of truth for this
+        // full decision — see its own comment for the direct-recipient
+        // channel-bypass this fixed (a direct recipient previously skipped
+        // the channel check entirely).
         if (req.session!.role !== "admin") {
-          const sDoc = await getDoc(doc(db, "shipments", notif.shipmentId));
-          if (!sDoc.exists()) {
-            return res.status(404).json({ error: "Shipment not found for this notification." });
+          const isDirectRecipient = !!notif.recipientUserId && notif.recipientUserId === req.session!.id;
+          let ownsViaShipment = false;
+          if (!isDirectRecipient) {
+            const sDoc = await getDoc(doc(db, "shipments", notif.shipmentId));
+            if (!sDoc.exists()) {
+              return res.status(404).json({ error: "Shipment not found for this notification." });
+            }
+            const shipment = sDoc.data() as Shipment;
+            if (req.session!.role === "driver") {
+              const driverId = req.session!.id;
+              ownsViaShipment = shipment.assignedDriverId === driverId ||
+                !!(shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
+            } else if (req.session!.role === "client") {
+              const clientsCol = collection(db, "clients");
+              const clientsSnap = await getDocs(clientsCol);
+              const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+              ownsViaShipment = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
+            }
           }
-          const shipment = sDoc.data() as Shipment;
-          let owns = false;
-          if (req.session!.role === "driver") {
-            const driverId = req.session!.id;
-            owns = shipment.assignedDriverId === driverId ||
-              !!(shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
-          } else if (req.session!.role === "client") {
-            const clientsCol = collection(db, "clients");
-            const clientsSnap = await getDocs(clientsCol);
-            const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-            owns = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
-          }
-          if (!owns) {
-            return res.status(403).json({ error: "You do not have access to this notification." });
-          }
-
-          // PR #44: owning the shipment isn't enough on its own — a driver
-          // assigned to a shipment must still not be able to mark read a
-          // client_admin/internal_staff notification on that same shipment
-          // (and vice versa for a client), same audience rule already
-          // enforced on GET /api/notifications.
-          if (!isChatNotificationVisibleToRole(notif.type, req.session!.role, notif.channel)) {
+          if (!canMarkNotificationRead(notif, req.session!.role, req.session!.id, ownsViaShipment)) {
             return res.status(403).json({ error: "You do not have access to this notification." });
           }
         }
 
-        notif.read = true;
-        await setDoc(dRef, notif);
+        // Notification Phase 1 correction: per-user read tracking, via an
+        // atomic field-only update (addNotificationReaderId — real
+        // Firestore arrayUnion in production, an equivalent idempotent
+        // Set-union on just this field in memory fallback; see its own
+        // comment above). Only this caller's own session id is ever
+        // added; every other id already present (another user who already
+        // read this same notification) is preserved untouched, and
+        // nothing else on the document — including the legacy `read`
+        // flag — is read, touched, or written by this call. `read` is
+        // deliberately left exactly as it was: Admin/Client code paths
+        // that still consume it (not yet migrated to readByUserIds — see
+        // docs/NOTIFICATION_SYSTEM_AUDIT.md) must not have a Driver's own
+        // read silently flip it, the same class of bug this per-user
+        // model exists to fix.
+        await addNotificationReaderId(req.params.id, req.session!.id);
       }
       res.json({ status: "success" });
     } catch (err) {
