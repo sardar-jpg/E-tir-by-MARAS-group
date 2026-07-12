@@ -1,7 +1,8 @@
 # eTIR by MARAS
 
 **eTIR by MARAS** is a logistics/freight management platform for MARAS Group,
-tracking TIR shipments across Turkey, Iraq, and the Gulf.
+managing land, sea, and air freight operations, shipment tracking, drivers,
+customers, documents, and internal logistics workflows.
 
 - **Domain**: https://etir.app
 - **Support email**: support@etir.app
@@ -40,8 +41,9 @@ npm run build                   # production build
 npm run check-firebase-readiness  # verify Firebase/production launch config
 ```
 
-Local development runs against an in-memory data store by default — no
-Firebase credentials are required to get started. See
+When local Firebase credentials are unavailable, the development server may
+use the in-memory fallback for UI and local workflow testing. This data is
+not persistent and must never be treated as production storage. See
 [Real Firebase Verification](docs/REAL_FIREBASE_VERIFICATION.md) for how to
 verify the app against real Firebase locally.
 
