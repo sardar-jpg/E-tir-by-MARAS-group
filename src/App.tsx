@@ -18,7 +18,7 @@ import LoginPage from "./components/LoginPage";
 import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
 import TermsModal from "./components/TermsModal";
 import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
-import { Ship, MessageSquare, Globe, Laptop, Smartphone, Eye, Bell, CheckCircle2, ChevronRight, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, User, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
+import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
 import { onAuthStateChanged } from "firebase/auth";
 

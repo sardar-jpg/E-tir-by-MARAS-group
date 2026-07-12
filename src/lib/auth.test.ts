@@ -126,7 +126,7 @@ describe("signSessionToken / verifySessionToken", () => {
 
   it("rejects a tampered token body", () => {
     const token = signSessionToken(makePayload({ role: "driver" }), SECRET);
-    const [body, sig] = token.split(".");
+    const [, sig] = token.split(".");
     // Tamper with the body by re-encoding a payload with an elevated role,
     // keeping the original (now-mismatched) signature.
     const tamperedPayload = makePayload({ role: "admin", adminType: "super" });

@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { Language, Shipment, Driver, ShipmentDocument, LocationUpdate, DocumentCategory } from "../types";
+import { Language, Shipment, Driver, DocumentCategory } from "../types";
 import {
-  Ship, Globe, Star, Truck, Calendar, Eye, EyeOff, MapPin,
-  Search, Shield, Clipboard, ArrowRight, MessageSquare, CheckCircle2,
-  FileText, Download, Clock, ChevronRight, X, Send, HelpCircle,
+  Globe, Star, Truck, Eye,
+  Search, Clipboard, ArrowRight, MessageSquare, CheckCircle2,
+  FileText, Download, Clock, ChevronRight, X, Send,
   Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert, Paperclip
 } from "lucide-react";
 import { apiFetch } from "../lib/api";

@@ -549,8 +549,13 @@ referenced here rather than duplicated:
   automatically as part of adding the guide.
 - ~~Seed demo Client Staff account (local dev only)~~ — **Done in PR #67**,
   see `docs/FOLLOW_UP_ROADMAP.md`
-- Repository Cleanup / Legacy Files Review (`Etir/e-tir-by-maras`,
-  `etir-new` scaffold directories)
+- ~~Repository Cleanup / Legacy Files Review (`Etir/e-tir-by-maras`,
+  `etir-new` scaffold directories)~~ — **Done** in the
+  `chore/safe-code-cleanup-naming-audit` cleanup pass: both abandoned
+  scaffold directories, plus the unreferenced AI-Studio-only
+  `assets/.aistudio/`, `metadata.json`, and `firebase-blueprint.json`, were
+  removed after confirming zero references anywhere in the app. See
+  `docs/CODE_CLEANUP_AUDIT.md`.
 - ~~Performance / Bundle Size Optimization~~ — **partially done in PR #69**
   (`ClientDashboard` and `jsPDF` now lazy/dynamically loaded); the two
   >500kB Vite warnings remain, smaller. See

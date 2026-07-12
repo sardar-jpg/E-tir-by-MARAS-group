@@ -66,7 +66,6 @@ import {
   UNAVAILABLE_DISTANCE_MATRIX_RESPONSE,
 } from "./src/lib/distanceMatrix";
 import {
-  getFirestore,
   initializeFirestore,
   collection as rawCollection,
   doc as rawDoc,
@@ -75,12 +74,7 @@ import {
   setDoc as rawSetDoc,
   updateDoc as rawUpdateDoc,
   deleteDoc as rawDeleteDoc,
-  addDoc as rawAddDoc,
   runTransaction as rawRunTransaction,
-  query,
-  where,
-  orderBy,
-  limit
 } from "firebase/firestore";
 import {
   formatShipmentNumber,
@@ -170,39 +164,6 @@ function doc(dbInstance: any, pathName: string, ...pathSegments: string[]): any 
     return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isDoc: true };
   }
 }
-// Global wrappers to catch permission errors and raise structured errors
-export type OperationType = 'create' | 'update' | 'delete' | 'list' | 'get' | 'write';
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {},
-    operationType,
-    path
-  };
-  const errString = JSON.stringify(errInfo);
-  console.error("Firestore Error: ", errString);
-  throw new Error(errString);
-}
-
-
 let memoryStore: {
   drivers: Driver[];
   shipments: Shipment[];
@@ -394,25 +355,6 @@ function handleDeleteDocMemory(docRef: any) {
   }
 }
 
-function handleAddDocMemory(colRef: any, data: any) {
-  const { collection: colName } = parseFirebasePath(colRef);
-  const docId = `doc-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const mStore = getMemoryStore();
-  const items = mStore[colName as keyof typeof mStore] as any[];
-  const newItem = { id: docId, ...data };
-  if (items) {
-    items.push(newItem);
-  }
-  return {
-    id: docId,
-    path: `${colName}/${docId}`,
-    getDoc: () => ({
-      exists: () => true,
-      data: () => newItem
-    })
-  };
-}
-
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutErrorMsg: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -428,7 +370,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutErrorMsg:
 async function getDocs(queryRef: any) {
   if (useMemoryFallback) {
     // PR #84 (Firebase production readiness): every write wrapper below
-    // (setDoc/updateDoc/deleteDoc/addDoc/allocateNextShipmentSequence)
+    // (setDoc/updateDoc/deleteDoc/allocateNextShipmentSequence)
     // already refuses to silently use the memory fallback when
     // STRICT_PERSISTENCE is on — but reads didn't, so a mid-session
     // Firestore outage in production used to make every GET endpoint
@@ -561,23 +503,6 @@ async function deleteDoc(docRef: any) {
   }
 }
 
-async function addDoc(colRef: any, data: any) {
-  const cleanedData = cleanUndefined(data);
-  if (useMemoryFallback) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return handleAddDocMemory(colRef, cleanedData);
-  }
-  try {
-    return await withTimeout(rawAddDoc(colRef, cleanedData), 5000, "Firestore addDoc timed out");
-  } catch (error) {
-    console.warn("Firestore addDoc failed or timed out. Switching to robust Memory Fallback.", error);
-    useMemoryFallback = true;
-    scheduleFirestoreRecovery(30_000);
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return handleAddDocMemory(colRef, cleanedData);
-  }
-}
-
 // BUG-15: shipment number/id generation used to read the shipments
 // collection's current size, add 1001 in JS, and write the new shipment
 // with that number - with no coordination between two concurrent create
@@ -660,7 +585,6 @@ import {
   LocationUpdate,
   Client,
   Vendor,
-  CostItem,
   CostStatement
 } from "./src/types";
 
@@ -5195,7 +5119,6 @@ async function startServer() {
 
       try {
         const logId = `log-${Date.now()}`;
-        const logCol = collection(db, "activityLogs");
         const logData = {
           id: logId,
           shipmentId: shipmentId,

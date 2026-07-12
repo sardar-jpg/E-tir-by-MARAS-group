@@ -1,23 +1,20 @@
-import React, { useState, useEffect, useRef } from "react";
-import { 
-  Shipment, 
+import { useState, useEffect, useRef } from "react";
+import {
+  Shipment,
   Language,
   Driver,
   TRUCK_TYPES
 } from "../types";
-import { 
-  Map as MapIcon, 
-  Truck, 
-  User, 
-  Navigation, 
-  Compass, 
-  Info, 
-  Search, 
-  AlertTriangle, 
-  X, 
-  Activity, 
-  MapPin, 
-  ChevronRight,
+import {
+  Truck,
+  Navigation,
+  Compass,
+  Info,
+  Search,
+  AlertTriangle,
+  X,
+  Activity,
+  MapPin,
   Globe,
   Filter,
   Check,
@@ -31,7 +28,7 @@ import {
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
 import { resolveTrackingStatus } from "../lib/trackingMapStatus";
-import { APIProvider, Map, AdvancedMarker, InfoWindow, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
+import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
 
@@ -823,7 +820,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   const getNearestCity = (x: number, y: number): string => {
     let nearestCityName = "Transit Route";
     let minDistance = Infinity;
-    for (const [key, val] of Object.entries(VECTOR_CITIES)) {
+    for (const [, val] of Object.entries(VECTOR_CITIES)) {
       const dist = Math.hypot(val.x - x, val.y - y);
       if (dist < minDistance) {
         minDistance = dist;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 import { Compass, MapPin, Plus, Minus, Truck } from "lucide-react";
 import { Language, Shipment, Driver } from "../types";
