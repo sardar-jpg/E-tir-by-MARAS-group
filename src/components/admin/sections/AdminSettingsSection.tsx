@@ -1,5 +1,13 @@
-import { Settings, UserPlus, Mail, ShieldCheck, Ship } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Settings, UserPlus, Mail, ShieldCheck, Ship, Loader2, AlertCircle } from 'lucide-react';
 import type { Language } from '../../../types';
+import { apiFetch } from '../../../lib/api';
+import {
+  NOTIFICATION_PREFERENCE_CATEGORIES,
+  DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
+  type AdminNotificationPreferences,
+  type NotificationPreferenceCategory,
+} from '../../../lib/notificationPreferences';
 
 interface AdminSettingsSectionProps {
   lang: Language;
@@ -7,6 +15,56 @@ interface AdminSettingsSectionProps {
   adminType: string;
   resolvedAdminType: string;
   onNavigateTab: (tabId: 'my_account' | 'team' | 'gmail' | 'audit') => void;
+}
+
+const CATEGORY_LABELS: Record<NotificationPreferenceCategory, Record<Language, string>> = {
+  shipment_updates: { en: 'Shipment updates', tr: 'Sevkiyat Güncellemeleri', ar: 'تحديثات الشحنات' },
+  customer_messages: { en: 'Customer messages', tr: 'Müşteri Mesajları', ar: 'رسائل العملاء' },
+  driver_messages: { en: 'Driver messages', tr: 'Sürücü Mesajları', ar: 'رسائل السائقين' },
+  document_uploads: { en: 'Document uploads', tr: 'Belge Yüklemeleri', ar: 'رفع المستندات' },
+  cmr_pod: { en: 'CMR / POD', tr: 'CMR / POD', ar: 'CMR / POD' },
+  delays_border_waiting: { en: 'Delays / border waiting', tr: 'Gecikmeler / Sınır Bekleme', ar: 'التأخيرات / انتظار الحدود' },
+  accounting_alerts: { en: 'Accounting alerts', tr: 'Muhasebe Uyarıları', ar: 'تنبيهات المحاسبة' },
+  security_system_alerts: { en: 'Security / system alerts', tr: 'Güvenlik / Sistem Uyarıları', ar: 'تنبيهات الأمان / النظام' },
+};
+
+/**
+ * Notification Preferences Phase 2 (Admin only). A minimal, self-contained
+ * toggle switch — no shared Toggle component exists elsewhere in this
+ * codebase yet, so this stays local rather than introducing one for a
+ * single consumer. Native `<input type="checkbox" role="switch">` for
+ * real accessibility semantics (screen readers announce it as a switch,
+ * not just a checkbox), styled as a pill via the sr-only + peer pattern.
+ */
+function NotificationPreferenceToggle({
+  checked,
+  disabled,
+  saving,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  saving?: boolean;
+  label: string;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <label className={`relative inline-flex items-center shrink-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+      <input
+        type="checkbox"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        className="sr-only peer"
+        checked={checked}
+        disabled={disabled || saving}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <div className="w-9 h-5 bg-slate-200 peer-checked:bg-indigo-600 rounded-full transition-colors peer-disabled:opacity-50" />
+      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+    </label>
+  );
 }
 
 /**
@@ -27,6 +85,82 @@ export default function AdminSettingsSection({
   resolvedAdminType,
   onNavigateTab,
 }: AdminSettingsSectionProps) {
+  // Notification Preferences Phase 2 (Admin only). Scoped entirely by the
+  // caller's own authenticated session on the backend (GET/PUT
+  // /api/admin/notification-preferences) — no admin id is sent from here
+  // at all, so there is no risk of this component ever reading or writing
+  // a different admin's preferences.
+  const [preferences, setPreferences] = useState<AdminNotificationPreferences>(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
+  const [prefsLoading, setPrefsLoading] = useState(true);
+  const [prefsLoadError, setPrefsLoadError] = useState<string | null>(null);
+  const [savingCategories, setSavingCategories] = useState<Set<NotificationPreferenceCategory>>(new Set());
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setPrefsLoading(true);
+      setPrefsLoadError(null);
+      try {
+        const res = await apiFetch('/api/admin/notification-preferences');
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const data = await res.json();
+        if (!cancelled && data?.preferences) {
+          setPreferences(data.preferences);
+        }
+      } catch (err) {
+        console.error('Failed to load notification preferences:', err);
+        if (!cancelled) {
+          setPrefsLoadError(
+            lang === 'tr'
+              ? 'Bildirim tercihleri yüklenemedi.'
+              : (lang === 'ar' ? 'تعذّر تحميل تفضيلات الإشعارات.' : 'Could not load notification preferences.')
+          );
+        }
+      } finally {
+        if (!cancelled) setPrefsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleTogglePreference = async (category: NotificationPreferenceCategory, next: boolean) => {
+    // security_system_alerts is rendered as a disabled, always-on toggle
+    // (see the "Always On" row below) and never reaches this handler in
+    // normal use — this guard is defense in depth only.
+    if (category === 'security_system_alerts') return;
+    if (savingCategories.has(category)) return;
+
+    const previous = preferences;
+    setPreferences({ ...preferences, [category]: next });
+    setSavingCategories((prev) => new Set(prev).add(category));
+    setSaveError(null);
+    try {
+      const res = await apiFetch('/api/admin/notification-preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [category]: next }),
+      });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const data = await res.json();
+      if (data?.preferences) setPreferences(data.preferences);
+    } catch (err) {
+      console.error(`Failed to save notification preference "${category}":`, err);
+      setPreferences(previous); // revert — failed requests must not appear saved
+      setSaveError(
+        lang === 'tr'
+          ? 'Değişiklik kaydedilemedi. Lütfen tekrar deneyin.'
+          : (lang === 'ar' ? 'تعذّر حفظ التغيير. يرجى المحاولة مرة أخرى.' : 'Could not save the change. Please try again.')
+      );
+    } finally {
+      setSavingCategories((prev) => {
+        const next = new Set(prev);
+        next.delete(category);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-6xl">
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
@@ -79,43 +213,61 @@ export default function AdminSettingsSection({
           </div>
         </div>
 
-        {/* Notification Preferences — visible to all admin types.
-            Foundation UI only: no preference is actually wired to a
-            backend yet, and security/system alerts cannot be disabled. */}
+        {/* Notification Preferences — visible to all admin types. Each
+            admin's own preferences (GET/PUT /api/admin/notification-
+            preferences), independent of any other admin's — see
+            AdminSettingsSection's fetch/save logic above. */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 h-full">
-          <h3 className="text-sm font-bold text-slate-900 mb-1">
-            {lang === 'tr' ? 'Bildirim Tercihleri' : (lang === 'ar' ? 'تفضيلات الإشعارات' : 'Notification Preferences')}
-          </h3>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <h3 className="text-sm font-bold text-slate-900">
+              {lang === 'tr' ? 'Bildirim Tercihleri' : (lang === 'ar' ? 'تفضيلات الإشعارات' : 'Notification Preferences')}
+            </h3>
+            {savingCategories.size > 0 && (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-indigo-500">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {lang === 'tr' ? 'Kaydediliyor…' : (lang === 'ar' ? 'جارٍ الحفظ…' : 'Saving…')}
+              </span>
+            )}
+          </div>
           <p className="text-slate-500 text-xs mb-3">
             {lang === 'tr'
-              ? 'Bu kategoriler yakında ayarlanabilir hale gelecek. Kritik güvenlik/sistem uyarıları her zaman açık kalır ve kapatılamaz.'
+              ? 'Bu, yalnızca sizin hesabınız için geçerlidir. Kritik güvenlik/sistem uyarıları her zaman açık kalır ve kapatılamaz.'
               : (lang === 'ar'
-                ? 'ستصبح هذه الفئات قابلة للتعديل قريباً. تبقى تنبيهات الأمان/النظام الحرجة مفعّلة دائماً ولا يمكن إيقافها.'
-                : 'These categories can be adjusted here soon. Critical security/system alerts always stay on and cannot be turned off.')}
+                ? 'ينطبق هذا على حسابك فقط. تبقى تنبيهات الأمان/النظام الحرجة مفعّلة دائماً ولا يمكن إيقافها.'
+                : 'This applies to your own account only. Critical security/system alerts always stay on and cannot be turned off.')}
           </p>
-          <div className="space-y-1.5">
-            {[
-              { key: 'shipment', label: lang === 'tr' ? 'Sevkiyat Güncellemeleri' : (lang === 'ar' ? 'تحديثات الشحنات' : 'Shipment updates') },
-              { key: 'customer', label: lang === 'tr' ? 'Müşteri Mesajları' : (lang === 'ar' ? 'رسائل العملاء' : 'Customer messages') },
-              { key: 'driver', label: lang === 'tr' ? 'Sürücü Mesajları' : (lang === 'ar' ? 'رسائل السائقين' : 'Driver messages') },
-              { key: 'documents', label: lang === 'tr' ? 'Belge Yüklemeleri' : (lang === 'ar' ? 'رفع المستندات' : 'Document uploads') },
-              { key: 'cmr_pod', label: lang === 'tr' ? 'CMR/POD' : (lang === 'ar' ? 'CMR/POD' : 'CMR / POD') },
-              { key: 'delays', label: lang === 'tr' ? 'Gecikmeler/Sınır Bekleme' : (lang === 'ar' ? 'التأخيرات/انتظار الحدود' : 'Delays / border waiting') },
-              { key: 'accounting', label: lang === 'tr' ? 'Muhasebe Uyarıları' : (lang === 'ar' ? 'تنبيهات المحاسبة' : 'Accounting alerts') },
-            ].map((row) => (
-              <div key={row.key} className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 border border-slate-100">
-                <span className="text-xs font-semibold text-slate-600">{row.label}</span>
-                <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
-                  {lang === 'tr' ? 'Yakında' : (lang === 'ar' ? 'قريباً' : 'Coming soon')}
-                </span>
+
+          {saveError && (
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-2">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              {saveError}
+            </div>
+          )}
+          {prefsLoadError && (
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-2">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              {prefsLoadError}
+            </div>
+          )}
+
+          <div className={`space-y-1.5 ${prefsLoading ? 'opacity-50 pointer-events-none' : ''}`}>
+            {NOTIFICATION_PREFERENCE_CATEGORIES.filter((c) => c !== 'security_system_alerts').map((category) => (
+              <div key={category} className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 border border-slate-100">
+                <span className="text-xs font-semibold text-slate-600">{CATEGORY_LABELS[category][lang]}</span>
+                <NotificationPreferenceToggle
+                  checked={preferences[category]}
+                  saving={savingCategories.has(category)}
+                  label={CATEGORY_LABELS[category][lang]}
+                  onChange={(next) => handleTogglePreference(category, next)}
+                />
               </div>
             ))}
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-amber-50 border border-amber-100">
               <span className="text-xs font-bold text-amber-700">
-                {lang === 'tr' ? 'Güvenlik/Sistem Uyarıları' : (lang === 'ar' ? 'تنبيهات الأمان/النظام' : 'Security / system alerts')}
+                {CATEGORY_LABELS.security_system_alerts[lang]}
               </span>
               <span className="text-[9px] font-bold uppercase tracking-widest text-amber-700 bg-white border border-amber-200 px-2 py-0.5 rounded-full">
-                {lang === 'tr' ? 'Her Zaman Açık' : (lang === 'ar' ? 'مفعّل دائماً' : 'Always on')}
+                {lang === 'tr' ? 'Her Zaman Açık' : (lang === 'ar' ? 'مفعّل دائماً' : 'Always On')}
               </span>
             </div>
           </div>

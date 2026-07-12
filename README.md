@@ -79,3 +79,6 @@ verify the app against real Firebase locally.
 - [Notification System Audit](docs/NOTIFICATION_SYSTEM_AUDIT.md) —
   notification architecture, routing, and privacy review; Driver/Client/
   Admin unread flows; bugs fixed and remaining issues.
+- [Notification Preferences — Phase 2](docs/NOTIFICATION_PREFERENCES_PHASE2.md) —
+  per-admin notification category preferences: storage model, endpoint
+  behavior, category mapping, and deferred Driver/Client work.

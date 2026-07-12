@@ -54,6 +54,7 @@ import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
 import { isNotificationForDriver, addReaderToNotification, canMarkNotificationRead } from "./src/lib/notificationAccess";
+import { resolveAdminNotificationPreferences, sanitizeNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences } from "./src/lib/notificationPreferences";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -185,6 +186,12 @@ let memoryStore: {
   // Firestore credentials, e.g. local dev). Every other collection this
   // server writes to already has an entry here; this one was just missed.
   pushTokens: any[];
+  // Notification Preferences Phase 2: one document per admin (keyed by
+  // session id). Same PR #44 lesson as pushTokens above applies here —
+  // every collection this server reads/writes must have an entry in this
+  // store, or every read/write against it silently no-ops in memory
+  // fallback (no live Firestore credentials, e.g. local dev).
+  adminNotificationPreferences: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -206,6 +213,7 @@ function getMemoryStore() {
       admins: [],
       costStatements: [],
       pushTokens: [],
+      adminNotificationPreferences: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -1727,12 +1735,24 @@ async function pushNotification(
   try {
     const userIds = new Set<string>();
 
-    // Always include every admin - admins see every notification with
-    // no filtering, so they should get every push too.
+    // Every admin gets a push for this notification's category, unless
+    // that specific admin has disabled it in their own notification
+    // preferences (Notification Preferences Phase 2 — Admin only; Driver/
+    // Client recipient resolution below is completely separate code and
+    // is never touched by this). security_system_alerts-mapped types
+    // (and any type with no clear category) always reach every admin
+    // regardless of preferences — see shouldDeliverNotificationToAdmin.
     const adminTokensSnap = await getDocs(collection(db, "pushTokens"));
     const allTokenDocs = adminTokensSnap.docs.map(d => d.data() as any);
-    for (const t of allTokenDocs) {
-      if (t.role === "admin") userIds.add(t.userId);
+    const adminTokenIds = allTokenDocs.filter(t => t.role === "admin").map(t => t.userId as string);
+    if (adminTokenIds.length > 0) {
+      const adminPrefsSnap = await getDocs(collection(db, "adminNotificationPreferences"));
+      const preferencesByAdminId: Record<string, any> = {};
+      for (const d of adminPrefsSnap.docs) {
+        preferencesByAdminId[d.id] = d.data();
+      }
+      const allowedAdminIds = filterAdminRecipientsByPreferences(adminTokenIds, preferencesByAdminId, type, chatChannel);
+      for (const id of allowedAdminIds) userIds.add(id);
     }
 
     // Notification Phase 1: a directly-addressed recipient (e.g. a driver
@@ -4978,12 +4998,80 @@ async function startServer() {
         } else {
           list = [];
         }
+      } else if (req.session!.role === "admin") {
+        // Notification Preferences Phase 2 (Admin only): this admin's own
+        // saved preferences (or the all-enabled default, for an admin who
+        // has never saved any) gate which categories show up in THEIR OWN
+        // in-app list — a different admin's list is filtered by their own
+        // preferences independently (own Firestore doc, keyed by
+        // req.session.id, never by email). Driver/Client branches above
+        // are completely untouched by this. security_system_alerts-mapped
+        // notifications (and anything with no clear category) always
+        // pass through regardless of preferences.
+        const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
+        const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
+        list = list.filter(n => shouldDeliverNotificationToAdmin(preferences, n.type, n.channel));
       }
 
       res.json(list);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get notifications" });
+    }
+  });
+
+  // Notification Preferences Phase 2 (Admin only). Storage: one document
+  // per admin in a new `adminNotificationPreferences` collection, keyed
+  // by req.session.id (the super-admin's email, or a sub-admin's own
+  // `admins/{id}` Firestore doc id — never their email; see
+  // src/lib/notificationPreferences.ts's own header comment for why these
+  // differ). Both routes are scoped entirely by the caller's own verified
+  // session id — there is no id/email parameter accepted from the client
+  // at all, so there is no way for one admin to read or write another
+  // admin's preferences through this API. This is a brand-new collection;
+  // no Firestore rules change is needed (firestore.rules already denies
+  // every collection except the server's own account, a blanket rule that
+  // already covers any collection name). No production data is migrated —
+  // an admin with no saved document simply resolves to all-enabled
+  // defaults (resolveAdminNotificationPreferences).
+  app.get("/api/admin/notification-preferences", requireRole("admin"), async (req, res) => {
+    try {
+      const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
+      const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
+      res.json({ preferences });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to load notification preferences." });
+    }
+  });
+
+  app.put("/api/admin/notification-preferences", requireRole("admin"), async (req, res) => {
+    try {
+      const prefRef = doc(db, "adminNotificationPreferences", req.session!.id);
+      const existingDoc = await getDoc(prefRef);
+      const existing = resolveAdminNotificationPreferences(existingDoc.exists() ? existingDoc.data() : undefined);
+      const result = sanitizeNotificationPreferencesUpdate(existing, req.body);
+      // Every submitted category value is validated server-side: a known
+      // category with a non-boolean value rejects the whole request
+      // rather than silently applying a partially-valid update. An
+      // attempt to disable security_system_alerts specifically is NOT a
+      // validation error — sanitizeNotificationPreferencesUpdate already
+      // ignored it (forced true) above, so the rest of a legitimate
+      // request (e.g. also toggling another category) still succeeds.
+      if (result.invalidKeys.length > 0) {
+        return res.status(400).json({
+          error: `Invalid value for: ${result.invalidKeys.join(", ")}. Each category must be true or false.`
+        });
+      }
+      await setDoc(prefRef, {
+        id: req.session!.id,
+        ...result.preferences,
+        updatedAt: new Date().toISOString()
+      });
+      res.json({ preferences: result.preferences });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update notification preferences." });
     }
   });
 
