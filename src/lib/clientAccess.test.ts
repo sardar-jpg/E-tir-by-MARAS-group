@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   isClientStaffAccount,
-  canClientSelfDeleteAccount,
   canClientSendChatMessage,
   normalizeClientUsername,
   buildClientUsernameField,
@@ -9,6 +8,7 @@ import {
   matchesClientLoginIdentifier,
   hasDuplicateClientUsername,
   isShipmentVisibleToClientCompany,
+  resolveClientAccountDeleteAuthorization,
 } from "./clientAccess";
 
 describe("isClientStaffAccount", () => {
@@ -20,22 +20,119 @@ describe("isClientStaffAccount", () => {
   });
 });
 
-describe("canClientSelfDeleteAccount", () => {
-  it("allows the company owner account to self-delete", () => {
-    expect(canClientSelfDeleteAccount({ isEmployee: false })).toBe(true);
-    expect(canClientSelfDeleteAccount({})).toBe(true);
-  });
-
-  it("blocks a Client Staff account from self-deleting — MARAS Admin only", () => {
-    expect(canClientSelfDeleteAccount({ isEmployee: true })).toBe(false);
-  });
-});
-
 describe("canClientSendChatMessage", () => {
   it("customer-chat-enablement-safety-review: gives Client Staff the same chat send capability as the company owner", () => {
     expect(canClientSendChatMessage({ isEmployee: true })).toBe(true);
     expect(canClientSendChatMessage({ isEmployee: false })).toBe(true);
     expect(canClientSendChatMessage({})).toBe(true);
+  });
+});
+
+describe("resolveClientAccountDeleteAuthorization — final confirmed account-deletion rule", () => {
+  const OWNER_ID = "client-owner-1";
+  const STAFF_ID = "client-staff-1";
+  const OTHER_STAFF_ID = "client-staff-2";
+
+  it("Client Owner can delete their own personal account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: OWNER_ID,
+      session: { role: "client", id: OWNER_ID },
+    });
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("Client Staff can delete their own personal account — identical mechanism to Owner, no isEmployee check at all", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "client", id: STAFF_ID },
+    });
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("deleting either personal account only ever authorizes that ONE record id — never implies any other record (company, other accounts) is affected", () => {
+    const ownerDecision = resolveClientAccountDeleteAuthorization({
+      requestedId: OWNER_ID,
+      session: { role: "client", id: OWNER_ID },
+    });
+    const staffDecision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "client", id: STAFF_ID },
+    });
+    // Each decision is scoped to exactly the requested id — the function
+    // has no concept of "also delete related records," so a caller can
+    // never derive authorization for anything beyond the single id checked.
+    expect(ownerDecision).toEqual({ allowed: true });
+    expect(staffDecision).toEqual({ allowed: true });
+  });
+
+  it("Client Owner cannot delete a Client Staff account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "client", id: OWNER_ID },
+    });
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("You can only delete your own account.");
+  });
+
+  it("Client Staff cannot delete another Client Staff account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: OTHER_STAFF_ID,
+      session: { role: "client", id: STAFF_ID },
+    });
+    expect(decision.allowed).toBe(false);
+  });
+
+  it("Client Staff cannot delete the Client Owner account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: OWNER_ID,
+      session: { role: "client", id: STAFF_ID },
+    });
+    expect(decision.allowed).toBe(false);
+  });
+
+  it("neither Owner nor Staff can delete \"the company\" — there is no id a client session can supply, other than its own, that this function ever authorizes", () => {
+    const someOtherCompanyRecordId = "client-owner-999";
+    expect(
+      resolveClientAccountDeleteAuthorization({
+        requestedId: someOtherCompanyRecordId,
+        session: { role: "client", id: OWNER_ID },
+      }).allowed
+    ).toBe(false);
+    expect(
+      resolveClientAccountDeleteAuthorization({
+        requestedId: someOtherCompanyRecordId,
+        session: { role: "client", id: STAFF_ID },
+      }).allowed
+    ).toBe(false);
+  });
+
+  it("only a full Admin (not accounts-restricted) can delete any Client record — the only path that can remove a company's Owner record", () => {
+    const superDecision = resolveClientAccountDeleteAuthorization({
+      requestedId: OWNER_ID,
+      session: { role: "admin", id: "admin-1", adminType: "super" },
+    });
+    const operationDecision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "admin", id: "admin-2", adminType: "operation" },
+    });
+    expect(superDecision.allowed).toBe(true);
+    expect(operationDecision.allowed).toBe(true);
+  });
+
+  it("an accounts-restricted admin cannot delete any Client record", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: OWNER_ID,
+      session: { role: "admin", id: "admin-3", adminType: "accounts" },
+    });
+    expect(decision.allowed).toBe(false);
+  });
+
+  it("a driver session is never authorized to delete a Client record, even its own id coincidentally matching", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: "driver-1",
+      session: { role: "driver", id: "driver-1" },
+    });
+    expect(decision.allowed).toBe(false);
   });
 });
 

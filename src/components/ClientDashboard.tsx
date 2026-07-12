@@ -586,19 +586,24 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
 
-          {!viewOnly && (
-            <button
-              type="button"
-              onClick={() => {
-                setShowClientDeleteConfirm(true);
-                setUnderstandClientDelete(false);
-              }}
-              className="px-4 py-2.5 bg-red-950/10 hover:bg-red-950/20 border border-red-900/30 hover:border-red-500/20 text-red-400 font-bold rounded-xl text-xs shadow transition-all cursor-pointer flex items-center gap-1 shrink-0"
-            >
-              <Trash2 className="w-3.5 h-3.5 shrink-0" />
-              <span>{lang === 'tr' ? "Hesabı Sil" : (lang === 'ar' ? "حذف الحساب" : "Delete Account")}</span>
-            </button>
-          )}
+          {/* fix/client-create-username, final confirmed rule: both Client
+              Owner and Client Staff may delete their own personal login
+              account — no longer hidden for Staff (viewOnly). The server
+              (resolveClientAccountDeleteAuthorization) always deletes the
+              AUTHENTICATED session's own id regardless of what this button
+              submits, so this can never delete anyone else's account or
+              the company. */}
+          <button
+            type="button"
+            onClick={() => {
+              setShowClientDeleteConfirm(true);
+              setUnderstandClientDelete(false);
+            }}
+            className="px-4 py-2.5 bg-red-950/10 hover:bg-red-950/20 border border-red-900/30 hover:border-red-500/20 text-red-400 font-bold rounded-xl text-xs shadow transition-all cursor-pointer flex items-center gap-1 shrink-0"
+          >
+            <Trash2 className="w-3.5 h-3.5 shrink-0" />
+            <span>{lang === 'tr' ? "Hesabı Sil" : (lang === 'ar' ? "حذف الحساب" : "Delete Account")}</span>
+          </button>
 
           <button
             onClick={onLogout}
@@ -1037,12 +1042,13 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                           </div>
                         )}
 
-                        {/* customer-chat-enablement-safety-review: Client
-                            Staff (viewOnly) get the same chat send access as
-                            the Client Owner — viewOnly only restricts
-                            account-management actions (see the "Delete
-                            Account" button above and canClientSelfDeleteAccount
-                            in clientAccess.ts), never chat. */}
+                        {/* customer-chat-enablement-safety-review, updated
+                            fix/client-create-username: Client Staff
+                            (viewOnly) get identical chat send access to the
+                            Client Owner — this branch is effectively dead
+                            code today since canClientSendChatMessage always
+                            returns true, kept as a named, reviewable
+                            extension point (see clientAccess.ts). */}
                         {!canClientSendChatMessage({ isEmployee: viewOnly }) ? (
                           <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
                             <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
