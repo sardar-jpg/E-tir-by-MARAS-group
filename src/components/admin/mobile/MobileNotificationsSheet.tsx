@@ -35,7 +35,11 @@ export default function MobileNotificationsSheet({
 
   return (
     <div className="lg:hidden fixed inset-0 z-50 bg-white flex flex-col" dir={isRtl ? 'rtl' : 'ltr'}>
-      <div className="sticky top-0 flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3 min-h-[52px] shrink-0">
+      {/* feature/admin-mobile-ui correction pass: this is a fixed
+          inset-0 full-screen takeover with no other header above it
+          (unlike MobileTopAppBar's page context), so it needs its own
+          safe-area-inset-top allowance directly. */}
+      <div className="sticky top-0 flex items-center justify-between gap-2 border-b border-slate-200 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] min-h-[52px] shrink-0">
         <div className="flex items-center gap-1.5 font-extrabold text-sm text-slate-900">
           <Bell className="w-4 h-4 text-slate-600" />
           <span>{lang === 'tr' ? 'Bildirimler' : lang === 'ar' ? 'الإشعارات' : 'Notifications'}</span>
@@ -66,7 +70,7 @@ export default function MobileNotificationsSheet({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-2 pb-24">
+      <div className="flex-1 overflow-y-auto p-3 space-y-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         {notifications.length === 0 ? (
           <div className="py-16 text-center text-slate-400 text-sm">
             {lang === 'tr' ? 'Henüz bildirim yok.' : lang === 'ar' ? 'لا توجد إشعارات حالياً.' : 'No recent notifications.'}

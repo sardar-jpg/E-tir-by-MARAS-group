@@ -2,6 +2,7 @@ import type { ComponentType } from 'react';
 import { LayoutGrid, Ship, Map as MapIcon, MessageSquare, MoreHorizontal } from 'lucide-react';
 import type { Language } from '../../../types';
 import { resolvePrimaryMobileTabs, isMoreTabActive, type MobileNavTab } from '../../../lib/mobileAdminNav';
+import { formatUnreadBadge } from '../../../lib/chatUnreadAccess';
 
 export interface MobileNavTabEntry {
   id: string;
@@ -16,6 +17,13 @@ interface MobileBottomNavProps {
   isMoreOpen: boolean;
   onSelectTab: (id: string) => void;
   onOpenMore: () => void;
+  /** feature/admin-mobile-ui correction pass: tab id -> unread count.
+      Today only 'chat_center' is populated (from AdminPanel's own
+      per-admin unreadChatMessages — src/lib/chatUnreadAccess.ts), same
+      source as every other chat unread badge in the app, so this one
+      stays in sync with the rest automatically. Any id not present here
+      renders no badge. */
+  badges?: Record<string, number>;
 }
 
 // Short, canonical bottom-nav labels for the 4 primary slots — the
@@ -52,7 +60,7 @@ const PRIMARY_ICONS: Record<string, ComponentType<{ className?: string }>> = {
  * chat_center) still gets a fully populated, role-correct bar instead
  * of empty/dead slots.
  */
-export default function MobileBottomNav({ lang, tabs, activeTab, isMoreOpen, onSelectTab, onOpenMore }: MobileBottomNavProps) {
+export default function MobileBottomNav({ lang, tabs, activeTab, isMoreOpen, onSelectTab, onOpenMore, badges }: MobileBottomNavProps) {
   const primaryIds = resolvePrimaryMobileTabs(tabs as MobileNavTab[]);
   const byId = new Map(tabs.map((tab) => [tab.id, tab]));
   const moreActive = isMoreOpen || isMoreTabActive(activeTab, primaryIds);
@@ -81,6 +89,11 @@ export default function MobileBottomNav({ lang, tabs, activeTab, isMoreOpen, onS
             <div className="relative flex flex-col items-center">
               <Icon className={`w-5 h-5 shrink-0 transition-transform ${isActive ? 'text-orange-500 scale-110' : ''}`} />
               {isActive && <span className="absolute -bottom-1.5 w-4 h-0.5 bg-orange-500 rounded-full" />}
+              {formatUnreadBadge(badges?.[id] ?? 0) && (
+                <span className="absolute -top-1.5 -end-2.5 min-w-[16px] h-4 px-1 rounded-full bg-orange-500 text-white text-[9px] font-black flex items-center justify-center border-2 border-white">
+                  {formatUnreadBadge(badges?.[id] ?? 0)}
+                </span>
+              )}
             </div>
             <span className="mt-1 truncate max-w-full px-0.5">{label}</span>
           </button>

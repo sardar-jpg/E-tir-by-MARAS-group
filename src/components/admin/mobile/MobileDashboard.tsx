@@ -173,12 +173,12 @@ export default function MobileDashboard({
                 key={action.key}
                 type="button"
                 onClick={action.onClick}
-                className="flex flex-col items-start gap-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl p-3.5 text-left cursor-pointer border-0 min-h-[44px] transition-colors"
+                className="flex items-center gap-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl px-3 py-2.5 text-left cursor-pointer border-0 min-h-[44px] transition-colors"
               >
-                <span className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/10 text-orange-400">
-                  <Icon className="w-4 h-4" />
+                <span className="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-orange-400">
+                  <Icon className="w-3.5 h-3.5" />
                 </span>
-                <span className="text-xs font-bold leading-tight">{action.label[lang] ?? action.label.en}</span>
+                <span className="text-xs font-bold leading-tight truncate">{action.label[lang] ?? action.label.en}</span>
               </button>
             );
           })}

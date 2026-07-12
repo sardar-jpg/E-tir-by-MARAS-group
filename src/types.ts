@@ -218,8 +218,29 @@ export interface ChatMessage {
   fileName?: string;
   fileCategory?: DocumentCategory;
   timestamp: string;
+  // Single global read receipt shown to the SENDING driver/client ("was
+  // my message seen by the admin side") — unchanged by the
+  // admin-mobile-ui correction pass. Not per-admin; do not use this to
+  // compute an individual admin's unread badge (see readByAdminIds).
   status?: 'sent' | 'seen';
   channel?: ChatChannel;
+  // feature/admin-mobile-ui correction pass: session id of the admin who
+  // sent this message (only ever set when sender === 'admin', resolved
+  // server-side from the verified session — never client-supplied).
+  // Needed to tell "my own internal_staff message" apart from "another
+  // admin's internal_staff message" — sender alone ('admin') can't,
+  // since every admin's messages have the same sender value. Absent on
+  // driver/client messages and on messages sent before this field
+  // existed (src/lib/chatUnreadAccess.ts treats those conservatively —
+  // never counted as unread for anyone, rather than guessed).
+  senderId?: string;
+  // feature/admin-mobile-ui correction pass: session ids of the admins
+  // who have read this message — the actual per-admin unread source of
+  // truth (src/lib/chatUnreadAccess.ts), distinct from `status` above.
+  // Only ever meaningful for messages an admin can receive (i.e. not
+  // their own); appended to, never overwritten, by POST
+  // /api/shipments/:id/chat/seen with viewer: 'admin'.
+  readByAdminIds?: string[];
 }
 
 export interface ActivityLog {

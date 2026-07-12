@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
+import { resolveTrackingStatus } from "../lib/trackingMapStatus";
 import { APIProvider, Map, AdvancedMarker, InfoWindow, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
@@ -370,7 +371,7 @@ const LABELS = {
     allTypes: "All Types",
     unspecifiedType: "Others / Unassigned",
     bestFitZoom: "Auto-Center Focus",
-    lastUpdated: "Telemetry Feed Active",
+    lastUpdated: "Last Reported Shipment Status",
     gpsAcquired: "GPS Signal Acquired",
     simulatedGps: "Simulated Dead-Reckoning",
     operationalStats: "Transit Stats Overview",
@@ -404,7 +405,7 @@ const LABELS = {
     allTypes: "Tüm Tipler",
     unspecifiedType: "Diğer / Tanımsız",
     bestFitZoom: "Hızlı Odaklan",
-    lastUpdated: "Akıllı Takip Aktif",
+    lastUpdated: "Son Bildirilen Gönderi Durumu",
     gpsAcquired: "GPS Sinyali Alındı",
     simulatedGps: "Simüle Edilmiş Rota Verisi",
     operationalStats: "Operasyonel İstatistikler",
@@ -438,7 +439,7 @@ const LABELS = {
     allTypes: "كل الأنواع",
     unspecifiedType: "أخرى / غير محدد",
     bestFitZoom: "أوتو-فوكس للشبكة",
-    lastUpdated: "التتبع الذكي نشط",
+    lastUpdated: "آخر حالة مسجلة للشحنة",
     gpsAcquired: "إشارة الـ GPS نشطة",
     simulatedGps: "عبر نظام الملاحة التقديري",
     operationalStats: "ملخص النقل النشط",
@@ -503,7 +504,11 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   const [currentDriverId, setCurrentDriverId] = useState<string | null>(null);
   const [currentDriverName, setCurrentDriverName] = useState<string | null>(null);
   const [locationStatusMessage, setLocationStatusMessage] = useState<string | null>(null);
-  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(true);
+  // feature/admin-mobile-ui correction pass: the legend used to always
+  // default open, covering a large share of a phone's map area. Closed
+  // by default under the same 1024px breakpoint AdminPanel's own mobile
+  // mode uses; desktop is unaffected (defaults open, same as before).
+  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(() => (typeof window === "undefined" ? true : window.innerWidth >= 1024));
   const [mapViewMode, setMapViewMode] = useState<'vector' | 'google_map'>('google_map');
   const [googleMapLoading, setGoogleMapLoading] = useState<boolean>(true);
   const [mapsAuthError, setMapsAuthError] = useState<boolean>(() => {
@@ -515,6 +520,14 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   // mobile shows one at a time full-height with a small toggle — desktop
   // (lg:) ignores this and always shows both via the existing grid.
   const [mobileListOpen, setMobileListOpen] = useState<boolean>(false);
+
+  // feature/admin-mobile-ui correction pass: single source of truth
+  // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
+  // allowed to say "Live"/"Active" about Google Maps GPS tracking right
+  // now. Google Map mode with no configured key, or with an auth
+  // failure, is NOT live even though the admin selected that mode.
+  const trackingStatus = resolveTrackingStatus({ mapViewMode, hasValidMapsKey, mapsAuthError });
+  const isGoogleMapsLive = trackingStatus === "live";
 
   useEffect(() => {
     const handleMapsFailure = () => {
@@ -893,19 +906,70 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-4 p-4"
       : "space-y-4"
     }>
-      {/* ⚠️ HIGH-DENSITY RADAR OVERVIEW DECK */}
-      <div className="bg-slate-900 border border-slate-800 text-white p-4 rounded-2xl shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      {/* feature/admin-mobile-ui correction pass: compact mobile-only
+          header — icon, honest runtime-derived status text (same
+          isGoogleMapsLive logic as the desktop deck below), a small
+          Vector/Google Map toggle, and Fullscreen. Replaces the full
+          desktop deck (hidden below via lg:flex) plus the amber
+          "operational stats" paragraph drawer, which is redundant with
+          the status text and was pure vertical space on a phone. */}
+      <div className="lg:hidden bg-slate-900 border border-slate-800 text-white rounded-2xl px-3 py-2.5 flex items-center gap-2">
+        <Compass className="w-4 h-4 text-orange-500 shrink-0 animate-spin" style={{ animationDuration: '10s' }} />
+        <p className={`flex-1 min-w-0 truncate text-[11px] font-bold flex items-center gap-1.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`}></span>
+          <span className="truncate">
+            {mapViewMode === 'vector'
+              ? (lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar")
+              : isGoogleMapsLive
+                ? (lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "غوغل ماب مباشر" : "Live Google Map")
+                : !hasValidMapsKey
+                  ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
+                  : (lang === 'tr' ? "Demo / Manuel Takip" : lang === 'ar' ? "وضع تجريبي / يدوي" : "Demo / Manual Mode")}
+          </span>
+        </p>
+        <button
+          type="button"
+          onClick={() => setMapViewMode(mapViewMode === 'vector' ? 'google_map' : 'vector')}
+          className="shrink-0 w-8 h-8 flex items-center justify-center bg-slate-950 border border-slate-800 rounded-lg text-slate-300 cursor-pointer"
+          title={mapViewMode === 'vector' ? 'Google Map' : 'Vector Radar'}
+        >
+          {mapViewMode === 'vector' ? '📍' : '🗺️'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsFullscreen(f => !f)}
+          className="shrink-0 w-8 h-8 flex items-center justify-center bg-slate-950 border border-slate-800 rounded-lg text-slate-300 cursor-pointer"
+        >
+          {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+        </button>
+      </div>
+
+      {/* ⚠️ HIGH-DENSITY RADAR OVERVIEW DECK — desktop only, see the
+          compact mobile replacement immediately above. */}
+      <div className="hidden lg:flex bg-slate-900 border border-slate-800 text-white p-4 rounded-2xl shadow-md flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="p-2.5 bg-orange-500/10 text-orange-500 rounded-xl border border-orange-500/20 shrink-0">
             <Compass className="w-5 h-5 animate-spin" style={{ animationDuration: '10s' }} />
           </div>
           <div>
             <h3 className="text-xs font-black uppercase tracking-wider text-slate-100">{t.engineSelector}</h3>
-            <p className="text-[11px] text-orange-400 font-medium flex items-center gap-1.5 mt-0.5">
-              <span className="inline-block w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
-              {mapViewMode === 'vector' 
-                ? t.engineVector 
-                : (lang === 'tr' ? "Canlı Google Harita Modu Aktif" : lang === 'ar' ? "تتبع غوغل ماب المباشر نشط" : "Live Google Maps GIS Tracking Active")}
+            {/* feature/admin-mobile-ui correction pass: this used to say
+                "Live Google Maps GIS Tracking Active" any time google_map
+                mode was selected, even with no configured key or an auth
+                failure — directly contradicting the "Key Required"/error
+                fallback panel shown in the same view. Wording is now
+                derived from isGoogleMapsLive (mapViewMode === 'google_map'
+                && hasValidMapsKey && !mapsAuthError), the single runtime
+                source of truth for whether this is actually connected. */}
+            <p className={`text-[11px] font-medium flex items-center gap-1.5 mt-0.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
+              <span className={`inline-block w-2 h-2 rounded-full ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`}></span>
+              {mapViewMode === 'vector'
+                ? t.engineVector
+                : isGoogleMapsLive
+                  ? (lang === 'tr' ? "Canlı Google Harita Modu Aktif" : lang === 'ar' ? "تتبع غوغل ماب المباشر نشط" : "Live Google Maps GIS Tracking Active")
+                  : !hasValidMapsKey
+                    ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
+                    : (lang === 'tr' ? "Demo / Manuel Takip Modu" : lang === 'ar' ? "وضع التتبع التجريبي / اليدوي" : "Demo / Manual Tracking Mode")}
             </p>
           </div>
         </div>
@@ -934,7 +998,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                   : 'text-slate-400 hover:text-slate-200 bg-transparent'
               }`}
             >
-              📍 {lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "غوغل ماب مباشر" : "Live Google Map"}
+              📍 {lang === 'tr' ? "Google Harita" : lang === 'ar' ? "خرائط غوغل" : "Google Map"}
             </button>
           </div>
 
@@ -956,8 +1020,11 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
       </div>
 
-      {/* THREE LANGUAGE ACTION DRAWER */}
-      <div className="bg-amber-50/70 border border-amber-100 rounded-2xl p-4 text-xs text-amber-950 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+      {/* THREE LANGUAGE ACTION DRAWER — desktop only (correction pass):
+          this paragraph restated what the compact mobile header above
+          already says, and was pure vertical space pushing the actual
+          map/list down on a phone. */}
+      <div className="hidden lg:grid bg-amber-50/70 border border-amber-100 rounded-2xl p-4 text-xs text-amber-950 grid-cols-1 md:grid-cols-12 gap-3 items-center">
         <div className="md:col-span-10 space-y-1">
           <h4 className="font-extrabold flex items-center gap-1.5 text-amber-900">
             <Info className="w-4 h-4 text-orange-600" />
@@ -1795,7 +1862,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                               {lang === 'tr' ? "EŞİTLENİYOR..." : lang === 'ar' ? "مزامنة الأنظمة..." : "SYNCHRONIZING..."}
                             </span>
                             <h4 className="font-sans font-extrabold text-sm text-slate-100 tracking-tight leading-none mt-1">
-                              {lang === 'tr' ? "Google Harita Başlatılıyor" : lang === 'ar' ? "جاري تهيئة الخريطة..." : "Initializing Live Google Map"}
+                              {lang === 'tr' ? "Google Harita Başlatılıyor" : lang === 'ar' ? "جاري تهيئة الخريطة..." : "Initializing Google Map"}
                             </h4>
                             <p className="text-[10px]/normal text-slate-500 font-mono">
                               {lang === 'tr' ? "Yüksek çözünürlüklü GIS verileri ve uydu telemetrisi yükleniyor..." : lang === 'ar' ? "تحميل معلومات شبكة النقل الدولية عبر الأقمار الصناعية..." : "Securing satcom GIS telemetry & transport corridor vectors..."}
@@ -1939,9 +2006,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         <MapPin className="w-6 h-6 text-orange-400 animate-bounce" />
                       </div>
                       <div className="space-y-1">
-                        <h4 className="font-bold text-sm text-slate-100">Google Maps Platform Key Required</h4>
+                        <h4 className="font-bold text-sm text-slate-100">
+                          {lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured"}
+                        </h4>
                         <p className="text-[11px] text-slate-400 max-w-sm mx-auto leading-normal">
-                          No Google Maps Platform key is configured for this deployment, so the interactive map can't load. This is a setup step, not a live map — shipment list, search, and filters below are unaffected.
+                          {lang === 'tr'
+                            ? "Bu dağıtım için bir Google Haritalar Platformu anahtarı yapılandırılmamış, bu yüzden etkileşimli harita yüklenemiyor. Bu bir kurulum adımıdır, canlı bir harita değildir — aşağıdaki sevkiyat listesi, arama ve filtreler etkilenmez."
+                            : lang === 'ar'
+                              ? "لم يتم تهيئة مفتاح خدمة خرائط غوغل لهذا النشر، لذا لا يمكن تحميل الخريطة التفاعلية. هذه خطوة إعداد وليست خريطة مباشرة — قائمة الشحنات والبحث والفلاتر أدناه تعمل بشكل طبيعي."
+                              : "No Google Maps Platform key is configured for this deployment, so the interactive map can't load. This is a setup step, not a live map — shipment list, search, and filters below are unaffected."}
                         </p>
                       </div>
                       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl text-left text-[11px]/normal text-slate-400 space-y-1.5 max-w-sm w-full font-mono">

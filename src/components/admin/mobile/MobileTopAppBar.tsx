@@ -26,6 +26,12 @@ interface MobileTopAppBarProps {
  * panel itself stays in AdminPanel.tsx, positioned for this bar), and a
  * quick-access menu button that opens the same "More" sheet as the
  * bottom nav's More item.
+ *
+ * Correction pass: App.tsx's own dark Admin header (branding, language,
+ * logout) is now hidden on mobile — this bar is the ONLY header mobile
+ * sees, so it now also owns the safe-area-inset-top padding that header
+ * used to provide (previously this bar sat below that header, which
+ * already handled the notch/status-bar inset).
  */
 export default function MobileTopAppBar({
   lang,
@@ -39,7 +45,7 @@ export default function MobileTopAppBar({
 }: MobileTopAppBarProps) {
   const BackIcon = isRtl ? ChevronRight : ChevronLeft;
   return (
-    <div className="lg:hidden sticky top-0 z-30 flex items-center gap-2 bg-white border-b border-slate-200 px-3 py-2.5 min-h-[52px]">
+    <div className="lg:hidden -mx-3 sticky top-0 z-30 flex items-center gap-2 bg-white border-b border-slate-200 px-3 pb-2.5 pt-[max(0.625rem,env(safe-area-inset-top))] min-h-[56px]">
       {onBack ? (
         <button
           type="button"

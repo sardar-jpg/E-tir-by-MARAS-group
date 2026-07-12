@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
+import { useIsMobile } from "./hooks/useIsMobile";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 // BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
@@ -48,6 +49,14 @@ function RouteLoadingFallback() {
 export default function App() {
   // 1. Language State
   const [lang, setLang] = useState<Language>("en");
+
+  // feature/admin-mobile-ui correction pass: the Admin shell's own dark
+  // header/footer (below) duplicate MobileTopAppBar/MobileBottomNav on
+  // mobile — this must be a hook call (not computed inside the admin
+  // return branch) since Driver/Client return early above it. Same
+  // breakpoint AdminPanel's own isMobileMode uses, so header/footer and
+  // the mobile shell switch over at the same width.
+  const isAdminMobileMode = useIsMobile(1024);
 
   // Custom premium toast notifier
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -625,8 +634,17 @@ export default function App() {
             const data = await res.json();
             setChatMessages(data);
 
-            const hasUnseenFromOtherParty = data.some((m: any) => m.sender !== 'admin' && m.status !== 'seen');
-            if (hasUnseenFromOtherParty) {
+            // feature/admin-mobile-ui correction pass: `status` is no
+            // longer per-admin truth (another admin reading first already
+            // flips it to 'seen' globally) — gating this call on
+            // `status !== 'seen'` meant a second admin opening the same
+            // drawer could skip calling /chat/seen entirely and never get
+            // added to that message's readByAdminIds, leaving their own
+            // unread badge stuck forever. The server-side write is
+            // idempotent, so just call whenever there's a message from
+            // the other party at all.
+            const hasMessageFromOtherParty = data.some((m: any) => m.sender !== 'admin');
+            if (hasMessageFromOtherParty) {
               await apiFetch(`/api/shipments/${chatShipment.id}/chat/seen`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -839,7 +857,11 @@ export default function App() {
   return (
     <div className="bg-slate-900 min-h-screen text-slate-100 font-sans flex flex-col justify-between" dir={isRtl ? "rtl" : "ltr"}>
       
-      <header className="bg-slate-950 border-b border-slate-800 sticky top-0 z-40 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))]">
+      {/* feature/admin-mobile-ui correction pass: hidden on mobile — this
+          duplicated MobileTopAppBar (AdminPanel.tsx), doubling the header
+          height and pushing content down. Language switch + Logout move
+          into MobileMoreMenu on mobile; unchanged on desktop. */}
+      <header className="hidden lg:block bg-slate-950 border-b border-slate-800 sticky top-0 z-40 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))]">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           
           {/* Logo / Title */}
@@ -907,6 +929,7 @@ export default function App() {
               adminEmail={session?.email}
               adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
               onLogout={handleLogout}
+              onLangChange={setLang}
             />
           </Suspense>
         ) : (
@@ -1340,8 +1363,12 @@ export default function App() {
         </div>
       )}
 
-      {/* CORE STATS FOOTER BRANDING */}
-      <footer className="bg-slate-950 py-5 text-center text-[10px] text-slate-500 uppercase border-xs border-slate-800 tracking-wider flex flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-inner">
+      {/* CORE STATS FOOTER BRANDING.
+          feature/admin-mobile-ui correction pass: hidden on mobile — it
+          sat directly above the fixed MobileBottomNav, effectively
+          becoming unreadable/wasted space above the nav bar. Unchanged
+          on desktop. */}
+      <footer className="hidden lg:flex bg-slate-950 py-5 text-center text-[10px] text-slate-500 uppercase border-xs border-slate-800 tracking-wider flex-col md:flex-row items-center justify-center gap-2 md:gap-4 px-4 shadow-inner">
         <span>etir by MARAS Group © {new Date().getFullYear()} — Multi-Country Operations Gateway | All rights reserved.</span>
         <div className="flex items-center gap-3">
           <button

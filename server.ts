@@ -58,6 +58,7 @@ import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
 import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
+import { isMessageFromOtherAdmin, isMessageUnreadForAdmin, appendAdminReader } from "./src/lib/chatUnreadAccess";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -3268,6 +3269,13 @@ async function startServer() {
       // (matches the merged admin GET default).
       const channelFilter = resolveSeenChannelFilter(req.session!.role, requestedChannel);
 
+      // feature/admin-mobile-ui correction pass: only an admin viewer
+      // gets per-admin read tracking (src/lib/chatUnreadAccess.ts) — a
+      // driver/client session's own "mark the admin side's messages seen"
+      // call below is unchanged, since there's exactly one driver/client
+      // per shipment and no per-user concept applies there.
+      const viewerAdminId = viewer === "admin" ? req.session!.id : null;
+
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);
       const batchWrites: Promise<void>[] = [];
@@ -3275,8 +3283,21 @@ async function startServer() {
       snapshot.docs.forEach((d) => {
         const msg = d.data() as ChatMessage;
         if (channelFilter && msg.channel !== channelFilter) return;
-        // If message is for this shipment, was sent by the opposite party, and is not already 'seen'
-        if (msg.shipmentId === shipmentId && msg.sender !== viewer && msg.status !== "seen") {
+        if (msg.shipmentId !== shipmentId) return;
+
+        if (viewerAdminId) {
+          // Still also sets status: 'seen' (unchanged, first-seen-by-any-
+          // admin only) for the driver/client-facing read receipt, which
+          // stays a single global flag — a genuinely different concern
+          // from this admin's own per-admin unread state.
+          if (!isMessageFromOtherAdmin(msg, viewerAdminId)) return;
+          const nextReadBy = appendAdminReader(msg.readByAdminIds, viewerAdminId);
+          const alreadyGloballySeen = msg.status === "seen";
+          if (nextReadBy === msg.readByAdminIds && alreadyGloballySeen) return;
+          batchWrites.push(
+            setDoc(doc(db, "chatMessages", d.id), { ...msg, status: "seen", readByAdminIds: nextReadBy })
+          );
+        } else if (msg.sender !== viewer && msg.status !== "seen") {
           batchWrites.push(
             setDoc(doc(db, "chatMessages", d.id), { ...msg, status: "seen" })
           );
@@ -3408,6 +3429,14 @@ async function startServer() {
         status: "sent",
         channel
       };
+
+      // feature/admin-mobile-ui correction pass: only meaningful (and only
+      // ever set) for admin senders — see ChatMessage.senderId and
+      // src/lib/chatUnreadAccess.ts. Lets per-admin unread tracking tell
+      // "my own internal_staff message" apart from "another admin's".
+      if (sender === "admin") {
+        newMessage.senderId = req.session!.id;
+      }
 
       if (text !== undefined) newMessage.text = text;
       if (fileUrl !== undefined) newMessage.fileUrl = fileUrl;
@@ -5227,15 +5256,22 @@ async function startServer() {
   // driver/client sessions can see, not admin.
   app.get("/api/chat/unread", requireRole("admin"), async (req, res) => {
     try {
+      // feature/admin-mobile-ui correction pass: per-admin (WhatsApp/
+      // Google-Chat-style), not a single global flag shared by every
+      // admin — see src/lib/chatUnreadAccess.ts. This also now correctly
+      // includes another admin's internal_staff messages (previously
+      // excluded outright by the old `sender !== "admin"` filter, since
+      // every admin's messages share that same sender value).
+      const viewerAdminId = req.session!.id;
       const col = collection(db, "chatMessages");
       const snapshot = await getDocs(col);
       const unreadMsgs = snapshot.docs
         .map(doc => doc.data() as ChatMessage)
-        .filter(m => m.sender !== "admin" && m.status !== "seen");
-      
+        .filter(m => isMessageUnreadForAdmin(m, viewerAdminId));
+
       // Sort messages by timestamp descending
       unreadMsgs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      
+
       res.json(unreadMsgs);
     } catch (err: any) {
       console.error(err);

@@ -35,6 +35,7 @@ import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExpo
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
+import { formatUnreadBadge } from "../lib/chatUnreadAccess";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -273,8 +274,17 @@ interface AdminPanelProps {
   isConnectingGmail?: boolean;
   adminEmail?: string;
   adminType?: string;
-  /** feature/admin-mobile-ui: optional — lets the mobile "More" menu offer a Logout entry. The desktop app already has its own always-visible Logout button in App.tsx's outer header (unchanged); this is purely an additional, easier-to-reach entry point on mobile, calling the exact same handler. */
+  /** feature/admin-mobile-ui: lets the mobile "More" menu offer a Logout
+      entry. App.tsx's own Logout button (outer header) is now hidden on
+      mobile (correction pass — it duplicated MobileTopAppBar), so this is
+      mobile's only reachable Logout; desktop keeps using App.tsx's own
+      header button, unchanged, calling the same handler. */
   onLogout?: () => void;
+  /** feature/admin-mobile-ui correction pass: lets the mobile "More" menu
+      offer language switching. App.tsx's own language <select> (outer
+      header) is now hidden on mobile for the same reason as onLogout
+      above; desktop keeps using App.tsx's own switcher, unchanged. */
+  onLangChange?: (lang: Language) => void;
 }
 
 export default function AdminPanel({
@@ -290,7 +300,8 @@ export default function AdminPanel({
   isConnectingGmail = false,
   adminEmail = '',
   adminType = '',
-  onLogout
+  onLogout,
+  onLangChange,
 }: AdminPanelProps) {
   const isMobileMode = isMobile || useIsMobile(1024);
 
@@ -3630,7 +3641,15 @@ MARAS Group etir Center`;
         isMobileOpen={isMobileNavOpen}
         onCloseMobile={() => setIsMobileNavOpen(false)}
       />
-      <div className={`flex-1 min-w-0 ${isMobileMode ? 'pb-24' : 'p-4 md:p-6'}`}>
+      {/* feature/admin-mobile-ui correction pass: mobile had NO horizontal
+          padding at all (content touched the screen edges) — only
+          bottom clearance for the fixed nav. px-3 restores a normal
+          inset (no top padding, so MobileTopAppBar — the first child,
+          sticky top-0 — sits flush with zero gap instead of a small
+          scroll-away gap above it); bottom padding is safe-area-aware so
+          it always clears MobileBottomNav regardless of the device's
+          home-indicator inset, not just a fixed guess. */}
+      <div className={`flex-1 min-w-0 ${isMobileMode ? 'px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'p-4 md:p-6'}`}>
 
       {/* feature/admin-mobile-ui: mobile-only top app bar (lg:hidden,
           internally) — branding mark, current page title (same
@@ -3746,9 +3765,9 @@ MARAS Group etir Center`;
               title={lang === "tr" ? "Sürücü Sohbetleri" : lang === "ar" ? "محادثات السائقين" : "Driver Support Chats"}
             >
               <MessageSquare className={`w-5 h-5 ${unreadChatMessages.length > 0 ? "text-orange-600 animate-pulse" : "text-slate-500"}`} />
-              {unreadChatMessages.length > 0 && (
-                <span className="absolute -top-1 -end-1 bg-orange-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
-                  {unreadChatMessages.length}
+              {formatUnreadBadge(unreadChatMessages.length) && (
+                <span className="absolute -top-1 -end-1 bg-orange-600 text-white font-bold text-[10px] min-w-[20px] h-5 px-1 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                  {formatUnreadBadge(unreadChatMessages.length)}
                 </span>
               )}
             </button>
@@ -3759,9 +3778,9 @@ MARAS Group etir Center`;
                   <div className="flex items-center gap-1.5 font-bold text-sm text-slate-800">
                     <MessageSquare className="w-4 h-4 text-orange-600/90" />
                     <span>{lang === 'tr' ? 'Sürücü Mesajları' : lang === 'ar' ? 'رسائل السائقين غير المقروءة' : 'Unread Driver Chats'}</span>
-                    {unreadChatMessages.length > 0 && (
+                    {formatUnreadBadge(unreadChatMessages.length) && (
                       <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-black">
-                        {unreadChatMessages.length}
+                        {formatUnreadBadge(unreadChatMessages.length)}
                       </span>
                     )}
                   </div>
@@ -4075,8 +4094,43 @@ MARAS Group etir Center`;
           MobileBottomNav's "More" both open the new mobileMoreMenu sheet
           instead, which is the curated page the confirmed spec asks for). */}
 
-      {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR */}
+      {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR.
+          feature/admin-mobile-ui correction pass: mobile gets a compact
+          one-line variant (short label + input only, no explanatory
+          paragraph) instead of the full card — desktop is untouched. */}
       {(activeTab === 'dashboard' || activeTab === 'shipments') && (
+        isMobileMode ? (
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 shrink-0">
+              {lang === 'tr' ? "Ara" : (lang === 'ar' ? "بحث" : "Search")}
+            </span>
+            <div className="flex-1 relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="h-3.5 w-3.5 text-slate-400" />
+              </div>
+              <input
+                type="text"
+                className="block w-full pl-9 pr-9 py-2 bg-white text-xs text-slate-900 border border-slate-200 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 rounded-xl focus:outline-none transition-all placeholder:text-slate-400 font-medium font-sans"
+                placeholder={lang === 'tr' ? "Sevkiyat, sürücü veya şehir..." : (lang === 'ar' ? "شحنة، سائق أو مدينة..." : "Shipment, driver, or city...")}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setSearchQuery("");
+                }}
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-700 bg-transparent border-0 cursor-pointer"
+                  type="button"
+                  title={lang === 'tr' ? "Temizle" : "Clear Query"}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
         <div className="bg-white rounded-2xl border border-slate-200 p-4.5 mb-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all duration-300">
           <div className="space-y-1">
             <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
@@ -4084,8 +4138,8 @@ MARAS Group etir Center`;
               <span>{lang === 'tr' ? "Sevkiyat Arama ve Hızlı Getirme" : (lang === 'ar' ? "البحث السريع واسترجاع الشحنات" : "Shipment Quick Retrieval")}</span>
             </h3>
             <p className="text-[11px] text-slate-500 font-medium">
-              {lang === 'tr' 
-                ? "Sevkiyatları ID'sine, atanan sürücüye veya varış/hedef şehrine göre anında arayın ve filtreleyin." 
+              {lang === 'tr'
+                ? "Sevkiyatları ID'sine, atanan sürücüye veya varış/hedef şehrine göre anında arayın ve filtreleyin."
                 : (lang === 'ar' ? "ابحث عن الشحنات فوراً من خلال رقم التعريف (ID)، اسم السائق، أو مدينة الوصول." : "Search and retrieve shipments instantly using unique ID, assigned driver name, or destination city.")}
             </p>
           </div>
@@ -4097,8 +4151,8 @@ MARAS Group etir Center`;
             <input
               type="text"
               className="block w-full pl-9 pr-10 py-2.5 bg-slate-50 hover:bg-slate-100/80 focus:bg-white text-xs text-slate-900 border border-slate-200 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 rounded-xl focus:outline-none transition-all placeholder:text-slate-400 font-medium font-sans"
-              placeholder={lang === 'tr' 
-                ? "Sevkiyat ID, sürücü adı veya hedef şehir girin... (Sıfırlamak için Esc)" 
+              placeholder={lang === 'tr'
+                ? "Sevkiyat ID, sürücü adı veya hedef şehir girin... (Sıfırlamak için Esc)"
                 : (lang === 'ar' ? "أدخل رقم التعريف، اسم السائق، أو مدينة الوصول... (Esc للمسح)" : "Filter by shipment ID, driver name, or destination city... (Esc to clear)")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -4120,6 +4174,7 @@ MARAS Group etir Center`;
             )}
           </div>
         </div>
+        )
       )}
 
       {/* 1. Dashboard Overview Tab */}
@@ -4207,21 +4262,89 @@ MARAS Group etir Center`;
           only thing standing between accounts admins and this page). */}
       {activeTab === 'shipments' && canViewShipmentRegistry(resolvedAdminType) && (
         <div className="space-y-4">
+          {isMobileMode ? (
+            /* feature/admin-mobile-ui correction pass: the desktop filter
+               card (search + type segmented control + a wrapped, often
+               multi-row, status chip list) was too tall on a phone. Mobile
+               gets: a compact search row, a single horizontally-scrollable
+               row of transport-mode chips, and a single horizontally-
+               scrollable row of status chips — same searchQuery/typeFilter/
+               statusFilter state, same options, no wrapping. */
+            <div className="space-y-2">
+              <div className="relative">
+                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder={lang === 'tr' ? "Sevkiyat, konteyner, şirket ara..." : (lang === 'ar' ? "ابحث برقم الشحنة أو الحاوية أو الشركة..." : "Search shipment, container, company...")}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-8 py-2 bg-white text-xs border border-slate-200 focus:border-slate-400 rounded-lg focus:outline-none transition-all"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-900 bg-transparent border-0 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 overflow-x-auto -mx-3 px-3 pb-0.5">
+                {([
+                  { id: 'all', label: 'All' },
+                  { id: 'land', label: 'Land' },
+                  { id: 'sea', label: 'Sea' },
+                  { id: 'air', label: 'Air' }
+                ] as const).map(type => (
+                  <button
+                    key={type.id}
+                    type="button"
+                    onClick={() => { setStatusFilter("all"); setTypeFilter(type.id); }}
+                    className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border-0 cursor-pointer whitespace-nowrap ${
+                      typeFilter === type.id ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {type.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1.5 overflow-x-auto -mx-3 px-3 pb-0.5">
+                {(typeFilter === 'sea'
+                  ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                  : typeFilter === 'air'
+                    ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                    : ['all', 'New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                ).map((st) => (
+                  <button
+                    key={st}
+                    onClick={() => setStatusFilter(st)}
+                    className={`shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all border-0 cursor-pointer whitespace-nowrap ${
+                      statusFilter === st ? 'bg-orange-100 text-orange-800' : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {st === "all" ? t('allStatuses') : st}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-4">
             <div className="flex flex-col gap-4 w-full">
               {/* Row 1: Search & Shipment Type */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 w-full">
                 <div className="relative flex-1">
                   <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     placeholder="Search by Shipment #, Container, BL, AWB, Company, Vessel, Airline..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-9 pr-8 py-2 bg-slate-50 hover:bg-slate-100 focus:bg-white text-xs border border-slate-200 focus:border-slate-400 rounded-lg focus:outline-none transition-all"
                   />
                   {searchQuery && (
-                    <button 
+                    <button
                       onClick={() => setSearchQuery("")}
                       className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-900"
                     >
@@ -4229,7 +4352,7 @@ MARAS Group etir Center`;
                     </button>
                   )}
                 </div>
-                
+
                 <div className="flex items-center gap-2">
                   <span className="text-slate-500 text-xs font-semibold whitespace-nowrap">Shipment Type:</span>
                   <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
@@ -4243,7 +4366,7 @@ MARAS Group etir Center`;
                         key={type.id}
                         type="button"
                         onClick={() => {
-                          setStatusFilter("all"); 
+                          setStatusFilter("all");
                           setTypeFilter(type.id);
                         }}
                         className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
@@ -4264,9 +4387,9 @@ MARAS Group etir Center`;
                 <span className="text-slate-500 text-xs font-semibold flex items-center gap-1">
                   <Filter className="w-4 h-4" /> Status Indicator:
                 </span>
-                
+
                 {/* Dynamically list candidate statuses depending on freight type */}
-                {(typeFilter === 'sea' 
+                {(typeFilter === 'sea'
                   ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
                     ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
@@ -4276,8 +4399,8 @@ MARAS Group etir Center`;
                     key={st}
                     onClick={() => setStatusFilter(st)}
                     className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                      statusFilter === st 
-                        ? 'bg-slate-900 text-white shadow-xs' 
+                      statusFilter === st
+                        ? 'bg-slate-900 text-white shadow-xs'
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}
                   >
@@ -4287,6 +4410,7 @@ MARAS Group etir Center`;
               </div>
             </div>
           </div>
+          )}
 
           {/* feature/admin-mobile-ui: card list replaces the wide table on
               mobile — same filteredShipments array, same
@@ -5710,6 +5834,14 @@ MARAS Group etir Center`;
             onOpenFullChat={onSelectShipmentChat}
             focus={chatCenterFocus}
             onFocusHandled={() => setChatCenterFocus(null)}
+            onChannelRead={(shipmentId, channel) => {
+              // feature/admin-mobile-ui correction pass: optimistic local
+              // drop so every badge sourced from unreadChatMessages
+              // (shipment row, bottom nav, notification bell) updates
+              // immediately — the next ~12s poll (fetchData) reconciles
+              // against the server's per-admin state regardless.
+              setUnreadChatMessages((prev) => prev.filter((m) => !(m.shipmentId === shipmentId && m.channel === channel)));
+            }}
           />
         </React.Suspense>
       )}
@@ -9519,10 +9651,15 @@ MARAS Group etir Center`;
         isMoreOpen={isMoreMenuOpen}
         onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
         onOpenMore={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
+        badges={{ chat_center: unreadChatMessages.length }}
       />
 
+      {/* feature/admin-mobile-ui correction pass: z-30 (below
+          MobileBottomNav's z-40) and bottom padding clearing the nav's
+          height, so the More page behaves like a page under a persistent
+          nav bar rather than a full-screen modal that hides it. */}
       {isMoreMenuOpen && (
-        <div className="lg:hidden fixed inset-0 z-40 bg-slate-50 overflow-y-auto p-4" dir={isRtl ? 'rtl' : 'ltr'}>
+        <div className="lg:hidden fixed inset-0 z-30 bg-slate-50 overflow-y-auto px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[calc(5.5rem+env(safe-area-inset-bottom))]" dir={isRtl ? 'rtl' : 'ltr'}>
           <MobileMoreMenu
             lang={lang}
             isRtl={isRtl}
@@ -9530,6 +9667,7 @@ MARAS Group etir Center`;
             onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
             unreadNotifications={notifications.filter(n => !n.read).length}
             onOpenNotifications={() => { setIsNotifOpen(true); setIsMoreMenuOpen(false); }}
+            onLangChange={onLangChange}
             onLogout={onLogout}
           />
         </div>
