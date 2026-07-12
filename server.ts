@@ -52,7 +52,7 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { canClientSelfDeleteAccount, buildClientUsernameField, normalizeClientUsername, matchesClientLoginIdentifier } from "./src/lib/clientAccess";
+import { canClientSelfDeleteAccount, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -2215,7 +2215,7 @@ async function startServer() {
           const clientsCol = collection(db, "clients");
           const clientsSnap = await getDocs(clientsCol);
           const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-          if (!myClient || shipment.companyName !== myClient.companyName) {
+          if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
             return res.status(403).json({ error: "You do not have access to this shipment." });
           }
           req.shipment = shipment;
@@ -2356,7 +2356,7 @@ async function startServer() {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        const filtered = myClient ? list.filter(s => s.companyName === myClient.companyName) : [];
+        const filtered = myClient ? list.filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName)) : [];
         return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
       }
       // Admins see everything.
@@ -2550,7 +2550,7 @@ async function startServer() {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        if (!myClient || shipment.companyName !== myClient.companyName) {
+        if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
           return res.status(403).json({ error: "You do not have access to this shipment." });
         }
       }
@@ -4383,7 +4383,7 @@ async function startServer() {
       } else if (req.session!.role === "client") {
         const clientsSnap = await getDocs(collection(db, "clients"));
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        relevantShipments = myClient ? allShipments.filter(s => s.companyName === myClient.companyName) : [];
+        relevantShipments = myClient ? allShipments.filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName)) : [];
       }
 
       res.json(scopeDriverListForSession(allDrivers, req.session!, relevantShipments));
@@ -4606,10 +4606,7 @@ async function startServer() {
     try {
       const col = collection(db, "clients");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => {
-        const { password, ...rest } = doc.data() as any;
-        return rest as Client;
-      });
+      const list = snapshot.docs.map(doc => stripPassword(doc.data() as Client));
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -4622,6 +4619,18 @@ async function startServer() {
       const data = req.body;
       if (!data.companyName || !data.contactName) {
         return res.status(400).json({ error: "Company name and contact name are required" });
+      }
+      // Duplicate check across ALL Client accounts (Owner and Staff alike —
+      // POST /api/login's client-matching branch has no per-company
+      // scoping, so a duplicate username anywhere would make one of the
+      // two colliding accounts unreachable/ambiguous at login. Same
+      // reasoning as findDuplicateDriverField for drivers.
+      if (data.username) {
+        const clientsSnapshot = await getDocs(collection(db, "clients"));
+        const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
+        if (hasDuplicateClientUsername(existingClients, data.username)) {
+          return res.status(409).json({ error: "Username is already registered to another client account." });
+        }
       }
       const newClient: Client = {
         id: data.id || `client-${Date.now()}`,
@@ -4637,8 +4646,7 @@ async function startServer() {
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
       await setDoc(doc(db, "clients", newClient.id), newClient);
-      const { password, ...safeClient } = newClient as any;
-      res.status(201).json(safeClient);
+      res.status(201).json(stripPassword(newClient));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create client" });
@@ -4660,14 +4668,24 @@ async function startServer() {
       if (data.address !== undefined) updates.address = data.address;
       if (data.notes !== undefined) updates.notes = data.notes;
       if (data.isEmployee !== undefined) updates.isEmployee = Boolean(data.isEmployee);
-      if (data.username !== undefined) updates.username = normalizeClientUsername(data.username);
-      if (data.password !== undefined) updates.password = hashPassword(data.password);
+      if (data.username !== undefined) {
+        const normalizedUsername = normalizeClientUsername(data.username);
+        if (normalizedUsername) {
+          const clientsSnapshot = await getDocs(collection(db, "clients"));
+          const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
+          if (hasDuplicateClientUsername(existingClients, normalizedUsername, req.params.id)) {
+            return res.status(409).json({ error: "Username is already registered to another client account." });
+          }
+        }
+        updates.username = normalizedUsername;
+      }
+      const passwordField = buildClientPasswordUpdateField(data.password);
+      if ("password" in passwordField) updates.password = hashPassword(passwordField.password);
 
       await updateDoc(clientRef, updates as Record<string, unknown>);
 
       const updated = { ...clientDoc.data(), ...updates } as Client;
-      const { password: _pw, ...safeClient } = updated as any;
-      res.json(safeClient);
+      res.json(stripPassword(updated));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update client" });
@@ -4840,7 +4858,7 @@ async function startServer() {
           const myShipmentIds = new Set(
             shipSnap.docs
               .map(d => d.data() as Shipment)
-              .filter(s => s.companyName === myClient.companyName)
+              .filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName))
               .map(s => s.id)
           );
           list = list.filter(n => myShipmentIds.has(n.shipmentId));
@@ -4961,7 +4979,7 @@ async function startServer() {
             const clientsCol = collection(db, "clients");
             const clientsSnap = await getDocs(clientsCol);
             const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-            owns = !!myClient && shipment.companyName === myClient.companyName;
+            owns = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
           }
           if (!owns) {
             return res.status(403).json({ error: "You do not have access to this notification." });

@@ -83,18 +83,90 @@ export function buildClientUsernameField(rawUsername: string | undefined): { use
 }
 
 /**
+ * Builds the optional `password` field for PUT /api/clients/:id, mirroring
+ * `buildClientUsernameField`'s pattern: a blank/whitespace-only password
+ * results in no `password` key at all — the caller must leave the
+ * existing hash untouched, never overwrite it with a hash of an empty
+ * string. The Admin Panel's edit form already only includes `password` in
+ * its request body when the field is non-blank (`editClientPassword.trim()`
+ * in `AdminPanel.tsx`), so this is defense in depth for any other caller
+ * of this route, not a behavior change for the existing UI.
+ */
+export function buildClientPasswordUpdateField(rawPassword: string | undefined): { password: string } | Record<string, never> {
+  const trimmed = (rawPassword || "").trim();
+  return trimmed ? { password: trimmed } : {};
+}
+
+/**
  * True if `normalizedQuery` (already trimmed+lowercased by the caller,
  * matching POST /api/login's own `normalizedQuery`) identifies this
  * client by username, email, or company name — the exact three fields
  * POST /api/login's client-matching branch checks. Extracted so the
  * matching rule itself is unit-testable independent of Firestore/Express.
+ *
+ * Hardened independently of the route-level guard: POST /api/login
+ * rejects a fully empty `username` (`if (!username || !password)`) but
+ * NOT a whitespace-only one — `"   "` passes that check and then trims
+ * down to `normalizedQuery === ""`. Without the guard below, that blank
+ * query would falsy-match any client whose username/email/companyName is
+ * itself missing/blank (`("" || "") === ""` is `true`). A blank query can
+ * never legitimately identify anyone, so it's rejected here regardless of
+ * what the route-level check does or doesn't catch.
  */
 export function matchesClientLoginIdentifier(
   client: Pick<Client, "username" | "email" | "companyName">,
   normalizedQuery: string
 ): boolean {
+  if (!normalizedQuery.trim()) return false;
   const uMatch = (client.username || "").toLowerCase() === normalizedQuery;
   const eMatch = (client.email || "").toLowerCase() === normalizedQuery;
   const nameMatch = (client.companyName || "").toLowerCase() === normalizedQuery;
   return uMatch || eMatch || nameMatch;
+}
+
+/**
+ * True if `candidateUsername` (normalized) already belongs to another
+ * Client record — Owner or Staff, checked across all Client accounts
+ * together, since POST /api/login's client-matching branch (above) has no
+ * concept of scoping the search to one company: a duplicate username
+ * anywhere in the `clients` collection would make one of the two
+ * colliding accounts unreachable, or ambiguous, at login time, the same
+ * risk `findDuplicateDriverField` (driverAccess.ts) documents for
+ * drivers. `excludeClientId` lets an edit keep a record's own existing
+ * username without flagging itself as a duplicate.
+ */
+export function hasDuplicateClientUsername(
+  existingClients: Pick<Client, "id" | "username">[],
+  candidateUsername: string | undefined,
+  excludeClientId?: string
+): boolean {
+  const normalized = normalizeClientUsername(candidateUsername);
+  if (!normalized) return false;
+  return existingClients.some(
+    (c) => c.id !== excludeClientId && normalizeClientUsername(c.username) === normalized
+  );
+}
+
+/**
+ * True if a shipment recorded under `shipmentCompanyName` belongs to the
+ * company `clientCompanyName` — the exact rule every client-facing route
+ * in server.ts uses to scope shipments/documents/chat/notifications to a
+ * Client session (Owner and Staff alike, since both are scoped by
+ * companyName the same way — see clientAccess.ts's module doc comment).
+ * Extracted purely for unit-testability; intentionally preserves the
+ * existing strict, unnormalized `===` comparison used server-side today
+ * (server.ts's shipment-access checks do not `.trim()`/`.toLowerCase()`,
+ * unlike the admin/client dashboard's own display-side filtering) — this
+ * fix does not change that behavior, only makes it independently
+ * testable. Note: the admin/client dashboard's own display-side
+ * filtering (`AdminClientsSection.tsx`, `ClientDashboard.tsx`) DOES
+ * `.toLowerCase().trim()` both sides before comparing — an inconsistency
+ * with this server-side strict match, not resolved here (see the
+ * fix/client-create-username PR discussion for the full writeup).
+ */
+export function isShipmentVisibleToClientCompany(
+  shipmentCompanyName: string | undefined,
+  clientCompanyName: string | undefined
+): boolean {
+  return !!shipmentCompanyName && shipmentCompanyName === clientCompanyName;
 }

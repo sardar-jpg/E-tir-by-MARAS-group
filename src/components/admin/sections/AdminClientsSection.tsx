@@ -406,7 +406,7 @@ export default function AdminClientsSection({
               </button>
             </div>
 
-            <form onSubmit={handleEditClientSubmit} className="space-y-4 text-xs font-sans">
+            <form onSubmit={handleEditClientSubmit} autoComplete="off" className="space-y-4 text-xs font-sans">
               <div className="space-y-1.5">
                 <label className="block font-bold text-slate-700">{lang === 'tr' ? "Yetkili Kişi" : (lang === 'ar' ? "اسم جهة الاتصال" : "Contact Representative Name")} *</label>
                 <input
@@ -460,6 +460,20 @@ export default function AdminClientsSection({
               </div>
 
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
+                {/* fix/client-create-username: decoy username+password pair,
+                    visually hidden but present in the DOM (not display:none,
+                    which Chrome ignores for autofill targeting) — absorbs
+                    Chrome/Safari's "fill the saved credential pair" heuristic
+                    so it doesn't land on the real fields below, which is
+                    exactly what happened live (the signed-in Admin's own
+                    saved username/password got auto-filled into this Client
+                    record's credential fields). autoComplete="off" alone is
+                    not reliably honored by Chrome's password manager, hence
+                    this decoy in addition to the autoComplete hints below. */}
+                <div style={{ position: "absolute", width: 0, height: 0, overflow: "hidden", opacity: 0, pointerEvents: "none" }} aria-hidden="true">
+                  <input type="text" name="username" autoComplete="username" tabIndex={-1} readOnly value="" />
+                  <input type="password" name="password" autoComplete="current-password" tabIndex={-1} readOnly value="" />
+                </div>
                 <label className="flex items-center gap-2.5 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -468,7 +482,7 @@ export default function AdminClientsSection({
                     className="w-4 h-4 accent-orange-600 cursor-pointer"
                   />
                   <span className="font-bold text-slate-700 text-xs">
-                    {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
+                    {lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "طاقم العميل" : "Client Staff")}
                   </span>
                 </label>
 
@@ -479,6 +493,9 @@ export default function AdminClientsSection({
                     </label>
                     <input
                       type="text"
+                      name="edit-client-login-username"
+                      id="edit-client-login-username"
+                      autoComplete="off"
                       value={editClientUsername}
                       onChange={(e) => setEditClientUsername(e.target.value)}
                       className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-xs"
@@ -490,6 +507,9 @@ export default function AdminClientsSection({
                       <span className="font-normal normal-case ml-1 text-slate-400">(leave blank to keep)</span>
                     </label>
                     <PasswordInput
+                      name="edit-client-new-password"
+                      id="edit-client-new-password"
+                      autoComplete="new-password"
                       placeholder="Leave blank to keep current"
                       value={editClientPassword}
                       onChange={(e) => setEditClientPassword(e.target.value)}
@@ -504,6 +524,9 @@ export default function AdminClientsSection({
                       {lang === 'tr' ? "Yeni Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور الجديدة" : "Confirm New Password")}
                     </label>
                     <PasswordInput
+                      name="edit-client-confirm-password"
+                      id="edit-client-confirm-password"
+                      autoComplete="new-password"
                       placeholder="Leave blank to keep current"
                       value={editClientConfirmPassword}
                       onChange={(e) => setEditClientConfirmPassword(e.target.value)}
@@ -559,7 +582,7 @@ export default function AdminClientsSection({
               </button>
             </div>
 
-            <form onSubmit={handleAddClientSubmit} className="space-y-4 text-xs font-sans">
+            <form onSubmit={handleAddClientSubmit} autoComplete="off" className="space-y-4 text-xs font-sans">
               <div className="space-y-1.5">
                 <label className="block font-bold text-slate-700">{lang === 'tr' ? "Şirket Adı" : (lang === 'ar' ? "اسم الشركة" : "Company / Corporate Name")} *</label>
                 <input
@@ -629,39 +652,18 @@ export default function AdminClientsSection({
                 />
               </div>
 
-              {/* Client Staff / Login Account Section */}
+              {/* Client Owner login account. This form creates the company
+                  record and its Owner login only — Client Staff accounts
+                  are created separately, attached to an existing company
+                  (see the "+ Add Employee" flow), never from here. */}
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
-                <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={newClientIsEmployee}
-                    onChange={(e) => setNewClientIsEmployee(e.target.checked)}
-                    className="w-4 h-4 accent-orange-600 cursor-pointer"
-                  />
-                  <span className="font-bold text-slate-700 text-xs">
-                    {lang === 'tr' ? "Müşteri Personeli / Takip Hesabı" : (lang === 'ar' ? "حساب موظف العميل / حساب تتبع" : "Client Staff / Tracking Account")}
-                  </span>
-                </label>
-
-                {newClientIsEmployee && (
-                  <div className="space-y-1.5">
-                    <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                      {lang === 'tr' ? "Hangi Şirketin Altında?" : (lang === 'ar' ? "تحت أي شركة؟" : "Attach to existing company")} *
-                    </label>
-                    <select
-                      required={newClientIsEmployee}
-                      value={newClientCompanyName}
-                      onChange={(e) => setNewClientCompanyName(e.target.value)}
-                      className="w-full p-2.5 border border-slate-200 rounded-lg focus:outline-none focus:border-orange-500 text-xs font-medium bg-white"
-                    >
-                      <option value="">{lang === 'tr' ? "Şirket seçin..." : (lang === 'ar' ? "اختر الشركة..." : "Select company...")}</option>
-                      {[...new Set(clients.filter(c => !c.isEmployee).map(c => c.companyName))].sort().map(name => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
+                {/* fix/client-create-username: decoy pair — see the matching
+                    comment in the Edit Client modal above for why this is
+                    needed in addition to the autoComplete hints below. */}
+                <div style={{ position: "absolute", width: 0, height: 0, overflow: "hidden", opacity: 0, pointerEvents: "none" }} aria-hidden="true">
+                  <input type="text" name="username" autoComplete="username" tabIndex={-1} readOnly value="" />
+                  <input type="password" name="password" autoComplete="current-password" tabIndex={-1} readOnly value="" />
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
@@ -669,6 +671,9 @@ export default function AdminClientsSection({
                     </label>
                     <input
                       type="text"
+                      name="new-client-login-username"
+                      id="new-client-login-username"
+                      autoComplete="off"
                       placeholder="e.g. ahmed.ali"
                       value={newClientUsername}
                       onChange={(e) => setNewClientUsername(e.target.value)}
@@ -680,6 +685,9 @@ export default function AdminClientsSection({
                       {lang === 'tr' ? "Şifre" : (lang === 'ar' ? "كلمة المرور" : "Password")}
                     </label>
                     <PasswordInput
+                      name="new-client-login-password"
+                      id="new-client-login-password"
+                      autoComplete="new-password"
                       placeholder="Set login password"
                       value={newClientPassword}
                       onChange={(e) => setNewClientPassword(e.target.value)}
@@ -694,6 +702,9 @@ export default function AdminClientsSection({
                       {lang === 'tr' ? "Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور" : "Confirm Password")}
                     </label>
                     <PasswordInput
+                      name="new-client-confirm-password"
+                      id="new-client-confirm-password"
+                      autoComplete="new-password"
                       placeholder="Confirm login password"
                       value={newClientConfirmPassword}
                       onChange={(e) => setNewClientConfirmPassword(e.target.value)}
