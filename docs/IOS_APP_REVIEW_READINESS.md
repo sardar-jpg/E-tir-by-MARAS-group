@@ -664,12 +664,14 @@ reviewed native-config PR of their own.
 
 ## 9. Non-blocking cleanup noted, not done
 
-- `README.md` still carries "AI Studio" prototype boilerplate (title,
+- ~~`README.md` still carries "AI Studio" prototype boilerplate (title,
   banner image, "View your app in AI Studio" link, `GEMINI_API_KEY` setup
-  step). This is developer-facing only (never shipped in the app or seen
-  by a reviewer), so it's not an App Review blocker — flagged for a future
-  cleanup pass, not touched here to keep this PR scoped to review
-  readiness/performance, not repo-wide copy cleanup.
+  step).~~ **Resolved** — a documentation-only cleanup PR rewrote
+  `README.md` to describe the current eTIR platform (architecture,
+  supported languages, local dev commands, safety rules, and a
+  documentation index) and removed the AI Studio boilerplate. This was
+  never an App Review blocker (developer-facing only, never shipped in the
+  app or seen by a reviewer).
 
 ## 10. MARAS AI Assistant — Admin-only, documentation-only roadmap clarification
 
