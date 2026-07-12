@@ -4339,14 +4339,16 @@ async function startServer() {
       // never checks isEmployee) may only ever delete its OWN account. The
       // delete target is the AUTHENTICATED session's own id, never
       // `requestedId` (the client-supplied URL parameter), so a client can
-      // never delete another account (Owner, another Staff member) or "the
-      // company" by supplying a different :id — even though the
-      // authorization check above already guarantees requestedId ===
-      // session.id for a client session, the target is derived from the
-      // session explicitly, not merely validated against it. A full Admin's
-      // requestedId is used as-is (this is the only path that can remove a
-      // company's Owner record) and still only deletes that one Firestore
-      // document — no cascade to shipments/documents/other Client records.
+      // never delete another Client account by supplying a different :id —
+      // even though the authorization check above already guarantees
+      // requestedId === session.id for a client session, the target is
+      // derived from the session explicitly, not merely validated against
+      // it. A Super Admin's requestedId is used as-is (Operation Admin and
+      // Accounts Admin never reach this line — resolveClientAccountDeleteAuthorization
+      // rejects them above). There is no separate "company" entity or
+      // company-delete operation in this codebase: this always deletes
+      // exactly one Client Firestore document, never a cascade to
+      // shipments, documents, or any other Client record.
       const targetId = req.session!.role === "client" ? req.session!.id : requestedId;
       await deleteDoc(doc(db, "clients", targetId));
       res.json({ success: true, message: "Client deleted successfully" });

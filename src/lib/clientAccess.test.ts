@@ -106,25 +106,49 @@ describe("resolveClientAccountDeleteAuthorization — final confirmed account-de
     ).toBe(false);
   });
 
-  it("only a full Admin (not accounts-restricted) can delete any Client record — the only path that can remove a company's Owner record", () => {
-    const superDecision = resolveClientAccountDeleteAuthorization({
+  it("Super Admin can delete a selected Client account — Owner or Staff", () => {
+    const ownerTarget = resolveClientAccountDeleteAuthorization({
       requestedId: OWNER_ID,
       session: { role: "admin", id: "admin-1", adminType: "super" },
     });
-    const operationDecision = resolveClientAccountDeleteAuthorization({
+    const staffTarget = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "admin", id: "admin-1", adminType: "super" },
+    });
+    expect(ownerTarget.allowed).toBe(true);
+    expect(staffTarget.allowed).toBe(true);
+  });
+
+  it("Operation Admin cannot delete any Client account — this is the exact bug this fix corrects: adminType !== \"accounts\" is NOT the same as isSuperAdmin", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
       requestedId: STAFF_ID,
       session: { role: "admin", id: "admin-2", adminType: "operation" },
     });
-    expect(superDecision.allowed).toBe(true);
-    expect(operationDecision.allowed).toBe(true);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("You can only delete your own account.");
   });
 
-  it("an accounts-restricted admin cannot delete any Client record", () => {
+  it("Accounts Admin cannot delete any Client account", () => {
     const decision = resolveClientAccountDeleteAuthorization({
       requestedId: OWNER_ID,
       session: { role: "admin", id: "admin-3", adminType: "accounts" },
     });
     expect(decision.allowed).toBe(false);
+  });
+
+  it("other, non-super admin types (including an unrecognized/future adminType string) cannot delete any Client account", () => {
+    expect(
+      resolveClientAccountDeleteAuthorization({
+        requestedId: OWNER_ID,
+        session: { role: "admin", id: "admin-4", adminType: "some-future-admin-type" },
+      }).allowed
+    ).toBe(false);
+    expect(
+      resolveClientAccountDeleteAuthorization({
+        requestedId: OWNER_ID,
+        session: { role: "admin", id: "admin-5", adminType: undefined },
+      }).allowed
+    ).toBe(false);
   });
 
   it("a driver session is never authorized to delete a Client record, even its own id coincidentally matching", () => {
@@ -133,6 +157,27 @@ describe("resolveClientAccountDeleteAuthorization — final confirmed account-de
       session: { role: "driver", id: "driver-1" },
     });
     expect(decision.allowed).toBe(false);
+  });
+
+  it("personal-account deletion authorization never extends beyond the single requested id — no cascade to company shipments, documents, or other accounts is representable by this decision", () => {
+    // The function's return type is a plain { allowed, reason? } boolean-ish
+    // decision about ONE id — it has no way to also authorize deleting any
+    // other record, so "deleting my own account" can never, by construction,
+    // imply authorization to delete shipments/documents/other Client
+    // accounts. Demonstrated by confirming a Staff self-delete decision
+    // grants nothing beyond its own id, even when other accounts (Owner,
+    // another Staff member) exist in the same "company".
+    const staffSelfDelete = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "client", id: STAFF_ID },
+    });
+    expect(staffSelfDelete).toEqual({ allowed: true });
+    expect(
+      resolveClientAccountDeleteAuthorization({ requestedId: OWNER_ID, session: { role: "client", id: STAFF_ID } }).allowed
+    ).toBe(false);
+    expect(
+      resolveClientAccountDeleteAuthorization({ requestedId: OTHER_STAFF_ID, session: { role: "client", id: STAFF_ID } }).allowed
+    ).toBe(false);
   });
 });
 

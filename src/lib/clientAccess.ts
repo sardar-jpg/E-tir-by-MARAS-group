@@ -18,14 +18,23 @@
  * links. Neither can create/edit shipments, change status, or manage
  * *other* accounts. Each may delete only their own personal login account
  * (see resolveClientAccountDeleteAuthorization below) — never another
- * account (Owner or Staff), and never "the company" as a whole. Only a
- * full MARAS Admin (not accounts-restricted) may delete any Client
- * record, Owner or Staff, subject to the existing (non-cascading) delete
- * behavior in DELETE /api/clients/:id — deleting one Client record has
- * never deleted shipments, documents, or other Client records tied to the
- * same companyName, and this fix does not change that.
+ * Client account, Owner or Staff. Deleting one's own account only ever
+ * removes that single Client Firestore document; it cannot cascade to
+ * shipments, documents, or any other Client record, because no code path
+ * here does anything but a single-document delete by id.
+ *
+ * Deleting *another* Client account (Owner or Staff) is restricted to the
+ * Super Admin (`adminType === "super"`) specifically — not Operation
+ * Admin, not Accounts Admin, not any other admin type. There is currently
+ * no separate "company" entity or company-delete operation in this data
+ * model at all: a company is just whichever Client records happen to
+ * share a `companyName` string. This endpoint (DELETE /api/clients/:id)
+ * only ever deletes exactly one Client account record — never described
+ * here as "deleting the company," because no operation that does that
+ * exists.
  */
 import type { Client } from "../types";
+import { isSuperAdmin } from "./adminAccess";
 
 /** True if this Client record is a Client Staff (customer-employee) account rather than the company's own owner account. */
 export function isClientStaffAccount(client: Pick<Client, "isEmployee">): boolean {
@@ -57,32 +66,36 @@ export function canClientSendChatMessage(_client: Pick<Client, "isEmployee">): b
  * responsible for actually deleting `session.id`, not `requestedId`, for
  * a client-role caller (see the comment at the DELETE route's call site).
  *
+ * Mirrors the exact same shape as the repository's existing canonical
+ * "delete someone else's account" rule, `canDeleteAdminAccount`
+ * (adminAccess.ts): you may always delete your own record, and deleting
+ * anyone else's is restricted to the Super Admin specifically.
+ *
  * Rules:
  * - A "client" session (Owner or Staff — no isEmployee check at all,
  *   deliberately, since both get identical self-delete rights) may only
- *   ever target its OWN id. It can never delete another account (the
- *   Owner, another Staff member) or trigger any broader "delete the
- *   company" operation — there is no such operation for a client session
- *   to reach; self-delete only ever removes the one record matching
- *   session.id.
- * - A full MARAS Admin (adminType !== "accounts") may delete any single
- *   Client record by id — Owner or Staff — matching the same
- *   `requireFullAdmin` gating already used by POST/PUT /api/clients.
- *   This is the only path that can remove the company's Owner record
- *   (the closest analog to "deleting the company" in a data model with no
- *   separate company entity), and it still only deletes that one
- *   Firestore document — no cascade to shipments/documents/other Client
- *   records, unchanged from the existing behavior this fix preserves.
- * - An accounts-restricted admin, or a driver session, is never allowed.
+ *   ever target its OWN id. It can never delete another Client account —
+ *   not the Owner, not another Staff member. There is no broader "delete
+ *   the company" operation for a client session to reach: self-delete
+ *   only ever removes the single Client record matching session.id, and
+ *   that is a strictly narrower operation than deleting a company (which
+ *   does not exist as a distinct entity or endpoint in this codebase).
+ * - Deleting *another* Client account (Owner or Staff) requires
+ *   `isSuperAdmin(session.adminType)` — i.e. `adminType === "super"`
+ *   exactly. Operation Admin and Accounts Admin are explicitly NOT
+ *   authorized here, unlike POST/PUT /api/clients (create/edit), which
+ *   both remain open to super+operation via `requireFullAdmin` and are
+ *   unaffected by this rule — this restriction is specific to deleting
+ *   someone else's account.
+ * - A driver session is never authorized, regardless of id.
  */
 export function resolveClientAccountDeleteAuthorization(params: {
   requestedId: string;
   session: { role: "admin" | "client" | "driver"; id: string; adminType?: string };
 }): { allowed: boolean; reason?: string } {
   const { requestedId, session } = params;
-  const isFullAdmin = session.role === "admin" && session.adminType !== "accounts";
-  if (isFullAdmin) return { allowed: true };
   if (session.role === "client" && session.id === requestedId) return { allowed: true };
+  if (session.role === "admin" && isSuperAdmin(session.adminType)) return { allowed: true };
   return { allowed: false, reason: "You can only delete your own account." };
 }
 
