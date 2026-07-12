@@ -34,6 +34,13 @@ import { getAssignableDrivers, getCoreDriverSelectOptions } from "../lib/driverA
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
+import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
+import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
+import MobileBottomNav from "./admin/mobile/MobileBottomNav";
+import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
+import MobileNotificationsSheet from "./admin/mobile/MobileNotificationsSheet";
+import MobileDashboard from "./admin/mobile/MobileDashboard";
+import MobileOrdersList from "./admin/mobile/MobileOrdersList";
 
 // Heavy, tab-scoped admin sections — lazy-loaded so their code (and, for
 // TrackingMap, the Google Maps SDK) only ships once an admin actually
@@ -266,6 +273,8 @@ interface AdminPanelProps {
   isConnectingGmail?: boolean;
   adminEmail?: string;
   adminType?: string;
+  /** feature/admin-mobile-ui: optional — lets the mobile "More" menu offer a Logout entry. The desktop app already has its own always-visible Logout button in App.tsx's outer header (unchanged); this is purely an additional, easier-to-reach entry point on mobile, calling the exact same handler. */
+  onLogout?: () => void;
 }
 
 export default function AdminPanel({
@@ -280,7 +289,8 @@ export default function AdminPanel({
   isMobile = false,
   isConnectingGmail = false,
   adminEmail = '',
-  adminType = ''
+  adminType = '',
+  onLogout
 }: AdminPanelProps) {
   const isMobileMode = isMobile || useIsMobile(1024);
 
@@ -338,6 +348,14 @@ export default function AdminPanel({
   // permanently occupies the screen; AdminSidebar itself closes it after a
   // tab is selected.
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+
+  // feature/admin-mobile-ui: the mobile "More" page (bottom nav's 5th
+  // slot). Distinct from isMobileNavOpen above (the existing off-canvas
+  // drawer, still used by the desktop-style "Menu" affordance nothing in
+  // this change removes) — this instead swaps the main content area for
+  // MobileMoreMenu, matching how the other 4 primary tabs each replace
+  // the content area.
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
   // PR #34: internal_staff has no UI in the App.tsx full chat drawer (its
   // channel toggle/header only know about driver_admin vs client_admin —
@@ -3498,7 +3516,7 @@ MARAS Group etir Center`;
 
   // Admin navigation tabs, filtered by admin role/type — shared by the
   // desktop sidebar and the mobile/tablet horizontal tab bar below.
-  const filteredAdminTabs = (() => {
+  const allRoleFilteredAdminTabs = (() => {
     const isSuper = resolvedAdminType === 'super';
     const isOperation = resolvedAdminType === 'operation';
     const isAccounts = resolvedAdminType === 'accounts' || resolvedAdminType === 'account';
@@ -3559,8 +3577,32 @@ MARAS Group etir Center`;
     // reach them, since that's still decided by the role filter above and
     // by resolvedAdminType === 'super' on the Settings cards themselves.
     const HIDDEN_FROM_TOP_LEVEL_NAV_IDS = ['my_account', 'team', 'gmail', 'audit'];
-    return roleFiltered.filter(tab => !HIDDEN_FROM_TOP_LEVEL_NAV_IDS.includes(tab.id));
+    return { visible: roleFiltered.filter(tab => !HIDDEN_FROM_TOP_LEVEL_NAV_IDS.includes(tab.id)), roleFiltered };
   })();
+  const filteredAdminTabs = allRoleFilteredAdminTabs.visible;
+  // feature/admin-mobile-ui: 'team' is deliberately hidden from
+  // filteredAdminTabs above (see the comment on HIDDEN_FROM_TOP_LEVEL_NAV_IDS
+  // just above — desktop reaches it via the Settings hub instead), but the
+  // mobile "More" menu still wants it directly (labeled "Employees" there —
+  // see MobileMoreMenu), so it's looked up from the pre-strip list. Nothing
+  // here changes who is allowed to see it — that's still decided by the
+  // exact same role filter above (`isSuper ? [...] : []`).
+  const mobileMoreExtraTabIds = allRoleFilteredAdminTabs.roleFiltered.some(tab => tab.id === 'team') ? ['team'] : [];
+  const mobilePrimaryTabIds = resolvePrimaryMobileTabs(filteredAdminTabs);
+  const mobileMoreMenuTabs = resolveMoreMenuTabIds(filteredAdminTabs, mobilePrimaryTabIds, mobileMoreExtraTabIds)
+    .map((id) => {
+      const tab = allRoleFilteredAdminTabs.roleFiltered.find((t) => t.id === id);
+      if (!tab) return null;
+      // 'team' keeps its real desktop label everywhere except this one
+      // mobile menu, where the confirmed spec calls it "Employees" — this
+      // is a display-only override, not a change to the tab's identity,
+      // permission gating, or its desktop label.
+      const label = id === 'team'
+        ? (lang === 'tr' ? 'Çalışanlar' : (lang === 'ar' ? 'الموظفون' : 'Employees'))
+        : tab.label;
+      return { id: tab.id, label, icon: tab.icon };
+    })
+    .filter((tab): tab is { id: string; label: string; icon: typeof ClipboardList } => tab !== null);
 
   // BUG-24: catch a tab that AdminSidebar's GROUPS forgot to place — it
   // would otherwise just silently disappear from the desktop sidebar while
@@ -3588,7 +3630,25 @@ MARAS Group etir Center`;
         isMobileOpen={isMobileNavOpen}
         onCloseMobile={() => setIsMobileNavOpen(false)}
       />
-      <div className={`flex-1 min-w-0 ${isMobileMode ? 'p-2' : 'p-4 md:p-6'}`}>
+      <div className={`flex-1 min-w-0 ${isMobileMode ? 'pb-24' : 'p-4 md:p-6'}`}>
+
+      {/* feature/admin-mobile-ui: mobile-only top app bar (lg:hidden,
+          internally) — branding mark, current page title (same
+          filteredAdminTabs lookup the old inline "Menu" bar used), the
+          same notification bell state as the desktop bell below, and a
+          menu button opening the same "More" sheet as the bottom nav's
+          More item. The app's own outer header (App.tsx — brand,
+          language switch, Logout) still renders above this, unchanged,
+          on every viewport. */}
+      <MobileTopAppBar
+        lang={lang}
+        isRtl={isRtl}
+        title={filteredAdminTabs.find((tab) => tab.id === activeTab)?.label ?? ''}
+        TitleIcon={filteredAdminTabs.find((tab) => tab.id === activeTab)?.icon}
+        unreadNotifications={notifications.filter(n => !n.read).length}
+        onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
+        onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
+      />
 
       {/* Toast Alert */}
       {toast && (
@@ -3598,8 +3658,11 @@ MARAS Group etir Center`;
         </div>
       )}
 
-      {/* Admin Quick Action Header */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6 border-b border-slate-200 pb-5">
+      {/* Admin Quick Action Header — desktop only; feature/admin-mobile-ui's
+          MobileTopAppBar above covers this role on mobile instead of
+          squeezing the same wide, multi-badge header into a narrow
+          viewport. */}
+      <div className="hidden lg:flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6 border-b border-slate-200 pb-5 lg:mt-4 lg:mx-4 md:mx-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
             <span className="p-2 bg-slate-900 text-white rounded-lg"><Ship className="w-6 h-6 shrink-0" /></span>
@@ -4002,36 +4065,15 @@ MARAS Group etir Center`;
         </div>
       )}
 
-      {/* Admin nav — mobile & tablet only; desktop uses the left sidebar.
-          A Menu button opens AdminSidebar's off-canvas drawer (same `tabs`
-          prop, same role-filtered list, so it can never show a section the
-          desktop sidebar hides — see AdminSidebar.tsx). Replaces the old
-          always-visible horizontal tab strip, which had no menu button and
-          nothing to "close after selecting a navigation item" since it was
-          never an overlay in the first place. */}
-      <div className="lg:hidden flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 mb-6">
-        <button
-          onClick={() => setIsMobileNavOpen(true)}
-          className="flex items-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg bg-slate-900 text-white text-sm font-bold shrink-0"
-          aria-label={lang === 'tr' ? 'Menü' : (lang === 'ar' ? 'القائمة' : 'Menu')}
-        >
-          <Menu className="w-4 h-4" />
-          <span>{lang === 'tr' ? 'Menü' : (lang === 'ar' ? 'القائمة' : 'Menu')}</span>
-        </button>
-        <div className="flex items-center gap-2 px-2 min-w-0 text-slate-700 font-bold text-sm truncate">
-          {(() => {
-            const current = filteredAdminTabs.find((tab) => tab.id === activeTab);
-            if (!current) return null;
-            const CurrentIcon = current.icon;
-            return (
-              <>
-                <CurrentIcon className="w-4 h-4 text-orange-500 shrink-0" />
-                <span className="truncate">{current.label}</span>
-              </>
-            );
-          })()}
-        </div>
-      </div>
+      {/* The old inline "Menu" bar that used to live here (hamburger button
+          + current-tab label, lg:hidden) is superseded by MobileTopAppBar,
+          now rendered as a proper sticky top bar at the very top of this
+          content column (see just above the Toast Alert block) — same
+          underlying data (filteredAdminTabs, activeTab), same AdminSidebar
+          drawer still reachable (isMobileNavOpen is unchanged, just no
+          longer triggered from here; MobileTopAppBar's menu button and
+          MobileBottomNav's "More" both open the new mobileMoreMenu sheet
+          instead, which is the curated page the confirmed spec asks for). */}
 
       {/* 🚀 PROMINENT SHIPMENT QUICK RETRIEVAL SEARCH BAR */}
       {(activeTab === 'dashboard' || activeTab === 'shipments') && (
@@ -4081,7 +4123,29 @@ MARAS Group etir Center`;
       )}
 
       {/* 1. Dashboard Overview Tab */}
-      {activeTab === 'dashboard' && (
+      {activeTab === 'dashboard' && isMobileMode && (
+        <MobileDashboard
+          lang={lang}
+          isRtl={isRtl}
+          t={t}
+          shipments={shipments}
+          activeShipmentsCount={activeShipmentsCount}
+          totalShipmentsCount={totalShipmentsCount}
+          completedShipmentsCount={completedShipmentsCount}
+          pendingDocumentsCount={pendingDocumentsCount}
+          recentAlertsData={recentAlertsData}
+          setNewShipmentData={setNewShipmentData}
+          createEmptyShipmentForm={createEmptyShipmentForm}
+          setUseCustomPOL={setUseCustomPOL}
+          setUseCustomPOD={setUseCustomPOD}
+          setIsCreateOpen={setIsCreateOpen}
+          setActiveTab={(id) => setActiveTab(id as any)}
+          canViewShipmentRegistry={canViewShipmentRegistry(resolvedAdminType)}
+          canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
+          onOpenNotifications={() => setIsNotifOpen(true)}
+        />
+      )}
+      {activeTab === 'dashboard' && !isMobileMode && (
         <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
           <AdminDashboardSection
             lang={lang}
@@ -4224,8 +4288,32 @@ MARAS Group etir Center`;
             </div>
           </div>
 
+          {/* feature/admin-mobile-ui: card list replaces the wide table on
+              mobile — same filteredShipments array, same
+              analyzeShipmentTiming/getShipmentProgressPercentage helpers,
+              same View/Edit/Chat handlers as the desktop row actions
+              below (desktop table is untouched, just hidden via
+              lg:hidden on the card list / hidden lg:block on the table). */}
+          <MobileOrdersList
+            lang={lang}
+            t={t}
+            shipments={filteredShipments}
+            analyzeShipmentTiming={analyzeShipmentTiming}
+            getShipmentProgressPercentage={getShipmentProgressPercentage}
+            onViewDetails={(id) => setOpenDetailsId(id)}
+            onEdit={(s) => {
+              const portsL = getPortsForCountry(s.loadingCountry || "");
+              const portsD = getPortsForCountry(s.deliveryCountry || "");
+              setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
+              setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
+              setEditingShipment(s);
+              setIsEditOpen(true);
+            }}
+            onChat={(s) => onSelectShipmentChat(s)}
+          />
+
           {/* Table Container */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="hidden lg:block bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead>
@@ -6146,13 +6234,18 @@ MARAS Group etir Center`;
       )}
 
 
-      {/* DETAILED MODAL PORTAL: SHIPMENT DRAWER SCREEN */}
+      {/* DETAILED MODAL PORTAL: SHIPMENT DRAWER SCREEN.
+          feature/admin-mobile-ui: full-screen on mobile (no outer padding,
+          no rounded corners, no vertical centering — matches native sheet
+          conventions and the spec's "near-full-screen, sticky
+          header/footer" responsive-modal requirement), reverting to the
+          original centered max-w-4xl card at sm and up. */}
       {targetDetailsShipment && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto block">
-          <div className="bg-white rounded-2xl border border-slate-400 shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-            
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center sm:p-4 z-50 overflow-y-auto block">
+          <div className="bg-white sm:rounded-2xl border-0 sm:border border-slate-400 shadow-2xl w-full h-full sm:h-auto sm:max-w-4xl sm:max-h-[90vh] overflow-y-auto flex flex-col">
+
             {/* Modal Header */}
-            <div className="sticky top-0 bg-slate-900 text-white p-5 rounded-t-2xl flex items-center justify-between gap-4 border-b border-slate-800 z-10">
+            <div className="sticky top-0 bg-slate-900 text-white p-5 sm:rounded-t-2xl flex items-center justify-between gap-4 border-b border-slate-800 z-10 shrink-0">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="bg-orange-500 text-white font-mono text-xs font-bold uppercase rounded px-2.5 py-0.5 tracking-wider">
@@ -7065,8 +7158,8 @@ MARAS Group etir Center`;
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 bg-slate-50 border-t border-slate-200 rounded-b-2xl flex items-center justify-end">
-              <button 
+            <div className="sticky bottom-0 p-4 bg-slate-50 border-t border-slate-200 sm:rounded-b-2xl flex items-center justify-end shrink-0">
+              <button
                 onClick={() => setOpenDetailsId(null)}
                 className="px-5 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 text-xs font-bold cursor-pointer"
               >
@@ -9412,6 +9505,51 @@ MARAS Group etir Center`;
       })()}
 
       </div>
+
+      {/* feature/admin-mobile-ui: mobile shell overlays — all three are
+          internally `lg:hidden` and `fixed`, so their position here (as
+          siblings of the scrollable content div, inside the panel root)
+          doesn't affect desktop layout at all. They reuse the exact same
+          filteredAdminTabs / activeTab / notifications state as the rest
+          of AdminPanel — no parallel data or permission logic. */}
+      <MobileBottomNav
+        lang={lang}
+        tabs={filteredAdminTabs}
+        activeTab={activeTab}
+        isMoreOpen={isMoreMenuOpen}
+        onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
+        onOpenMore={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
+      />
+
+      {isMoreMenuOpen && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-slate-50 overflow-y-auto p-4" dir={isRtl ? 'rtl' : 'ltr'}>
+          <MobileMoreMenu
+            lang={lang}
+            isRtl={isRtl}
+            tabs={mobileMoreMenuTabs}
+            onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
+            unreadNotifications={notifications.filter(n => !n.read).length}
+            onOpenNotifications={() => { setIsNotifOpen(true); setIsMoreMenuOpen(false); }}
+            onLogout={onLogout}
+          />
+        </div>
+      )}
+
+      {isNotifOpen && (
+        <MobileNotificationsSheet
+          lang={lang}
+          isRtl={isRtl}
+          notifications={notifications}
+          shipments={shipments}
+          onClose={() => setIsNotifOpen(false)}
+          onMarkAllRead={handleMarkAllNotifsRead}
+          onMarkOneRead={handleMarkNotifRead}
+          onOpenChat={(shipment, channel) => {
+            openShipmentChatForChannel(shipment, channel);
+            setIsNotifOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

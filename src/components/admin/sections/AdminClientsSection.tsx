@@ -603,11 +603,17 @@ export default function AdminClientsSection({
         </div>
       </div>
 
-      {/* Edit Client Modal */}
+      {/* Edit Client Modal.
+          feature/admin-mobile-ui: full-screen sheet on mobile (no outer
+          padding, no rounded corners, full height), the original centered
+          max-w-lg card at sm and up. Header/footer become sticky within
+          the same overflow-y-auto card (no structural split needed — the
+          container's own top/bottom padding is consumed by the first
+          scroll tick, same trick used on the Shipment Details modal). */}
       {editClientTarget && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[200] p-4 animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center sm:p-4 z-[200] animate-fade-in">
+          <div className="bg-white sm:rounded-xl shadow-2xl max-w-lg w-full h-full sm:h-auto sm:max-h-[90vh] overflow-y-auto p-6 space-y-4">
+            <div className="sticky top-0 z-10 bg-white flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
                   <Pencil className="text-orange-500 w-5 h-5" />
@@ -804,7 +810,7 @@ export default function AdminClientsSection({
                 />
               )}
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="sticky bottom-0 z-10 bg-white flex items-center justify-end gap-2 pt-2 pb-1 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setEditClientTarget(null)}
@@ -825,11 +831,13 @@ export default function AdminClientsSection({
         </div>
       )}
 
-      {/* Add Client Modal */}
+      {/* Add Client Modal.
+          feature/admin-mobile-ui: same full-screen-on-mobile / sticky
+          header treatment as the Edit Client modal above. */}
       {isAddClientOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[200] p-4 animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center sm:p-4 z-[200] animate-fade-in">
+          <div className="bg-white sm:rounded-xl shadow-2xl max-w-lg w-full h-full sm:h-auto sm:max-h-[90vh] overflow-y-auto p-6 space-y-4">
+            <div className="sticky top-0 z-10 bg-white flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
                 <UserPlus className="text-orange-500 w-5 h-5" />
                 <span>{lang === 'tr' ? "Yeni Müşteri Oluştur" : (lang === 'ar' ? "تسجيل عميل جديد" : "Create New Customer / Client")}</span>
@@ -977,7 +985,7 @@ export default function AdminClientsSection({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="sticky bottom-0 z-10 bg-white flex items-center justify-end gap-2 pt-2 pb-1 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsAddClientOpen(false)}
@@ -998,11 +1006,13 @@ export default function AdminClientsSection({
         </div>
       )}
 
-      {/* Add Employee Modal */}
+      {/* Add Employee Modal.
+          feature/admin-mobile-ui: same full-screen-on-mobile / sticky
+          header+footer treatment as the Edit/Add Client modals above. */}
       {addEmployeeTarget && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[210] p-4 animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center sm:p-4 z-[210] animate-fade-in">
+          <div className="bg-white sm:rounded-xl shadow-2xl max-w-md w-full h-full sm:h-auto sm:max-h-[90vh] overflow-y-auto p-6 space-y-4">
+            <div className="sticky top-0 z-10 bg-white flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
                   <UserPlus className="text-orange-500 w-5 h-5" />
@@ -1123,7 +1133,7 @@ export default function AdminClientsSection({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="sticky bottom-0 z-10 bg-white flex items-center justify-end gap-2 pt-2 pb-1 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={closeAddEmployeeModal}

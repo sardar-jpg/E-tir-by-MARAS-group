@@ -510,6 +510,11 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     return Boolean((window as any).googleMapsAuthFailed);
   });
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  // feature/admin-mobile-ui: on narrow viewports the sidebar (filters +
+  // shipment list) and the map can't reasonably sit side-by-side, so
+  // mobile shows one at a time full-height with a small toggle — desktop
+  // (lg:) ignores this and always shows both via the existing grid.
+  const [mobileListOpen, setMobileListOpen] = useState<boolean>(false);
 
   useEffect(() => {
     const handleMapsFailure = () => {
@@ -974,11 +979,32 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
       </div>
 
+      {/* feature/admin-mobile-ui: mobile-only List/Map toggle — the
+          sidebar and map below render one at a time on narrow viewports
+          (see mobileListOpen), so this pill is the way to switch between
+          them. Hidden at lg: where both already show side-by-side. */}
+      <div className="lg:hidden bg-slate-100 p-1 rounded-xl border border-slate-200 flex gap-1 text-xs font-bold">
+        <button
+          type="button"
+          onClick={() => setMobileListOpen(false)}
+          className={`flex-1 py-2 rounded-lg transition-all cursor-pointer border-0 ${!mobileListOpen ? "bg-slate-900 text-white shadow-xs" : "text-slate-500 bg-transparent"}`}
+        >
+          {lang === "tr" ? "Harita" : lang === "ar" ? "الخريطة" : "Map"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileListOpen(true)}
+          className={`flex-1 py-2 rounded-lg transition-all cursor-pointer border-0 ${mobileListOpen ? "bg-slate-900 text-white shadow-xs" : "text-slate-500 bg-transparent"}`}
+        >
+          {lang === "tr" ? "Liste" : lang === "ar" ? "القائمة" : "List"} ({inTransitShipments.length})
+        </button>
+      </div>
+
       {/* MAIN CONTAINER LAYOUT */}
       <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
-        
+
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className={`lg:col-span-4 border-r border-slate-200 flex flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
+        <div className={`${mobileListOpen ? "flex" : "hidden"} lg:flex lg:col-span-4 border-r border-slate-200 flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
           {/* Sidebar Header */}
           <div className="p-4 border-b border-slate-100 bg-white space-y-3">
@@ -1195,7 +1221,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
-          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "min-h-0" : "h-[480px]"}`}>
+          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "min-h-0" : "h-[65vh] lg:h-[480px]"}`}>
             {inTransitShipments.length === 0 ? (
               <div className="p-6 text-center space-y-2">
                 <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto" />
@@ -1282,7 +1308,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className={`lg:col-span-8 relative w-full min-w-[200px] bg-slate-950 flex flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[620px]"}`}>
+        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex lg:col-span-8 relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-[620px]"}`}>
           
           {/* Radar Ambient Weather Overlay */}
           <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2.5 py-1 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">

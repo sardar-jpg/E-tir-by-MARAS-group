@@ -906,6 +906,7 @@ export default function App() {
               isConnectingGmail={isConnectingGmail}
               adminEmail={session?.email}
               adminType={session?.adminType || (session?.email?.toLowerCase() === "sardar@maras.iq" ? "super" : "operation")}
+              onLogout={handleLogout}
             />
           </Suspense>
         ) : (
