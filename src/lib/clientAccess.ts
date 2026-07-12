@@ -55,3 +55,46 @@ export function canClientSelfDeleteAccount(client: Pick<Client, "isEmployee">): 
 export function canClientSendChatMessage(_client: Pick<Client, "isEmployee">): boolean {
   return true;
 }
+
+/**
+ * fix/client-create-username
+ *
+ * Normalizes a submitted client username the same way POST /api/login
+ * normalizes the submitted login identifier (`normalizedQuery =
+ * username.toLowerCase().trim()` in server.ts) — trim first, then
+ * lowercase. Stored usernames must go through this so a later login with
+ * the exact same string always matches, regardless of stray whitespace.
+ */
+export function normalizeClientUsername(value: string | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+/**
+ * Builds the optional `username` field for a brand-new Client Firestore
+ * record, mirroring the existing conditional-spread pattern already used
+ * for `isEmployee`/`password` in POST /api/clients (server.ts) — a
+ * blank/whitespace-only/omitted username results in no `username` key at
+ * all, rather than storing an empty string that could later collide with
+ * another blank-username record or an empty login query.
+ */
+export function buildClientUsernameField(rawUsername: string | undefined): { username: string } | Record<string, never> {
+  const normalized = normalizeClientUsername(rawUsername);
+  return normalized ? { username: normalized } : {};
+}
+
+/**
+ * True if `normalizedQuery` (already trimmed+lowercased by the caller,
+ * matching POST /api/login's own `normalizedQuery`) identifies this
+ * client by username, email, or company name — the exact three fields
+ * POST /api/login's client-matching branch checks. Extracted so the
+ * matching rule itself is unit-testable independent of Firestore/Express.
+ */
+export function matchesClientLoginIdentifier(
+  client: Pick<Client, "username" | "email" | "companyName">,
+  normalizedQuery: string
+): boolean {
+  const uMatch = (client.username || "").toLowerCase() === normalizedQuery;
+  const eMatch = (client.email || "").toLowerCase() === normalizedQuery;
+  const nameMatch = (client.companyName || "").toLowerCase() === normalizedQuery;
+  return uMatch || eMatch || nameMatch;
+}

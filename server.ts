@@ -52,7 +52,7 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
+import { canClientSelfDeleteAccount, buildClientUsernameField, normalizeClientUsername, matchesClientLoginIdentifier } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -3913,12 +3913,7 @@ async function startServer() {
       const clientsSnapshot = await getDocs(clientsCol);
       const clientsList = clientsSnapshot.docs.map(doc => doc.data() as Client);
 
-      const matchedClient = clientsList.find(c => {
-        const uMatch = (c.username || "").toLowerCase() === normalizedQuery;
-        const eMatch = (c.email || "").toLowerCase() === normalizedQuery;
-        const nameMatch = (c.companyName || "").toLowerCase() === normalizedQuery;
-        return uMatch || eMatch || nameMatch;
-      });
+      const matchedClient = clientsList.find(c => matchesClientLoginIdentifier(c, normalizedQuery));
 
       if (matchedClient) {
         // No more "|| 'client123'" default — same reasoning as drivers above.
@@ -4638,6 +4633,7 @@ async function startServer() {
         notes: data.notes || "",
         createdAt: data.createdAt || new Date().toISOString(),
         ...(data.isEmployee ? { isEmployee: true } : {}),
+        ...buildClientUsernameField(data.username),
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
       await setDoc(doc(db, "clients", newClient.id), newClient);
@@ -4664,7 +4660,7 @@ async function startServer() {
       if (data.address !== undefined) updates.address = data.address;
       if (data.notes !== undefined) updates.notes = data.notes;
       if (data.isEmployee !== undefined) updates.isEmployee = Boolean(data.isEmployee);
-      if (data.username !== undefined) updates.username = data.username;
+      if (data.username !== undefined) updates.username = normalizeClientUsername(data.username);
       if (data.password !== undefined) updates.password = hashPassword(data.password);
 
       await updateDoc(clientRef, updates as Record<string, unknown>);
