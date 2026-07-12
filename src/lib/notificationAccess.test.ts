@@ -214,3 +214,92 @@ describe("Atomic per-user read update — Notification Phase 1 correction", () =
     expect(memoryResult).toHaveLength(new Set(sequence).size);
   });
 });
+
+describe("Full per-role read migration — Admin, Client, Driver (Notification Phase 1 completion)", () => {
+  it("Admin A reading a notification does not mark it read for Admin B", () => {
+    const readByUserIds = addReaderToNotification(undefined, "admin-A@maras.iq");
+    expect(isNotificationReadForUser({ readByUserIds }, "admin-A@maras.iq")).toBe(true);
+    expect(isNotificationReadForUser({ readByUserIds }, "admin-B-id")).toBe(false);
+  });
+
+  it("Client Owner reading does not mark read for Client Staff on the same company, and vice versa", () => {
+    const ownerId = "client-owner-1";
+    const staffId = "client-staff-1";
+    const afterOwnerRead = addReaderToNotification(undefined, ownerId);
+    expect(isNotificationReadForUser({ readByUserIds: afterOwnerRead }, ownerId)).toBe(true);
+    expect(isNotificationReadForUser({ readByUserIds: afterOwnerRead }, staffId)).toBe(false);
+
+    // Staff then reads the same notification — Owner's own read status
+    // (and the array entry proving it) must be preserved, not replaced.
+    const afterStaffRead = addReaderToNotification(afterOwnerRead, staffId);
+    expect(isNotificationReadForUser({ readByUserIds: afterStaffRead }, ownerId)).toBe(true);
+    expect(isNotificationReadForUser({ readByUserIds: afterStaffRead }, staffId)).toBe(true);
+  });
+
+  it("Driver reading a notification does not affect Client or Admin read state", () => {
+    const readByUserIds = addReaderToNotification(undefined, "driver-1");
+    expect(isNotificationReadForUser({ readByUserIds }, "driver-1")).toBe(true);
+    expect(isNotificationReadForUser({ readByUserIds }, "client-1")).toBe(false);
+    expect(isNotificationReadForUser({ readByUserIds }, "admin@maras.iq")).toBe(false);
+  });
+
+  it("Admin 'mark all as read' (POST /api/notifications/clear, new semantics) only ever adds the calling admin's own id", () => {
+    // Models the route's new per-notification behavior:
+    // addReaderToNotification(existing, callingAdminId) for every doc —
+    // never a replacement, never another user's id.
+    const callingAdminId = "admin-A@maras.iq";
+    const notifs = [
+      { id: "n1", readByUserIds: undefined as string[] | undefined },
+      { id: "n2", readByUserIds: ["admin-B-id"] },
+      { id: "n3", readByUserIds: ["driver-1", "client-1"] },
+    ];
+    const updated = notifs.map((n) => ({ ...n, readByUserIds: addReaderToNotification(n.readByUserIds, callingAdminId) }));
+
+    expect(updated[0].readByUserIds).toEqual([callingAdminId]);
+    expect(updated[1].readByUserIds).toEqual(expect.arrayContaining(["admin-B-id", callingAdminId]));
+    expect(updated[1].readByUserIds).toHaveLength(2);
+    expect(updated[2].readByUserIds).toEqual(expect.arrayContaining(["driver-1", "client-1", callingAdminId]));
+    expect(updated[2].readByUserIds).toHaveLength(3);
+
+    // Admin B's pre-existing read status is untouched by Admin A's
+    // mark-all, and Admin A's mark-all does not retroactively count as a
+    // read for Admin B before it actually happened.
+    expect(isNotificationReadForUser(updated[1], "admin-B-id")).toBe(true); // was already there beforehand
+    expect(isNotificationReadForUser({ readByUserIds: ["admin-B-id"] }, callingAdminId)).toBe(false); // A hadn't read it yet
+  });
+
+  it("a partial Client 'mark all as read' failure leaves only the failed notification(s) unread", () => {
+    // Models ClientDashboard.tsx's handleMarkAllRead: each notification's
+    // local readByUserIds is only updated after its OWN POST request
+    // succeeds — a failure for one id must not affect any other id's
+    // already-applied update.
+    const clientId = "client-1";
+    const notifASucceeded = { id: "a", readByUserIds: addReaderToNotification(undefined, clientId) };
+    const notifBFailed = { id: "b", readByUserIds: undefined as string[] | undefined }; // request failed, never touched
+    expect(isNotificationReadForUser(notifASucceeded, clientId)).toBe(true);
+    expect(isNotificationReadForUser(notifBFailed, clientId)).toBe(false);
+  });
+
+  it("existing reader ids are preserved across Driver, Client, and Admin reading the same notification independently", () => {
+    let readByUserIds: string[] | undefined = undefined;
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-1");
+    readByUserIds = addReaderToNotification(readByUserIds, "client-1");
+    readByUserIds = addReaderToNotification(readByUserIds, "admin@maras.iq");
+    expect(readByUserIds).toEqual(expect.arrayContaining(["driver-1", "client-1", "admin@maras.iq"]));
+    expect(readByUserIds).toHaveLength(3);
+  });
+
+  it("repeated reads by any single role stay idempotent", () => {
+    let readByUserIds: string[] | undefined = undefined;
+    readByUserIds = addReaderToNotification(readByUserIds, "admin@maras.iq");
+    readByUserIds = addReaderToNotification(readByUserIds, "admin@maras.iq");
+    expect(readByUserIds).toEqual(["admin@maras.iq"]);
+  });
+
+  it("a legacy notification (no readByUserIds at all) is unread for every role until that role reads it — no data migration needed", () => {
+    const legacyNotif: { read: boolean; readByUserIds?: string[] } = { read: true };
+    expect(isNotificationReadForUser(legacyNotif, "admin@maras.iq")).toBe(false);
+    expect(isNotificationReadForUser(legacyNotif, "client-1")).toBe(false);
+    expect(isNotificationReadForUser(legacyNotif, "driver-1")).toBe(false);
+  });
+});

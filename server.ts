@@ -5049,21 +5049,29 @@ async function startServer() {
     }
   });
 
+  // Notification Phase 1 correction: this route used to mean "set the
+  // legacy shared `read` flag true on every notification" — which was
+  // exactly the cross-contamination bug the per-user model exists to fix
+  // (one admin's global "clear" would have marked every notification read
+  // for every other admin, every driver, and every client too). It now
+  // means "mark every notification visible to the current admin as read
+  // FOR THIS ADMIN ONLY": the calling admin's own session id is
+  // atomically added to each notification's readByUserIds via
+  // addNotificationReaderId (the same helper POST
+  // /api/notifications/:id/read uses — real Firestore arrayUnion,
+  // idempotent Set-union in memory fallback), never the whole document.
+  // Still admin-only (requireRole("admin"), unchanged); `read` itself is
+  // never read or written by this route anymore; no other admin's,
+  // driver's, or client's readByUserIds entry is ever touched.
   app.post("/api/notifications/clear", requireRole("admin"), async (req, res) => {
     try {
       const col = collection(db, "notifications");
       const snapshot = await getDocs(col);
-      for (const d of snapshot.docs) {
-        const notif = d.data() as AppNotification;
-        if (!notif.read) {
-          notif.read = true;
-          await setDoc(d.ref, notif);
-        }
-      }
+      await Promise.all(snapshot.docs.map(d => addNotificationReaderId(d.id, req.session!.id)));
       res.json({ status: "success" });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: "Failed to clear notifications" });
+      res.status(500).json({ error: "Failed to mark all notifications as read" });
     }
   });
 

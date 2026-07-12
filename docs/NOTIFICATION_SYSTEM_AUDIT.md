@@ -1,13 +1,13 @@
 # Notification System Audit — Phase 1
 
-Branch: `fix/notification-phase1-driver-read-safety`. Scope: Driver
-unread-badge bug (now on a correct, atomic, `read`-preserving per-user read
-model — see §5 for the two review passes that got it there), a backend
-privacy/channel-leakage review (including a direct-recipient channel-bypass
-found and fixed along the way, §4d), Client Owner/Staff push fan-out, and the
-Driver Approved notification. No business rules, role permissions, API
-contracts, Firebase architecture, or iOS configuration were touched beyond
-what's described below.
+Branch: `fix/notification-phase1-driver-read-safety`. Scope: unread-badge
+correctness for **all three roles** (Driver, Client, Admin) on a completed,
+atomic, `read`-preserving per-user read model — see §5 for the review passes
+that got it there — a backend privacy/channel-leakage review (including a
+direct-recipient channel-bypass found and fixed along the way, §4d), Client
+Owner/Staff push fan-out, and the Driver Approved notification. No business
+rules, role permissions, API contracts, Firebase architecture, or iOS
+configuration were touched beyond what's described below.
 
 ## 1. Architecture
 
@@ -18,9 +18,8 @@ path:
   (`AppNotification`, `src/types.ts`). Written by `pushNotification()`
   (`server.ts`), read via `GET /api/notifications`, marked read via
   `POST /api/notifications/:id/read` (any authenticated role, own
-  notifications only) or `POST /api/notifications/clear` (admin only, marks
-  every notification in the entire collection read — legacy, unchanged,
-  see §5).
+  notifications only) or `POST /api/notifications/clear` (admin only — see
+  §4e for its revised, now per-user, "mark all as read for me" semantics).
 - **Push notifications** — Firebase Cloud Messaging, sent from the same
   `pushNotification()` call via `pushMessaging.sendEachForMulticast()`.
   Recipients are resolved server-side from device tokens in the
@@ -30,9 +29,11 @@ path:
 
 Every notification carries a `shipmentId` (empty string `""` for events with
 no associated shipment), an optional `recipientUserId` (§4c) for events that
-need to reach one specific user regardless of shipment, a legacy `read`
-boolean (§5), and — as of this revision — an optional `readByUserIds` array
-(§5), the correct per-user read model.
+need to reach one specific user regardless of shipment, `readByUserIds`
+(§5 — the per-user read model every role now uses for its own unread state),
+and a legacy `read` boolean, kept in the schema for backward compatibility
+but no longer read or written by any personal-unread-state code path in this
+codebase (§5).
 
 ## 2. Routing
 
@@ -79,8 +80,8 @@ type:
   by `shipmentId` membership (their own assigned shipments / their own
   company's shipments) before the channel check ever runs, so even a
   same-channel notification on a shipment they don't own is invisible.
-- **`recipientUserId` — real bypass found and fixed here (§4d)**: the
-  initial version of this PR's `POST /api/notifications/:id/read` let a
+- **`recipientUserId` — real bypass found and fixed here (§4d)**: an
+  earlier revision of this PR's `POST /api/notifications/:id/read` let a
   direct recipient (`recipientUserId` matching the caller) skip the
   channel-visibility check entirely, because that check lived inside the
   same `if (!isDirectRecipient)` branch as the shipment-ownership lookup.
@@ -89,7 +90,11 @@ type:
   notification outside their own audience. Not exploitable *today* — the
   only real call site (`recipientUserId` on the "Driver Approved" event)
   uses a non-channel-gated type — but fixed as defense in depth against a
-  future call site combining the two. See §4d.
+  future call site combining the two.
+- **Per-user read state (§5) introduces no new leakage**: every read/write
+  of `readByUserIds` is keyed to the caller's own verified session id —
+  never a client-supplied value — for all three roles, and one role's
+  reads are provably invisible to the others (§7).
 
 ## 4. Bugs fixed
 
@@ -108,11 +113,8 @@ whenever `activeTab === 'notifications'`, computing the currently-visible
 unread ids and calling a new `markNotificationsRead(ids)`, which calls
 `POST /api/notifications/:id/read` — the same authenticated,
 per-notification, own-notification-only endpoint every other role already
-uses. It **never** calls `POST /api/notifications/clear` (admin-only; a
-driver session has no permission to call it, and it would mark the
-*entire collection* read, not just this driver's own visible
-notifications). See §5 for the exact read-state model this now uses —
-revised from the version first shipped in this PR (see below).
+uses. It **never** calls `POST /api/notifications/clear` (admin-only). See
+§5 for the exact read-state model this uses.
 
 ### 4b. Client Owner/Staff push routing only reached one account per company
 
@@ -168,8 +170,7 @@ session yet to receive anything.
 
 ### 4d. Direct recipients could bypass channel-visibility checks (found during PR review)
 
-Reported against the first version of this PR: `POST
-/api/notifications/:id/read`'s channel-visibility check
+`POST /api/notifications/:id/read`'s channel-visibility check
 (`isChatNotificationVisibleToRole`) lived **inside** the `if
 (!isDirectRecipient)` branch, alongside the shipment-ownership lookup —
 meaning a direct recipient (§4c's `recipientUserId` mechanism) skipped it
@@ -186,53 +187,125 @@ booting the Express server. `server.ts` now computes `ownsViaShipment`
 (the existing async shipment lookup, unchanged) and `isDirectRecipient`,
 then calls this one function, which runs
 `isChatNotificationVisibleToRole` **unconditionally** for every non-admin
-caller regardless of which path established their access. Covered by 9
-new tests (§7), including the exact "direct recipient, wrong channel"
+caller regardless of which path established their access. Covered by 8
+tests (§7), including the exact "direct recipient, wrong channel"
 scenario for `chat`, `doc_upload`, and `ai_alert`.
 
-## 5. Unread flow — per-user read model (corrected, then made atomic and read-preserving)
+### 4e. Shared `read` flag caused cross-role/cross-account contamination for every role, not just Driver
 
-**The first version of this PR fixed the Driver badge by writing to the
-same shared `read: boolean` field every other role and every other user
-reads** — which reproduced the identical class of bug it was meant to fix:
-Driver A opening their notifications flipped `read` to `true` on the
-shared document, silently marking that notification read for Driver B,
-Admin, and Client too. Caught in review; `readByUserIds` was added and the
-route switched to it.
-
-**A second review pass found the route still set `notif.read = true`
-alongside the new `readByUserIds` write, via a full-document `setDoc`.**
-That meant a Driver's own read could still flip the shared flag Admin/
-Client consume — the same cross-contamination the per-user model exists to
-prevent, just moved from `read`-only-write to `read`-plus-`readByUserIds`.
-The full-document `setDoc` (read-then-write) was also non-atomic: two
-different users reading the same notification at nearly the same moment
-could race, with one's write silently overwriting the other's just-added
-id. **Both are fixed as of this revision:**
+The original Driver-badge fix (§4a) wrote to the single, shared
+`AppNotification.read` boolean — every driver, client, and admin who could
+see a given notification read the *same* document, so one person's read
+silently marked it read for everyone else too. This section is the
+complete fix, covering **all three roles**:
 
 **`AppNotification.readByUserIds?: string[]`** (`src/types.ts`) is the
-source of truth for whether a *specific* user has read a given
-notification: their own verified session id must appear in this array.
+sole source of truth for whether a *specific* user has read a given
+notification — their own verified session id must appear in the array.
 Absent/empty means unread for everyone, including every notification
 written before this field existed (no data migration performed or
-needed). The legacy `read` boolean is **left in place, and is no longer
-touched by `POST /api/notifications/:id/read` at all** — its value is
-whatever it already was, forever, from this route's perspective. It is
-still written by the legacy admin-wide `POST /api/notifications/clear`
-only (unchanged, §8).
+needed). The legacy `read` boolean is **left in the schema, untouched by
+any of this** — `POST /api/notifications/:id/read` and `POST
+/api/notifications/clear` (§4f) never read or write it; it exists purely
+for backward compatibility with the field itself, not with any behavior.
+
+**Driver** (`DriverApplication.tsx`) — see §4a/§5 for the flow. Reader id:
+`loggedInDriverId`.
+
+**Client** (`ClientDashboard.tsx`) — `handleMarkAllRead` (triggered by the
+notification panel's "Mark all as read" button) now:
+- Computes unread ids via `isNotificationReadForUser(n, clientId)`, not
+  `!n.read`.
+- Calls `POST /api/notifications/:id/read` per id, skipping any id already
+  in-flight (`markingNotifsReadRef`, the same duplicate-request guard used
+  for Driver).
+- Updates each id's local `readByUserIds` (via `addReaderToNotification`,
+  which preserves every existing id) **only after that id's own request
+  succeeds**. A failed request for one id leaves only that id unread —
+  every other id's already-applied update is unaffected (§7).
+- The bell badge, the panel's unread count, the "Mark all as read" button's
+  visibility, and each notification card's unread styling all switched
+  from `!n.read` to `!isNotificationReadForUser(n, clientId)`.
+- Reader id: `clientId` — the verified session's own client record id
+  (`session.client?.id`, threaded through as an existing prop), which is
+  **distinct for a Client Owner vs. each Client Staff account on the same
+  company** even though they share `companyName`. This is exactly why
+  Owner reading a notification does not mark it read for Staff, and vice
+  versa (§7) — they have different reader ids by construction, with no
+  new code needed to keep them apart.
+
+**Admin** (`AdminPanel.tsx`) — `handleMarkNotifRead` (per-item) and the
+bell/panel/mobile-sheet unread computations all switched from `!n.read` to
+`!isNotificationReadForUser(n, ownAdminId)`, with the same in-flight-guard
+and after-success-only local update pattern as Driver/Client.
+**`ownAdminId` is *not* the `adminEmail` prop.** `req.session.id`
+server-side is the super-admin's email for the super-admin (where email
+and id happen to coincide), but a **sub-admin's `admins/{id}` Firestore
+document id** for every other admin type — a genuinely different value
+from their email. Using `adminEmail` would have silently broken the badge
+for every sub-admin (their own reads would never match what the server
+actually stored in `readByUserIds`). `ownAdminId` instead uses
+`getOwnSessionId()` — a function already present in this file for the
+identical "recognize my own identity, not for authorization" purpose (the
+own-chat-message toast guard) — which decodes `id` directly out of this
+admin's own signed session token, matching `req.session.id` exactly for
+every admin type. `MobileNotificationsSheet.tsx` (a separate component
+rendering the same notifications on mobile) received a new `currentUserId`
+prop carrying this same value, so its own unread count/styling compute
+identically to the desktop dropdown.
+
+## 4f. Admin global "clear" redefined as atomic per-admin "mark all as read"
+
+`POST /api/notifications/clear` previously set the legacy shared `read`
+flag `true` on every unread notification — global, not per-user, and the
+same cross-contamination bug as §4e for every admin at once. It now means
+**"mark every notification visible to the current admin as read, for this
+admin only"**:
+
+- Still `requireRole("admin")` — unchanged, admin-only.
+- For every notification in the collection, atomically adds *only* the
+  calling admin's own session id to `readByUserIds`, via the same
+  `addNotificationReaderId` helper (§5) `POST /api/notifications/:id/read`
+  uses — real Firestore `arrayUnion()`, or the equivalent idempotent
+  Set-union in memory fallback. Never a full-document write.
+- Never reads or writes the legacy `read` field.
+- Never adds any id other than the caller's own — another admin's,
+  driver's, or client's `readByUserIds` entry is untouched (§7).
+- UI wording was already correct before this PR ("Mark all as read" — both
+  the desktop dropdown button and `MobileNotificationsSheet`'s button
+  already said this, not "Clear"); only the route's internal comments and
+  error message (`"Failed to clear notifications"` →
+  `"Failed to mark all notifications as read"`) needed updating to match
+  the corrected semantics.
+
+## 5. Unread flow — per-user read model (how it got here, and the final atomic form)
+
+Three review passes shaped this model; each caught something the previous
+one missed:
+
+1. **First pass**: Driver's badge fix wrote to the shared `read` flag —
+   reproduced the exact one-user-affects-everyone bug it was meant to fix.
+2. **Second pass**: `readByUserIds` was added and the route switched to it
+   for Driver — but the route *also* still set `notif.read = true`
+   alongside it, via a full-document `setDoc` (non-atomic, and still let a
+   Driver's read flip the flag Admin/Client were still reading from).
+3. **Third and final pass (this revision)**: the route no longer touches
+   `read` at all, the write is a genuine atomic field update (not a
+   read-then-write of the whole document), and **Admin and Client are
+   fully migrated** to the same `readByUserIds` model Driver uses — so
+   there is no longer any live code path anywhere in this app that reads
+   or writes the legacy `read` field for personal unread state, for any
+   role.
 
 ```
-Driver opens Notifications tab
-  → useEffect(activeTab === 'notifications') fires
-  → unread ids computed from myNotifications, using
-    isNotificationReadForUser(notif, loggedInDriverId) — i.e. is this
-    driver's own id in notif.readByUserIds — NEVER notif.read
-  → markNotificationsRead(ids)
-      → skip any id already in-flight (markingNotifsReadRef)
-      → POST /api/notifications/:id/read for each remaining id
-      → server: addNotificationReaderId(notificationId, callerSessionId)
-          — a DEDICATED atomic helper (src/lib/notificationAccess.ts's
-          addReaderToNotification is its pure core), not the generic
+Any role (Driver / Client / Admin) opens its notifications view
+  → unread ids computed via isNotificationReadForUser(notif, ownId)
+    — NEVER notif.read, for any of the three roles
+  → for each unread id (guarded against duplicate in-flight requests):
+      POST /api/notifications/:id/read
+      → server: canMarkNotificationRead(...) authorization check (§4d)
+      → server: addNotificationReaderId(notificationId, req.session!.id)
+          — a DEDICATED atomic helper (server.ts), not the generic
           setDoc/updateDoc wrappers:
             • real Firestore: rawUpdateDoc(ref, { readByUserIds:
               arrayUnion(callerSessionId) }) — a genuine atomic
@@ -242,201 +315,180 @@ Driver opens Notifications tab
               other field, never the whole document.
             • memory fallback: a direct assignment of just the
               readByUserIds property on the already-stored record
-              (addReaderToNotification's Set-union) — again, only that
-              one field, nothing else.
-      → on 2xx: local state updates via the same addReaderToNotification
-                → unreadNotificationCount recomputes instantly (useMemo),
-                  via isNotificationReadForUser — never notif.read
-      → on failure: console.error, id stays unread for this driver
-        both locally and on the server, retried next run
+              (addReaderToNotification's Set-union, src/lib/
+              notificationAccess.ts) — again, only that one field.
+      → on 2xx: the calling role's local state updates via the same
+        addReaderToNotification (preserves every existing id)
+        → its own unread count recomputes instantly (useMemo),
+          via isNotificationReadForUser — never notif.read
+      → on failure: console.error, that one id stays unread both
+        locally and on the server, retried next run — every other
+        id's already-applied update is unaffected
 ```
+
+Admin's bulk "mark all as read" (`POST /api/notifications/clear`, §4f)
+follows the identical `addNotificationReaderId` path, just applied to
+every notification in one request instead of one id at a time.
 
 **Backward compatibility, as required:**
 - No production data was migrated. A notification with no `readByUserIds`
   field at all behaves exactly like one with an empty array — unread for
-  everyone — and becomes readable the normal way the first time anyone
-  calls `POST /api/notifications/:id/read` on it.
-- The legacy `read` field was **not** removed or renamed. It simply is no
-  longer written by this particular route — it keeps whatever value it
-  already had (see the consequence noted in §6/§8: Admin/Client's own
-  per-item read, which calls this same route, no longer persists a
-  read-across-refresh signal via `read` the way it incidentally did in
-  the previous revision).
-- **`POST /api/notifications/clear` (admin global clear) remains legacy,
-  by explicit scope decision**: it still only touches `read`, never
-  `readByUserIds`, and is unchanged by this revision.
-- **Atomic, field-scoped write — not a read-modify-write of the whole
-  document.** `addNotificationReaderId` (`server.ts`) is a dedicated
-  helper, deliberately not routed through the generic `setDoc`/`updateDoc`
-  wrappers: `setDoc` would send the entire notification document back on
-  every read; the generic `updateDoc` wrapper would work for real
-  Firestore (a raw `arrayUnion()` `FieldValue` survives this file's
-  `cleanUndefined()` untouched, via its existing "native class instance"
-  guard) but would silently corrupt `readByUserIds` in memory-fallback
-  mode, where `handleUpdateDocMemory`'s plain object spread would store
-  the `FieldValue` sentinel itself instead of resolving it into an array.
-  `addNotificationReaderId` branches on `useMemoryFallback` itself: real
-  Firestore gets a genuine atomic `arrayUnion()` field update (no
-  transaction needed — Firestore itself guarantees this is race-free
-  under concurrent writers); memory fallback gets the equivalent
-  idempotent `addReaderToNotification` Set-union, applied by direct
-  field assignment (never a full-object replace). The initial `getDoc`
-  in the route still happens, but only to evaluate the authorization
-  checks (§4d) — it is never written back as a whole document anymore.
+  everyone, for every role — and becomes readable the normal way the first
+  time any given user reads it.
+- The legacy `read` field was **not** removed or renamed — it remains in
+  `AppNotification` and in every existing document, simply unread and
+  unwritten by any personal-unread-state code path now (Driver, Client,
+  Admin per-item, and Admin mark-all all migrated).
+- **Atomic, field-scoped write — never a read-modify-write of the whole
+  document.** `addNotificationReaderId` (`server.ts`) is deliberately not
+  routed through the generic `setDoc`/`updateDoc` wrappers: `setDoc` would
+  send the entire notification document back on every read; the generic
+  `updateDoc` wrapper would work for real Firestore (a raw `arrayUnion()`
+  `FieldValue` survives this file's `cleanUndefined()` untouched, via its
+  existing "native class instance" guard) but would silently corrupt
+  `readByUserIds` in memory-fallback mode, where `handleUpdateDocMemory`'s
+  plain object spread would store the `FieldValue` sentinel itself instead
+  of resolving it into an array. `addNotificationReaderId` branches on
+  `useMemoryFallback` itself: real Firestore gets a genuine atomic
+  `arrayUnion()` field update; memory fallback gets the equivalent
+  idempotent `addReaderToNotification` Set-union, applied by direct field
+  assignment (never a full-object replace). The initial `getDoc` each
+  route still does happens only to evaluate the authorization checks
+  (§4d) — it is never written back as a whole document.
 
-## 6. Driver / Client / Admin flow summary
+## 6. Driver / Client / Admin flow summary (all three fully migrated)
 
 - **Driver** (`DriverApplication.tsx`): polls `GET /api/notifications`
-  every 12s, toasts on newly-seen ids, badge from
-  `unreadNotificationCount` — computed via `readByUserIds` (§5). Fixed in
-  this PR (§4a, §4c, §4d, §5).
-- **Client** (`ClientDashboard.tsx`): its `handleMarkAllRead` still calls
-  the correct per-notification endpoint, so it now correctly populates
-  `readByUserIds` for whichever client account calls it — but its own
-  unread badge still reads the legacy `read` flag, which this route no
-  longer sets at all (§5). **Consequence: Client's own per-item read no
-  longer persists as "read" across a page refresh** (the local optimistic
-  UI update still works within the same session, but a fresh `GET
-  /api/notifications` will show `read: false` again, unchanged by this
-  route). Not fixed in this Phase-1 pass since it's Driver-scoped; see §8.
-- **Admin** (`AdminPanel.tsx`): `handleMarkNotifRead` (per-item) has the
-  same consequence as Client above — its local optimistic update still
-  works, but the server's `read` field is no longer flipped by this route,
-  so it won't persist across a refresh either. `handleMarkAllNotifsRead`
-  uses the admin-only `POST /api/notifications/clear`, unaffected and
-  still legacy (§5).
+  every 12s, toasts on newly-seen ids, badge and list from
+  `isNotificationReadForUser(n, loggedInDriverId)`. Fixed in this PR (§4a,
+  §4c, §4d, §4e, §5).
+- **Client** (`ClientDashboard.tsx`): bell badge, panel unread count,
+  "Mark all as read" visibility, and per-card unread styling all from
+  `isNotificationReadForUser(n, clientId)`; `handleMarkAllRead` per-id,
+  after-success-only, duplicate-guarded (§4e). Client Owner and each
+  Client Staff account read independently — reading as one never affects
+  the other's badge.
+- **Admin** (`AdminPanel.tsx`): desktop dropdown, `MobileTopAppBar`/
+  `MobileMoreMenu` badge counts, and `MobileNotificationsSheet` all from
+  `isNotificationReadForUser(n, ownAdminId)`; `handleMarkNotifRead`
+  per-item and `handleMarkAllNotifsRead` (→ `POST
+  /api/notifications/clear`, §4f) both after-success-only and
+  duplicate-guarded for the per-item case. One admin reading, or bulk
+  "marking all as read," never affects another admin's own badge.
+
+No role's personal unread state reads or writes the legacy `read` field
+anywhere in this codebase as of this revision.
 
 ## 7. Tests added
 
-- `src/lib/notificationAccess.test.ts` (26 tests total):
+- `src/lib/notificationAccess.test.ts` (34 tests total):
   - `isNotificationForDriver` (7): own-shipment match, direct-recipient
     match with no shipment at all, no-match cases, both-match case, and
     an empty-string-shipmentId edge case.
-  - `isNotificationReadForUser` / `addReaderToNotification` (6): Driver A
-    reading does not mark it read for Driver B; a Driver reading does not
-    mark it read for Admin or Client; repeated reads by the same user are
-    idempotent (no duplicate entries); existing `readByUserIds` entries
-    are preserved when a new user reads it; a legacy notification with no
-    `readByUserIds` field at all remains safely readable; an empty
-    `readByUserIds` array means unread for everyone, not read-by-default.
+  - `isNotificationReadForUser` / `addReaderToNotification` (6): base
+    idempotency/preservation/legacy-compat cases.
   - `canMarkNotificationRead` (8): admin always allowed regardless of
-    channel; a direct recipient **rejected** for `chat` outside their own
-    channel (the core §4d fix); a direct recipient rejected for
-    `internal_staff`; a direct recipient rejected for `ai_alert`; a direct
-    recipient allowed for a non-channel-gated type (`driver_registration`,
-    the real "Driver Approved" case); a direct recipient allowed for
-    their own correctly-scoped chat channel; a shipment owner still
-    requires the correct channel too (pre-existing PR #44 rule,
-    unchanged, now re-verified through this function); neither a direct
-    recipient nor a shipment owner is allowed regardless of channel.
-  - **Atomic per-user read update (5, new this revision)**: the
-    computation never reads or produces a `read` value (proving the
-    legacy flag is structurally outside this code path, not just
-    unwritten by convention); two different users added sequentially both
-    remain in `readByUserIds`; repeated same-user reads stay idempotent
-    even interleaved with a different user's read; existing reader ids
-    are preserved (and the input array is never mutated); the
-    memory-fallback union and a locally-simulated Firestore `arrayUnion`
-    produce identical results for the same input sequence — the closest
-    proof of memory-fallback/Firestore parity available without a live
-    Firestore emulator in this environment (see §9.6).
+    channel; a direct recipient **rejected** for `chat`/`internal_staff`/
+    `ai_alert` outside their own channel (the core §4d fix); a direct
+    recipient allowed for a non-channel-gated type and for their own
+    correctly-scoped chat channel; a shipment owner still requires the
+    correct channel too (pre-existing PR #44 rule, unchanged); neither
+    path allowed without the other.
+  - Atomic per-user read update (5): the computation never reads or
+    produces a `read` value; sequential different-user reads both persist;
+    same-user repeats stay idempotent; existing ids preserved without
+    mutating the input; the memory-fallback union matches a
+    locally-simulated Firestore `arrayUnion` for identical input
+    sequences.
+  - **Full per-role migration (8, new this revision)**: Admin A reading
+    does not mark read for Admin B; Client Owner reading does not mark
+    read for Client Staff, and vice versa (with each account's own read
+    status independently preserved); Driver reading does not affect
+    Client or Admin; Admin "mark all as read" only ever adds the calling
+    admin's own id, across multiple notifications with varying existing
+    reader ids; a partial Client mark-all-read failure leaves only the
+    failed notification(s) unread; existing reader ids are preserved
+    across Driver, Client, and Admin reading independently; repeated reads
+    stay idempotent; a legacy notification with no `readByUserIds` is
+    unread for every role until that role reads it, with no data
+    migration required.
 - `src/lib/clientAccess.test.ts` (+6 tests) — `resolveClientPushRecipientIds`
   (§4b), unchanged from prior revisions of this PR.
 - Existing `chatVisibility.test.ts` (38 tests, unchanged) already covers
   the full channel-privacy matrix reviewed in §3.
 
-`npm run test`: **439/439 passing** (407 carried over from before this PR +
-32 new across this PR's three revisions).
+`npm run test`: **447/447 passing** (407 carried over from before this PR +
+40 new across this PR's four revisions).
+
+Component-level (`AdminPanel.tsx`/`ClientDashboard.tsx`/
+`DriverApplication.tsx`) behavior is exercised through the shared pure
+functions above rather than a rendered-component test, consistent with
+this repo's established convention (no `.test.tsx`/testing-library
+harness exists in this codebase; UI logic is validated by extracting it
+into `src/lib/*.ts` and testing that directly — see `docs/
+CODE_CLEANUP_AUDIT.md` for the same convention noted elsewhere).
 
 ## 8. Remaining issues (not fixed in this Phase-1 pass)
 
-- **Admin and Client's own per-item read no longer persists across a page
-  refresh.** Both `AdminPanel.tsx`'s `handleMarkNotifRead` and
-  `ClientDashboard.tsx`'s `handleMarkAllRead` call the same `POST
-  /api/notifications/:id/read` route Driver now uses — which, as of this
-  revision, **never** touches the legacy `read` field. Their own local
-  optimistic state update still works within the same session (they set
-  `read: true` client-side after a 2xx response, independent of the
-  response body), but a fresh `GET /api/notifications` (e.g. after a
-  reload) will show `read: false` again, since nothing on the server sets
-  it true anymore via this route. This is the direct, deliberate
-  consequence of closing the Driver/Admin/Client cross-contamination bug
-  the task asked to fix — Admin and Client simply have not been migrated
-  to `readByUserIds` *yet* in this pass (explicit scope: this task named
-  Driver only). A future phase must migrate `AdminPanel.tsx`'s
-  `handleMarkNotifRead`/badge and `ClientDashboard.tsx`'s
-  `handleMarkAllRead`/badge to `isNotificationReadForUser`/
-  `readByUserIds`, the same way `DriverApplication.tsx` was in this PR —
-  until then, Admin/Client read-state does not survive a refresh.
-- **`POST /api/notifications/clear` (admin global clear) remains on the
-  legacy shared `read` model** — explicitly scoped as legacy-for-now per
-  this task's instructions; it still only ever touches `read`, never
-  `readByUserIds`, and is unaffected by any of this PR's changes.
-- **`ClientDashboard.tsx`'s `handleMarkAllRead` marks every notification
-  read in local state *before* awaiting the backend requests, and does
-  not roll back on a partial/total failure** (`console.error`-only) — a
-  separate bug from the read-model issue above, contradicting the "failed
-  requests must remain unread" principle applied to the Driver fix in
-  this PR. Left untouched (Driver-scoped PR).
 - **Full-collection-scan reads**: `GET /api/notifications` fetches the
-  entire `notifications` collection on every call and filters in JS — a
-  pre-existing, systemic pattern across this codebase's server routes
-  (already documented in `docs/FOLLOW_UP_ROADMAP.md`), not something this
-  PR changes.
+  entire `notifications` collection on every call and filters in JS, and
+  `POST /api/notifications/clear` (§4f) now does an
+  `addNotificationReaderId` call per document in the collection rather
+  than a single batched write — a pre-existing, systemic full-scan
+  pattern across this codebase's server routes (already documented in
+  `docs/FOLLOW_UP_ROADMAP.md`), not something this PR changes
+  structurally, just applies the correct per-user semantics to.
 - **No push-delivery confirmation/retry**: `sendEachForMulticast` errors
   are caught and logged only; a failed push is never retried or surfaced
   to the sender. Pre-existing behavior, unchanged.
 - **`recipientUserId` is currently only populated by the driver-approval
   event.** The mechanism is generic (any role, any event) so a future
   no-shipment event can reuse it without another schema change.
+- Consider whether `PATCH /api/drivers/:id/status`'s "rejected" branch
+  should also notify the driver directly (it currently only logs an
+  activity entry, no notification/push at all) — out of scope for this
+  PR since the task only named the approved-driver case.
 
 ## 9. Recommendations for a future phase
 
-1. Migrate Admin and Client to `readByUserIds`/`isNotificationReadForUser`
-   for their own unread badges — this also resolves the "doesn't persist
-   across refresh" consequence noted in §8 — and decide what (if
-   anything) `POST /api/notifications/clear` should do to `readByUserIds`
-   once they are (e.g. add the calling admin's id to every notification's
-   array, or leave it a deliberately cross-role legacy operation).
-2. Fix `ClientDashboard.tsx`'s `handleMarkAllRead` to match the
-   after-success-only local-state-update pattern used here.
-3. Consider whether `PATCH /api/drivers/:id/status`'s "rejected" branch
-   should also notify the driver directly (it currently only logs an
-   activity entry, no notification/push at all) — out of scope for this
-   PR since the task only named the approved-driver case.
-4. As notification volume grows, replace the full-collection-scan reads
-   with real Firestore queries, consistent with the already-documented
-   systemic full-scan tracked in `docs/FOLLOW_UP_ROADMAP.md`.
-5. Consider migrating some of `server.ts`'s other single-document
+1. As notification volume grows, replace the full-collection-scan reads
+   (and `POST /api/notifications/clear`'s per-document loop, §8) with
+   real Firestore queries/batched writes, consistent with the
+   already-documented systemic full-scan tracked in
+   `docs/FOLLOW_UP_ROADMAP.md`.
+2. Consider migrating some of `server.ts`'s other single-document
    read-modify-write mutations (the pattern used everywhere except the
    shipment-sequence-counter transaction and, as of this revision,
    `addNotificationReaderId`) to atomic field updates where the same
    class of concurrent-write race could matter — this PR's
    `addNotificationReaderId` is a template for that pattern, not a
    one-off.
-6. If a Firebase emulator becomes available in CI, add an integration
+3. If a Firebase emulator becomes available in CI, add an integration
    test exercising the real `pushNotification()` recipient resolution and
-   the real `POST /api/notifications/:id/read` route (including its
-   `arrayUnion` write) against a live Firestore instance — today's
-   coverage proves the memory-fallback path's logic and its equivalence
-   to `arrayUnion`'s *documented* semantics, but has not exercised a real
-   `arrayUnion` call, per this repo's established testing convention for
-   `server.ts` logic (no server.ts test file; pure-function extraction
-   instead).
+   the real `POST /api/notifications/:id/read` / `/clear` routes
+   (including their `arrayUnion` writes) against a live Firestore
+   instance — today's coverage proves the memory-fallback path's logic
+   and its equivalence to `arrayUnion`'s *documented* semantics, but has
+   not exercised a real `arrayUnion` call, per this repo's established
+   testing convention for `server.ts` logic (no server.ts test file;
+   pure-function extraction instead).
+4. Consider whether `PATCH /api/drivers/:id/status`'s "rejected" branch
+   should notify the driver directly (§8).
 
 ## 10. Confirmation
 
 No changes were made to business rules, role permissions, Client Owner/
 Staff behavior (Owner and Staff still have identical company-level
-access), authentication/session behavior, API request/response contracts
-(the endpoints named in this doc keep their existing routes, methods, and
-response shapes — `recipientUserId` and `readByUserIds` are additive
-optional fields, not breaking changes to any existing contract), persisted
-field names (aside from the two additive fields above; the legacy `read`
-field was not removed or renamed), Firestore collection names, Firebase/
-Storage rules, shipment numbering, chat channel rules, document visibility
-rules, accounting calculations, GPS update intervals, production
-configuration, environment files, `package.json`/lockfile, Capacitor
-configuration, or any file under `ios/`/`android/`. No production data was
-migrated or altered. No app version/build change, no deploy, no TestFlight
-upload, no App Store Review submission changes.
+access, and now independently correct personal read state), authentication/
+session behavior, API request/response contracts (the endpoints named in
+this doc keep their existing routes, methods, and response shapes —
+`recipientUserId` and `readByUserIds` are additive optional fields, not
+breaking changes to any existing contract), persisted field names (aside
+from the two additive fields above; the legacy `read` field was not
+removed or renamed), Firestore collection names, Firebase/Storage rules,
+shipment numbering, chat channel rules, document visibility rules,
+accounting calculations, GPS update intervals, production configuration,
+environment files, `package.json`/lockfile, Capacitor configuration, or
+any file under `ios/`/`android/`. No production data was migrated or
+altered. No app version/build change, no deploy, no TestFlight upload, no
+App Store Review submission changes.
