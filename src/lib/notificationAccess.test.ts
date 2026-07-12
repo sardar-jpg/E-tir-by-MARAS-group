@@ -140,3 +140,77 @@ describe("Per-user read state — Notification Phase 1 correction", () => {
     });
   });
 });
+
+describe("Atomic per-user read update — Notification Phase 1 correction", () => {
+  it("never reads or produces a `read` value — the legacy shared flag is entirely outside this computation", () => {
+    // addReaderToNotification's signature only ever takes/returns
+    // readByUserIds — it cannot read or mutate a `read` field. This is
+    // exactly why POST /api/notifications/:id/read (server.ts) no longer
+    // sets notif.read = true: the atomic update (addNotificationReaderId)
+    // only ever touches readByUserIds, both in real Firestore (a
+    // field-scoped arrayUnion()) and in memory fallback (a direct
+    // assignment to just this one property on the stored record) — `read`
+    // is never part of that write in either path.
+    const before = { read: true, readByUserIds: ["admin-1"] };
+    const updated = addReaderToNotification(before.readByUserIds, "driver-1");
+    expect(before.read).toBe(true); // untouched by the computation
+    expect(updated).toEqual(["admin-1", "driver-1"]);
+  });
+
+  it("two different users added sequentially both remain in readByUserIds", () => {
+    let readByUserIds: string[] | undefined = undefined;
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-A");
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-B");
+    expect(readByUserIds).toContain("driver-A");
+    expect(readByUserIds).toContain("driver-B");
+    expect(readByUserIds).toHaveLength(2);
+  });
+
+  it("repeated same-user reads stay idempotent even when interleaved with a different user's read", () => {
+    let readByUserIds: string[] | undefined = undefined;
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-A");
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-B");
+    readByUserIds = addReaderToNotification(readByUserIds, "driver-A"); // repeat read
+    expect(readByUserIds.filter((id) => id === "driver-A")).toHaveLength(1);
+    expect(readByUserIds).toContain("driver-B");
+    expect(readByUserIds).toHaveLength(2);
+  });
+
+  it("existing reader ids are preserved when a new reader is added", () => {
+    const existing = ["admin-1", "client-1"];
+    const updated = addReaderToNotification(existing, "driver-1");
+    expect(updated).toEqual(expect.arrayContaining(["admin-1", "client-1", "driver-1"]));
+    expect(updated).toHaveLength(3);
+    // the input array itself is never mutated (pure function)
+    expect(existing).toEqual(["admin-1", "client-1"]);
+  });
+
+  it("the memory-fallback union and a simulated Firestore arrayUnion produce identical results for the same input sequence", () => {
+    // Firestore's arrayUnion(...elements) is documented to add each
+    // element only if not already present and never duplicate. This is a
+    // faithful, minimal local model of exactly that contract, used only
+    // to prove addReaderToNotification (the memory-fallback path used by
+    // handleAddNotificationReaderMemory in server.ts) reaches the same
+    // end state a real arrayUnion() would on the production Firestore
+    // path (addNotificationReaderId), for identical sequences of reader
+    // ids — a logical equivalence check of the two paths' documented/pure
+    // semantics, not a live Firestore call (no emulator available in this
+    // environment).
+    const simulateArrayUnion = (existing: string[] | undefined, newId: string): string[] => {
+      const result = [...(existing ?? [])];
+      if (!result.includes(newId)) result.push(newId);
+      return result;
+    };
+
+    const sequence = ["driver-A", "admin-1", "driver-A", "client-1", "driver-B"];
+
+    let memoryResult: string[] | undefined = undefined;
+    for (const id of sequence) memoryResult = addReaderToNotification(memoryResult, id);
+
+    let firestoreResult: string[] | undefined = undefined;
+    for (const id of sequence) firestoreResult = simulateArrayUnion(firestoreResult, id);
+
+    expect(new Set(memoryResult)).toEqual(new Set(firestoreResult));
+    expect(memoryResult).toHaveLength(new Set(sequence).size);
+  });
+});

@@ -76,6 +76,7 @@ import {
   updateDoc as rawUpdateDoc,
   deleteDoc as rawDeleteDoc,
   runTransaction as rawRunTransaction,
+  arrayUnion,
 } from "firebase/firestore";
 import {
   formatShipmentNumber,
@@ -485,6 +486,66 @@ async function updateDoc(docRef: any, data: any) {
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
+  }
+}
+
+// Notification Phase 1 correction: a dedicated, atomic per-user read
+// marker for AppNotification.readByUserIds — deliberately NOT routed
+// through the generic setDoc/updateDoc wrappers above. setDoc would write
+// the entire notification document back on every read (this function's
+// whole point is to touch only readByUserIds); the generic updateDoc
+// wrapper would work for real Firestore (a raw Firestore arrayUnion()
+// FieldValue survives cleanUndefined() untouched — see its "native class
+// instance" guard), but handleUpdateDocMemory's plain `{ ...existing,
+// ...data }` spread in memory-fallback mode would store the arrayUnion()
+// FieldValue sentinel object itself as the field's value instead of
+// resolving it into an array, silently corrupting readByUserIds in local
+// dev (which runs on the memory fallback by default). This function
+// branches on useMemoryFallback itself so each path gets real, correct,
+// non-destructive array-union semantics:
+//  - Real Firestore: rawUpdateDoc(..., { readByUserIds: arrayUnion(userId) })
+//    is a genuine atomic field update — Firestore guarantees this is safe
+//    under two concurrent writers adding different ids at the same time,
+//    with no read-modify-write race and no transaction needed. It also
+//    only ever touches the readByUserIds field, never the rest of the
+//    document (in particular, never the legacy `read` flag — see the
+//    POST /api/notifications/:id/read route, which intentionally leaves
+//    `read` untouched now).
+//  - Memory fallback: the equivalent idempotent Set-union
+//    (addReaderToNotification, src/lib/notificationAccess.ts) applied by
+//    direct field assignment on the already-stored record — never a full
+//    object replace, and never removes an existing reader id. Safe
+//    without its own transaction: Node's single-threaded event loop means
+//    this synchronous find-and-assign can't interleave with another
+//    concurrent call to this same function the way two real network
+//    requests to Firestore could.
+async function addNotificationReaderId(notificationId: string, userId: string): Promise<void> {
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    handleAddNotificationReaderMemory(notificationId, userId);
+    return;
+  }
+  try {
+    const notifRef = rawDoc(db, "notifications", notificationId);
+    await withTimeout(
+      rawUpdateDoc(notifRef, { readByUserIds: arrayUnion(userId) }),
+      5000,
+      "Firestore readByUserIds update timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore readByUserIds update failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    handleAddNotificationReaderMemory(notificationId, userId);
+  }
+}
+
+function handleAddNotificationReaderMemory(notificationId: string, userId: string): void {
+  const mStore = getMemoryStore();
+  const item = mStore.notifications.find(n => n.id === notificationId);
+  if (item) {
+    item.readByUserIds = addReaderToNotification(item.readByUserIds, userId);
   }
 }
 
@@ -5049,19 +5110,21 @@ async function startServer() {
           }
         }
 
-        // Notification Phase 1 correction: per-user read tracking. Only
-        // this caller's own session id is added to readByUserIds — every
-        // other id already present (another user who already read this
-        // same notification) is preserved untouched. `read` is left set
-        // to true as well, unconditionally, for backward compatibility
-        // with Admin/Client code paths not yet migrated off that legacy
-        // shared flag (see docs/NOTIFICATION_SYSTEM_AUDIT.md) — but
-        // DriverApplication.tsx no longer reads `read` for its own unread
-        // badge, so this no longer marks the notification read for other
-        // drivers the way it used to.
-        notif.readByUserIds = addReaderToNotification(notif.readByUserIds, req.session!.id);
-        notif.read = true;
-        await setDoc(dRef, notif);
+        // Notification Phase 1 correction: per-user read tracking, via an
+        // atomic field-only update (addNotificationReaderId — real
+        // Firestore arrayUnion in production, an equivalent idempotent
+        // Set-union on just this field in memory fallback; see its own
+        // comment above). Only this caller's own session id is ever
+        // added; every other id already present (another user who already
+        // read this same notification) is preserved untouched, and
+        // nothing else on the document — including the legacy `read`
+        // flag — is read, touched, or written by this call. `read` is
+        // deliberately left exactly as it was: Admin/Client code paths
+        // that still consume it (not yet migrated to readByUserIds — see
+        // docs/NOTIFICATION_SYSTEM_AUDIT.md) must not have a Driver's own
+        // read silently flip it, the same class of bug this per-user
+        // model exists to fix.
+        await addNotificationReaderId(req.params.id, req.session!.id);
       }
       res.json({ status: "success" });
     } catch (err) {
