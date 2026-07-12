@@ -13,6 +13,8 @@ import {
   resolveStaffParentCompanyName,
   resolveClientCreationCompany,
   scopeStaffToCompany,
+  validateStaffCredentials,
+  groupClientsByCompany,
 } from "./clientAccess";
 
 describe("isClientStaffAccount", () => {
@@ -592,5 +594,136 @@ describe("19/20. Password hashes are never returned to the UI — new Staff crea
     ]);
     expect(resolution.ok).toBe(true);
     expect(resolution).not.toHaveProperty("password");
+  });
+});
+
+// feature/client-staff-management-ui follow-up: Client Staff login credentials must be required
+
+describe("validateStaffCredentials", () => {
+  it("Staff creation without a username is rejected", () => {
+    const result = validateStaffCredentials({ password: "SomePass1!" });
+    expect(result).toEqual({ ok: false, error: "Username is required for Client Staff accounts." });
+  });
+
+  it("Staff creation with a whitespace-only username is rejected", () => {
+    const result = validateStaffCredentials({ username: "   ", password: "SomePass1!" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("Staff creation without a password is rejected", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed" });
+    expect(result).toEqual({ ok: false, error: "Password is required for Client Staff accounts." });
+  });
+
+  it("Staff creation with a whitespace-only password is rejected", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed", password: "   " });
+    expect(result.ok).toBe(false);
+  });
+
+  it("valid Staff credentials succeed", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed", password: "SomePass1!" });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("username check runs before password check — a request missing both is rejected for the username first", () => {
+    const result = validateStaffCredentials({});
+    expect(result).toEqual({ ok: false, error: "Username is required for Client Staff accounts." });
+  });
+
+  it("duplicate username is still rejected independently — validateStaffCredentials only checks presence/blankness, hasDuplicateClientUsername (already tested above) is the separate, complementary check POST /api/clients also runs", () => {
+    const credentialsCheck = validateStaffCredentials({ username: "sara.ahmed", password: "SomePass1!" });
+    expect(credentialsCheck.ok).toBe(true);
+    const existing = [{ id: "staff-existing", username: "sara.ahmed" }];
+    expect(hasDuplicateClientUsername(existing, "sara.ahmed")).toBe(true);
+  });
+});
+
+// feature/client-staff-management-ui follow-up: Owner self-deletion must not orphan Staff in Admin UI
+
+describe("groupClientsByCompany", () => {
+  it("a company with Owner + Staff appears once, as a single group", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].companyName).toBe("Acme Freight");
+    expect(groups[0].owner?.id).toBe("owner-1");
+    expect(groups[0].staff.map((s) => s.id).sort()).toEqual(["staff-1", "staff-2"]);
+  });
+
+  it("after removing the Owner record, the company still appears — with owner: null, not omitted from the result", () => {
+    const clientsWithOwner = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const clientsAfterOwnerDeleted = clientsWithOwner.filter((c) => c.id !== "owner-1"); // simulates the Owner's self-delete
+
+    const groupsBefore = groupClientsByCompany(clientsWithOwner);
+    const groupsAfter = groupClientsByCompany(clientsAfterOwnerDeleted);
+
+    expect(groupsBefore).toHaveLength(1);
+    expect(groupsBefore[0].owner).not.toBeNull();
+
+    expect(groupsAfter).toHaveLength(1);
+    expect(groupsAfter[0].companyName).toBe("Acme Freight");
+    expect(groupsAfter[0].owner).toBeNull();
+  });
+
+  it("its Staff remain visible after the Owner is removed — the exact same records, not lost", () => {
+    const clients = [
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].staff.map((s) => s.id).sort()).toEqual(["staff-1", "staff-2"]);
+  });
+
+  it("Staff from different companies are never mixed into the same group", () => {
+    const clients = [
+      { id: "owner-acme", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-acme", companyName: "Acme Freight", isEmployee: true },
+      { id: "owner-other", companyName: "Other Company Ltd.", isEmployee: false },
+      { id: "staff-other", companyName: "Other Company Ltd.", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(2);
+    const acmeGroup = groups.find((g) => g.companyName === "Acme Freight")!;
+    const otherGroup = groups.find((g) => g.companyName === "Other Company Ltd.")!;
+    expect(acmeGroup.staff.map((s) => s.id)).toEqual(["staff-acme"]);
+    expect(otherGroup.staff.map((s) => s.id)).toEqual(["staff-other"]);
+  });
+
+  it("groups by normalized (case/whitespace-insensitive) companyName, consistent with scopeStaffToCompany", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "  ACME freight  ", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].staff.map((s) => s.id)).toEqual(["staff-1"]);
+  });
+
+  it("no Staff record is ever silently promoted to Owner — an orphaned company's group.owner stays null even with multiple Staff present", () => {
+    const clients = [
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-3", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups[0].owner).toBeNull();
+    // Confirmed independently: not one of the three staff ids leaked into the owner slot.
+    expect(["staff-1", "staff-2", "staff-3"]).not.toContain(groups[0].owner);
+  });
+
+  it("a company with only an Owner and no Staff yet still produces a group with an empty staff array", () => {
+    const clients = [{ id: "owner-1", companyName: "Acme Freight", isEmployee: false }];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].owner?.id).toBe("owner-1");
+    expect(groups[0].staff).toEqual([]);
   });
 });

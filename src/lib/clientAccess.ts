@@ -291,6 +291,32 @@ export function resolveClientCreationCompany(
 /**
  * feature/client-staff-management-ui
  *
+ * Every Client Staff member is a real login account — username and
+ * password are mandatory for Staff creation, unlike Client Owner
+ * creation (POST /api/clients accepts a username/password-less Owner
+ * record, matching its pre-existing, unchanged behavior — this
+ * validation is Staff-only, called by POST /api/clients only when
+ * resolveClientCreationCompany resolved `isEmployee: true`). Enforced
+ * server-side so the frontend's own `required` attributes can never be
+ * the only thing standing between a Staff record and a blank/whitespace-
+ * only username or password (a direct API call bypasses HTML `required`
+ * entirely).
+ */
+export function validateStaffCredentials(
+  data: { username?: string; password?: string }
+): { ok: true } | { ok: false; error: string } {
+  if (!normalizeClientUsername(data.username)) {
+    return { ok: false, error: "Username is required for Client Staff accounts." };
+  }
+  if (!(data.password || "").trim()) {
+    return { ok: false, error: "Password is required for Client Staff accounts." };
+  }
+  return { ok: true };
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
  * Scopes the full clients list down to the Staff accounts (`isEmployee`)
  * belonging to one company — the exact list the "Client Staff" section
  * (inside Edit Client, when editing the Owner) renders. Uses the same
@@ -307,4 +333,57 @@ export function scopeStaffToCompany<T extends Pick<Client, "isEmployee" | "compa
   return clients.filter(
     (c) => !!c.isEmployee && c.companyName.toLowerCase().trim() === normalizedCompanyName
   );
+}
+
+export type CompanyGroup<T> = {
+  companyName: string;
+  /** The real Client Owner record for this company, or null when it has been deleted (orphaned) — never a Staff record, even if one exists. */
+  owner: T | null;
+  /** Every Staff (isEmployee: true) record for this company. */
+  staff: T[];
+};
+
+/**
+ * feature/client-staff-management-ui — fixes the Admin UI orphaning gap:
+ * the top-level Clients table previously rendered one row per
+ * `!isEmployee` record (`clients.filter(c => !c.isEmployee)`), so if a
+ * Client Owner self-deleted their own account (explicitly allowed by the
+ * confirmed deletion rule — see resolveClientAccountDeleteAuthorization),
+ * any Staff records left behind under that companyName had NO row to
+ * appear under at all: they were excluded by that same filter
+ * (`isEmployee: true`) and no fallback row existed. They became
+ * completely invisible in the Admin Panel, with no way to reach them
+ * (Edit/Activate/Reset Password/Delete) even though they still existed
+ * in Firestore and could still log in and use the app themselves.
+ *
+ * This groups the full clients list by normalized companyName instead,
+ * so the Admin UI can render exactly one row per company — with its
+ * Owner when one exists, or `owner: null` (rendered as "Owner account
+ * missing") when it doesn't — and the company's Staff are always
+ * reachable through that one row regardless of whether the Owner record
+ * still exists. Deliberately never treats a Staff record as `owner`
+ * under any condition — no silent promotion — matching the confirmed
+ * rule that only an explicit, separate action may ever designate an
+ * Owner.
+ */
+export function groupClientsByCompany<T extends Pick<Client, "companyName" | "isEmployee">>(
+  clients: T[]
+): CompanyGroup<T>[] {
+  const order: string[] = [];
+  const groups = new Map<string, CompanyGroup<T>>();
+  for (const client of clients) {
+    const key = client.companyName.toLowerCase().trim();
+    if (!groups.has(key)) {
+      groups.set(key, { companyName: client.companyName, owner: null, staff: [] });
+      order.push(key);
+    }
+    const group = groups.get(key)!;
+    if (client.isEmployee) {
+      group.staff.push(client);
+    } else {
+      group.owner = client;
+      group.companyName = client.companyName; // prefer the real Owner record's own casing for display
+    }
+  }
+  return order.map((key) => groups.get(key)!);
 }

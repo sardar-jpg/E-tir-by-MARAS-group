@@ -756,6 +756,13 @@ export default function AdminPanel({
   const [deleteStaffTarget, setDeleteStaffTarget] = useState<Client | null>(null);
   const [isDeletingStaff, setIsDeletingStaff] = useState(false);
 
+  // feature/client-staff-management-ui follow-up: the company name (not a
+  // Client record — there isn't one) for the "Manage" view opened from an
+  // orphaned company row in the top-level Clients table (Owner record
+  // deleted, Staff remain). Distinct from editClientTarget, which always
+  // holds a real Client record.
+  const [orphanedCompanyView, setOrphanedCompanyView] = useState<string | null>(null);
+
   // fix/client-create-username: the Add Client modal's Cancel/✕ buttons
   // previously just closed the modal (`setIsAddClientOpen(false)`) without
   // clearing newClientUsername/Password/ConfirmPassword — so a cancelled,
@@ -2837,7 +2844,24 @@ MARAS Group etir Center`;
       triggerToast(lang === 'tr' ? "Personel adı zorunludur!" : (lang === 'ar' ? "اسم الموظف مطلوب!" : "Employee name is required!"));
       return;
     }
-    if (newEmployeePassword.trim() && newEmployeePassword.trim() !== newEmployeeConfirmPassword.trim()) {
+    // feature/client-staff-management-ui follow-up: every Client Staff
+    // member is a real login account — username and password are
+    // mandatory here (unlike Client Owner creation, where both stay
+    // optional). The `required` attributes on these fields already push
+    // back on an empty submit, but a whitespace-only value (e.g. a single
+    // space) passes HTML's `required` check while still being blank in
+    // practice — checked explicitly here, and independently enforced
+    // server-side (validateStaffCredentials in POST /api/clients) since
+    // this frontend check alone is not sufficient for a direct API call.
+    if (!newEmployeeUsername.trim()) {
+      triggerToast(lang === 'tr' ? "Kullanıcı adı zorunludur!" : (lang === 'ar' ? "اسم المستخدم مطلوب!" : "Username is required!"));
+      return;
+    }
+    if (!newEmployeePassword.trim()) {
+      triggerToast(lang === 'tr' ? "Şifre zorunludur!" : (lang === 'ar' ? "كلمة المرور مطلوبة!" : "Password is required!"));
+      return;
+    }
+    if (newEmployeePassword.trim() !== newEmployeeConfirmPassword.trim()) {
       triggerToast(passwordMismatchError);
       return;
     }
@@ -2852,8 +2876,8 @@ MARAS Group etir Center`;
           email: newEmployeeEmail.trim(),
           phone: newEmployeePhone.trim(),
           createdAt: new Date().toISOString(),
-          ...(newEmployeeUsername.trim() ? { username: newEmployeeUsername.trim() } : {}),
-          ...(newEmployeePassword.trim() ? { password: newEmployeePassword.trim() } : {}),
+          username: newEmployeeUsername.trim(),
+          password: newEmployeePassword.trim(),
         })
       });
 
@@ -4625,6 +4649,8 @@ MARAS Group etir Center`;
             setDeleteStaffTarget={setDeleteStaffTarget}
             isDeletingStaff={isDeletingStaff}
             handleDeleteStaffConfirm={handleDeleteStaffConfirm}
+            orphanedCompanyView={orphanedCompanyView}
+            setOrphanedCompanyView={setOrphanedCompanyView}
             passwordToggleClasses={passwordToggleClasses}
             showPasswordLabel={showPasswordLabel}
             hidePasswordLabel={hidePasswordLabel}

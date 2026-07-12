@@ -4,7 +4,7 @@ import { UserPlus, Search, ClipboardList, Pencil, Mail, Phone, Share2, MessageSq
 import type { Language, Client, Shipment } from '../../../types';
 import { TRANSLATIONS } from '../../../translations';
 import PasswordInput from '../../PasswordInput';
-import { scopeStaffToCompany } from '../../../lib/clientAccess';
+import { scopeStaffToCompany, groupClientsByCompany } from '../../../lib/clientAccess';
 
 interface AdminClientsSectionProps {
   lang: Language;
@@ -96,6 +96,9 @@ interface AdminClientsSectionProps {
   setDeleteStaffTarget: (value: Client | null) => void;
   isDeletingStaff: boolean;
   handleDeleteStaffConfirm: () => Promise<void>;
+  /** feature/client-staff-management-ui: companyName (not a Client record) for the "Manage" view opened from an orphaned company row — no Owner record exists for this company. */
+  orphanedCompanyView: string | null;
+  setOrphanedCompanyView: (value: string | null) => void;
   passwordToggleClasses: string;
   showPasswordLabel: string;
   hidePasswordLabel: string;
@@ -104,6 +107,129 @@ interface AdminClientsSectionProps {
   getWhatsAppLink: (shipmentNum: string, token: string, loading: string, delivery: string) => string;
   handlePrepopulateGmail: (shipmentId: string) => void;
   setActiveTab: (tabId: 'gmail') => void;
+}
+
+interface ClientStaffSectionProps {
+  lang: Language;
+  companyStaff: Client[];
+  canWriteClients: boolean;
+  isSuperAdmin: boolean;
+  /** feature/client-staff-management-ui: false for an orphaned company (no Owner record) — there is no valid parentOwnerId to attach a new Staff record to until a replacement Owner exists (see the orphaned-company notice). */
+  canAddEmployee: boolean;
+  onAddEmployee: () => void;
+  openEditClient: (client: Client) => void;
+  handleToggleClientActive: (client: Client) => Promise<void>;
+  setResetPasswordTarget: (value: Client | null) => void;
+  setDeleteStaffTarget: (value: Client | null) => void;
+}
+
+/**
+ * feature/client-staff-management-ui: the "Client Staff" list + actions,
+ * shared between (a) the Edit Client modal when editing a company's
+ * Owner, and (b) the orphaned-company modal (no Owner record exists).
+ * Extracted so both render identically and stay in sync — this is the
+ * one place Staff rows are rendered.
+ */
+function ClientStaffSection({
+  lang,
+  companyStaff,
+  canWriteClients,
+  isSuperAdmin,
+  canAddEmployee,
+  onAddEmployee,
+  openEditClient,
+  handleToggleClientActive,
+  setResetPasswordTarget,
+  setDeleteStaffTarget,
+}: ClientStaffSectionProps) {
+  return (
+    <div className="border border-slate-200 rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2.5 bg-slate-50 border-b border-slate-200">
+        <h4 className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">
+          <Users className="w-3.5 h-3.5 text-orange-500" />
+          <span>{lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "موظفو العميل" : "Client Staff")}</span>
+          <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-black text-slate-500">{companyStaff.length}</span>
+        </h4>
+        {canWriteClients && canAddEmployee && (
+          <button
+            type="button"
+            onClick={onAddEmployee}
+            className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-black cursor-pointer inline-flex items-center gap-1 border-0"
+          >
+            <UserPlus className="w-3.5 h-3.5" />
+            <span>{lang === 'tr' ? "Personel Ekle" : (lang === 'ar' ? "إضافة موظف" : "Add Employee")}</span>
+          </button>
+        )}
+      </div>
+
+      {companyStaff.length === 0 ? (
+        <div className="py-6 text-center text-[11px] text-slate-400 italic">
+          {lang === 'tr' ? "Bu şirket için henüz personel eklenmedi." : (lang === 'ar' ? "لم تتم إضافة أي موظفين لهذه الشركة بعد." : "No employees added for this company yet.")}
+        </div>
+      ) : (
+        <div className="max-h-56 overflow-y-auto divide-y divide-slate-100">
+          {companyStaff.map((staff) => {
+            const isActive = staff.active !== false;
+            return (
+              <div key={staff.id} className="px-3 py-2.5 flex items-center justify-between gap-2 text-[11px]">
+                <div className="min-w-0">
+                  <div className="font-bold text-slate-800 truncate">{staff.contactName}</div>
+                  <div className="text-slate-400 font-mono truncate">{staff.username || '—'} · {staff.email || '—'}</div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider border ${isActive ? 'bg-green-50 text-green-600 border-green-200' : 'bg-red-50 text-red-500 border-red-200'}`}>
+                    {isActive
+                      ? (lang === 'tr' ? "Aktif" : (lang === 'ar' ? "نشط" : "Active"))
+                      : (lang === 'tr' ? "Devre Dışı" : (lang === 'ar' ? "معطل" : "Disabled"))}
+                  </span>
+                  {canWriteClients && (
+                    <>
+                      <button
+                        type="button"
+                        title={lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}
+                        onClick={() => openEditClient(staff)}
+                        className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
+                      >
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        title={isActive
+                          ? (lang === 'tr' ? "Devre Dışı Bırak" : (lang === 'ar' ? "تعطيل" : "Disable"))
+                          : (lang === 'tr' ? "Etkinleştir" : (lang === 'ar' ? "تفعيل" : "Activate"))}
+                        onClick={() => handleToggleClientActive(staff)}
+                        className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
+                      >
+                        <Power className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        title={lang === 'tr' ? "Şifreyi Sıfırla" : (lang === 'ar' ? "إعادة تعيين كلمة المرور" : "Reset Password")}
+                        onClick={() => setResetPasswordTarget(staff)}
+                        className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
+                      >
+                        <KeyRound className="w-3 h-3" />
+                      </button>
+                    </>
+                  )}
+                  {isSuperAdmin && (
+                    <button
+                      type="button"
+                      title={lang === 'tr' ? "Sil" : (lang === 'ar' ? "حذف" : "Delete")}
+                      onClick={() => setDeleteStaffTarget(staff)}
+                      className="p-1.5 bg-red-50 hover:bg-red-100 text-red-500 rounded-md cursor-pointer border-0"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -202,6 +328,8 @@ export default function AdminClientsSection({
   setDeleteStaffTarget,
   isDeletingStaff,
   handleDeleteStaffConfirm,
+  orphanedCompanyView,
+  setOrphanedCompanyView,
   passwordToggleClasses,
   showPasswordLabel,
   hidePasswordLabel,
@@ -211,16 +339,26 @@ export default function AdminClientsSection({
   handlePrepopulateGmail,
   setActiveTab,
 }: AdminClientsSectionProps) {
-  // feature/client-staff-management-ui: the top-level Clients table now
-  // lists Client Owners only — Client Staff moved into each company's own
-  // "Client Staff" section (inside Edit Client), so they're no longer
-  // mixed into this flat list.
-  const filteredClients = clients.filter(c =>
-    !c.isEmployee && (
-      c.companyName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-      c.contactName.toLowerCase().includes(clientSearchQuery.toLowerCase()) ||
-      c.email.toLowerCase().includes(clientSearchQuery.toLowerCase())
-    )
+  // feature/client-staff-management-ui: the top-level Clients table lists
+  // one row per COMPANY (grouped by companyName via groupClientsByCompany),
+  // not one row per Client Owner record. This fixes a real orphaning bug:
+  // rendering strictly `clients.filter(c => !c.isEmployee)` meant that if
+  // a Client Owner self-deleted their own account (explicitly allowed —
+  // see resolveClientAccountDeleteAuthorization), any Staff records left
+  // behind under that companyName had NO row to appear under at all and
+  // became invisible/unreachable in this Admin UI, even though they still
+  // existed in Firestore and could still log in. Grouping means the
+  // company's row (and its Staff, via ClientStaffSection) stays reachable
+  // whether or not the Owner record still exists — see the orphaned-
+  // company handling below (`group.owner === null`).
+  const companyGroups = groupClientsByCompany(clients);
+  const query = clientSearchQuery.toLowerCase();
+  const filteredCompanyGroups = companyGroups.filter(group =>
+    group.companyName.toLowerCase().includes(query) ||
+    (!!group.owner && (
+      group.owner.contactName.toLowerCase().includes(query) ||
+      group.owner.email.toLowerCase().includes(query)
+    ))
   );
 
   return (
@@ -259,11 +397,11 @@ export default function AdminClientsSection({
             />
           </div>
           <div className="text-xs text-slate-500 font-semibold">
-            {filteredClients.length} {lang === 'tr' ? "müşteri bulundu" : (lang === 'ar' ? "العملاء الذين تم العثور عليهم" : "clients found")}
+            {filteredCompanyGroups.length} {lang === 'tr' ? "şirket bulundu" : (lang === 'ar' ? "الشركات التي تم العثور عليها" : "companies found")}
           </div>
         </div>
 
-        {/* Clients Grid/Table */}
+        {/* Clients Grid/Table — one row per company (see groupClientsByCompany) */}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs md:text-sm">
             <thead className="bg-slate-100 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
@@ -276,43 +414,54 @@ export default function AdminClientsSection({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredClients.length === 0 ? (
+              {filteredCompanyGroups.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-12 text-center text-slate-400 text-xs">
                     {lang === 'tr' ? "Herhangi bir kayıtlı müşteri bulunamadı." : (lang === 'ar' ? "لم يتم العثور على أي عملاء مسجلين." : "No registered clients found matching filter.")}
                   </td>
                 </tr>
               ) : (
-                filteredClients.map((client) => {
-                  const clientShipments = shipments.filter(s => s.companyName.toLowerCase().trim() === client.companyName.toLowerCase().trim());
-                  const isExpanded = expandedClientOrdersCompanyName === client.companyName;
+                filteredCompanyGroups.map((group) => {
+                  const clientShipments = shipments.filter(s => s.companyName.toLowerCase().trim() === group.companyName.toLowerCase().trim());
+                  const isExpanded = expandedClientOrdersCompanyName === group.companyName;
+                  const owner = group.owner;
+                  const rowKey = owner ? owner.id : `orphaned:${group.companyName.toLowerCase().trim()}`;
 
                   return (
-                    <React.Fragment key={client.id}>
-                      <tr className={`hover:bg-slate-50/50 transition-colors ${isExpanded ? 'bg-orange-50/10' : ''}`}>
+                    <React.Fragment key={rowKey}>
+                      <tr className={`hover:bg-slate-50/50 transition-colors ${isExpanded ? 'bg-orange-50/10' : ''} ${!owner ? 'bg-red-50/30' : ''}`}>
                         <td className="px-5 py-4">
-                          <div className="font-extrabold text-slate-800 leading-snug">{client.companyName}</div>
-                          <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                            {lang === 'tr' ? "Kayıt:" : (lang === 'ar' ? "التسجيل:" : "Registered:")} {new Date(client.createdAt).toLocaleDateString()}
-                          </div>
-                          {client.notes && (
-                            <div className="text-[10px] text-slate-500 italic mt-1 max-w-xs truncate" title={client.notes}>
-                              {client.notes}
+                          <div className="font-extrabold text-slate-800 leading-snug">{group.companyName}</div>
+                          {owner ? (
+                            <>
+                              <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                                {lang === 'tr' ? "Kayıt:" : (lang === 'ar' ? "التسجيل:" : "Registered:")} {new Date(owner.createdAt).toLocaleDateString()}
+                              </div>
+                              {owner.notes && (
+                                <div className="text-[10px] text-slate-500 italic mt-1 max-w-xs truncate" title={owner.notes}>
+                                  {owner.notes}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 bg-red-50 border border-red-200 text-red-600 text-[9px] font-black uppercase rounded tracking-wider">
+                              <AlertTriangle className="w-2.5 h-2.5" />
+                              <span>{lang === 'tr' ? "Sahip Hesabı Eksik" : (lang === 'ar' ? "حساب المالك مفقود" : "Owner account missing")}</span>
                             </div>
                           )}
                         </td>
                         <td className="px-5 py-4 font-bold text-slate-700">
-                          {/* feature/client-staff-management-ui: every row here is a Client Owner by construction — filteredClients excludes Staff — so no per-row badge is needed anymore (see the Client Staff section inside Edit Client for staff). */}
-                          <span>{client.contactName}</span>
+                          {/* feature/client-staff-management-ui: an orphaned company (owner === null) never falls back to showing a Staff member's name here — that would silently imply promotion to Owner, which this UI must never do. */}
+                          <span>{owner ? owner.contactName : '—'}</span>
                         </td>
                         <td className="px-5 py-4 space-y-0.5">
                           <div className="flex items-center gap-1.5 text-xs text-slate-600">
                             <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span className="font-medium">{client.email || '—'}</span>
+                            <span className="font-medium">{owner ? (owner.email || '—') : '—'}</span>
                           </div>
                           <div className="flex items-center gap-1.5 text-xs text-slate-600">
                             <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span className="font-mono">{client.phone || '—'}</span>
+                            <span className="font-mono">{owner ? (owner.phone || '—') : '—'}</span>
                           </div>
                         </td>
                         <td className="px-5 py-4">
@@ -328,16 +477,20 @@ export default function AdminClientsSection({
                           <div className="flex items-center justify-end gap-2">
                             {canWriteClients && (
                               <button
-                                onClick={() => openEditClient(client)}
+                                onClick={() => owner ? openEditClient(owner) : setOrphanedCompanyView(group.companyName)}
                                 className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
                               >
-                                <Pencil className="w-3.5 h-3.5" />
-                                <span>{lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}</span>
+                                {owner ? <Pencil className="w-3.5 h-3.5" /> : <Users className="w-3.5 h-3.5" />}
+                                <span>
+                                  {owner
+                                    ? (lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit"))
+                                    : (lang === 'tr' ? "Yönet" : (lang === 'ar' ? "إدارة" : "Manage"))}
+                                </span>
                               </button>
                             )}
                             <button
                               onClick={() => {
-                                setExpandedClientOrdersCompanyName(isExpanded ? null : client.companyName);
+                                setExpandedClientOrdersCompanyName(isExpanded ? null : group.companyName);
                               }}
                               className="px-2.5 py-1.5 bg-orange-100 hover:bg-orange-200 text-orange-700 hover:text-orange-800 rounded-lg text-xs font-black cursor-pointer inline-flex items-center gap-1 border-0"
                             >
@@ -360,7 +513,7 @@ export default function AdminClientsSection({
                             <div className="border border-slate-200 rounded-xl bg-white p-4 shadow-xs space-y-3">
                               <h4 className="font-extrabold text-sm text-slate-800 flex items-center gap-1.5">
                                 <Ship className="w-4 h-4 text-orange-500" />
-                                <span>{client.companyName} — {lang === 'tr' ? "Sipariş Geçmişi" : (lang === 'ar' ? "سجل الطلبات" : "Shipment Order History")}</span>
+                                <span>{group.companyName} — {lang === 'tr' ? "Sipariş Geçmişi" : (lang === 'ar' ? "سجل الطلبات" : "Shipment Order History")}</span>
                               </h4>
 
                               {clientShipments.length === 0 ? (
@@ -636,97 +789,20 @@ export default function AdminClientsSection({
                   (a Staff record editing itself doesn't also manage other
                   staff). Scoped the same normalized way the "Check Orders"
                   shipment match already does, for display-side consistency. */}
-              {!editClientTarget.isEmployee && (() => {
-                const companyStaff = scopeStaffToCompany(clients, editClientTarget.companyName);
-                return (
-                  <div className="border border-slate-200 rounded-lg overflow-hidden">
-                    <div className="flex items-center justify-between px-3 py-2.5 bg-slate-50 border-b border-slate-200">
-                      <h4 className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">
-                        <Users className="w-3.5 h-3.5 text-orange-500" />
-                        <span>{lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "موظفو العميل" : "Client Staff")}</span>
-                        <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-black text-slate-500">{companyStaff.length}</span>
-                      </h4>
-                      {canWriteClients && (
-                        <button
-                          type="button"
-                          onClick={() => setAddEmployeeTarget(editClientTarget)}
-                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-black cursor-pointer inline-flex items-center gap-1 border-0"
-                        >
-                          <UserPlus className="w-3.5 h-3.5" />
-                          <span>{lang === 'tr' ? "Personel Ekle" : (lang === 'ar' ? "إضافة موظف" : "Add Employee")}</span>
-                        </button>
-                      )}
-                    </div>
-
-                    {companyStaff.length === 0 ? (
-                      <div className="py-6 text-center text-[11px] text-slate-400 italic">
-                        {lang === 'tr' ? "Bu şirket için henüz personel eklenmedi." : (lang === 'ar' ? "لم تتم إضافة أي موظفين لهذه الشركة بعد." : "No employees added for this company yet.")}
-                      </div>
-                    ) : (
-                      <div className="max-h-56 overflow-y-auto divide-y divide-slate-100">
-                        {companyStaff.map((staff) => {
-                          const isActive = staff.active !== false;
-                          return (
-                            <div key={staff.id} className="px-3 py-2.5 flex items-center justify-between gap-2 text-[11px]">
-                              <div className="min-w-0">
-                                <div className="font-bold text-slate-800 truncate">{staff.contactName}</div>
-                                <div className="text-slate-400 font-mono truncate">{staff.username || '—'} · {staff.email || '—'}</div>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider border ${isActive ? 'bg-green-50 text-green-600 border-green-200' : 'bg-red-50 text-red-500 border-red-200'}`}>
-                                  {isActive
-                                    ? (lang === 'tr' ? "Aktif" : (lang === 'ar' ? "نشط" : "Active"))
-                                    : (lang === 'tr' ? "Devre Dışı" : (lang === 'ar' ? "معطل" : "Disabled"))}
-                                </span>
-                                {canWriteClients && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      title={lang === 'tr' ? "Düzenle" : (lang === 'ar' ? "تعديل" : "Edit")}
-                                      onClick={() => openEditClient(staff)}
-                                      className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
-                                    >
-                                      <Pencil className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title={isActive
-                                        ? (lang === 'tr' ? "Devre Dışı Bırak" : (lang === 'ar' ? "تعطيل" : "Disable"))
-                                        : (lang === 'tr' ? "Etkinleştir" : (lang === 'ar' ? "تفعيل" : "Activate"))}
-                                      onClick={() => handleToggleClientActive(staff)}
-                                      className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
-                                    >
-                                      <Power className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title={lang === 'tr' ? "Şifreyi Sıfırla" : (lang === 'ar' ? "إعادة تعيين كلمة المرور" : "Reset Password")}
-                                      onClick={() => setResetPasswordTarget(staff)}
-                                      className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md cursor-pointer border-0"
-                                    >
-                                      <KeyRound className="w-3 h-3" />
-                                    </button>
-                                  </>
-                                )}
-                                {isSuperAdmin && (
-                                  <button
-                                    type="button"
-                                    title={lang === 'tr' ? "Sil" : (lang === 'ar' ? "حذف" : "Delete")}
-                                    onClick={() => setDeleteStaffTarget(staff)}
-                                    className="p-1.5 bg-red-50 hover:bg-red-100 text-red-500 rounded-md cursor-pointer border-0"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
+              {!editClientTarget.isEmployee && (
+                <ClientStaffSection
+                  lang={lang}
+                  companyStaff={scopeStaffToCompany(clients, editClientTarget.companyName)}
+                  canWriteClients={canWriteClients}
+                  isSuperAdmin={isSuperAdmin}
+                  canAddEmployee={true}
+                  onAddEmployee={() => setAddEmployeeTarget(editClientTarget)}
+                  openEditClient={openEditClient}
+                  handleToggleClientActive={handleToggleClientActive}
+                  setResetPasswordTarget={setResetPasswordTarget}
+                  setDeleteStaffTarget={setDeleteStaffTarget}
+                />
+              )}
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
@@ -994,10 +1070,11 @@ export default function AdminClientsSection({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                      {lang === 'tr' ? "Kullanıcı Adı" : (lang === 'ar' ? "اسم المستخدم" : "Username")}
+                      {lang === 'tr' ? "Kullanıcı Adı" : (lang === 'ar' ? "اسم المستخدم" : "Username")} *
                     </label>
                     <input
                       type="text"
+                      required
                       name="new-employee-username"
                       id="new-employee-username"
                       autoComplete="off"
@@ -1009,9 +1086,10 @@ export default function AdminClientsSection({
                   </div>
                   <div className="space-y-1.5">
                     <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                      {lang === 'tr' ? "Şifre" : (lang === 'ar' ? "كلمة المرور" : "Password")}
+                      {lang === 'tr' ? "Şifre" : (lang === 'ar' ? "كلمة المرور" : "Password")} *
                     </label>
                     <PasswordInput
+                      required
                       name="new-employee-password"
                       id="new-employee-password"
                       autoComplete="new-password"
@@ -1026,9 +1104,10 @@ export default function AdminClientsSection({
                   </div>
                   <div className="space-y-1.5">
                     <label className="block font-bold text-slate-600 text-[11px] uppercase tracking-wider">
-                      {lang === 'tr' ? "Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور" : "Confirm Password")}
+                      {lang === 'tr' ? "Şifreyi Onayla" : (lang === 'ar' ? "تأكيد كلمة المرور" : "Confirm Password")} *
                     </label>
                     <PasswordInput
+                      required
                       name="new-employee-confirm-password"
                       id="new-employee-confirm-password"
                       autoComplete="new-password"
@@ -1140,6 +1219,73 @@ export default function AdminClientsSection({
           </div>
         </div>
       )}
+
+      {/* Orphaned Company Modal — Owner record has been deleted (self-delete
+          is explicitly allowed), Client Staff remain. Company is
+          identified by companyName only, not a Client record — there
+          isn't one. */}
+      {orphanedCompanyView && (() => {
+        const companyStaff = scopeStaffToCompany(clients, orphanedCompanyView);
+        return (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[200] p-4 animate-fade-in">
+            <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                    <Users className="text-orange-500 w-5 h-5" />
+                    <span>{lang === 'tr' ? "Şirketi Yönet" : (lang === 'ar' ? "إدارة الشركة" : "Manage Company")}</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5 font-mono">{orphanedCompanyView}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOrphanedCompanyView(null)}
+                  className="p-1 px-2 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 border-0 cursor-pointer text-xs font-bold rounded-md"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-[11px] text-red-700 space-y-1.5">
+                <div className="font-black uppercase tracking-wider flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{lang === 'tr' ? "Sahip Hesabı Eksik" : (lang === 'ar' ? "حساب المالك مفقود" : "Owner account missing")}</span>
+                </div>
+                <p className="leading-relaxed">
+                  {lang === 'tr'
+                    ? "Bu şirketin sahip hesabı silinmiş (kendi hesabını silme işlemiyle). Şirket, sevkiyatlar, belgeler ve mevcut personel hesapları etkilenmedi ve aşağıda yönetilebilir. Yeni personel eklemek için önce yeni bir sahip hesabı oluşturulmalıdır — bu, ayrı bir takip öğesi olarak planlanmıştır."
+                    : (lang === 'ar'
+                      ? "تم حذف حساب مالك هذه الشركة (عبر حذف الحساب الشخصي). لم تتأثر الشركة أو الشحنات أو المستندات أو حسابات الموظفين الحاليين، ويمكن إدارتها أدناه. لإضافة موظفين جدد، يجب أولاً إنشاء حساب مالك بديل — وهذا مخطط كعنصر متابعة منفصل."
+                      : "This company's Owner account was deleted (via personal account self-deletion). The company, its shipments, documents, and existing Staff accounts are unaffected and can be managed below. Adding new Staff requires a replacement Owner account first — that's planned as a separate follow-up, not built in this change.")}
+                </p>
+              </div>
+
+              <ClientStaffSection
+                lang={lang}
+                companyStaff={companyStaff}
+                canWriteClients={canWriteClients}
+                isSuperAdmin={isSuperAdmin}
+                canAddEmployee={false}
+                onAddEmployee={() => {}}
+                openEditClient={openEditClient}
+                handleToggleClientActive={handleToggleClientActive}
+                setResetPasswordTarget={setResetPasswordTarget}
+                setDeleteStaffTarget={setDeleteStaffTarget}
+              />
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setOrphanedCompanyView(null)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg cursor-pointer border-0"
+                >
+                  {lang === 'tr' ? "Kapat" : (lang === 'ar' ? "إغلاق" : "Close")}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Delete Employee Confirmation Modal */}
       {deleteStaffTarget && (

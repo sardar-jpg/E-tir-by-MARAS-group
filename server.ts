@@ -52,7 +52,7 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -4660,6 +4660,19 @@ async function startServer() {
         return res.status(400).json({ error: resolution.error });
       }
       const { companyName, isEmployee } = resolution;
+
+      // Every Client Staff member is a real login account — username and
+      // password are mandatory (Owner creation is unaffected: this check
+      // only runs when isEmployee is true, i.e. only on the Add Employee
+      // path). Enforced here, not just in the Admin UI's `required`
+      // attributes, since a direct API call bypasses HTML validation
+      // entirely.
+      if (isEmployee) {
+        const credentialsCheck = validateStaffCredentials(data);
+        if (!credentialsCheck.ok) {
+          return res.status(400).json({ error: credentialsCheck.error });
+        }
+      }
 
       // Duplicate check across ALL Client accounts (Owner and Staff alike —
       // POST /api/login's client-matching branch has no per-company
