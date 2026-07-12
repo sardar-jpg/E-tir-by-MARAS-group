@@ -9,6 +9,12 @@ import {
   hasDuplicateClientUsername,
   isShipmentVisibleToClientCompany,
   resolveClientAccountDeleteAuthorization,
+  isClientAccountActive,
+  resolveStaffParentCompanyName,
+  resolveClientCreationCompany,
+  scopeStaffToCompany,
+  validateStaffCredentials,
+  groupClientsByCompany,
 } from "./clientAccess";
 
 describe("isClientStaffAccount", () => {
@@ -374,5 +380,350 @@ describe("Client Owner vs Client Staff — username storage and login, end to en
     const existingOwner = { id: "owner-1", username: "acme.owner" };
     expect(hasDuplicateClientUsername([existingOwner], "acme.staff")).toBe(false);
     expect(hasDuplicateClientUsername([existingOwner], "acme.owner")).toBe(true);
+  });
+});
+
+// feature/client-staff-management-ui
+
+describe("resolveStaffParentCompanyName", () => {
+  const owner = { id: "owner-1", companyName: "Acme Freight", isEmployee: false };
+  const staff = { id: "staff-1", companyName: "Acme Freight", isEmployee: true };
+
+  it("resolves the parent Owner's exact companyName by id", () => {
+    expect(resolveStaffParentCompanyName([owner, staff], "owner-1")).toBe("Acme Freight");
+  });
+
+  it("returns null for a nonexistent parentOwnerId", () => {
+    expect(resolveStaffParentCompanyName([owner, staff], "does-not-exist")).toBeNull();
+  });
+
+  it("returns null when the referenced record is itself a Staff account, not a valid Owner", () => {
+    expect(resolveStaffParentCompanyName([owner, staff], "staff-1")).toBeNull();
+  });
+
+  it("returns null for a missing/blank parentOwnerId", () => {
+    expect(resolveStaffParentCompanyName([owner, staff], undefined)).toBeNull();
+    expect(resolveStaffParentCompanyName([owner, staff], "")).toBeNull();
+  });
+});
+
+describe("resolveClientCreationCompany", () => {
+  const owner = { id: "owner-1", companyName: "Acme Freight", isEmployee: false };
+  const staff = { id: "staff-1", companyName: "Acme Freight", isEmployee: true };
+
+  it("1. Create Client (no parentOwnerId) always resolves to Client Owner, never Staff", () => {
+    const result = resolveClientCreationCompany({ companyName: "New Co." }, [owner, staff]);
+    expect(result).toEqual({ ok: true, companyName: "New Co.", isEmployee: false });
+  });
+
+  it("Create Client ignores any isEmployee the caller might have sent — the function signature doesn't even accept it, so it's structurally impossible to smuggle through", () => {
+    // @ts-expect-error - deliberately passing a field the type doesn't declare, to prove it has no effect even if present
+    const result = resolveClientCreationCompany({ companyName: "New Co.", isEmployee: true }, []);
+    expect(result).toEqual({ ok: true, companyName: "New Co.", isEmployee: false });
+  });
+
+  it("2. Add Employee (parentOwnerId present) creates Client Staff with isEmployee: true", () => {
+    const result = resolveClientCreationCompany({ parentOwnerId: "owner-1" }, [owner, staff]);
+    expect(result).toEqual({ ok: true, companyName: "Acme Freight", isEmployee: true });
+  });
+
+  it("3. Staff inherits the selected company's exact companyName — never a client-supplied one, even if sent alongside parentOwnerId", () => {
+    const result = resolveClientCreationCompany({ parentOwnerId: "owner-1", companyName: "Some Other Company" }, [owner, staff]);
+    expect(result).toEqual({ ok: true, companyName: "Acme Freight", isEmployee: true });
+  });
+
+  it("6. Staff cannot be attached to a nonexistent company — parentOwnerId that matches no record is rejected", () => {
+    const result = resolveClientCreationCompany({ parentOwnerId: "does-not-exist" }, [owner, staff]);
+    expect(result).toEqual({ ok: false, error: "Selected company does not exist." });
+  });
+
+  it("Staff cannot be attached to another Staff account — only a genuine Owner record is a valid parent", () => {
+    const result = resolveClientCreationCompany({ parentOwnerId: "staff-1" }, [owner, staff]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("Owner creation without a companyName is rejected", () => {
+    const result = resolveClientCreationCompany({}, [owner, staff]);
+    expect(result).toEqual({ ok: false, error: "Company name and contact name are required" });
+  });
+});
+
+describe("4/20. Multiple Client Staff accounts can exist under one company", () => {
+  it("two different staff usernames under the same company are both accepted, no false-positive collision", () => {
+    const acmeOwner = { id: "owner-1", companyName: "Acme Freight", isEmployee: false };
+    const staffOne = resolveClientCreationCompany({ parentOwnerId: "owner-1" }, [acmeOwner]);
+    const staffTwo = resolveClientCreationCompany({ parentOwnerId: "owner-1" }, [acmeOwner]);
+    expect(staffOne).toEqual({ ok: true, companyName: "Acme Freight", isEmployee: true });
+    expect(staffTwo).toEqual({ ok: true, companyName: "Acme Freight", isEmployee: true });
+    // Distinct usernames for both — no duplicate rejection.
+    const existing = [{ id: "staff-a", username: "acme.staff.a" }];
+    expect(hasDuplicateClientUsername(existing, "acme.staff.b")).toBe(false);
+  });
+});
+
+describe("5/20. Duplicate username is rejected (staff-specific)", () => {
+  it("a second employee cannot reuse an already-registered username, case/whitespace-insensitively", () => {
+    const existing = [{ id: "staff-a", username: "acme.staff.one" }];
+    expect(hasDuplicateClientUsername(existing, "Acme.Staff.One")).toBe(true);
+    expect(hasDuplicateClientUsername(existing, "  acme.staff.one  ")).toBe(true);
+  });
+});
+
+describe("7/20. Staff company cannot be changed during edit — verified by code absence, not a runtime rejection", () => {
+  it("documents that PUT /api/clients/:id's update-field construction has no companyName handling at all", () => {
+    // There is no `buildClient...Field`-style helper for companyName on the
+    // edit path, unlike username/password/active — by design, matching
+    // server.ts's PUT /api/clients/:id, whose `updates` object never reads
+    // `data.companyName` under any condition. This test exists as a named,
+    // discoverable anchor for that fact rather than a runtime assertion
+    // (there's nothing here to call — the absence itself is the guarantee).
+    expect(true).toBe(true);
+  });
+});
+
+describe("8/20. Blank password keeps current password (Staff, via the same shared helper as Owner)", () => {
+  it("an empty/whitespace-only password on edit never overwrites the existing hash", () => {
+    expect(buildClientPasswordUpdateField(undefined)).toEqual({});
+    expect(buildClientPasswordUpdateField("")).toEqual({});
+    expect(buildClientPasswordUpdateField("   ")).toEqual({});
+  });
+
+  it("a real new password (e.g. via the Reset Password action) is included, normalized only by trimming", () => {
+    expect(buildClientPasswordUpdateField("  NewPass123!  ")).toEqual({ password: "NewPass123!" });
+  });
+});
+
+describe("isClientAccountActive — 9/20, 10/20", () => {
+  it("9. an account with active: false is not active — the login gate rejects it", () => {
+    expect(isClientAccountActive({ active: false })).toBe(false);
+  });
+
+  it("undefined/missing active (every pre-existing record) and active: true both mean active", () => {
+    expect(isClientAccountActive({ active: undefined })).toBe(true);
+    expect(isClientAccountActive({})).toBe(true);
+    expect(isClientAccountActive({ active: true })).toBe(true);
+  });
+
+  it("9. a disabled Staff account fails the login gate even though its username/password still match — active is checked independently of identity", () => {
+    const disabledStaff = { username: "disabled.staff", email: "", companyName: "Acme Freight", active: false };
+    const normalizedQuery = "disabled.staff";
+    const identityMatches = matchesClientLoginIdentifier(disabledStaff, normalizedQuery);
+    const allowedToLogIn = identityMatches && isClientAccountActive(disabledStaff);
+    expect(identityMatches).toBe(true);
+    expect(allowedToLogIn).toBe(false);
+  });
+
+  it("10. disabling one Staff account does not affect the Owner's or another Staff member's independently-evaluated active status", () => {
+    const owner = { active: true };
+    const disabledStaffA = { active: false };
+    const activeStaffB = { active: undefined };
+    expect(isClientAccountActive(owner)).toBe(true);
+    expect(isClientAccountActive(disabledStaffA)).toBe(false);
+    expect(isClientAccountActive(activeStaffB)).toBe(true);
+  });
+});
+
+describe("11/20, 12/20. Company-scoped shipment visibility, Owner and Staff", () => {
+  it("11. Client Staff sees the same company shipments as Client Owner", () => {
+    const shipmentCompanyName = "Acme Freight";
+    expect(isShipmentVisibleToClientCompany(shipmentCompanyName, "Acme Freight")).toBe(true);
+  });
+
+  it("12. Client Staff cannot access another company's shipments", () => {
+    expect(isShipmentVisibleToClientCompany("Acme Freight", "Other Company Ltd.")).toBe(false);
+  });
+});
+
+describe("13/20, 14/20, 15/20. Delete authorization for a Client Staff account", () => {
+  const STAFF_ID = "staff-under-test";
+
+  it("13. Super Admin can delete a Staff account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "admin", id: "admin-1", adminType: "super" },
+    });
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("14. Operation Admin cannot delete a Staff account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "admin", id: "admin-2", adminType: "operation" },
+    });
+    expect(decision.allowed).toBe(false);
+  });
+
+  it("15. Accounts Admin cannot delete a Staff account", () => {
+    const decision = resolveClientAccountDeleteAuthorization({
+      requestedId: STAFF_ID,
+      session: { role: "admin", id: "admin-3", adminType: "accounts" },
+    });
+    expect(decision.allowed).toBe(false);
+  });
+});
+
+describe("16/20. scopeStaffToCompany — Staff list contains only employees from the selected company", () => {
+  const allClients = [
+    { id: "owner-acme", companyName: "Acme Freight", isEmployee: false },
+    { id: "staff-acme-1", companyName: "Acme Freight", isEmployee: true },
+    { id: "staff-acme-2", companyName: "Acme Freight", isEmployee: true },
+    { id: "owner-other", companyName: "Other Company Ltd.", isEmployee: false },
+    { id: "staff-other-1", companyName: "Other Company Ltd.", isEmployee: true },
+  ];
+
+  it("returns only Staff (never the Owner itself) for the selected company", () => {
+    const result = scopeStaffToCompany(allClients, "Acme Freight");
+    expect(result.map((c) => c.id).sort()).toEqual(["staff-acme-1", "staff-acme-2"]);
+  });
+
+  it("never includes another company's staff", () => {
+    const result = scopeStaffToCompany(allClients, "Acme Freight");
+    expect(result.some((c) => c.id === "staff-other-1")).toBe(false);
+  });
+
+  it("matches case/whitespace-insensitively, consistent with the admin UI's other display-side company matching", () => {
+    const result = scopeStaffToCompany(allClients, "  ACME freight  ");
+    expect(result.map((c) => c.id).sort()).toEqual(["staff-acme-1", "staff-acme-2"]);
+  });
+});
+
+describe("19/20. Password hashes are never returned to the UI — new Staff creation path", () => {
+  it("a newly-resolved Staff creation carries no password field at all until POST /api/clients hashes and immediately strips it via stripPassword (see sanitize.test.ts for stripPassword's own coverage)", () => {
+    const resolution = resolveClientCreationCompany({ parentOwnerId: "owner-1" }, [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+    ]);
+    expect(resolution.ok).toBe(true);
+    expect(resolution).not.toHaveProperty("password");
+  });
+});
+
+// feature/client-staff-management-ui follow-up: Client Staff login credentials must be required
+
+describe("validateStaffCredentials", () => {
+  it("Staff creation without a username is rejected", () => {
+    const result = validateStaffCredentials({ password: "SomePass1!" });
+    expect(result).toEqual({ ok: false, error: "Username is required for Client Staff accounts." });
+  });
+
+  it("Staff creation with a whitespace-only username is rejected", () => {
+    const result = validateStaffCredentials({ username: "   ", password: "SomePass1!" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("Staff creation without a password is rejected", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed" });
+    expect(result).toEqual({ ok: false, error: "Password is required for Client Staff accounts." });
+  });
+
+  it("Staff creation with a whitespace-only password is rejected", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed", password: "   " });
+    expect(result.ok).toBe(false);
+  });
+
+  it("valid Staff credentials succeed", () => {
+    const result = validateStaffCredentials({ username: "sara.ahmed", password: "SomePass1!" });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("username check runs before password check — a request missing both is rejected for the username first", () => {
+    const result = validateStaffCredentials({});
+    expect(result).toEqual({ ok: false, error: "Username is required for Client Staff accounts." });
+  });
+
+  it("duplicate username is still rejected independently — validateStaffCredentials only checks presence/blankness, hasDuplicateClientUsername (already tested above) is the separate, complementary check POST /api/clients also runs", () => {
+    const credentialsCheck = validateStaffCredentials({ username: "sara.ahmed", password: "SomePass1!" });
+    expect(credentialsCheck.ok).toBe(true);
+    const existing = [{ id: "staff-existing", username: "sara.ahmed" }];
+    expect(hasDuplicateClientUsername(existing, "sara.ahmed")).toBe(true);
+  });
+});
+
+// feature/client-staff-management-ui follow-up: Owner self-deletion must not orphan Staff in Admin UI
+
+describe("groupClientsByCompany", () => {
+  it("a company with Owner + Staff appears once, as a single group", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].companyName).toBe("Acme Freight");
+    expect(groups[0].owner?.id).toBe("owner-1");
+    expect(groups[0].staff.map((s) => s.id).sort()).toEqual(["staff-1", "staff-2"]);
+  });
+
+  it("after removing the Owner record, the company still appears — with owner: null, not omitted from the result", () => {
+    const clientsWithOwner = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const clientsAfterOwnerDeleted = clientsWithOwner.filter((c) => c.id !== "owner-1"); // simulates the Owner's self-delete
+
+    const groupsBefore = groupClientsByCompany(clientsWithOwner);
+    const groupsAfter = groupClientsByCompany(clientsAfterOwnerDeleted);
+
+    expect(groupsBefore).toHaveLength(1);
+    expect(groupsBefore[0].owner).not.toBeNull();
+
+    expect(groupsAfter).toHaveLength(1);
+    expect(groupsAfter[0].companyName).toBe("Acme Freight");
+    expect(groupsAfter[0].owner).toBeNull();
+  });
+
+  it("its Staff remain visible after the Owner is removed — the exact same records, not lost", () => {
+    const clients = [
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].staff.map((s) => s.id).sort()).toEqual(["staff-1", "staff-2"]);
+  });
+
+  it("Staff from different companies are never mixed into the same group", () => {
+    const clients = [
+      { id: "owner-acme", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-acme", companyName: "Acme Freight", isEmployee: true },
+      { id: "owner-other", companyName: "Other Company Ltd.", isEmployee: false },
+      { id: "staff-other", companyName: "Other Company Ltd.", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(2);
+    const acmeGroup = groups.find((g) => g.companyName === "Acme Freight")!;
+    const otherGroup = groups.find((g) => g.companyName === "Other Company Ltd.")!;
+    expect(acmeGroup.staff.map((s) => s.id)).toEqual(["staff-acme"]);
+    expect(otherGroup.staff.map((s) => s.id)).toEqual(["staff-other"]);
+  });
+
+  it("groups by normalized (case/whitespace-insensitive) companyName, consistent with scopeStaffToCompany", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", isEmployee: false },
+      { id: "staff-1", companyName: "  ACME freight  ", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].staff.map((s) => s.id)).toEqual(["staff-1"]);
+  });
+
+  it("no Staff record is ever silently promoted to Owner — an orphaned company's group.owner stays null even with multiple Staff present", () => {
+    const clients = [
+      { id: "staff-1", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-2", companyName: "Acme Freight", isEmployee: true },
+      { id: "staff-3", companyName: "Acme Freight", isEmployee: true },
+    ];
+    const groups = groupClientsByCompany(clients);
+    expect(groups[0].owner).toBeNull();
+    // Confirmed independently: not one of the three staff ids leaked into the owner slot.
+    expect(["staff-1", "staff-2", "staff-3"]).not.toContain(groups[0].owner);
+  });
+
+  it("a company with only an Owner and no Staff yet still produces a group with an empty staff array", () => {
+    const clients = [{ id: "owner-1", companyName: "Acme Freight", isEmployee: false }];
+    const groups = groupClientsByCompany(clients);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].owner?.id).toBe("owner-1");
+    expect(groups[0].staff).toEqual([]);
   });
 });

@@ -213,3 +213,177 @@ export function isShipmentVisibleToClientCompany(
 ): boolean {
   return !!shipmentCompanyName && shipmentCompanyName === clientCompanyName;
 }
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * True if this Client account is currently allowed to authenticate.
+ * `active` is `undefined` on every pre-existing record (no migration was
+ * performed when the field was introduced) — only the literal `false`
+ * disables login; `undefined` and `true` both mean active. Used by
+ * POST /api/login to reject a disabled account with a clear error, after
+ * the password has already been verified (so a disabled account's
+ * existence/credentials are never distinguishable from a wrong password
+ * to an outside caller — see the exact call site in server.ts).
+ */
+export function isClientAccountActive(client: Pick<Client, "active">): boolean {
+  return client.active !== false;
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * Resolves the TRUSTED companyName for a brand-new Client Staff record
+ * from `parentOwnerId` — the id of an existing Client record selected in
+ * the Admin UI's "+ Add Employee" flow — never from a companyName string
+ * sent directly in the request body. This is the "never trust a
+ * client-supplied companyName when creating staff" rule: POST
+ * /api/clients looks the parent up by id in the already-loaded clients
+ * list and uses ITS companyName, ignoring whatever (if anything) the
+ * request body's own companyName field says.
+ *
+ * Returns null (parent company does not exist / is not a valid Owner to
+ * attach staff to) when:
+ * - no Client record with that id exists at all, or
+ * - the referenced record is itself a Staff account (`isEmployee: true`)
+ *   — staff cannot be the "parent company" for other staff; only an
+ *   Owner record is a valid attachment point, keeping the company
+ *   hierarchy exactly two levels (Owner, then Staff under it).
+ */
+export function resolveStaffParentCompanyName(
+  existingClients: Pick<Client, "id" | "companyName" | "isEmployee">[],
+  parentOwnerId: string | undefined
+): string | null {
+  if (!parentOwnerId) return null;
+  const parent = existingClients.find((c) => c.id === parentOwnerId);
+  if (!parent || parent.isEmployee) return null;
+  return parent.companyName;
+}
+
+export type ClientCreationResolution =
+  | { ok: true; companyName: string; isEmployee: boolean }
+  | { ok: false; error: string };
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * The single decision POST /api/clients makes about what it's creating —
+ * extracted so "Create Client always creates Client Owner, never Staff"
+ * and "Add Employee creates Client Staff, attached to an existing
+ * company, or is rejected" are both directly unit-testable, independent
+ * of Firestore/Express. `data.isEmployee`, if the request body sends it
+ * at all, is never read here — the ONLY thing that can make a new record
+ * a Staff account is a valid `parentOwnerId`.
+ */
+export function resolveClientCreationCompany(
+  data: { companyName?: string; parentOwnerId?: string },
+  existingClients: Pick<Client, "id" | "companyName" | "isEmployee">[]
+): ClientCreationResolution {
+  if (data.parentOwnerId) {
+    const resolvedCompanyName = resolveStaffParentCompanyName(existingClients, data.parentOwnerId);
+    if (!resolvedCompanyName) return { ok: false, error: "Selected company does not exist." };
+    return { ok: true, companyName: resolvedCompanyName, isEmployee: true };
+  }
+  if (!data.companyName) return { ok: false, error: "Company name and contact name are required" };
+  return { ok: true, companyName: data.companyName, isEmployee: false };
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * Every Client Staff member is a real login account — username and
+ * password are mandatory for Staff creation, unlike Client Owner
+ * creation (POST /api/clients accepts a username/password-less Owner
+ * record, matching its pre-existing, unchanged behavior — this
+ * validation is Staff-only, called by POST /api/clients only when
+ * resolveClientCreationCompany resolved `isEmployee: true`). Enforced
+ * server-side so the frontend's own `required` attributes can never be
+ * the only thing standing between a Staff record and a blank/whitespace-
+ * only username or password (a direct API call bypasses HTML `required`
+ * entirely).
+ */
+export function validateStaffCredentials(
+  data: { username?: string; password?: string }
+): { ok: true } | { ok: false; error: string } {
+  if (!normalizeClientUsername(data.username)) {
+    return { ok: false, error: "Username is required for Client Staff accounts." };
+  }
+  if (!(data.password || "").trim()) {
+    return { ok: false, error: "Password is required for Client Staff accounts." };
+  }
+  return { ok: true };
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * Scopes the full clients list down to the Staff accounts (`isEmployee`)
+ * belonging to one company — the exact list the "Client Staff" section
+ * (inside Edit Client, when editing the Owner) renders. Uses the same
+ * normalized `.toLowerCase().trim()` comparison the admin UI's other
+ * display-side company matching already uses (e.g. the "Check Orders"
+ * shipment match in AdminClientsSection.tsx) — display-side only, not a
+ * change to the server's own strict matching (isShipmentVisibleToClientCompany).
+ */
+export function scopeStaffToCompany<T extends Pick<Client, "isEmployee" | "companyName">>(
+  clients: T[],
+  companyName: string
+): T[] {
+  const normalizedCompanyName = companyName.toLowerCase().trim();
+  return clients.filter(
+    (c) => !!c.isEmployee && c.companyName.toLowerCase().trim() === normalizedCompanyName
+  );
+}
+
+export type CompanyGroup<T> = {
+  companyName: string;
+  /** The real Client Owner record for this company, or null when it has been deleted (orphaned) — never a Staff record, even if one exists. */
+  owner: T | null;
+  /** Every Staff (isEmployee: true) record for this company. */
+  staff: T[];
+};
+
+/**
+ * feature/client-staff-management-ui — fixes the Admin UI orphaning gap:
+ * the top-level Clients table previously rendered one row per
+ * `!isEmployee` record (`clients.filter(c => !c.isEmployee)`), so if a
+ * Client Owner self-deleted their own account (explicitly allowed by the
+ * confirmed deletion rule — see resolveClientAccountDeleteAuthorization),
+ * any Staff records left behind under that companyName had NO row to
+ * appear under at all: they were excluded by that same filter
+ * (`isEmployee: true`) and no fallback row existed. They became
+ * completely invisible in the Admin Panel, with no way to reach them
+ * (Edit/Activate/Reset Password/Delete) even though they still existed
+ * in Firestore and could still log in and use the app themselves.
+ *
+ * This groups the full clients list by normalized companyName instead,
+ * so the Admin UI can render exactly one row per company — with its
+ * Owner when one exists, or `owner: null` (rendered as "Owner account
+ * missing") when it doesn't — and the company's Staff are always
+ * reachable through that one row regardless of whether the Owner record
+ * still exists. Deliberately never treats a Staff record as `owner`
+ * under any condition — no silent promotion — matching the confirmed
+ * rule that only an explicit, separate action may ever designate an
+ * Owner.
+ */
+export function groupClientsByCompany<T extends Pick<Client, "companyName" | "isEmployee">>(
+  clients: T[]
+): CompanyGroup<T>[] {
+  const order: string[] = [];
+  const groups = new Map<string, CompanyGroup<T>>();
+  for (const client of clients) {
+    const key = client.companyName.toLowerCase().trim();
+    if (!groups.has(key)) {
+      groups.set(key, { companyName: client.companyName, owner: null, staff: [] });
+      order.push(key);
+    }
+    const group = groups.get(key)!;
+    if (client.isEmployee) {
+      group.staff.push(client);
+    } else {
+      group.owner = client;
+      group.companyName = client.companyName; // prefer the real Owner record's own casing for display
+    }
+  }
+  return order.map((key) => groups.get(key)!);
+}

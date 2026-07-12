@@ -52,7 +52,7 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -3923,6 +3923,18 @@ async function startServer() {
           await setDoc(doc(db, "clients", matchedClient.id), { ...matchedClient, password: newHash });
         });
         if (matched) {
+          // feature/client-staff-management-ui: checked only AFTER the
+          // password has already verified, so a disabled account's
+          // existence/credentials are never distinguishable from a wrong
+          // password to an outside caller — this is a clear, specific
+          // error shown only to someone who already proved they know the
+          // correct password. isClientAccountActive treats missing/undefined
+          // `active` as active (every pre-existing record), so this never
+          // blocks an account that predates the field.
+          if (!isClientAccountActive(matchedClient)) {
+            logActivity("", "", matchedClient.email || matchedClient.username || "Client", "Login rejected - account disabled", "Giriş reddedildi - hesap devre dışı", "تم رفض تسجيل الدخول - الحساب معطل");
+            return res.status(403).json({ error: "This account has been disabled. Contact your administrator." });
+          }
           clearLoginRateLimit(req, normalizedQuery);
           logActivity("", "", matchedClient.email || matchedClient.username || "Client", "Client login succeeded", "Müşteri girişi başarılı", "تم تسجيل دخول العميل بنجاح");
           // isEmployee is read from the Firestore record loaded above — never from the request body.
@@ -4625,31 +4637,62 @@ async function startServer() {
   app.post("/api/clients", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
-      if (!data.companyName || !data.contactName) {
-        return res.status(400).json({ error: "Company name and contact name are required" });
+      if (!data.contactName) {
+        return res.status(400).json({ error: "Contact name is required" });
       }
+
+      // feature/client-staff-management-ui: `parentOwnerId` present means
+      // this is an "+ Add Employee" (Client Staff) creation — the company
+      // is NEVER taken from a client-supplied `companyName` string here;
+      // it's looked up server-side from the parent Owner record's id, the
+      // one thing the Admin UI actually lets the operator select. Absent
+      // `parentOwnerId` means this is the "Create New Client" (Owner)
+      // form — isEmployee is never honored from the request body on
+      // either path, so this route can never be tricked into creating a
+      // Staff record except through the explicit parentOwnerId path,
+      // guaranteeing "Create Client always creates Client Owner, never
+      // Staff."
+      const clientsSnapshot = await getDocs(collection(db, "clients"));
+      const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
+
+      const resolution = resolveClientCreationCompany(data, existingClients);
+      if (!resolution.ok) {
+        return res.status(400).json({ error: resolution.error });
+      }
+      const { companyName, isEmployee } = resolution;
+
+      // Every Client Staff member is a real login account — username and
+      // password are mandatory (Owner creation is unaffected: this check
+      // only runs when isEmployee is true, i.e. only on the Add Employee
+      // path). Enforced here, not just in the Admin UI's `required`
+      // attributes, since a direct API call bypasses HTML validation
+      // entirely.
+      if (isEmployee) {
+        const credentialsCheck = validateStaffCredentials(data);
+        if (!credentialsCheck.ok) {
+          return res.status(400).json({ error: credentialsCheck.error });
+        }
+      }
+
       // Duplicate check across ALL Client accounts (Owner and Staff alike —
       // POST /api/login's client-matching branch has no per-company
       // scoping, so a duplicate username anywhere would make one of the
       // two colliding accounts unreachable/ambiguous at login. Same
       // reasoning as findDuplicateDriverField for drivers.
-      if (data.username) {
-        const clientsSnapshot = await getDocs(collection(db, "clients"));
-        const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
-        if (hasDuplicateClientUsername(existingClients, data.username)) {
-          return res.status(409).json({ error: "Username is already registered to another client account." });
-        }
+      if (data.username && hasDuplicateClientUsername(existingClients, data.username)) {
+        return res.status(409).json({ error: "Username is already registered to another client account." });
       }
       const newClient: Client = {
         id: data.id || `client-${Date.now()}`,
-        companyName: data.companyName,
+        companyName,
         contactName: data.contactName,
         phone: data.phone || "",
         email: data.email || "",
         address: data.address || "",
         notes: data.notes || "",
         createdAt: data.createdAt || new Date().toISOString(),
-        ...(data.isEmployee ? { isEmployee: true } : {}),
+        active: true,
+        ...(isEmployee ? { isEmployee: true } : {}),
         ...buildClientUsernameField(data.username),
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
@@ -4676,6 +4719,13 @@ async function startServer() {
       if (data.address !== undefined) updates.address = data.address;
       if (data.notes !== undefined) updates.notes = data.notes;
       if (data.isEmployee !== undefined) updates.isEmployee = Boolean(data.isEmployee);
+      // feature/client-staff-management-ui: Activate/Disable action.
+      // `active` is Client Staff-scoped in the Admin UI this ships with,
+      // but the field/route itself doesn't distinguish Owner from Staff —
+      // whichever single Client record :id refers to gets updated, never
+      // any other account, matching the existing per-id-only update
+      // behavior of this route.
+      if (data.active !== undefined) updates.active = Boolean(data.active);
       if (data.username !== undefined) {
         const normalizedUsername = normalizeClientUsername(data.username);
         if (normalizedUsername) {

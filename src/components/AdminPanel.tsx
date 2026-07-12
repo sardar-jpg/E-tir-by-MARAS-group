@@ -723,7 +723,45 @@ export default function AdminPanel({
   const [editClientUsername, setEditClientUsername] = useState("");
   const [editClientPassword, setEditClientPassword] = useState("");
   const [editClientConfirmPassword, setEditClientConfirmPassword] = useState("");
+  const [editClientActive, setEditClientActive] = useState(true);
   const [isSubmittingEditClient, setIsSubmittingEditClient] = useState(false);
+
+  // feature/client-staff-management-ui: "+ Add Employee" modal — creates a
+  // Client Staff record attached to addEmployeeTarget's company. Company
+  // is never a free-text/editable field here; it's fixed to whichever
+  // Client Owner the admin opened this from.
+  const [addEmployeeTarget, setAddEmployeeTarget] = useState<Client | null>(null);
+  const [newEmployeeName, setNewEmployeeName] = useState("");
+  const [newEmployeeEmail, setNewEmployeeEmail] = useState("");
+  const [newEmployeePhone, setNewEmployeePhone] = useState("");
+  const [newEmployeeUsername, setNewEmployeeUsername] = useState("");
+  const [newEmployeePassword, setNewEmployeePassword] = useState("");
+  const [newEmployeeConfirmPassword, setNewEmployeeConfirmPassword] = useState("");
+  const [isSubmittingEmployee, setIsSubmittingEmployee] = useState(false);
+
+  // feature/client-staff-management-ui: quick "Reset Password" action from
+  // the Client Staff table — a focused, single-purpose modal distinct from
+  // the fuller Edit flow, credentials-only.
+  const [resetPasswordTarget, setResetPasswordTarget] = useState<Client | null>(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [resetPasswordConfirmValue, setResetPasswordConfirmValue] = useState("");
+  const [isSubmittingResetPassword, setIsSubmittingResetPassword] = useState(false);
+
+  // feature/client-staff-management-ui: Delete confirmation for a Client
+  // Staff row — the server (resolveClientAccountDeleteAuthorization) is
+  // the real enforcement point restricting this to Super Admin; the UI
+  // action itself is also only rendered for a Super Admin session (see
+  // AdminClientsSection's isSuperAdmin prop), matching the merged
+  // fix/client-create-username rule.
+  const [deleteStaffTarget, setDeleteStaffTarget] = useState<Client | null>(null);
+  const [isDeletingStaff, setIsDeletingStaff] = useState(false);
+
+  // feature/client-staff-management-ui follow-up: the company name (not a
+  // Client record — there isn't one) for the "Manage" view opened from an
+  // orphaned company row in the top-level Clients table (Owner record
+  // deleted, Staff remain). Distinct from editClientTarget, which always
+  // holds a real Client record.
+  const [orphanedCompanyView, setOrphanedCompanyView] = useState<string | null>(null);
 
   // fix/client-create-username: the Add Client modal's Cancel/✕ buttons
   // previously just closed the modal (`setIsAddClientOpen(false)`) without
@@ -739,6 +777,27 @@ export default function AdminPanel({
       setNewClientPassword("");
       setNewClientConfirmPassword("");
     }
+  };
+
+  // feature/client-staff-management-ui: same reset-on-close reasoning as
+  // setIsAddClientOpenSafe above, applied to the "+ Add Employee" modal —
+  // closing it (Cancel/✕, or after a successful create) always clears
+  // every field, so reopening it (for the same or a different company)
+  // never carries stale values forward.
+  const closeAddEmployeeModal = () => {
+    setAddEmployeeTarget(null);
+    setNewEmployeeName("");
+    setNewEmployeeEmail("");
+    setNewEmployeePhone("");
+    setNewEmployeeUsername("");
+    setNewEmployeePassword("");
+    setNewEmployeeConfirmPassword("");
+  };
+
+  const closeResetPasswordModal = () => {
+    setResetPasswordTarget(null);
+    setResetPasswordValue("");
+    setResetPasswordConfirmValue("");
   };
 
   const [isNotifOpen, setIsNotifOpen] = useState(false);
@@ -2722,6 +2781,7 @@ MARAS Group etir Center`;
     setEditClientUsername(client.username || "");
     setEditClientPassword("");
     setEditClientConfirmPassword("");
+    setEditClientActive(client.active !== false);
   };
 
   const handleEditClientSubmit = async (e: React.FormEvent) => {
@@ -2743,6 +2803,11 @@ MARAS Group etir Center`;
         username: editClientUsername.trim(),
       };
       if (editClientPassword.trim()) body.password = editClientPassword.trim();
+      // feature/client-staff-management-ui: Status is a Client Staff
+      // concept in this UI — only sent when editing a Staff record, so
+      // editing a Client Owner never touches `active` at all (Owner
+      // status behavior is intentionally unchanged by this PR).
+      if (editClientTarget.isEmployee) body.active = editClientActive;
 
       const res = await apiFetch(`/api/clients/${editClientTarget.id}`, {
         method: "PUT",
@@ -2762,6 +2827,160 @@ MARAS Group etir Center`;
       triggerToast(`Error: ${err.message}`);
     } finally {
       setIsSubmittingEditClient(false);
+    }
+  };
+
+  // feature/client-staff-management-ui: "+ Add Employee" — creates a
+  // Client Staff record attached to addEmployeeTarget's company. Notably
+  // does NOT send `companyName` at all — the server derives it from
+  // `parentOwnerId` (never trusts a client-supplied companyName for staff
+  // creation), and does not send `isEmployee` either (the server forces
+  // this to true whenever `parentOwnerId` is present, regardless of what
+  // the request body says).
+  const handleAddEmployeeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addEmployeeTarget) return;
+    if (!newEmployeeName.trim()) {
+      triggerToast(lang === 'tr' ? "Personel adı zorunludur!" : (lang === 'ar' ? "اسم الموظف مطلوب!" : "Employee name is required!"));
+      return;
+    }
+    // feature/client-staff-management-ui follow-up: every Client Staff
+    // member is a real login account — username and password are
+    // mandatory here (unlike Client Owner creation, where both stay
+    // optional). The `required` attributes on these fields already push
+    // back on an empty submit, but a whitespace-only value (e.g. a single
+    // space) passes HTML's `required` check while still being blank in
+    // practice — checked explicitly here, and independently enforced
+    // server-side (validateStaffCredentials in POST /api/clients) since
+    // this frontend check alone is not sufficient for a direct API call.
+    if (!newEmployeeUsername.trim()) {
+      triggerToast(lang === 'tr' ? "Kullanıcı adı zorunludur!" : (lang === 'ar' ? "اسم المستخدم مطلوب!" : "Username is required!"));
+      return;
+    }
+    if (!newEmployeePassword.trim()) {
+      triggerToast(lang === 'tr' ? "Şifre zorunludur!" : (lang === 'ar' ? "كلمة المرور مطلوبة!" : "Password is required!"));
+      return;
+    }
+    if (newEmployeePassword.trim() !== newEmployeeConfirmPassword.trim()) {
+      triggerToast(passwordMismatchError);
+      return;
+    }
+    setIsSubmittingEmployee(true);
+    try {
+      const res = await apiFetch("/api/clients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parentOwnerId: addEmployeeTarget.id,
+          contactName: newEmployeeName.trim(),
+          email: newEmployeeEmail.trim(),
+          phone: newEmployeePhone.trim(),
+          createdAt: new Date().toISOString(),
+          username: newEmployeeUsername.trim(),
+          password: newEmployeePassword.trim(),
+        })
+      });
+
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "Personel eklendi!" : (lang === 'ar' ? "تمت إضافة الموظف بنجاح!" : "Employee added successfully!"));
+        closeAddEmployeeModal();
+        fetchData();
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to add employee");
+      }
+    } catch (err: any) {
+      triggerToast(`Error: ${err.message}`);
+    } finally {
+      setIsSubmittingEmployee(false);
+    }
+  };
+
+  // feature/client-staff-management-ui: quick Activate/Disable toggle from
+  // the Client Staff table row — no modal, immediately reversible.
+  const handleToggleClientActive = async (client: Client) => {
+    try {
+      const res = await apiFetch(`/api/clients/${client.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: client.active === false }),
+      });
+      if (res.ok) {
+        triggerToast(
+          client.active === false
+            ? (lang === 'tr' ? "Hesap etkinleştirildi." : (lang === 'ar' ? "تم تفعيل الحساب." : "Account activated."))
+            : (lang === 'tr' ? "Hesap devre dışı bırakıldı." : (lang === 'ar' ? "تم تعطيل الحساب." : "Account disabled."))
+        );
+        fetchData();
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to update status");
+      }
+    } catch (err: any) {
+      triggerToast(`Error: ${err.message}`);
+    }
+  };
+
+  // feature/client-staff-management-ui: focused "Reset Password" action —
+  // only ever sends `password`, reusing PUT /api/clients/:id's existing
+  // blank-preserves-current / duplicate-username-safe / password-stripped
+  // -from-response behavior. Does not touch any other field.
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetPasswordTarget) return;
+    if (!resetPasswordValue.trim()) {
+      triggerToast(lang === 'tr' ? "Yeni şifre gereklidir." : (lang === 'ar' ? "كلمة المرور الجديدة مطلوبة." : "A new password is required."));
+      return;
+    }
+    if (resetPasswordValue.trim() !== resetPasswordConfirmValue.trim()) {
+      triggerToast(passwordMismatchError);
+      return;
+    }
+    setIsSubmittingResetPassword(true);
+    try {
+      const res = await apiFetch(`/api/clients/${resetPasswordTarget.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: resetPasswordValue.trim() }),
+      });
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "Şifre sıfırlandı." : (lang === 'ar' ? "تمت إعادة تعيين كلمة المرور." : "Password reset successfully."));
+        closeResetPasswordModal();
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to reset password");
+      }
+    } catch (err: any) {
+      triggerToast(`Error: ${err.message}`);
+    } finally {
+      setIsSubmittingResetPassword(false);
+    }
+  };
+
+  // feature/client-staff-management-ui: Delete a Client Staff account from
+  // the Admin UI. The server (resolveClientAccountDeleteAuthorization,
+  // merged in fix/client-create-username) is the real enforcement —
+  // Operation/Accounts Admin get a 403 here even if this ever somehow
+  // rendered for them; the button itself is also only rendered for a
+  // Super Admin session (see the isSuperAdmin prop passed to
+  // AdminClientsSection).
+  const handleDeleteStaffConfirm = async () => {
+    if (!deleteStaffTarget) return;
+    setIsDeletingStaff(true);
+    try {
+      const res = await apiFetch(`/api/clients/${deleteStaffTarget.id}`, { method: "DELETE" });
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "Personel hesabı silindi." : (lang === 'ar' ? "تم حذف حساب الموظف." : "Employee account deleted."));
+        setDeleteStaffTarget(null);
+        fetchData();
+      } else {
+        const errData = await res.json();
+        triggerToast(errData.error || "Failed to delete account");
+      }
+    } catch (err: any) {
+      triggerToast(`Error: ${err.message}`);
+    } finally {
+      setIsDeletingStaff(false);
     }
   };
 
@@ -4347,6 +4566,7 @@ MARAS Group etir Center`;
             lang={lang}
             t={t}
             canWriteClients={canWriteClients}
+            isSuperAdmin={resolvedAdminType === 'super'}
             clients={clients}
             shipments={shipments}
             clientSearchQuery={clientSearchQuery}
@@ -4374,8 +4594,6 @@ MARAS Group etir Center`;
             setNewClientAddress={setNewClientAddress}
             newClientNotes={newClientNotes}
             setNewClientNotes={setNewClientNotes}
-            newClientIsEmployee={newClientIsEmployee}
-            setNewClientIsEmployee={setNewClientIsEmployee}
             newClientUsername={newClientUsername}
             setNewClientUsername={setNewClientUsername}
             newClientPassword={newClientPassword}
@@ -4392,14 +4610,47 @@ MARAS Group etir Center`;
             setEditClientAddress={setEditClientAddress}
             editClientNotes={editClientNotes}
             setEditClientNotes={setEditClientNotes}
-            editClientIsEmployee={editClientIsEmployee}
-            setEditClientIsEmployee={setEditClientIsEmployee}
             editClientUsername={editClientUsername}
             setEditClientUsername={setEditClientUsername}
             editClientPassword={editClientPassword}
             setEditClientPassword={setEditClientPassword}
             editClientConfirmPassword={editClientConfirmPassword}
             setEditClientConfirmPassword={setEditClientConfirmPassword}
+            editClientActive={editClientActive}
+            setEditClientActive={setEditClientActive}
+            addEmployeeTarget={addEmployeeTarget}
+            setAddEmployeeTarget={setAddEmployeeTarget}
+            closeAddEmployeeModal={closeAddEmployeeModal}
+            isSubmittingEmployee={isSubmittingEmployee}
+            handleAddEmployeeSubmit={handleAddEmployeeSubmit}
+            newEmployeeName={newEmployeeName}
+            setNewEmployeeName={setNewEmployeeName}
+            newEmployeeEmail={newEmployeeEmail}
+            setNewEmployeeEmail={setNewEmployeeEmail}
+            newEmployeePhone={newEmployeePhone}
+            setNewEmployeePhone={setNewEmployeePhone}
+            newEmployeeUsername={newEmployeeUsername}
+            setNewEmployeeUsername={setNewEmployeeUsername}
+            newEmployeePassword={newEmployeePassword}
+            setNewEmployeePassword={setNewEmployeePassword}
+            newEmployeeConfirmPassword={newEmployeeConfirmPassword}
+            setNewEmployeeConfirmPassword={setNewEmployeeConfirmPassword}
+            handleToggleClientActive={handleToggleClientActive}
+            resetPasswordTarget={resetPasswordTarget}
+            setResetPasswordTarget={setResetPasswordTarget}
+            closeResetPasswordModal={closeResetPasswordModal}
+            isSubmittingResetPassword={isSubmittingResetPassword}
+            handleResetPasswordSubmit={handleResetPasswordSubmit}
+            resetPasswordValue={resetPasswordValue}
+            setResetPasswordValue={setResetPasswordValue}
+            resetPasswordConfirmValue={resetPasswordConfirmValue}
+            setResetPasswordConfirmValue={setResetPasswordConfirmValue}
+            deleteStaffTarget={deleteStaffTarget}
+            setDeleteStaffTarget={setDeleteStaffTarget}
+            isDeletingStaff={isDeletingStaff}
+            handleDeleteStaffConfirm={handleDeleteStaffConfirm}
+            orphanedCompanyView={orphanedCompanyView}
+            setOrphanedCompanyView={setOrphanedCompanyView}
             passwordToggleClasses={passwordToggleClasses}
             showPasswordLabel={showPasswordLabel}
             hidePasswordLabel={hidePasswordLabel}
