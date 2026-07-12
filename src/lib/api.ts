@@ -24,9 +24,8 @@
  *    user would have attempted to route through unrelated Google AI
  *    Studio sandbox environments instead of this app's own server.
  *
- * See fetchFromFirestoreDirectly below for a related, already-fixed
- * issue from the same root cause (AI Studio's own dev-preview fallback
- * logic being left in the shipped app).
+ * Both were removed as part of the same root-cause fix (AI Studio's own
+ * dev-preview fallback logic being left in the shipped app).
  */
 
 // Safe, iframe-resilient localStorage fallback storage helper
@@ -47,15 +46,6 @@ export function safeSetItem(key: string, value: string): void {
   } catch (e) {
     console.warn(`[Iframe Storage] Write blocked for key "${key}", saving to virtual memory`);
     memoryStorage[key] = value;
-  }
-}
-
-export function safeRemoveItem(key: string): void {
-  try {
-    localStorage.removeItem(key);
-  } catch (e) {
-    console.warn(`[Iframe Storage] Purge blocked for key "${key}", deleting from virtual memory`);
-    delete memoryStorage[key];
   }
 }
 

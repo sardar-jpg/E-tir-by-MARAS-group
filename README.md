@@ -73,3 +73,6 @@ verify the app against real Firebase locally.
   account plan, and a safe bundle-size review.
 - [Follow-Up Roadmap](docs/FOLLOW_UP_ROADMAP.md) — deferred items and
   detailed review history tracked between PRs.
+- [Code Cleanup Audit](docs/CODE_CLEANUP_AUDIT.md) — unused-code, naming,
+  and dependency audit findings, and what was deliberately left for future
+  cleanup PRs.

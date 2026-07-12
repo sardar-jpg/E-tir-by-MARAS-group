@@ -8,7 +8,6 @@ import {
   AppNotification,
   ShipmentStatus,
   Currency,
-  DocumentCategory,
   Language,
   TRUCK_TYPES,
   Client,
@@ -23,7 +22,7 @@ import {
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
   ArrowUpRight, ClipboardList, CheckCircle2, FileText,
   Paperclip, Image as ImageIcon, Send, X, ExternalLink, RefreshCw, UserPlus, Phone, Mail, Check, AlertCircle, Printer,
-  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, ThumbsUp, TrendingUp, Trash2, Users, ShieldAlert, User, Pencil, Lock, Save, Settings, Menu, BarChart3
+  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, Users, ShieldAlert, User, Lock, Save, Settings, BarChart3
 } from 'lucide-react';
 import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import type { ChatCenterFocus } from "./admin/ChatCenter";
@@ -142,23 +141,6 @@ const COUNTRY_PORTS: Record<string, string[]> = {
   "ABD": ["Los Angeles Limanı", "New York Limanı", "Houston Limanı"],
   "Iraq": ["Port of Umm Qasr (Basra)", "Abu Fulus Port", "Khor Al-Zubair Port"],
   "Irak": ["Umm Qasr Limanı (Basra)", "Ebu Fulus Limanı", "Hor Al-Zubayr Limanı"]
-};
-
-/**
- * Approximate exchange rates to USD, used only for the single-currency
- * "Total Revenue" dashboard KPI. These are NOT live rates — there's no
- * exchange-rate API integrated into this app — so they will drift from
- * real-world rates over time and need periodic manual updates.
- *
- * UPDATE_NEEDED: last manually verified around when this constant was
- * introduced. If the revenue KPI looks off, check these against current
- * rates and update this object — it's the only place they're defined.
- */
-const APPROX_USD_EXCHANGE_RATES: Record<Currency, number> = {
-  USD: 1,
-  IQD: 1 / 1450,
-  TRY: 1 / 32,
-  EUR: 1.08,
 };
 
 const getPortsForCountry = (countryName: string): string[] => {
@@ -2337,7 +2319,6 @@ MARAS Group etir Center`;
   };
 
   const renderStatementHeader = (selectedStatement: CostStatement) => {
-    const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     let title = lang === 'tr' ? 'MALİYET BEYANNAMESİ' : 'COST STATEMENT';
     let refNum = `Reference: MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
     
@@ -3323,7 +3304,7 @@ MARAS Group etir Center`;
   const getWhatsAppLink = (shipmentNum: string, token: string, loading: string, delivery: string) => {
     const link = getDirectLink(token);
     const text = encodeURIComponent(
-      `etir by MARAS Group\nShipment: ${shipmentNum}\nRoute: ${loading} ➔ ${delivery}\nTrack logistics progress in real-time here: ${link}`
+      `etir by MARAS Group\nShipment: ${shipmentNum}\nRoute: ${loading} ➔ ${delivery}\nTrack logistics progress here: ${link}`
     );
     return `https://api.whatsapp.com/send?text=${text}`;
   };
@@ -3332,14 +3313,6 @@ MARAS Group etir Center`;
   const totalShipmentsCount = shipments.length;
   const activeShipmentsCount = shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed").length;
   const completedShipmentsCount = shipments.filter(s => s.status === "Delivered" || s.status === "Closed").length;
-  
-  // Calculate revenue total by currency (approximate conversion to USD for
-  // a single KPI overview — see APPROX_USD_EXCHANGE_RATES for the rates
-  // used and why they're not live).
-  const totalRevenueUSD = shipments.reduce((acc, s) => {
-    const rate = APPROX_USD_EXCHANGE_RATES[s.currency] ?? 1;
-    return acc + (s.agreedAmount || 0) * rate;
-  }, 0);
 
   // Recharts metric generation
   const statusData = [

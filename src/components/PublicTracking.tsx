@@ -5,10 +5,10 @@ import { apiFetch } from "../lib/api";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const fetch = apiFetch;
-import { 
-  Ship, Calendar, Truck, ShieldCheck, Box, PackageOpen, ListOrdered, 
-  MapPin, CheckCircle2, FileText, Image as ImageIcon, AlertTriangle, ExternalLink,
-  Copy, Check, Activity, CloudSun, Clock, Moon, Lock, Shield, ArrowUpRight,
+import {
+  Ship, Truck, ShieldCheck, Box, ListOrdered,
+  MapPin, FileText, Image as ImageIcon, AlertTriangle,
+  Copy, Check, Activity, CloudSun, Clock, Lock, Shield,
   Download, Printer, Compass, Navigation, Anchor, Plane, Bell
 } from 'lucide-react';
 

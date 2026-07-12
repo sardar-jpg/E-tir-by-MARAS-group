@@ -1,6 +1,5 @@
-import React from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Scale, FileSymlink, ScrollText, CheckCircle2, ShieldAlert, BookOpen, AlertCircle, HelpCircle, Landmark, Globe, Mail } from "lucide-react";
+import { X, Scale, FileSymlink, ScrollText, CheckCircle2, ShieldAlert, BookOpen, AlertCircle, Landmark, Globe, Mail } from "lucide-react";
 
 interface TermsModalProps {
   isOpen: boolean;

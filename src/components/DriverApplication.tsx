@@ -4,8 +4,7 @@ import {
   Driver, 
   ChatMessage, 
   AppNotification, 
-  ShipmentStatus, 
-  Currency,
+  ShipmentStatus,
   Language,
   DocumentCategory,
   TRUCK_TYPES

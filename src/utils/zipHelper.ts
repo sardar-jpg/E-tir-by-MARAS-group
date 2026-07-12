@@ -18,7 +18,6 @@ export async function downloadDocumentsAsZip(shipmentNumber: string, documents: 
       try {
         const parts = doc.url.split(',');
         if (parts.length > 1) {
-          const contentType = parts[0].split(':')[1]?.split(';')[0];
           const base64Data = parts[1];
           zip.file(fileName, base64Data, { base64: true });
           addedCount++;

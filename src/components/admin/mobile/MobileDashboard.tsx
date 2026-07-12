@@ -45,11 +45,9 @@ interface MobileDashboardProps {
 export default function MobileDashboard({
   lang,
   isRtl,
-  t,
   shipments,
   activeShipmentsCount,
   totalShipmentsCount,
-  completedShipmentsCount,
   pendingDocumentsCount,
   recentAlertsData,
   setNewShipmentData,

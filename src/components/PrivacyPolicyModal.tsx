@@ -1,6 +1,5 @@
-import React from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, ShieldAlert, BadgeCheck, FileText, CheckCircle2, MapPin, HardDrive, Share2, Shield, Eye, HelpCircle, Activity, Landmark, ExternalLink, Mail, Globe } from "lucide-react";
+import { X, ShieldAlert, BadgeCheck, FileText, CheckCircle2, MapPin, HardDrive, Share2, Shield, HelpCircle, Activity, Landmark, Mail, Globe } from "lucide-react";
 
 interface PrivacyPolicyModalProps {
   isOpen: boolean;
@@ -113,7 +112,7 @@ export default function PrivacyPolicyModal({ isOpen, onClose, lang = "en" }: Pri
                   </li>
                   <li className="flex items-start gap-2.5">
                     <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                    <span><strong>Real-Time Tracking:</strong> Keep active delivery runs fully transparent to corporate dispatch divisions and assigned administrators.</span>
+                    <span><strong>Smart Tracking:</strong> Keep active delivery runs transparent to corporate dispatch divisions and assigned administrators, with periodic location updates rather than continuous live tracking.</span>
                   </li>
                   <li className="flex items-start gap-2.5">
                     <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />

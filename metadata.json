@@ -1,5 +1,0 @@
-{
-  "name": "etir by MARAS",
-  "description": "Professional logistics and truck management platform developed for MARAS Group to manage international transportation operations between countries.",
-  "requestFramePermissions": ["geolocation"]
-}
