@@ -725,6 +725,22 @@ export default function AdminPanel({
   const [editClientConfirmPassword, setEditClientConfirmPassword] = useState("");
   const [isSubmittingEditClient, setIsSubmittingEditClient] = useState(false);
 
+  // fix/client-create-username: the Add Client modal's Cancel/✕ buttons
+  // previously just closed the modal (`setIsAddClientOpen(false)`) without
+  // clearing newClientUsername/Password/ConfirmPassword — so a cancelled,
+  // reopened modal (or a browser autofill that had populated those fields)
+  // could carry stale credential values into the next client created. The
+  // success path (handleAddClientSubmit) already clears these explicitly;
+  // this wrapper makes every OTHER path that closes the modal do the same.
+  const setIsAddClientOpenSafe = (value: boolean) => {
+    setIsAddClientOpen(value);
+    if (!value) {
+      setNewClientUsername("");
+      setNewClientPassword("");
+      setNewClientConfirmPassword("");
+    }
+  };
+
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const notifDropdownRef = React.useRef<HTMLDivElement>(null);
   const [activeToasts, setActiveToasts] = useState<{ id: string; notif: AppNotification }[]>([]);
@@ -4338,7 +4354,7 @@ MARAS Group etir Center`;
             expandedClientOrdersCompanyName={expandedClientOrdersCompanyName}
             setExpandedClientOrdersCompanyName={setExpandedClientOrdersCompanyName}
             isAddClientOpen={isAddClientOpen}
-            setIsAddClientOpen={setIsAddClientOpen}
+            setIsAddClientOpen={setIsAddClientOpenSafe}
             isSubmittingClient={isSubmittingClient}
             handleAddClientSubmit={handleAddClientSubmit}
             editClientTarget={editClientTarget}

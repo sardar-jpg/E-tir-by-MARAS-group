@@ -52,7 +52,7 @@ import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSa
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { canClientSelfDeleteAccount } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany } from "./src/lib/clientAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -289,9 +289,10 @@ function getMemoryStore() {
       // Client Staff demo login: its own Client record (own id/username/
       // password), attached to the same "Demo Client Co." companyName as
       // the owner above so it gets identical customer-safe shipment/chat
-      // scoping, but with isEmployee: true so clientAccess.ts's
-      // isClientStaffAccount/canClientSelfDeleteAccount block it from
-      // self-deleting or managing the account the way the owner can.
+      // scoping, with isEmployee: true purely to identify it as staff
+      // (isClientStaffAccount) — it can self-delete its own login exactly
+      // like the owner (resolveClientAccountDeleteAuthorization), but
+      // still cannot manage/delete any *other* account.
       memoryStore.clients.push({
         id: "demo-client-staff",
         companyName: "Demo Client Co.",
@@ -2215,7 +2216,7 @@ async function startServer() {
           const clientsCol = collection(db, "clients");
           const clientsSnap = await getDocs(clientsCol);
           const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-          if (!myClient || shipment.companyName !== myClient.companyName) {
+          if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
             return res.status(403).json({ error: "You do not have access to this shipment." });
           }
           req.shipment = shipment;
@@ -2356,7 +2357,7 @@ async function startServer() {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        const filtered = myClient ? list.filter(s => s.companyName === myClient.companyName) : [];
+        const filtered = myClient ? list.filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName)) : [];
         return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
       }
       // Admins see everything.
@@ -2550,7 +2551,7 @@ async function startServer() {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        if (!myClient || shipment.companyName !== myClient.companyName) {
+        if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
           return res.status(403).json({ error: "You do not have access to this shipment." });
         }
       }
@@ -3136,10 +3137,11 @@ async function startServer() {
   // 5b. Subscribe Customer to Cargo Updates
   app.post("/api/shipments/:id/subscribe-customer", requireShipmentAccess, async (req, res) => {
     try {
-      // feature/client-staff-accounts-safety-review: unlike chat, this
-      // stays blocked for Client Staff (session.viewOnly) — managing who
-      // gets notified is an account-level setting, not day-to-day tracking.
-      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
+      // fix/client-create-username: Client Staff (session.viewOnly) now
+      // gets identical company-level permissions to Client Owner, per the
+      // confirmed account model — subscribing to updates is no longer
+      // blocked here (previously treated as an owner-only account-level
+      // setting; superseded by the explicit "same permissions" rule).
       const { email, channel } = req.body;
       if (!email || !email.includes("@")) {
         return res.status(400).json({ error: "A valid email address is required" });
@@ -3506,12 +3508,11 @@ async function startServer() {
   // 8. Upload Document Directly (Admin Center)
   app.post("/api/shipments/:id/documents", requireShipmentAccess, async (req, res) => {
     try {
-      // feature/client-staff-accounts-safety-review: unlike a chat
-      // attachment, this route files a document directly with no chat
-      // trail — stays blocked for Client Staff (session.viewOnly); a
-      // Client Staff member uploads through chat instead (see the /chat
-      // route above).
-      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
+      // fix/client-create-username: Client Staff (session.viewOnly) now
+      // gets identical company-level permissions to Client Owner — direct
+      // document upload is no longer blocked here (previously restricted
+      // to Owner only; superseded by the explicit "same permissions" rule
+      // covering documents/uploads).
       const shipmentId = req.params.id;
       const { name, url, category, uploadedBy, isSharedExternally } = req.body;
 
@@ -3587,10 +3588,11 @@ async function startServer() {
   // 10. Configure Sharing Page Link
   app.post("/api/shipments/:id/share", requireShipmentAccess, async (req, res) => {
     try {
-      // feature/client-staff-accounts-safety-review: Client Staff
-      // (session.viewOnly) must not approve/share documents or configure
-      // public link sharing — stays blocked.
-      if (req.session!.viewOnly) return res.status(403).json({ error: "View-only accounts cannot perform this action." });
+      // fix/client-create-username: Client Staff (session.viewOnly) now
+      // gets identical company-level permissions to Client Owner —
+      // configuring public share links is no longer blocked here
+      // (previously owner-only; superseded by the explicit "same
+      // permissions" rule covering public share links).
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) return res.status(404).json({ error: "Shipment not found" });
@@ -3913,12 +3915,7 @@ async function startServer() {
       const clientsSnapshot = await getDocs(clientsCol);
       const clientsList = clientsSnapshot.docs.map(doc => doc.data() as Client);
 
-      const matchedClient = clientsList.find(c => {
-        const uMatch = (c.username || "").toLowerCase() === normalizedQuery;
-        const eMatch = (c.email || "").toLowerCase() === normalizedQuery;
-        const nameMatch = (c.companyName || "").toLowerCase() === normalizedQuery;
-        return uMatch || eMatch || nameMatch;
-      });
+      const matchedClient = clientsList.find(c => matchesClientLoginIdentifier(c, normalizedQuery));
 
       if (matchedClient) {
         // No more "|| 'client123'" default — same reasoning as drivers above.
@@ -4329,25 +4326,31 @@ async function startServer() {
 
   app.delete("/api/clients/:id", requireAuth, async (req, res) => {
     try {
-      const { id } = req.params;
-      const isFullAdmin = req.session!.role === "admin" && req.session!.adminType !== "accounts";
-      const isSelf = req.session!.role === "client" && req.session!.id === id;
-      if (!isFullAdmin && !isSelf) {
-        return res.status(403).json({ error: "You can only delete your own account." });
+      const requestedId = req.params.id;
+      const decision = resolveClientAccountDeleteAuthorization({
+        requestedId,
+        session: { role: req.session!.role, id: req.session!.id, adminType: req.session!.adminType },
+      });
+      if (!decision.allowed) {
+        return res.status(403).json({ error: decision.reason });
       }
-      const docRef = doc(db, "clients", id);
-      // feature/client-staff-accounts-safety-review: a Client Staff account
-      // is created/managed by MARAS Admin only — self-service delete is
-      // reserved for the company owner account. Loaded fresh here (never
-      // trust the session's stale isEmployee) so a staff member calling
-      // this route directly can't remove their own login without Admin.
-      if (isSelf && !isFullAdmin) {
-        const selfDoc = await getDoc(docRef);
-        if (selfDoc.exists() && !canClientSelfDeleteAccount(selfDoc.data() as Client)) {
-          return res.status(403).json({ error: "Client Staff accounts can only be removed by MARAS Admin." });
-        }
-      }
-      await deleteDoc(docRef);
+      // fix/client-create-username, final confirmed rule: a Client session
+      // (Owner or Staff, identically — resolveClientAccountDeleteAuthorization
+      // never checks isEmployee) may only ever delete its OWN account. The
+      // delete target is the AUTHENTICATED session's own id, never
+      // `requestedId` (the client-supplied URL parameter), so a client can
+      // never delete another Client account by supplying a different :id —
+      // even though the authorization check above already guarantees
+      // requestedId === session.id for a client session, the target is
+      // derived from the session explicitly, not merely validated against
+      // it. A Super Admin's requestedId is used as-is (Operation Admin and
+      // Accounts Admin never reach this line — resolveClientAccountDeleteAuthorization
+      // rejects them above). There is no separate "company" entity or
+      // company-delete operation in this codebase: this always deletes
+      // exactly one Client Firestore document, never a cascade to
+      // shipments, documents, or any other Client record.
+      const targetId = req.session!.role === "client" ? req.session!.id : requestedId;
+      await deleteDoc(doc(db, "clients", targetId));
       res.json({ success: true, message: "Client deleted successfully" });
     } catch (err) {
       console.error(err);
@@ -4388,7 +4391,7 @@ async function startServer() {
       } else if (req.session!.role === "client") {
         const clientsSnap = await getDocs(collection(db, "clients"));
         const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        relevantShipments = myClient ? allShipments.filter(s => s.companyName === myClient.companyName) : [];
+        relevantShipments = myClient ? allShipments.filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName)) : [];
       }
 
       res.json(scopeDriverListForSession(allDrivers, req.session!, relevantShipments));
@@ -4611,10 +4614,7 @@ async function startServer() {
     try {
       const col = collection(db, "clients");
       const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => {
-        const { password, ...rest } = doc.data() as any;
-        return rest as Client;
-      });
+      const list = snapshot.docs.map(doc => stripPassword(doc.data() as Client));
       res.json(list);
     } catch (err) {
       console.error(err);
@@ -4628,6 +4628,18 @@ async function startServer() {
       if (!data.companyName || !data.contactName) {
         return res.status(400).json({ error: "Company name and contact name are required" });
       }
+      // Duplicate check across ALL Client accounts (Owner and Staff alike —
+      // POST /api/login's client-matching branch has no per-company
+      // scoping, so a duplicate username anywhere would make one of the
+      // two colliding accounts unreachable/ambiguous at login. Same
+      // reasoning as findDuplicateDriverField for drivers.
+      if (data.username) {
+        const clientsSnapshot = await getDocs(collection(db, "clients"));
+        const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
+        if (hasDuplicateClientUsername(existingClients, data.username)) {
+          return res.status(409).json({ error: "Username is already registered to another client account." });
+        }
+      }
       const newClient: Client = {
         id: data.id || `client-${Date.now()}`,
         companyName: data.companyName,
@@ -4638,11 +4650,11 @@ async function startServer() {
         notes: data.notes || "",
         createdAt: data.createdAt || new Date().toISOString(),
         ...(data.isEmployee ? { isEmployee: true } : {}),
+        ...buildClientUsernameField(data.username),
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
       await setDoc(doc(db, "clients", newClient.id), newClient);
-      const { password, ...safeClient } = newClient as any;
-      res.status(201).json(safeClient);
+      res.status(201).json(stripPassword(newClient));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create client" });
@@ -4664,14 +4676,24 @@ async function startServer() {
       if (data.address !== undefined) updates.address = data.address;
       if (data.notes !== undefined) updates.notes = data.notes;
       if (data.isEmployee !== undefined) updates.isEmployee = Boolean(data.isEmployee);
-      if (data.username !== undefined) updates.username = data.username;
-      if (data.password !== undefined) updates.password = hashPassword(data.password);
+      if (data.username !== undefined) {
+        const normalizedUsername = normalizeClientUsername(data.username);
+        if (normalizedUsername) {
+          const clientsSnapshot = await getDocs(collection(db, "clients"));
+          const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
+          if (hasDuplicateClientUsername(existingClients, normalizedUsername, req.params.id)) {
+            return res.status(409).json({ error: "Username is already registered to another client account." });
+          }
+        }
+        updates.username = normalizedUsername;
+      }
+      const passwordField = buildClientPasswordUpdateField(data.password);
+      if ("password" in passwordField) updates.password = hashPassword(passwordField.password);
 
       await updateDoc(clientRef, updates as Record<string, unknown>);
 
       const updated = { ...clientDoc.data(), ...updates } as Client;
-      const { password: _pw, ...safeClient } = updated as any;
-      res.json(safeClient);
+      res.json(stripPassword(updated));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update client" });
@@ -4844,7 +4866,7 @@ async function startServer() {
           const myShipmentIds = new Set(
             shipSnap.docs
               .map(d => d.data() as Shipment)
-              .filter(s => s.companyName === myClient.companyName)
+              .filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName))
               .map(s => s.id)
           );
           list = list.filter(n => myShipmentIds.has(n.shipmentId));
@@ -4965,7 +4987,7 @@ async function startServer() {
             const clientsCol = collection(db, "clients");
             const clientsSnap = await getDocs(clientsCol);
             const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-            owns = !!myClient && shipment.companyName === myClient.companyName;
+            owns = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
           }
           if (!owns) {
             return res.status(403).json({ error: "You do not have access to this notification." });
