@@ -213,3 +213,98 @@ export function isShipmentVisibleToClientCompany(
 ): boolean {
   return !!shipmentCompanyName && shipmentCompanyName === clientCompanyName;
 }
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * True if this Client account is currently allowed to authenticate.
+ * `active` is `undefined` on every pre-existing record (no migration was
+ * performed when the field was introduced) — only the literal `false`
+ * disables login; `undefined` and `true` both mean active. Used by
+ * POST /api/login to reject a disabled account with a clear error, after
+ * the password has already been verified (so a disabled account's
+ * existence/credentials are never distinguishable from a wrong password
+ * to an outside caller — see the exact call site in server.ts).
+ */
+export function isClientAccountActive(client: Pick<Client, "active">): boolean {
+  return client.active !== false;
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * Resolves the TRUSTED companyName for a brand-new Client Staff record
+ * from `parentOwnerId` — the id of an existing Client record selected in
+ * the Admin UI's "+ Add Employee" flow — never from a companyName string
+ * sent directly in the request body. This is the "never trust a
+ * client-supplied companyName when creating staff" rule: POST
+ * /api/clients looks the parent up by id in the already-loaded clients
+ * list and uses ITS companyName, ignoring whatever (if anything) the
+ * request body's own companyName field says.
+ *
+ * Returns null (parent company does not exist / is not a valid Owner to
+ * attach staff to) when:
+ * - no Client record with that id exists at all, or
+ * - the referenced record is itself a Staff account (`isEmployee: true`)
+ *   — staff cannot be the "parent company" for other staff; only an
+ *   Owner record is a valid attachment point, keeping the company
+ *   hierarchy exactly two levels (Owner, then Staff under it).
+ */
+export function resolveStaffParentCompanyName(
+  existingClients: Pick<Client, "id" | "companyName" | "isEmployee">[],
+  parentOwnerId: string | undefined
+): string | null {
+  if (!parentOwnerId) return null;
+  const parent = existingClients.find((c) => c.id === parentOwnerId);
+  if (!parent || parent.isEmployee) return null;
+  return parent.companyName;
+}
+
+export type ClientCreationResolution =
+  | { ok: true; companyName: string; isEmployee: boolean }
+  | { ok: false; error: string };
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * The single decision POST /api/clients makes about what it's creating —
+ * extracted so "Create Client always creates Client Owner, never Staff"
+ * and "Add Employee creates Client Staff, attached to an existing
+ * company, or is rejected" are both directly unit-testable, independent
+ * of Firestore/Express. `data.isEmployee`, if the request body sends it
+ * at all, is never read here — the ONLY thing that can make a new record
+ * a Staff account is a valid `parentOwnerId`.
+ */
+export function resolveClientCreationCompany(
+  data: { companyName?: string; parentOwnerId?: string },
+  existingClients: Pick<Client, "id" | "companyName" | "isEmployee">[]
+): ClientCreationResolution {
+  if (data.parentOwnerId) {
+    const resolvedCompanyName = resolveStaffParentCompanyName(existingClients, data.parentOwnerId);
+    if (!resolvedCompanyName) return { ok: false, error: "Selected company does not exist." };
+    return { ok: true, companyName: resolvedCompanyName, isEmployee: true };
+  }
+  if (!data.companyName) return { ok: false, error: "Company name and contact name are required" };
+  return { ok: true, companyName: data.companyName, isEmployee: false };
+}
+
+/**
+ * feature/client-staff-management-ui
+ *
+ * Scopes the full clients list down to the Staff accounts (`isEmployee`)
+ * belonging to one company — the exact list the "Client Staff" section
+ * (inside Edit Client, when editing the Owner) renders. Uses the same
+ * normalized `.toLowerCase().trim()` comparison the admin UI's other
+ * display-side company matching already uses (e.g. the "Check Orders"
+ * shipment match in AdminClientsSection.tsx) — display-side only, not a
+ * change to the server's own strict matching (isShipmentVisibleToClientCompany).
+ */
+export function scopeStaffToCompany<T extends Pick<Client, "isEmployee" | "companyName">>(
+  clients: T[],
+  companyName: string
+): T[] {
+  const normalizedCompanyName = companyName.toLowerCase().trim();
+  return clients.filter(
+    (c) => !!c.isEmployee && c.companyName.toLowerCase().trim() === normalizedCompanyName
+  );
+}

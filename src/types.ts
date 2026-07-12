@@ -162,6 +162,15 @@ export interface Client {
   username?: string;
   password?: string;
   isEmployee?: boolean;
+  /**
+   * feature/client-staff-management-ui: whether this account may log in.
+   * `undefined` (every pre-existing record — no migration performed) and
+   * `true` both mean active; only the literal `false` disables login. See
+   * isClientAccountActive in clientAccess.ts, which is the single place
+   * this convention is enforced — never compare `client.active === true`
+   * directly, or every existing record would be treated as disabled.
+   */
+  active?: boolean;
 }
 
 export interface Vendor {
