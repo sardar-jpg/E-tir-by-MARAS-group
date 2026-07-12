@@ -14,7 +14,7 @@ import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
-import { isNotificationForDriver } from "../lib/notificationAccess";
+import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -169,7 +169,15 @@ export default function DriverApplication({
     ]);
     return notifications.filter(n => isNotificationForDriver(n, loggedInDriverId || "", myShipmentIds));
   }, [notifications, shipments, activeShipment, loggedInDriverId]);
-  const unreadNotificationCount = useMemo(() => myNotifications.filter(n => !n.read).length, [myNotifications]);
+  // Notification Phase 1 correction: unread status is per-user
+  // (readByUserIds), not the legacy shared `read` flag — reading the
+  // shared flag here would mean one driver's (or admin's, or client's)
+  // read marks the notification read for every other driver too, since
+  // they all read the same underlying document.
+  const unreadNotificationCount = useMemo(
+    () => myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).length,
+    [myNotifications, loggedInDriverId]
+  );
 
   // Marks the given notification ids as read via the same authenticated
   // per-notification endpoint every other role already uses
@@ -179,7 +187,11 @@ export default function DriverApplication({
   // badge) is only updated for an id once its own request actually
   // succeeds; a failed request leaves that notification unread both on
   // the server and locally, so it's retried the next time this runs
-  // instead of silently disappearing from the badge count.
+  // instead of silently disappearing from the badge count. Only this
+  // driver's own id is added to readByUserIds (addReaderToNotification
+  // preserves whatever ids were already there) — this driver reading a
+  // notification never marks it read for any other driver, admin, or
+  // client.
   const markNotificationsRead = React.useCallback((ids: string[]) => {
     const toMark = ids.filter(id => !markingNotifsReadRef.current.has(id));
     if (toMark.length === 0) return;
@@ -188,7 +200,10 @@ export default function DriverApplication({
       try {
         const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
         if (res.ok) {
-          setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+          setNotifications(prev => prev.map(n => n.id === id
+            ? { ...n, readByUserIds: addReaderToNotification(n.readByUserIds, loggedInDriverId || "") }
+            : n
+          ));
         } else {
           console.error(`Failed to mark notification ${id} as read: ${res.status}`);
         }
@@ -198,7 +213,7 @@ export default function DriverApplication({
         markingNotifsReadRef.current.delete(id);
       }
     });
-  }, []);
+  }, [loggedInDriverId]);
 
   // Determine the primary active job to feature on the Home screen.
   // Priority: Assigned > In Transit / Border Crossing / Customs Clearance > others (most recently updated first).
@@ -229,11 +244,11 @@ export default function DriverApplication({
   // open, not just the ones present at the moment of opening.
   useEffect(() => {
     if (activeTab !== 'notifications') return;
-    const unreadIds = myNotifications.filter(n => !n.read).map(n => n.id);
+    const unreadIds = myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).map(n => n.id);
     if (unreadIds.length > 0) {
       markNotificationsRead(unreadIds);
     }
-  }, [activeTab, myNotifications, markNotificationsRead]);
+  }, [activeTab, myNotifications, markNotificationsRead, loggedInDriverId]);
 
   // Profile Form States
   const [profileName, setProfileName] = useState("");

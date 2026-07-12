@@ -20,6 +20,8 @@
  *    rule silently drops the notification for every driver, no matter who
  *    it was actually for.
  */
+import type { ChatChannel } from "../types";
+import { isChatNotificationVisibleToRole, type ChatRole } from "./chatVisibility";
 
 export interface DriverScopedNotification {
   shipmentId?: string;
@@ -34,4 +36,80 @@ export function isNotificationForDriver(
   const belongsToOwnShipment = !!notification.shipmentId && driverShipmentIds.has(notification.shipmentId);
   const addressedDirectly = !!notification.recipientUserId && notification.recipientUserId === driverId;
   return belongsToOwnShipment || addressedDirectly;
+}
+
+/**
+ * Notification Phase 1 correction.
+ *
+ * Per-user read state — see AppNotification.readByUserIds in
+ * src/types.ts for the full rationale (the legacy `read` boolean is a
+ * single flag shared by every user who can see the same notification
+ * document; one user's read request flipping it marked the notification
+ * read for everyone else too). A notification is read FOR THIS USER only
+ * if their own id is present in readByUserIds. Absent/empty
+ * readByUserIds — including every notification written before this field
+ * existed — means unread for everyone, not "unknown" or "read by
+ * default"; there is no fallback to the legacy `read` flag here on
+ * purpose, since that flag can no longer be trusted to mean "read by me."
+ */
+export function isNotificationReadForUser(
+  notification: { readByUserIds?: string[] },
+  userId: string
+): boolean {
+  return !!notification.readByUserIds && notification.readByUserIds.includes(userId);
+}
+
+/**
+ * Notification Phase 1 correction.
+ *
+ * Computes the next readByUserIds array after this user reads a
+ * notification — a pure union: the user's id is added if not already
+ * present, and every existing id (any other user who already read it) is
+ * preserved untouched. Never returns an array containing only the calling
+ * user's id when others were already present — that would silently
+ * "unread" the notification for them. Idempotent: reading the same
+ * notification twice as the same user produces the same array both
+ * times, in the same order (no duplicate entries).
+ */
+export function addReaderToNotification(
+  existingReaderIds: string[] | undefined,
+  userId: string
+): string[] {
+  const merged = new Set(existingReaderIds ?? []);
+  merged.add(userId);
+  return Array.from(merged);
+}
+
+/**
+ * Notification Phase 1 correction.
+ *
+ * Mirrors POST /api/notifications/:id/read's full authorization decision
+ * as a pure function, so the exact rule — including the fix below — is
+ * unit-testable without booting the Express server. `ownsViaShipment` is
+ * computed by the caller (an async Firestore lookup against
+ * notif.shipmentId), since that part genuinely can't be pure; everything
+ * downstream of it is.
+ *
+ * Fix: a direct recipient (recipientUserId matching the caller) previously
+ * skipped the channel-visibility check entirely in server.ts, because that
+ * check lived inside the same `if (!isDirectRecipient)` branch as the
+ * shipment-ownership lookup. That meant a direct recipient could, in
+ * principle, mark read a client_admin/driver_admin/internal_staff/
+ * ai_alert-scoped notification outside their own audience, bypassing the
+ * exact rule PR #44 already enforces everywhere else (GET
+ * /api/notifications, and shipment-owner-based access on this same
+ * route). isChatNotificationVisibleToRole now runs unconditionally for
+ * every non-admin caller, regardless of which of the two paths
+ * (isDirectRecipient or ownsViaShipment) established their access.
+ */
+export function canMarkNotificationRead(
+  notification: { type: string; channel?: ChatChannel; recipientUserId?: string },
+  role: ChatRole,
+  callerId: string,
+  ownsViaShipment: boolean
+): boolean {
+  if (role === "admin") return true;
+  const isDirectRecipient = !!notification.recipientUserId && notification.recipientUserId === callerId;
+  if (!isDirectRecipient && !ownsViaShipment) return false;
+  return isChatNotificationVisibleToRole(notification.type, role, notification.channel);
 }

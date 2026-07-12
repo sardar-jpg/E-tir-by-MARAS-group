@@ -53,7 +53,7 @@ import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canVi
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
-import { isNotificationForDriver } from "./src/lib/notificationAccess";
+import { isNotificationForDriver, addReaderToNotification, canMarkNotificationRead } from "./src/lib/notificationAccess";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -5018,41 +5018,48 @@ async function startServer() {
         // session id (Notification Phase 1: recipientUserId, for events
         // like "Driver Approved" with no associated shipment at all;
         // strictly narrower than shipment ownership, since it only ever
-        // matches the caller's own id).
+        // matches the caller's own id) — AND, either way, only within
+        // their own audience channel. canMarkNotificationRead
+        // (notificationAccess.ts) is the single source of truth for this
+        // full decision — see its own comment for the direct-recipient
+        // channel-bypass this fixed (a direct recipient previously skipped
+        // the channel check entirely).
         if (req.session!.role !== "admin") {
           const isDirectRecipient = !!notif.recipientUserId && notif.recipientUserId === req.session!.id;
+          let ownsViaShipment = false;
           if (!isDirectRecipient) {
             const sDoc = await getDoc(doc(db, "shipments", notif.shipmentId));
             if (!sDoc.exists()) {
               return res.status(404).json({ error: "Shipment not found for this notification." });
             }
             const shipment = sDoc.data() as Shipment;
-            let owns = false;
             if (req.session!.role === "driver") {
               const driverId = req.session!.id;
-              owns = shipment.assignedDriverId === driverId ||
+              ownsViaShipment = shipment.assignedDriverId === driverId ||
                 !!(shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
             } else if (req.session!.role === "client") {
               const clientsCol = collection(db, "clients");
               const clientsSnap = await getDocs(clientsCol);
               const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-              owns = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
+              ownsViaShipment = !!myClient && isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName);
             }
-            if (!owns) {
-              return res.status(403).json({ error: "You do not have access to this notification." });
-            }
-
-            // PR #44: owning the shipment isn't enough on its own — a driver
-            // assigned to a shipment must still not be able to mark read a
-            // client_admin/internal_staff notification on that same shipment
-            // (and vice versa for a client), same audience rule already
-            // enforced on GET /api/notifications.
-            if (!isChatNotificationVisibleToRole(notif.type, req.session!.role, notif.channel)) {
-              return res.status(403).json({ error: "You do not have access to this notification." });
-            }
+          }
+          if (!canMarkNotificationRead(notif, req.session!.role, req.session!.id, ownsViaShipment)) {
+            return res.status(403).json({ error: "You do not have access to this notification." });
           }
         }
 
+        // Notification Phase 1 correction: per-user read tracking. Only
+        // this caller's own session id is added to readByUserIds — every
+        // other id already present (another user who already read this
+        // same notification) is preserved untouched. `read` is left set
+        // to true as well, unconditionally, for backward compatibility
+        // with Admin/Client code paths not yet migrated off that legacy
+        // shared flag (see docs/NOTIFICATION_SYSTEM_AUDIT.md) — but
+        // DriverApplication.tsx no longer reads `read` for its own unread
+        // badge, so this no longer marks the notification read for other
+        // drivers the way it used to.
+        notif.readByUserIds = addReaderToNotification(notif.readByUserIds, req.session!.id);
         notif.read = true;
         await setDoc(dRef, notif);
       }

@@ -299,6 +299,27 @@ export interface AppNotification {
   // shipment-scoped rules. Absent for the ordinary shipment-scoped
   // notification types.
   recipientUserId?: string;
+  // Notification Phase 1 correction: per-user read tracking. `read` above
+  // is a legacy GLOBAL flag on the shared notification document — every
+  // driver/client/admin who can see a given notification reads the SAME
+  // doc, so one user's read request flipping `read` to true marked it
+  // read for every other user too (a real bug: Driver A opening their
+  // notifications silently marked it read for Driver B, Admin, and
+  // Client, none of whom had actually seen it). `readByUserIds` is the
+  // source of truth for whether a SPECIFIC user has read this
+  // notification: a user's own verified session id must appear in this
+  // array for it to count as read for them. Absent/empty means unread
+  // for everyone, including on notifications written before this field
+  // existed — those remain safely readable; reading one just adds the
+  // reader's id here rather than requiring a data migration. Only ids are
+  // ever added, never removed, by POST /api/notifications/:id/read.
+  // `read` itself is left in place, untouched by per-user reads — it
+  // still exists as-is for the legacy admin-wide POST
+  // /api/notifications/clear and for Admin/Client code paths not yet
+  // migrated to this per-user model (see
+  // docs/NOTIFICATION_SYSTEM_AUDIT.md). DriverApplication.tsx is the only
+  // consumer migrated to readByUserIds in this PR.
+  readByUserIds?: string[];
 }
 
 // PR #44 — MARAS AI notification readiness. Reserved notification type
