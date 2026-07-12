@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, X } from 'lucide-react';
+import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
 import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment } from '../../lib/chatCenterView';
+import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
 // DocumentCategory — 'photo' is left out here since these are staff
@@ -36,6 +37,13 @@ interface ChatCenterProps {
   onOpenFullChat: (shipment: Shipment, channel?: ChatChannel) => void;
   focus?: ChatCenterFocus | null;
   onFocusHandled?: () => void;
+  /** feature/admin-mobile-ui correction pass: called right after this
+      channel is marked read server-side (POST /chat/seen, per-admin —
+      src/lib/chatUnreadAccess.ts), so AdminPanel can optimistically drop
+      those messages from its own unreadChatMessages state immediately —
+      every badge (shipment row, bottom nav, notification bell) sourced
+      from that same state updates without waiting for the next poll. */
+  onChannelRead?: (shipmentId: string, channel: ChatCenterChannel) => void;
 }
 
 const LABELS: Record<Language, {
@@ -168,6 +176,7 @@ export default function ChatCenter({
   onOpenFullChat,
   focus,
   onFocusHandled,
+  onChannelRead,
 }: ChatCenterProps) {
   const label = LABELS[lang] ?? LABELS.en;
 
@@ -213,20 +222,44 @@ export default function ChatCenter({
       return;
     }
     let cancelled = false;
-    setIsLoadingMessages(true);
-    apiFetch(`/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data) => {
-        if (!cancelled) setChannelMessages(Array.isArray(data) ? data : []);
-      })
-      .catch(() => {
+
+    // feature/admin-mobile-ui correction pass: marks this channel read
+    // for the signed-in admin (per-admin — src/lib/chatUnreadAccess.ts,
+    // NOT the old shared-across-every-admin `status` flag) as soon as its
+    // messages are visible, same pattern/cadence (3s poll while a
+    // channel stays open) already established in App.tsx's own chat
+    // drawer — so a message that arrives while this exact shipment+
+    // channel is already open still gets picked up and marked read
+    // without the admin having to reselect anything.
+    const fetchAndMarkRead = async (showLoading: boolean) => {
+      if (showLoading) setIsLoadingMessages(true);
+      try {
+        const res = await apiFetch(`/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}`);
+        const data = res.ok ? await res.json() : [];
+        if (cancelled) return;
+        setChannelMessages(Array.isArray(data) ? data : []);
+
+        const hasMessageFromOtherParty = Array.isArray(data) && data.some((m: ChatMessage) => m.sender !== 'admin');
+        if (hasMessageFromOtherParty) {
+          await apiFetch(`/api/shipments/${selectedShipment.id}/chat/seen`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ viewer: 'admin', channel: activeChannel }),
+          });
+          if (!cancelled) onChannelRead?.(selectedShipment.id, activeChannel);
+        }
+      } catch {
         if (!cancelled) setChannelMessages([]);
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingMessages(false);
-      });
+      } finally {
+        if (!cancelled && showLoading) setIsLoadingMessages(false);
+      }
+    };
+
+    fetchAndMarkRead(true);
+    const interval = setInterval(() => fetchAndMarkRead(false), 3000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [selectedShipment?.id, activeChannel]);
 
@@ -328,10 +361,20 @@ export default function ChatCenter({
     { id: 'client_admin', label: label.customer, desc: label.customerDesc, icon: Building2 },
   ];
 
+  const BackIcon = isRtl ? ChevronRight : ChevronLeft;
+
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-220px)] min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
-      {/* Left: shipment conversation list */}
-      <div className="w-full lg:w-80 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col bg-slate-50">
+    /* feature/admin-mobile-ui correction pass: taller on mobile now that
+       App.tsx's dark header/footer are hidden there (freed-up viewport
+       height — see AdminPanel.tsx's mobile content padding). */
+    <div className="flex flex-col lg:flex-row h-[78vh] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
+      {/* Left: shipment conversation list.
+          feature/admin-mobile-ui: on mobile this list and the selected
+          conversation (below) are shown one at a time — list when nothing
+          is selected, full-screen detail once a shipment is picked — via
+          the same selectedShipmentId state this component already owns.
+          lg: always shows both side-by-side, unchanged. */}
+      <div className={`${selectedShipmentId ? 'hidden' : 'flex'} lg:flex w-full lg:w-80 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 flex-col bg-slate-50`}>
         <div className="p-4 border-b border-slate-200">
           <h2 className="font-bold text-slate-900 text-sm flex items-center gap-2">
             <MessageSquare className="w-4 h-4 text-orange-500" />
@@ -368,9 +411,9 @@ export default function ChatCenter({
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
-                  {unread.count > 0 && (
+                  {formatUnreadBadge(unread.count) && (
                     <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold flex items-center justify-center">
-                      {unread.count}
+                      {formatUnreadBadge(unread.count)}
                     </span>
                   )}
                 </div>
@@ -383,7 +426,7 @@ export default function ChatCenter({
       </div>
 
       {/* Main: channel tabs + selected conversation */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className={`${selectedShipmentId ? 'flex' : 'hidden'} lg:flex flex-1 flex-col min-w-0`}>
         {!selectedShipment ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center p-8 gap-2">
             <MessageSquare className="w-8 h-8 text-slate-300" />
@@ -392,10 +435,20 @@ export default function ChatCenter({
           </div>
         ) : (
           <>
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-              <div>
-                <span className="font-mono text-xs font-bold text-slate-900">{selectedShipment.shipmentNumber}</span>
-                <p className="text-[11px] text-slate-500">{selectedShipment.companyName} · {shipmentRouteLabel(selectedShipment)}</p>
+            <div className="p-3 lg:p-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setSelectedShipmentId(null)}
+                  aria-label={label.title}
+                  className="lg:hidden shrink-0 w-8 h-8 flex items-center justify-center text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer border-0 bg-transparent"
+                >
+                  <BackIcon className="w-4.5 h-4.5" />
+                </button>
+                <div className="min-w-0">
+                  <span className="font-mono text-xs font-bold text-slate-900">{selectedShipment.shipmentNumber}</span>
+                  <p className="text-[11px] text-slate-500 truncate">{selectedShipment.companyName} · {shipmentRouteLabel(selectedShipment)}</p>
+                </div>
               </div>
               {activeChannel !== 'internal_staff' && (
                 <button
@@ -418,7 +471,7 @@ export default function ChatCenter({
                     key={tab.id}
                     type="button"
                     onClick={() => setActiveChannel(tab.id)}
-                    className={`flex-1 flex flex-col items-center gap-1 py-2.5 text-xs font-bold border-b-2 transition-colors ${
+                    className={`flex-1 flex flex-col items-center gap-1 py-2 lg:py-2.5 text-xs font-bold border-b-2 transition-colors ${
                       isActive ? 'border-orange-500 text-orange-600 bg-orange-50/60' : 'border-transparent text-slate-400 hover:text-slate-600'
                     }`}
                   >
@@ -426,7 +479,11 @@ export default function ChatCenter({
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
                     </span>
-                    <span className="text-[10px] font-medium text-slate-400">{tab.desc}</span>
+                    {/* feature/admin-mobile-ui correction pass: hidden on
+                        mobile — 3 tabs at 2 lines each was tall vertical
+                        space on a phone; the icon + short label alone is
+                        still unambiguous. */}
+                    <span className="hidden lg:block text-[10px] font-medium text-slate-400">{tab.desc}</span>
                   </button>
                 );
               })}
