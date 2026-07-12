@@ -25,6 +25,24 @@
  * anywhere is migrated or touched. An admin with no saved preferences
  * document at all (every admin, before this feature ships) resolves to
  * "every category enabled" — see DEFAULT_ADMIN_NOTIFICATION_PREFERENCES.
+ *
+ * Concurrency: a stored document is deliberately allowed to be PARTIAL —
+ * it may only ever contain whichever categories that specific admin has
+ * actually changed at least once, never a full 8-field snapshot written
+ * eagerly "for completeness." This is intentional, not an oversight: the
+ * server writes ONLY the field(s) a given PUT request actually validated
+ * (see validateNotificationPreferencesUpdate's `updates`, and
+ * updateAdminNotificationPreferenceFields in server.ts), via a real
+ * atomic field-level merge, with no prior read of the document's other
+ * fields. If a create-on-first-write path instead eagerly filled in every
+ * other category's default value, two concurrent first-time saves to
+ * DIFFERENT categories for the same admin could each write a full
+ * "defaults + my one change" snapshot, and whichever wrote second would
+ * silently reset the first one's category back to its default — the
+ * exact bug this design avoids. resolveAdminNotificationPreferences
+ * already treats a missing category as enabled-by-default on every read,
+ * so this is functionally invisible to callers — GET and PUT responses
+ * always look like a complete 8-category object either way.
  */
 
 export const NOTIFICATION_PREFERENCE_CATEGORIES = [
@@ -68,8 +86,8 @@ function isKnownCategory(key: string): key is NotificationPreferenceCategory {
  * security_system_alerts is unconditionally forced to true here,
  * regardless of what (if anything) was actually stored — this is the
  * final, defense-in-depth enforcement point for "cannot be turned off",
- * on top of sanitizeNotificationPreferencesUpdate rejecting the write in
- * the first place.
+ * on top of validateNotificationPreferencesUpdate never including it in
+ * a write's `updates` in the first place.
  */
 export function resolveAdminNotificationPreferences(
   stored: Partial<Record<string, unknown>> | null | undefined
@@ -87,8 +105,17 @@ export function resolveAdminNotificationPreferences(
   return resolved;
 }
 
-export interface NotificationPreferencesValidationResult {
-  preferences: AdminNotificationPreferences;
+export interface NotificationPreferencesUpdateValidation {
+  // ONLY the fields this request actually validated and intends to
+  // change — deliberately never merged against, or defaulted from, any
+  // "existing" state. This is the concurrency fix: two concurrent PUTs
+  // to different categories each produce a `updates` object mentioning
+  // only their own category, so applying both (in either order, via an
+  // atomic field-level write — see updateAdminNotificationPreferenceFields
+  // in server.ts) can never cause one to clobber the other's field. Never
+  // contains "security_system_alerts" — the caller always forces that
+  // field to `true` itself on every write, independent of input.
+  updates: Partial<Record<NotificationPreferenceCategory, boolean>>;
   // Known category, but the submitted value wasn't a boolean — the PUT
   // route rejects the whole request (400) if this is non-empty, rather
   // than silently applying a partially-valid update.
@@ -99,23 +126,28 @@ export interface NotificationPreferencesValidationResult {
   unknownKeys: string[];
   // True if the request specifically tried to set security_system_alerts
   // to false. Not treated as an invalid request — the value is silently
-  // ignored (forced true) rather than rejecting the whole update, so a
+  // dropped from `updates` rather than rejecting the whole update, so a
   // request that also changes other categories in the same call still
   // succeeds for those.
   securityAlertsDisableAttempted: boolean;
 }
 
 /**
- * Validates and applies a PUT /api/admin/notification-preferences request
- * body against this admin's existing preferences. Pure — the caller
- * supplies `existing` (already resolved via resolveAdminNotificationPreferences)
- * and persists `preferences` from the result themselves.
+ * Validates a PUT /api/admin/notification-preferences request body and
+ * produces the DELTA to apply — deliberately with no "existing
+ * preferences" parameter at all. The previous version of this function
+ * took the admin's existing (already-resolved) preferences and returned a
+ * full merged object; that required the route to read the existing
+ * document before writing, which is exactly what made two concurrent
+ * requests to different categories race (both read the same "before"
+ * state, and whichever finished last silently discarded the other's
+ * change when it wrote its own full reconstruction back). Producing only
+ * the delta here, with no merge step, is what lets the write itself be a
+ * genuine atomic field-level update (see server.ts's
+ * updateAdminNotificationPreferenceFields) instead of a read-modify-write.
  */
-export function sanitizeNotificationPreferencesUpdate(
-  existing: AdminNotificationPreferences,
-  input: unknown
-): NotificationPreferencesValidationResult {
-  const preferences: AdminNotificationPreferences = { ...existing };
+export function validateNotificationPreferencesUpdate(input: unknown): NotificationPreferencesUpdateValidation {
+  const updates: Partial<Record<NotificationPreferenceCategory, boolean>> = {};
   const invalidKeys: string[] = [];
   const unknownKeys: string[] = [];
   let securityAlertsDisableAttempted = false;
@@ -132,14 +164,13 @@ export function sanitizeNotificationPreferencesUpdate(
       }
       if (key === "security_system_alerts") {
         if (value === false) securityAlertsDisableAttempted = true;
-        continue; // never applied from input — forced true below regardless
+        continue; // never included in updates — the route always forces this field true on every write, independent of input
       }
-      preferences[key] = value;
+      updates[key] = value;
     }
   }
 
-  preferences.security_system_alerts = true;
-  return { preferences, invalidKeys, unknownKeys, securityAlertsDisableAttempted };
+  return { updates, invalidKeys, unknownKeys, securityAlertsDisableAttempted };
 }
 
 /**
@@ -253,4 +284,23 @@ export function filterAdminRecipientsByPreferences(
     const preferences = resolveAdminNotificationPreferences(preferencesByAdminId[id]);
     return shouldDeliverNotificationToAdmin(preferences, notificationType, notificationChannel);
   });
+}
+
+/**
+ * A pure, single-field update of a preferences object — replaces exactly
+ * one category, leaves every other field untouched. This is the shared
+ * building block behind AdminSettingsSection.tsx's optimistic update,
+ * success-merge, and failure-rollback: all three are "set just this one
+ * category," never a full-object replace, so a save (successful or
+ * failed) for one category can never disturb any other category's
+ * already-applied value — the exact frontend half of the concurrency fix
+ * (see the backend's updateAdminNotificationPreferenceFields, server.ts,
+ * for the write-side half).
+ */
+export function applyPreferenceFieldUpdate(
+  current: AdminNotificationPreferences,
+  category: NotificationPreferenceCategory,
+  value: boolean
+): AdminNotificationPreferences {
+  return { ...current, [category]: value };
 }

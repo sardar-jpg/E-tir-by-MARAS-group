@@ -54,7 +54,7 @@ import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
 import { isNotificationForDriver, addReaderToNotification, canMarkNotificationRead } from "./src/lib/notificationAccess";
-import { resolveAdminNotificationPreferences, sanitizeNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences } from "./src/lib/notificationPreferences";
+import { resolveAdminNotificationPreferences, validateNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences, type NotificationPreferenceCategory } from "./src/lib/notificationPreferences";
 import { canDeletePushToken } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
@@ -555,6 +555,56 @@ function handleAddNotificationReaderMemory(notificationId: string, userId: strin
   if (item) {
     item.readByUserIds = addReaderToNotification(item.readByUserIds, userId);
   }
+}
+
+// Notification Preferences Phase 2 — concurrency fix. Writes ONLY the
+// caller's validated, submitted category fields (plus
+// security_system_alerts, forced true on every single write, and
+// updatedAt) — never a full reconstruction of this admin's other
+// categories, and never a prior read of the document's existing values.
+// This is what makes two concurrent PUT /api/admin/notification-preferences
+// requests to DIFFERENT categories both survive: neither write's payload
+// ever mentions a field the other request didn't touch, so there is
+// nothing for one write to overwrite that the other actually changed. See
+// src/lib/notificationPreferences.ts's header comment for why the stored
+// document is deliberately allowed to stay partial rather than eagerly
+// seeded with full defaults on first write — eagerly writing defaults
+// would reintroduce exactly this race for two concurrent first-time
+// saves to different categories.
+//
+// Real Firestore: the existing generic setDoc() wrapper already forwards
+// its `options` argument straight through to the real SDK's setDoc, so
+// passing { merge: true } here performs a genuine atomic field-level
+// merge, creating the document if it doesn't exist yet (using only the
+// given fields) or merging into an existing one — with no read required
+// first, and no transaction required, since Firestore's own merge
+// semantics already guarantee two field-disjoint concurrent merges both
+// apply.
+//
+// Memory fallback: handleSetDocMemory (below) already merges via
+// `{ ...items[idx], ...data }` when updating (or `{ id, ...data }` when
+// creating) as its own unconditional behavior — it doesn't even look at
+// the `merge` option — so it already has the same
+// only-touch-the-given-fields property real Firestore gets from
+// { merge: true }. No dedicated raw-bypass helper is needed here, unlike
+// addNotificationReaderId's arrayUnion() case above — this payload is
+// plain booleans/strings, nothing cleanUndefined() or
+// handleSetDocMemory's spread merge could mishandle.
+async function updateAdminNotificationPreferenceFields(
+  adminId: string,
+  fields: Partial<Record<NotificationPreferenceCategory, boolean>>
+): Promise<void> {
+  const prefRef = doc(db, "adminNotificationPreferences", adminId);
+  await setDoc(
+    prefRef,
+    {
+      ...fields,
+      security_system_alerts: true,
+      id: adminId,
+      updatedAt: new Date().toISOString()
+    },
+    { merge: true }
+  );
 }
 
 async function deleteDoc(docRef: any) {
@@ -5047,28 +5097,34 @@ async function startServer() {
 
   app.put("/api/admin/notification-preferences", requireRole("admin"), async (req, res) => {
     try {
-      const prefRef = doc(db, "adminNotificationPreferences", req.session!.id);
-      const existingDoc = await getDoc(prefRef);
-      const existing = resolveAdminNotificationPreferences(existingDoc.exists() ? existingDoc.data() : undefined);
-      const result = sanitizeNotificationPreferencesUpdate(existing, req.body);
+      const validation = validateNotificationPreferencesUpdate(req.body);
       // Every submitted category value is validated server-side: a known
       // category with a non-boolean value rejects the whole request
       // rather than silently applying a partially-valid update. An
       // attempt to disable security_system_alerts specifically is NOT a
-      // validation error — sanitizeNotificationPreferencesUpdate already
-      // ignored it (forced true) above, so the rest of a legitimate
+      // validation error — validateNotificationPreferencesUpdate already
+      // dropped it from `updates` above, so the rest of a legitimate
       // request (e.g. also toggling another category) still succeeds.
-      if (result.invalidKeys.length > 0) {
+      if (validation.invalidKeys.length > 0) {
         return res.status(400).json({
-          error: `Invalid value for: ${result.invalidKeys.join(", ")}. Each category must be true or false.`
+          error: `Invalid value for: ${validation.invalidKeys.join(", ")}. Each category must be true or false.`
         });
       }
-      await setDoc(prefRef, {
-        id: req.session!.id,
-        ...result.preferences,
-        updatedAt: new Date().toISOString()
-      });
-      res.json({ preferences: result.preferences });
+      // Concurrency fix: this is an atomic field-level write of ONLY the
+      // validated delta — no read of the existing document happens
+      // before this write, and nothing about another category is ever
+      // reconstructed or guessed at. See
+      // updateAdminNotificationPreferenceFields's own comment for exactly
+      // why this is what makes two concurrent PUTs to different
+      // categories both survive.
+      await updateAdminNotificationPreferenceFields(req.session!.id, validation.updates);
+      // This read happens strictly AFTER the write completes, purely to
+      // report accurate current data back to the caller — it has no
+      // influence on what was written above, so it cannot reintroduce the
+      // lost-update race this endpoint was fixed for.
+      const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
+      const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
+      res.json({ preferences });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update notification preferences." });

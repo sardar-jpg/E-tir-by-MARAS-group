@@ -5,6 +5,7 @@ import { apiFetch } from '../../../lib/api';
 import {
   NOTIFICATION_PREFERENCE_CATEGORIES,
   DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
+  applyPreferenceFieldUpdate,
   type AdminNotificationPreferences,
   type NotificationPreferenceCategory,
 } from '../../../lib/notificationPreferences';
@@ -93,7 +94,17 @@ export default function AdminSettingsSection({
   const [preferences, setPreferences] = useState<AdminNotificationPreferences>(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsLoadError, setPrefsLoadError] = useState<string | null>(null);
-  const [savingCategories, setSavingCategories] = useState<Set<NotificationPreferenceCategory>>(new Set());
+  // Only one preference save may be in flight at a time — every toggle is
+  // disabled while `savingCategory` is non-null (see the toggles below),
+  // so the frontend itself can never fire two overlapping PUT requests.
+  // This is the "serialize saves" half of the concurrency fix: it doesn't
+  // replace the backend's own atomic field-level writes (server.ts's
+  // updateAdminNotificationPreferenceFields still protects against
+  // concurrency from OTHER sources — another tab, another device), but it
+  // does mean a stale/out-of-order response from THIS component's own
+  // requests is not a concern in practice, since there is never more than
+  // one outstanding.
+  const [savingCategory, setSavingCategory] = useState<NotificationPreferenceCategory | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -129,11 +140,20 @@ export default function AdminSettingsSection({
     // (see the "Always On" row below) and never reaches this handler in
     // normal use — this guard is defense in depth only.
     if (category === 'security_system_alerts') return;
-    if (savingCategories.has(category)) return;
+    // Only one save at a time — every toggle is already disabled in the
+    // JSX below while this is non-null, so this check is a defense-in-depth
+    // backstop against firing a second request before React re-renders.
+    if (savingCategory !== null) return;
 
-    const previous = preferences;
-    setPreferences({ ...preferences, [category]: next });
-    setSavingCategories((prev) => new Set(prev).add(category));
+    const previousValue = preferences[category];
+    // Optimistic update touches ONLY this one category — never the whole
+    // preferences object — so it can never disturb any other category's
+    // already-confirmed value. applyPreferenceFieldUpdate (shared,
+    // unit-tested in src/lib/notificationPreferences.test.ts) is the same
+    // single-field-merge helper used for the success-merge and
+    // failure-rollback below.
+    setPreferences((prev) => applyPreferenceFieldUpdate(prev, category, next));
+    setSavingCategory(category);
     setSaveError(null);
     try {
       const res = await apiFetch('/api/admin/notification-preferences', {
@@ -143,21 +163,29 @@ export default function AdminSettingsSection({
       });
       if (!res.ok) throw new Error(`status ${res.status}`);
       const data = await res.json();
-      if (data?.preferences) setPreferences(data.preferences);
+      // Merge ONLY the category we just changed from the confirmed server
+      // response — never replace the whole preferences object with it.
+      // Trusting the full response here would risk visually reverting a
+      // different category if this response were ever processed
+      // out of order relative to another save; merging just this one
+      // field makes that structurally impossible regardless.
+      if (data?.preferences && typeof data.preferences[category] === 'boolean') {
+        setPreferences((prev) => applyPreferenceFieldUpdate(prev, category, data.preferences[category]));
+      }
     } catch (err) {
       console.error(`Failed to save notification preference "${category}":`, err);
-      setPreferences(previous); // revert — failed requests must not appear saved
+      // Revert ONLY this category back to its pre-toggle value — never
+      // the whole preferences object (setPreferences(previous)), which
+      // could silently undo a different category's already-successful
+      // save if one happened to land in the same render cycle.
+      setPreferences((prev) => applyPreferenceFieldUpdate(prev, category, previousValue));
       setSaveError(
         lang === 'tr'
           ? 'Değişiklik kaydedilemedi. Lütfen tekrar deneyin.'
           : (lang === 'ar' ? 'تعذّر حفظ التغيير. يرجى المحاولة مرة أخرى.' : 'Could not save the change. Please try again.')
       );
     } finally {
-      setSavingCategories((prev) => {
-        const next = new Set(prev);
-        next.delete(category);
-        return next;
-      });
+      setSavingCategory(null);
     }
   };
 
@@ -222,7 +250,7 @@ export default function AdminSettingsSection({
             <h3 className="text-sm font-bold text-slate-900">
               {lang === 'tr' ? 'Bildirim Tercihleri' : (lang === 'ar' ? 'تفضيلات الإشعارات' : 'Notification Preferences')}
             </h3>
-            {savingCategories.size > 0 && (
+            {savingCategory !== null && (
               <span className="flex items-center gap-1 text-[10px] font-bold text-indigo-500">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 {lang === 'tr' ? 'Kaydediliyor…' : (lang === 'ar' ? 'جارٍ الحفظ…' : 'Saving…')}
@@ -256,7 +284,8 @@ export default function AdminSettingsSection({
                 <span className="text-xs font-semibold text-slate-600">{CATEGORY_LABELS[category][lang]}</span>
                 <NotificationPreferenceToggle
                   checked={preferences[category]}
-                  saving={savingCategories.has(category)}
+                  saving={savingCategory === category}
+                  disabled={savingCategory !== null}
                   label={CATEGORY_LABELS[category][lang]}
                   onChange={(next) => handleTogglePreference(category, next)}
                 />

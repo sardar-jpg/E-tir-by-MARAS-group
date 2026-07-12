@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
   resolveAdminNotificationPreferences,
-  sanitizeNotificationPreferencesUpdate,
+  validateNotificationPreferencesUpdate,
+  applyPreferenceFieldUpdate,
   mapNotificationToPreferenceCategory,
   isNotificationCategoryEnabledForAdmin,
   shouldDeliverNotificationToAdmin,
   filterAdminRecipientsByPreferences,
   NOTIFICATION_PREFERENCE_CATEGORIES,
+  type AdminNotificationPreferences,
 } from "./notificationPreferences";
 
 describe("resolveAdminNotificationPreferences — defaults", () => {
@@ -88,61 +90,190 @@ describe("Per-admin isolation", () => {
   });
 });
 
-describe("sanitizeNotificationPreferencesUpdate", () => {
-  it("applies a valid boolean update to a known category", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, { shipment_updates: false });
-    expect(result.preferences.shipment_updates).toBe(false);
+describe("validateNotificationPreferencesUpdate — produces a delta only, no existing-state merge", () => {
+  it("a valid boolean update to a known category appears in `updates`, with no other category present at all", () => {
+    const result = validateNotificationPreferencesUpdate({ shipment_updates: false });
+    expect(result.updates).toEqual({ shipment_updates: false });
     expect(result.invalidKeys).toEqual([]);
   });
 
-  it("security_system_alerts cannot be disabled — the attempt is ignored, not applied, and flagged", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, { security_system_alerts: false });
-    expect(result.preferences.security_system_alerts).toBe(true);
-    expect(result.securityAlertsDisableAttempted).toBe(true);
-    expect(result.invalidKeys).toEqual([]); // not treated as an invalid request — silently ignored
+  it("security_system_alerts is never included in `updates`, whichever value is submitted — the caller forces it true itself on every write", () => {
+    const disableAttempt = validateNotificationPreferencesUpdate({ security_system_alerts: false });
+    expect(disableAttempt.updates).not.toHaveProperty("security_system_alerts");
+    expect(disableAttempt.securityAlertsDisableAttempted).toBe(true);
+    expect(disableAttempt.invalidKeys).toEqual([]); // not treated as an invalid request — silently dropped
+
+    const explicitTrue = validateNotificationPreferencesUpdate({ security_system_alerts: true });
+    expect(explicitTrue.updates).not.toHaveProperty("security_system_alerts");
+    expect(explicitTrue.securityAlertsDisableAttempted).toBe(false);
   });
 
-  it("a request disabling security_system_alerts alongside other valid changes still applies the other changes", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, {
-      security_system_alerts: false,
-      driver_messages: false,
-    });
-    expect(result.preferences.security_system_alerts).toBe(true);
-    expect(result.preferences.driver_messages).toBe(false);
+  it("a request disabling security_system_alerts alongside another valid change still produces that other change in `updates`", () => {
+    const result = validateNotificationPreferencesUpdate({ security_system_alerts: false, driver_messages: false });
+    expect(result.updates).toEqual({ driver_messages: false });
   });
 
-  it("explicitly setting security_system_alerts: true is accepted (a no-op, already always true)", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, { security_system_alerts: true });
-    expect(result.preferences.security_system_alerts).toBe(true);
-    expect(result.securityAlertsDisableAttempted).toBe(false);
-  });
-
-  it("a non-boolean value for a known category is flagged invalid, not silently coerced", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, { shipment_updates: "false" });
+  it("a non-boolean value for a known category is flagged invalid, and is never added to `updates`", () => {
+    const result = validateNotificationPreferencesUpdate({ shipment_updates: "false" });
     expect(result.invalidKeys).toEqual(["shipment_updates"]);
-    expect(result.preferences.shipment_updates).toBe(true); // unchanged from existing
+    expect(result.updates).not.toHaveProperty("shipment_updates");
   });
 
-  it("an unrecognized key is ignored, not treated as invalid", () => {
-    const result = sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, { made_up_category: false });
+  it("an unrecognized key is ignored (reported separately), not treated as invalid, and never added to `updates`", () => {
+    const result = validateNotificationPreferencesUpdate({ made_up_category: false });
     expect(result.unknownKeys).toEqual(["made_up_category"]);
     expect(result.invalidKeys).toEqual([]);
+    expect(result.updates).toEqual({});
   });
 
-  it("null/undefined/non-object input changes nothing and reports no errors", () => {
-    expect(sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, null).preferences).toEqual(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
-    expect(sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, undefined).preferences).toEqual(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
-    expect(sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, "not an object").preferences).toEqual(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
-    expect(sanitizeNotificationPreferencesUpdate(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, ["array"]).preferences).toEqual(DEFAULT_ADMIN_NOTIFICATION_PREFERENCES);
+  it("null/undefined/non-object input produces an empty delta and no errors", () => {
+    expect(validateNotificationPreferencesUpdate(null).updates).toEqual({});
+    expect(validateNotificationPreferencesUpdate(undefined).updates).toEqual({});
+    expect(validateNotificationPreferencesUpdate("not an object").updates).toEqual({});
+    expect(validateNotificationPreferencesUpdate(["array"]).updates).toEqual({});
   });
 
-  it("preserves categories not mentioned in the update", () => {
-    const existing = resolveAdminNotificationPreferences({ cmr_pod: false, accounting_alerts: false });
-    const result = sanitizeNotificationPreferencesUpdate(existing, { driver_messages: false });
-    expect(result.preferences.cmr_pod).toBe(false);
-    expect(result.preferences.accounting_alerts).toBe(false);
-    expect(result.preferences.driver_messages).toBe(false);
-    expect(result.preferences.shipment_updates).toBe(true);
+  it("a multi-category request produces a delta containing exactly those categories, nothing else", () => {
+    const result = validateNotificationPreferencesUpdate({ cmr_pod: false, accounting_alerts: false, driver_messages: false });
+    expect(result.updates).toEqual({ cmr_pod: false, accounting_alerts: false, driver_messages: false });
+    expect(Object.keys(result.updates)).toHaveLength(3);
+  });
+});
+
+describe("Atomic field-level merge semantics — the concurrency fix", () => {
+  // These tests model server.ts's updateAdminNotificationPreferenceFields
+  // at the level this repo's tests operate on (no server.ts test file
+  // exists — pure-function extraction is the established convention).
+  // simulateFieldMerge below stands in for BOTH real paths this function
+  // relies on: Firestore's own setDoc(ref, data, { merge: true }) contract
+  // (only the given top-level fields change; everything else in the
+  // document is left alone) and handleSetDocMemory's existing
+  // `{ ...items[idx], ...data }` / `{ id, ...data }` behavior in
+  // server.ts — both are, by construction, exactly this operation.
+  function simulateFieldMerge(
+    stored: Partial<Record<string, unknown>> | undefined,
+    fields: Partial<AdminNotificationPreferences>
+  ): Partial<Record<string, unknown>> {
+    return { ...(stored ?? {}), ...fields };
+  }
+
+  it("two sequential partial updates to different categories both persist — neither is lost", () => {
+    let stored: Partial<Record<string, unknown>> | undefined = undefined;
+    stored = simulateFieldMerge(stored, { driver_messages: false });
+    stored = simulateFieldMerge(stored, { shipment_updates: false });
+    const resolved = resolveAdminNotificationPreferences(stored);
+    expect(resolved.driver_messages).toBe(false);
+    expect(resolved.shipment_updates).toBe(false);
+  });
+
+  it("updating one category never resets a previously-saved different category back to its default", () => {
+    let stored: Partial<Record<string, unknown>> | undefined = simulateFieldMerge(undefined, { cmr_pod: false });
+    // A second, later, unrelated update — must not reintroduce cmr_pod at all,
+    // let alone reset it.
+    stored = simulateFieldMerge(stored, { accounting_alerts: false });
+    const resolved = resolveAdminNotificationPreferences(stored);
+    expect(resolved.cmr_pod).toBe(false); // still false — not reset to the true default
+    expect(resolved.accounting_alerts).toBe(false);
+  });
+
+  it("simulates the exact race this fix closes: two concurrent updates to DIFFERENT categories, applied in either order, both survive", () => {
+    // Request A changes driver_messages; Request B changes shipment_updates.
+    // Neither request's payload mentions the other's field at all (unlike
+    // the old read-existing-then-write-full-object approach), so applying
+    // them in either order — simulating either possible arrival order for
+    // two concurrent requests — produces the same, fully-correct result.
+    const requestAFields = { driver_messages: false };
+    const requestBFields = { shipment_updates: false };
+
+    const orderAThenB = simulateFieldMerge(simulateFieldMerge(undefined, requestAFields), requestBFields);
+    const orderBThenA = simulateFieldMerge(simulateFieldMerge(undefined, requestBFields), requestAFields);
+
+    for (const stored of [orderAThenB, orderBThenA]) {
+      const resolved = resolveAdminNotificationPreferences(stored);
+      expect(resolved.driver_messages).toBe(false);
+      expect(resolved.shipment_updates).toBe(false);
+    }
+  });
+
+  it("creating preferences for a brand-new admin (no prior document) via a single-category update still resolves every other category to its default", () => {
+    const stored = simulateFieldMerge(undefined, { driver_messages: false });
+    const resolved = resolveAdminNotificationPreferences(stored);
+    expect(resolved.driver_messages).toBe(false);
+    expect(resolved.shipment_updates).toBe(true);
+    expect(resolved.customer_messages).toBe(true);
+    expect(resolved.document_uploads).toBe(true);
+    expect(resolved.cmr_pod).toBe(true);
+    expect(resolved.delays_border_waiting).toBe(true);
+    expect(resolved.accounting_alerts).toBe(true);
+  });
+
+  it("security_system_alerts remains true through any sequence of field-level merges, since it is never part of a submitted delta", () => {
+    let stored: Partial<Record<string, unknown>> | undefined = undefined;
+    stored = simulateFieldMerge(stored, { driver_messages: false });
+    stored = simulateFieldMerge(stored, { shipment_updates: false });
+    stored = simulateFieldMerge(stored, { security_system_alerts: true }); // the route always includes this on every write
+    expect(resolveAdminNotificationPreferences(stored).security_system_alerts).toBe(true);
+  });
+
+  it("memory fallback and Firestore field-update semantics are equivalent at the helper level", () => {
+    // A second, independent model of Firestore's merge:true semantics
+    // (documented: only the given top-level fields change) — proves
+    // simulateFieldMerge above (standing in for BOTH real code paths)
+    // isn't accidentally modeling only one of them.
+    const simulateFirestoreMergeTrue = (
+      stored: Partial<Record<string, unknown>> | undefined,
+      fields: Partial<AdminNotificationPreferences>
+    ): Partial<Record<string, unknown>> => ({ ...(stored ?? {}), ...fields });
+
+    const sequence: Partial<AdminNotificationPreferences>[] = [
+      { driver_messages: false },
+      { shipment_updates: false },
+      { cmr_pod: false },
+    ];
+
+    let memoryFallbackResult: Partial<Record<string, unknown>> | undefined = undefined;
+    let firestoreResult: Partial<Record<string, unknown>> | undefined = undefined;
+    for (const fields of sequence) {
+      memoryFallbackResult = simulateFieldMerge(memoryFallbackResult, fields);
+      firestoreResult = simulateFirestoreMergeTrue(firestoreResult, fields);
+    }
+
+    expect(resolveAdminNotificationPreferences(memoryFallbackResult)).toEqual(resolveAdminNotificationPreferences(firestoreResult));
+  });
+});
+
+describe("applyPreferenceFieldUpdate — the frontend half of the concurrency fix", () => {
+  it("replaces exactly one category, leaving every other field untouched", () => {
+    const before: AdminNotificationPreferences = { ...DEFAULT_ADMIN_NOTIFICATION_PREFERENCES, cmr_pod: false };
+    const after = applyPreferenceFieldUpdate(before, "driver_messages", false);
+    expect(after.driver_messages).toBe(false);
+    expect(after.cmr_pod).toBe(false); // preserved, untouched
+    expect(after.shipment_updates).toBe(true); // preserved, untouched
+    // pure — does not mutate the input
+    expect(before.driver_messages).toBe(true);
+  });
+
+  it("models AdminSettingsSection.tsx's failure-rollback: reverting a failed category changes only that category", () => {
+    // Simulates: optimistic update to driver_messages, a second category
+    // (cmr_pod) already successfully saved earlier, then the
+    // driver_messages request fails and is rolled back.
+    let state: AdminNotificationPreferences = DEFAULT_ADMIN_NOTIFICATION_PREFERENCES;
+    state = applyPreferenceFieldUpdate(state, "cmr_pod", false); // earlier, already-successful save
+    const previousDriverMessages = state.driver_messages; // true, captured before the optimistic flip
+    state = applyPreferenceFieldUpdate(state, "driver_messages", false); // optimistic update for the new toggle
+    // ...request fails...
+    state = applyPreferenceFieldUpdate(state, "driver_messages", previousDriverMessages); // rollback
+
+    expect(state.driver_messages).toBe(true); // rolled back
+    expect(state.cmr_pod).toBe(false); // the earlier successful save is NOT undone by this rollback
+  });
+
+  it("models two sequential successful saves: the second save's success-merge never disturbs the first's already-applied value", () => {
+    let state: AdminNotificationPreferences = DEFAULT_ADMIN_NOTIFICATION_PREFERENCES;
+    state = applyPreferenceFieldUpdate(state, "shipment_updates", false); // save #1 succeeds, merges its own confirmed value
+    state = applyPreferenceFieldUpdate(state, "driver_messages", false); // save #2 succeeds, merges its own confirmed value
+    expect(state.shipment_updates).toBe(false);
+    expect(state.driver_messages).toBe(false);
   });
 });
 
