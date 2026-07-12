@@ -286,6 +286,19 @@ export interface AppNotification {
   // driver would be paged for a document event that belongs to the
   // client_admin audience. Absent for other notification types.
   channel?: ChatChannel;
+  // Notification Phase 1: session id of a specific user this notification
+  // is directly addressed to, independent of shipmentId. Some events (e.g.
+  // a driver being approved) have no associated shipment at all — without
+  // this, GET /api/notifications' shipment-scoping filter for
+  // driver/client sessions would silently drop the notification for
+  // everyone except admins, and POST /api/notifications/:id/read's
+  // ownership check (which looks up notif.shipmentId) would 404 rather
+  // than let the intended recipient mark it read. When set, both routes
+  // treat `recipientUserId === the caller's own session id` as sufficient
+  // access on its own, on top of (not instead of) the existing
+  // shipment-scoped rules. Absent for the ordinary shipment-scoped
+  // notification types.
+  recipientUserId?: string;
 }
 
 // PR #44 — MARAS AI notification readiness. Reserved notification type

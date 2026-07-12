@@ -231,6 +231,36 @@ export function isClientAccountActive(client: Pick<Client, "active">): boolean {
 }
 
 /**
+ * Notification Phase 1.
+ *
+ * Resolves every push-notification recipient for a shipment event on the
+ * client side: the Client Owner AND every active Client Staff account on
+ * the same company — never just one. Previously the only call site
+ * (server.ts's pushNotification) used `.find()` against the full clients
+ * collection, which resolves to whichever single record — Owner or one
+ * Staff account — happens to come first in Firestore's snapshot order,
+ * silently dropping every other account on the same company. A company
+ * can have one Owner plus multiple Staff accounts (see
+ * feature/client-staff-management-ui above); all of them should be
+ * pushed to, since Owner and Staff have equal company-level access.
+ *
+ * Disabled accounts (`active === false`, see isClientAccountActive) are
+ * excluded — same rule POST /api/login already uses to refuse them a
+ * session in the first place; there is no reason to push to an account
+ * that could not currently sign in to see it. Returns ids only (a caller
+ * adds them to a Set to dedupe against other recipients, e.g. admins).
+ */
+export function resolveClientPushRecipientIds(
+  clients: Pick<Client, "id" | "companyName" | "active">[],
+  companyName: string | undefined
+): string[] {
+  if (!companyName) return [];
+  return clients
+    .filter(c => c.companyName === companyName && isClientAccountActive(c))
+    .map(c => c.id);
+}
+
+/**
  * feature/client-staff-management-ui
  *
  * Resolves the TRUSTED companyName for a brand-new Client Staff record
