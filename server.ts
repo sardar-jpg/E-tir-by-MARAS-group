@@ -30,6 +30,9 @@ import {
   SESSION_TTL_MS as AUTH_SESSION_TTL_MS,
   signSessionToken as signSessionTokenImpl,
   verifySessionToken as verifySessionTokenImpl,
+  signPendingFirebaseIdentityDeletionToken as signPendingFirebaseIdentityDeletionTokenImpl,
+  verifyPendingFirebaseIdentityDeletionToken as verifyPendingFirebaseIdentityDeletionTokenImpl,
+  PENDING_FIREBASE_DELETION_TOKEN_TTL_MS,
   hashPassword,
   verifyPassword,
   verifyPasswordWithMigration,
@@ -50,7 +53,7 @@ import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
-import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError } from "./src/lib/driverAccountDeletion";
+import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
@@ -2061,6 +2064,12 @@ async function startServer() {
   }
   function verifySessionToken(token: string): SessionPayload | null {
     return verifySessionTokenImpl(token, SESSION_SECRET);
+  }
+  function signPendingFirebaseIdentityDeletionToken(payload: { driverId: string; firebaseUid: string; issuedAt: number; expiresAt: number }): string {
+    return signPendingFirebaseIdentityDeletionTokenImpl(payload, SESSION_SECRET);
+  }
+  function verifyPendingFirebaseIdentityDeletionToken(token: string) {
+    return verifyPendingFirebaseIdentityDeletionTokenImpl(token, SESSION_SECRET);
   }
 
   // (Express Request type augmentation moved to top-level, outside this
@@ -4073,12 +4082,11 @@ async function startServer() {
             issuedAt: Date.now(),
             expiresAt: Date.now() + SESSION_TTL_MS,
           };
-          const { password: _dpw, ...safeDriver } = matchedDriver as any;
           return res.json({
             success: true,
             token: signSessionToken(sessionPayload),
             role: "driver",
-            driver: safeDriver
+            driver: sanitizeDriver(matchedDriver)
           });
         }
       }
@@ -4279,12 +4287,11 @@ async function startServer() {
           issuedAt: Date.now(),
           expiresAt: Date.now() + SESSION_TTL_MS,
         };
-        const { password: _fdpw, ...safeFoundDriver } = foundDriver as any;
         return res.json({
           success: true,
           token: signSessionToken(sessionPayload),
           role: "driver",
-          driver: safeFoundDriver
+          driver: sanitizeDriver(foundDriver)
         });
       }
 
@@ -4528,12 +4535,14 @@ async function startServer() {
       const docRef = doc(db, "drivers", id);
 
       let driverBeforeDelete: Driver | undefined;
+      let driverLookupFailed = false;
       try {
         const existing = await getDoc(docRef);
         if (existing.exists()) {
           driverBeforeDelete = existing.data() as Driver;
         }
       } catch (lookupErr) {
+        driverLookupFailed = true;
         console.warn("[DELETE /api/drivers/:id] Could not read driver record before deletion:", lookupErr);
       }
 
@@ -4561,10 +4570,26 @@ async function startServer() {
       // as success, since Apple's guideline treats a surviving Auth
       // identity as an incomplete deletion regardless of what the client
       // separately reports.
-      let firebaseAuthDeleted = true;
-      if (adminAuth && hasVerifiedFirebaseUid(driverBeforeDelete)) {
+      //
+      // Review follow-up: `planServerFirebaseIdentityDeletion` is the single
+      // source of truth for "did an identity exist" / "should we even try" —
+      // in particular, a failed pre-delete lookup (driverLookupFailed) is
+      // treated as hadFirebaseIdentity=true but shouldAttemptDeletion=false,
+      // so firebaseAuthDeleted below is explicitly set to false rather than
+      // defaulting to true (the exact ambiguous-default bug this replaces).
+      const plan = planServerFirebaseIdentityDeletion({
+        driverLookupFailed,
+        driver: driverBeforeDelete,
+        adminAuthAvailable: !!adminAuth,
+      });
+
+      let firebaseAuthDeleted: boolean;
+      if (!plan.hadFirebaseIdentity) {
+        firebaseAuthDeleted = true;
+      } else if (plan.shouldAttemptDeletion) {
+        firebaseAuthDeleted = true;
         try {
-          await adminAuth.deleteUser(driverBeforeDelete!.firebaseUid!);
+          await adminAuth!.deleteUser(driverBeforeDelete!.firebaseUid!);
         } catch (fbErr: any) {
           if (isFirebaseUserNotFoundError(fbErr?.code)) {
             // Already gone — nothing left to do.
@@ -4573,12 +4598,99 @@ async function startServer() {
             console.error("[DELETE /api/drivers/:id] Firebase Auth user deletion failed unexpectedly:", fbErr);
           }
         }
+      } else {
+        // A verified identity is presumed to exist (or the lookup failed,
+        // so we can't rule one out) but there was no way to actually
+        // attempt the deletion (unreadable pre-delete record, or Admin
+        // Auth unavailable) — must not be reported as deleted.
+        firebaseAuthDeleted = false;
       }
 
-      res.json({ success: true, message: "Driver deleted successfully", firebaseAuthDeleted });
+      // Lets a later Retry (POST /api/drivers/finish-firebase-deletion)
+      // resume this specific deletion using the verified uid captured
+      // above — the Firestore driver record (and its firebaseUid field) is
+      // already gone by the time any retry could happen. Only issued when
+      // we actually have a concrete uid to retry with.
+      let pendingFirebaseDeletionToken: string | undefined;
+      if (!firebaseAuthDeleted && driverBeforeDelete?.firebaseUid) {
+        const now = Date.now();
+        pendingFirebaseDeletionToken = signPendingFirebaseIdentityDeletionToken({
+          driverId: id,
+          firebaseUid: driverBeforeDelete.firebaseUid,
+          issuedAt: now,
+          expiresAt: now + PENDING_FIREBASE_DELETION_TOKEN_TTL_MS,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Driver deleted successfully",
+        driverRecordDeleted: true,
+        hadFirebaseIdentity: plan.hadFirebaseIdentity,
+        firebaseAuthDeleted,
+        ...(pendingFirebaseDeletionToken ? { pendingFirebaseDeletionToken } : {}),
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to delete driver" });
+    }
+  });
+
+  // Review follow-up to fix/apple-driver-account-deletion: resumes a
+  // Firebase Auth identity deletion that DELETE /api/drivers/:id could not
+  // complete or attempt (see pendingFirebaseDeletionToken above). By the
+  // time this is called, the Firestore driver record is already gone, so
+  // the verified uid comes only from the signed token, never a client-
+  // supplied value or a fresh Firestore lookup. requireAuth is sufficient
+  // here (not a Firestore-backed driver check) because the session token
+  // is independent of the now-deleted driver document.
+  app.post("/api/drivers/finish-firebase-deletion", requireAuth, async (req, res) => {
+    try {
+      const { token } = req.body;
+      if (typeof token !== "string" || !token) {
+        return res.status(400).json({ success: false, error: "Missing retry token." });
+      }
+
+      const payload = verifyPendingFirebaseIdentityDeletionToken(token);
+      if (!payload) {
+        return res.status(400).json({
+          success: false,
+          error: "This retry link has expired or is invalid. Please contact support to confirm your account deletion.",
+        });
+      }
+
+      if (!canDeleteDriverAccount({ role: req.session!.role, id: req.session!.id, adminType: req.session!.adminType }, payload.driverId)) {
+        return res.status(403).json({ success: false, error: "You can only finish deleting your own account." });
+      }
+
+      if (!adminAuth) {
+        return res.status(503).json({ success: false, error: "Firebase Admin Auth is temporarily unavailable. Please retry shortly." });
+      }
+
+      let firebaseAuthDeleted = true;
+      try {
+        await adminAuth.deleteUser(payload.firebaseUid);
+      } catch (fbErr: any) {
+        if (isFirebaseUserNotFoundError(fbErr?.code)) {
+          // Already gone — nothing left to do.
+        } else {
+          firebaseAuthDeleted = false;
+          console.error("[POST /api/drivers/finish-firebase-deletion] Firebase Auth user deletion failed unexpectedly:", fbErr);
+        }
+      }
+
+      res.json({
+        success: true,
+        driverRecordDeleted: true,
+        hadFirebaseIdentity: true,
+        firebaseAuthDeleted,
+        // Same token stays valid (and is handed back) until it expires, so a
+        // repeated failure can keep being retried without a fresh DELETE call.
+        ...(!firebaseAuthDeleted ? { pendingFirebaseDeletionToken: token } : {}),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ success: false, error: "Failed to finish Firebase identity deletion." });
     }
   });
 
@@ -4678,9 +4790,8 @@ async function startServer() {
         truckType: data.truckType || "reefer"
       };
       await setDoc(doc(db, "drivers", newDriver.id), newDriver);
-      const { password, ...safeDriver } = newDriver;
       res.status(201).json({
-        ...safeDriver,
+        ...sanitizeDriver(newDriver),
         // Only returned here, once, at creation time, so the admin can
         // hand it to the driver — never stored or logged in plaintext.
         temporaryPassword: data.password ? undefined : "Generated — ask admin to set a password for this driver via Edit.",
@@ -4792,9 +4903,8 @@ async function startServer() {
         `قام ${newDriver.name} (${newDriver.username}) بالتسجيل وهو في انتظار موافقتك.`
       );
 
-      const { password, ...safeDriver } = newDriver;
       res.status(201).json({
-        ...safeDriver,
+        ...sanitizeDriver(newDriver),
         pendingApproval: true,
         message: "Registration received. Your account is pending admin approval before you can sign in."
       });
@@ -5124,8 +5234,7 @@ async function startServer() {
         }
       }
 
-      const { password, ...safeDriver } = updatedDriver;
-      res.json(safeDriver);
+      res.json(sanitizeDriver(updatedDriver));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update driver" });
