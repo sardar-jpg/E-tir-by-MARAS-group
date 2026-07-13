@@ -19,10 +19,9 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
-import { initializeApp } from "firebase/app";
-import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "firebase-admin/app";
+import { initializeApp as initializeAdminApp, getApps as getAdminApps, applicationDefault } from "firebase-admin/app";
+import { getFirestore as getAdminFirestore, FieldValue } from "firebase-admin/firestore";
+import { getStorage as getAdminStorage } from "firebase-admin/storage";
 import { getMessaging, Messaging } from "firebase-admin/messaging";
 import { getAuth as getAdminAuth, Auth as AdminAuth } from "firebase-admin/auth";
 import {
@@ -70,24 +69,14 @@ import {
   UNAVAILABLE_DISTANCE_MATRIX_RESPONSE,
 } from "./src/lib/distanceMatrix";
 import {
-  initializeFirestore,
-  collection as rawCollection,
-  doc as rawDoc,
-  getDocs as rawGetDocs,
-  getDoc as rawGetDoc,
-  setDoc as rawSetDoc,
-  updateDoc as rawUpdateDoc,
-  deleteDoc as rawDeleteDoc,
-  runTransaction as rawRunTransaction,
-  arrayUnion,
-} from "firebase/firestore";
-import {
   formatShipmentNumber,
   formatShipmentId,
   nextSequenceFromCounterDoc,
   InMemorySequenceCounter,
   ShipmentSequenceCounterDoc,
 } from "./src/lib/shipmentNumbering";
+import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
+import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
 export let useMemoryFallback = false;
 
@@ -100,8 +89,8 @@ const STRICT_PERSISTENCE = process.env.STRICT_PERSISTENCE !== "false";
 // fabricated/demo records as real operational data.
 const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA === "true";
 
-// Local-dev login safety net: when SERVER_FIREBASE_EMAIL/PASSWORD are
-// missing, the app falls back to the in-memory store above, but nothing
+// Local-dev login safety net: when Application Default Credentials are
+// missing/unusable, the app falls back to the in-memory store above, but nothing
 // seeds it unless SEED_DEMO_DATA=true — so a fresh `npm run dev` checkout
 // has no accounts to log in with. This is independent of SEED_DEMO_DATA
 // (which seeds a large realistic dataset): it seeds exactly one demo
@@ -141,32 +130,38 @@ class ServiceUnavailableError extends Error {
 }
 
 
-// Custom safe wrappers for collection and doc to prevent crash if db is null or offline
+// Custom safe wrappers for collection and doc to prevent crash if db is null or offline.
+// db is a Firebase Admin SDK Firestore instance (see the Admin SDK init
+// block below) — its .collection(path)/.doc(path) take one slash-joined
+// path string, same as the segments this function already joins here, so
+// this is a straight method call rather than a standalone function import.
 function collection(dbInstance: any, pathName: string, ...pathSegments: string[]): any {
+  const fullPath = pathName + (pathSegments.length ? "/" + pathSegments.join("/") : "");
   if (useMemoryFallback || !dbInstance) {
-    return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isCollection: true };
+    return { path: fullPath, isCollection: true };
   }
   try {
-    return rawCollection(dbInstance, pathName, ...pathSegments);
+    return dbInstance.collection(fullPath);
   } catch (err) {
     console.warn("Firestore collection wrapper caught error. Switching to Memory Fallback:", err);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isCollection: true };
+    return { path: fullPath, isCollection: true };
   }
 }
 
 function doc(dbInstance: any, pathName: string, ...pathSegments: string[]): any {
+  const fullPath = pathName + (pathSegments.length ? "/" + pathSegments.join("/") : "");
   if (useMemoryFallback || !dbInstance) {
-    return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isDoc: true };
+    return { path: fullPath, isDoc: true };
   }
   try {
-    return rawDoc(dbInstance, pathName, ...pathSegments);
+    return dbInstance.doc(fullPath);
   } catch (err) {
     console.warn("Firestore doc wrapper caught error. Switching to Memory Fallback:", err);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
-    return { path: pathName + (pathSegments.length ? "/" + pathSegments.join("/") : ""), isDoc: true };
+    return { path: fullPath, isDoc: true };
   }
 }
 let memoryStore: {
@@ -379,7 +374,26 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutErrorMsg:
   });
 }
 
-async function getDocs(queryRef: any) {
+// Shape every getDocs()/getDoc() call site in this file already expects
+// (matching both the memory-fallback snapshots above and the client-SDK
+// QuerySnapshot/DocumentSnapshot shape this replaced) — kept as a real
+// return type, not bare `any`, so the ~40 `.docs.map(doc => doc.data())`
+// call sites throughout the route handlers below still get contextual
+// typing for their callback parameters instead of needing an annotation
+// added at every single one.
+interface FirestoreDocLike {
+  id: string;
+  ref: any;
+  data: () => any;
+}
+
+interface FirestoreQuerySnapshotLike {
+  empty: boolean;
+  size: number;
+  docs: FirestoreDocLike[];
+}
+
+async function getDocs(queryRef: any): Promise<FirestoreQuerySnapshotLike> {
   if (useMemoryFallback) {
     // PR #84 (Firebase production readiness): every write wrapper below
     // (setDoc/updateDoc/deleteDoc/allocateNextShipmentSequence)
@@ -395,7 +409,10 @@ async function getDocs(queryRef: any) {
     return handleGetDocsMemory(queryRef);
   }
   try {
-    return await withTimeout(rawGetDocs(queryRef), 5000, "Firestore getDocs query timed out");
+    // Admin SDK: queryRef is a CollectionReference/Query — .get() returns a
+    // QuerySnapshot with the same .empty/.size/.docs[].id/.ref/.data() shape
+    // every existing call site already expects; no adapter needed here.
+    return await withTimeout(queryRef.get(), 5000, "Firestore getDocs query timed out");
   } catch (error) {
     console.warn("Firestore getDocs failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
@@ -405,14 +422,19 @@ async function getDocs(queryRef: any) {
   }
 }
 
-async function getDoc(docRef: any) {
+async function getDoc(docRef: any): Promise<AdaptedDocSnapshot> {
   if (useMemoryFallback) {
     // See getDocs above — same reasoning, same fix.
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleGetDocMemory(docRef);
   }
   try {
-    return await withTimeout(rawGetDoc(docRef), 5000, "Firestore getDoc query timed out");
+    // Admin SDK's DocumentSnapshot exposes `exists` as a boolean property,
+    // not a callable — adaptDocSnapshot normalizes it back to `exists()` so
+    // every existing call site (written against the client SDK/memory
+    // fallback shape) keeps working unchanged. See firestoreSnapshotAdapter.ts.
+    const snap = await withTimeout<any>(docRef.get(), 5000, "Firestore getDoc query timed out");
+    return adaptDocSnapshot(snap);
   } catch (error) {
     console.warn("Firestore getDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
@@ -465,14 +487,16 @@ function isLegacyShareToken(token: string | undefined | null): boolean {
   return !token || /^token-\d+$/.test(token);
 }
 
-async function setDoc(docRef: any, data: any, options?: any) {
+async function setDoc(docRef: any, data: any, options?: any): Promise<void> {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleSetDocMemory(docRef, cleanedData);
   }
   try {
-    return await withTimeout(rawSetDoc(docRef, cleanedData, options), 5000, "Firestore setDoc timed out");
+    // Admin SDK's DocumentReference.set(data, options) accepts the same
+    // SetOptions shape (e.g. { merge: true }) as the client SDK's setDoc.
+    return await withTimeout(docRef.set(cleanedData, options), 5000, "Firestore setDoc timed out");
   } catch (error) {
     console.warn("Firestore setDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
@@ -482,14 +506,14 @@ async function setDoc(docRef: any, data: any, options?: any) {
   }
 }
 
-async function updateDoc(docRef: any, data: any) {
+async function updateDoc(docRef: any, data: any): Promise<void> {
   const cleanedData = cleanUndefined(data);
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleUpdateDocMemory(docRef, cleanedData);
   }
   try {
-    return await withTimeout(rawUpdateDoc(docRef, cleanedData), 5000, "Firestore updateDoc timed out");
+    return await withTimeout(docRef.update(cleanedData), 5000, "Firestore updateDoc timed out");
   } catch (error) {
     console.warn("Firestore updateDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
@@ -504,8 +528,8 @@ async function updateDoc(docRef: any, data: any) {
 // through the generic setDoc/updateDoc wrappers above. setDoc would write
 // the entire notification document back on every read (this function's
 // whole point is to touch only readByUserIds); the generic updateDoc
-// wrapper would work for real Firestore (a raw Firestore arrayUnion()
-// FieldValue survives cleanUndefined() untouched — see its "native class
+// wrapper would work for real Firestore (a raw Firestore FieldValue.arrayUnion()
+// value survives cleanUndefined() untouched — see its "native class
 // instance" guard), but handleUpdateDocMemory's plain `{ ...existing,
 // ...data }` spread in memory-fallback mode would store the arrayUnion()
 // FieldValue sentinel object itself as the field's value instead of
@@ -513,8 +537,9 @@ async function updateDoc(docRef: any, data: any) {
 // dev (which runs on the memory fallback by default). This function
 // branches on useMemoryFallback itself so each path gets real, correct,
 // non-destructive array-union semantics:
-//  - Real Firestore: rawUpdateDoc(..., { readByUserIds: arrayUnion(userId) })
-//    is a genuine atomic field update — Firestore guarantees this is safe
+//  - Real Firestore: notifRef.update({ readByUserIds: FieldValue.arrayUnion(userId) })
+//    (firebase-admin/firestore's FieldValue — same semantics as the client
+//    SDK's) is a genuine atomic field update — Firestore guarantees this is safe
 //    under two concurrent writers adding different ids at the same time,
 //    with no read-modify-write race and no transaction needed. It also
 //    only ever touches the readByUserIds field, never the rest of the
@@ -536,9 +561,9 @@ async function addNotificationReaderId(notificationId: string, userId: string): 
     return;
   }
   try {
-    const notifRef = rawDoc(db, "notifications", notificationId);
+    const notifRef = db.collection("notifications").doc(notificationId);
     await withTimeout(
-      rawUpdateDoc(notifRef, { readByUserIds: arrayUnion(userId) }),
+      notifRef.update({ readByUserIds: FieldValue.arrayUnion(userId) }),
       5000,
       "Firestore readByUserIds update timed out"
     );
@@ -609,13 +634,13 @@ async function updateAdminNotificationPreferenceFields(
   );
 }
 
-async function deleteDoc(docRef: any) {
+async function deleteDoc(docRef: any): Promise<void> {
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
   try {
-    return await withTimeout(rawDeleteDoc(docRef), 5000, "Firestore deleteDoc timed out");
+    return await withTimeout(docRef.delete(), 5000, "Firestore deleteDoc timed out");
   } catch (error) {
     console.warn("Firestore deleteDoc failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
@@ -650,7 +675,7 @@ async function allocateNextShipmentSequence(): Promise<number> {
     return getShipmentSequenceCounterMemory().next();
   }
 
-  const counterRef = rawDoc(db, "counters", "shipments");
+  const counterRef = db.collection("counters").doc("shipments");
   try {
     // Firestore transactions can only read individual documents, not run
     // a collection query, so the one-time bootstrap value (how many
@@ -659,10 +684,13 @@ async function allocateNextShipmentSequence(): Promise<number> {
     // counter doc doesn't exist yet; from then on the counter doc itself
     // is authoritative and this pre-read value is discarded.
     let bootstrapCount = 0;
-    const existingCounter = await withTimeout(rawGetDoc(counterRef), 5000, "Firestore getDoc timed out");
-    if (!existingCounter.exists()) {
-      const existingShipments = await withTimeout(
-        rawGetDocs(rawCollection(db, "shipments")),
+    const existingCounter = await withTimeout<any>(counterRef.get(), 5000, "Firestore getDoc timed out");
+    // Admin SDK's DocumentSnapshot exposes `exists` as a boolean property,
+    // not a callable — unlike getDoc() above, this raw transactional path
+    // isn't routed through adaptDocSnapshot, so it's read as a property here.
+    if (!existingCounter.exists) {
+      const existingShipments = await withTimeout<any>(
+        db.collection("shipments").get(),
         5000,
         "Firestore getDocs timed out"
       );
@@ -676,9 +704,9 @@ async function allocateNextShipmentSequence(): Promise<number> {
     // successfully commit - one is always retried against the value the
     // other just wrote, and reads the incremented value instead.
     return await withTimeout(
-      rawRunTransaction(db, async (tx) => {
+      db.runTransaction(async (tx: any) => {
         const snap = await tx.get(counterRef);
-        const data = snap.exists() ? (snap.data() as ShipmentSequenceCounterDoc) : undefined;
+        const data = snap.exists ? (snap.data() as ShipmentSequenceCounterDoc) : undefined;
         const { current, next } = nextSequenceFromCounterDoc(data, bootstrapCount);
         tx.set(counterRef, next, { merge: true });
         return current;
@@ -725,12 +753,20 @@ declare global {
   }
 }
 
-// Initialize Firebase
+// Initialize Firebase.
+//
+// firebase-applet-config.json stays exactly as it was (still the browser's
+// only source for its own Firebase web SDK config, via src/googleAuth.ts) —
+// server-side code below now reads only projectId/storageBucket/
+// firestoreDatabaseId out of it, to configure the Admin SDK. It no longer
+// initializes a client-SDK app or signs in as a dedicated Firebase Auth
+// user; see the Admin SDK block below.
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 let firebaseConfig: any = null;
-let firebaseApp: any = null;
 export let db: any = null;
 let initialId = "(default)";
+let adminProjectId: string | undefined;
+let adminStorageBucketName: string | undefined;
 
 try {
   if (fs.existsSync(configPath)) {
@@ -738,43 +774,77 @@ try {
   } else if (process.env.FIREBASE_CONFIG) {
     firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
   }
-  
+
   if (firebaseConfig) {
-    firebaseApp = initializeApp(firebaseConfig);
-    const customId = firebaseConfig.firestoreDatabaseId;
-    initialId = customId && customId !== "(default)" ? customId : "(default)";
-    if (customId && customId !== "(default)") {
-      db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true }, customId);
-    } else {
-      db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true });
-    }
+    adminProjectId = firebaseConfig.projectId;
+    adminStorageBucketName = firebaseConfig.storageBucket;
   } else {
     console.warn("No Firebase configuration file or environment variable was found. Running using Robust Memory Fallback.");
     useMemoryFallback = true;
   }
 } catch (err: any) {
-  console.warn("Firebase initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
+  console.warn("Firebase configuration could not be read, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
   useMemoryFallback = true;
 }
 
-// Firebase Admin SDK, used only for sending push notifications via FCM.
-// No explicit credentials are passed - on Cloud Run this automatically
-// uses the instance's own service account (Application Default
-// Credentials), so no separate key file needs to be managed or shipped
-// in the container. This is intentionally separate from the client SDK
-// app above, which signs in as a real Firestore-rules-scoped user for
-// reading/writing data; sending pushes is an unrelated capability.
+// Firebase Admin SDK — the ONLY Firebase SDK this server uses now, for
+// Firestore, Storage, FCM push, and ID-token verification alike. It
+// authenticates via Application Default Credentials (ADC): locally, run
+// `gcloud auth application-default login` once (stores credentials outside
+// this repo, nothing to put in .env.local); on Cloud Run, ADC resolves
+// automatically to the service's own attached runtime service account, with
+// no key file to manage or ship. The Admin SDK bypasses firestore.rules/
+// storage.rules entirely (it is a trusted-server identity, not a
+// rules-checked end user) — those rule files are unchanged in this branch
+// and are addressed separately (see docs/REAL_FIREBASE_VERIFICATION.md).
 let pushMessaging: Messaging | null = null;
 // Admin Auth instance — used to VERIFY Firebase ID tokens that clients send
 // when restoring a session. This is how /api/verify-session proves who the
 // caller actually is, instead of trusting a client-supplied id/email.
 let adminAuth: AdminAuth | null = null;
+let adminApp: any = null;
+let storageBucketRef: any = null;
+
 try {
-  const adminApp = getAdminApps().length ? getAdminApps()[0]! : initializeAdminApp();
+  adminApp = getAdminApps().length
+    ? getAdminApps()[0]!
+    : initializeAdminApp({
+        credential: applicationDefault(),
+        ...(adminProjectId ? { projectId: adminProjectId } : {}),
+        ...(adminStorageBucketName ? { storageBucket: adminStorageBucketName } : {}),
+      });
   pushMessaging = getMessaging(adminApp);
   adminAuth = getAdminAuth(adminApp);
 } catch (err: any) {
-  console.warn("Firebase Admin SDK initialization failed - push notifications and server-side ID token verification will be disabled. Error:", err instanceof Error ? err.message : String(err));
+  console.warn("Firebase Admin SDK initialization failed - Firestore/Storage/push notifications/ID-token verification will be disabled. Error:", err instanceof Error ? err.message : String(err));
+}
+
+// Firestore only comes up if we actually know which project to target —
+// mirrors the previous "if (firebaseConfig) {...} else { memory fallback }"
+// gate exactly, just keyed off projectId instead of the whole config blob.
+if (adminApp && adminProjectId) {
+  try {
+    const customId = firebaseConfig?.firestoreDatabaseId;
+    initialId = customId && customId !== "(default)" ? customId : "(default)";
+    db = customId && customId !== "(default)" ? getAdminFirestore(adminApp, customId) : getAdminFirestore(adminApp);
+  } catch (err: any) {
+    console.warn("Firestore (Admin SDK) initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
+    useMemoryFallback = true;
+  }
+} else if (firebaseConfig) {
+  console.warn("Firebase config found but has no projectId — cannot initialize Firestore. Running using Robust Memory Fallback.");
+  useMemoryFallback = true;
+}
+
+// Storage bucket handle for /api/upload — only available if storageBucket
+// was present in firebase-applet-config.json (unchanged requirement from
+// before this migration; see docs/REAL_FIREBASE_VERIFICATION.md).
+if (adminApp && adminStorageBucketName) {
+  try {
+    storageBucketRef = getAdminStorage(adminApp).bucket();
+  } catch (err: any) {
+    console.warn("Firebase Storage (Admin SDK) initialization failed. Uploads will be refused until this is resolved. Error:", err instanceof Error ? err.message : String(err));
+  }
 }
 
 // One clear, consolidated startup summary — everything below this point
@@ -789,7 +859,7 @@ try {
   console.log(`[Startup] STRICT_PERSISTENCE: ${readiness.strictPersistence} (writes fail instead of using memory fallback when true)`);
   console.log(`[Startup] SEED_DEMO_DATA: ${readiness.seedDemoData}`);
   console.log(`[Startup] Firebase client config found: ${readiness.firebaseConfigured}`);
-  console.log(`[Startup] SERVER_FIREBASE_EMAIL/PASSWORD configured: ${readiness.serverFirebaseCredsConfigured}`);
+  console.log(`[Startup] ADC environment hint present (GOOGLE_APPLICATION_CREDENTIALS or Cloud Run's K_SERVICE): ${readiness.adcEnvHintPresent} (not authoritative — local dev via 'gcloud auth application-default login' can't be detected from env vars alone; the live Firestore connection check below is authoritative)`);
   console.log(`[Startup] Configured persistence mode: ${readiness.configuredMode} (pending live Firestore connection check below)`);
   if (readiness.warnings.length) {
     for (const warning of readiness.warnings) {
@@ -802,55 +872,30 @@ try {
 }
 
 // Test Firestore Connection
-// IMPORTANT: this server now authenticates as a dedicated Firebase Auth
-// account (configured via SERVER_FIREBASE_EMAIL / SERVER_FIREBASE_PASSWORD)
-// before it can read or write anything. firestore.rules denies all access
-// except from this specific account's UID — see firestore.rules for why.
-// Without successful sign-in here, every Firestore call below will be
-// rejected by the security rules and the app will run on the in-memory
-// fallback store instead (logged loudly, since silent data loss is far
-// worse than a visible startup error).
-async function authenticateServerAccount(): Promise<boolean> {
-  if (!firebaseApp) return false;
-  const email = process.env.SERVER_FIREBASE_EMAIL;
-  const password = process.env.SERVER_FIREBASE_PASSWORD;
-  if (!email || !password) {
-    console.error(
-      "[STARTUP ERROR] SERVER_FIREBASE_EMAIL / SERVER_FIREBASE_PASSWORD are not set. " +
-      "The server cannot authenticate to Firestore and firestore.rules will reject every " +
-      "request. Falling back to in-memory storage — ALL DATA WILL BE LOST ON RESTART. " +
-      "Set these two environment variables to the dedicated server account created in " +
-      "Firebase Console > Authentication."
-    );
-    return false;
-  }
-  try {
-    const auth = getAuth(firebaseApp);
-    await signInWithEmailAndPassword(auth, email, password);
-    console.log("Server authenticated to Firebase as the dedicated server account.");
-    return true;
-  } catch (err: any) {
-    console.error(
-      "[STARTUP ERROR] Server failed to authenticate to Firebase:",
-      err instanceof Error ? err.message : String(err),
-      "— falling back to in-memory storage. ALL DATA WILL BE LOST ON RESTART."
-    );
-    return false;
-  }
-}
-
-// One probe attempt. Sets useMemoryFallback = false on success, returns true/false.
+// The Admin SDK presents Application Default Credentials automatically on
+// every call — there is no separate sign-in step to perform first (unlike
+// the old client-SDK email/password flow this replaced). This probe is
+// therefore the ONLY way to find out whether ADC is actually available and
+// usable: locally, that means `gcloud auth application-default login` was
+// run; on Cloud Run, that the attached runtime service account has the
+// necessary Firestore IAM role. A failure here still falls back to the
+// in-memory store (logged loudly, since silent data loss is far worse than
+// a visible startup error).
 async function attemptFirestoreConnect(timeoutMs: number): Promise<boolean> {
   if (!db) return false;
-  const authed = await authenticateServerAccount();
-  if (!authed) return false;
   try {
-    await withTimeout(rawGetDoc(rawDoc(db, "test", "connection")), timeoutMs, "Firestore connection check timed out");
-    console.log(`[Firestore] Connected to database (${initialId}).`);
+    await withTimeout(db.collection("test").doc("connection").get(), timeoutMs, "Firestore connection check timed out");
+    console.log(`[Firestore] Connected to database (${initialId}) via Application Default Credentials.`);
     useMemoryFallback = false;
     return true;
   } catch (err: any) {
-    console.warn(`[Firestore] Connection check failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(
+      "[Firestore] Connection check failed — falling back to in-memory storage. ALL DATA WILL BE LOST ON " +
+      "RESTART until this is resolved. This usually means Application Default Credentials are missing or " +
+      "the runtime identity lacks Firestore access: locally, run `gcloud auth application-default login`; " +
+      "on Cloud Run, verify the service's attached service account has the Cloud Datastore User role. " +
+      `Error: ${err instanceof Error ? err.message : String(err)}`
+    );
     return false;
   }
 }
@@ -1541,14 +1586,14 @@ async function seedDatabaseIfEmpty() {
 
   // 1. Seed drivers
   try {
-    const driverCol = rawCollection(db, "drivers");
-    const driverSnap = await rawGetDocs(driverCol);
+    const driverCol = db.collection("drivers");
+    const driverSnap = await driverCol.get();
     if (driverSnap.empty) {
       console.log("Seeding drivers into Firestore...");
       for (const d of initialDrivers) {
         const cleaned = cleanUndefined(d);
         try {
-          await rawSetDoc(rawDoc(db, "drivers", d.id), cleaned);
+          await db.collection("drivers").doc(d.id).set(cleaned);
           console.log(`Successfully seeded driver: ${d.id}`);
         } catch (subErr) {
           console.error(`Failed to write driver ${d.id}:`, subErr);
@@ -1563,14 +1608,14 @@ async function seedDatabaseIfEmpty() {
 
   // 2. Seed shipments
   try {
-    const shipmentCol = rawCollection(db, "shipments");
-    const shipmentSnap = await rawGetDocs(shipmentCol);
+    const shipmentCol = db.collection("shipments");
+    const shipmentSnap = await shipmentCol.get();
     if (shipmentSnap.empty) {
       console.log("Seeding shipments into Firestore...");
       for (const s of initialShipments) {
         const cleaned = cleanUndefined(s);
         try {
-          await rawSetDoc(rawDoc(db, "shipments", s.id), cleaned);
+          await db.collection("shipments").doc(s.id).set(cleaned);
           console.log(`Successfully seeded shipment: ${s.id}`);
         } catch (subErr) {
           console.error(`Failed to write shipment ${s.id}:`, subErr);
@@ -1585,14 +1630,14 @@ async function seedDatabaseIfEmpty() {
 
   // 3. Seed chatMessages
   try {
-    const chatCol = rawCollection(db, "chatMessages");
-    const chatSnap = await rawGetDocs(chatCol);
+    const chatCol = db.collection("chatMessages");
+    const chatSnap = await chatCol.get();
     if (chatSnap.empty) {
       console.log("Seeding chat messages into Firestore...");
       for (const c of initialChatMessages) {
         const cleaned = cleanUndefined(c);
         try {
-          await rawSetDoc(rawDoc(db, "chatMessages", c.id), cleaned);
+          await db.collection("chatMessages").doc(c.id).set(cleaned);
           console.log(`Successfully seeded chat message: ${c.id}`);
         } catch (subErr) {
           console.error(`Failed to write chat message ${c.id}:`, subErr);
@@ -1607,14 +1652,14 @@ async function seedDatabaseIfEmpty() {
 
   // 4. Seed notifications
   try {
-    const notifCol = rawCollection(db, "notifications");
-    const notifSnap = await rawGetDocs(notifCol);
+    const notifCol = db.collection("notifications");
+    const notifSnap = await notifCol.get();
     if (notifSnap.empty) {
       console.log("Seeding notifications into Firestore...");
       for (const n of initialNotifications) {
         const cleaned = cleanUndefined(n);
         try {
-          await rawSetDoc(rawDoc(db, "notifications", n.id), cleaned);
+          await db.collection("notifications").doc(n.id).set(cleaned);
           console.log(`Successfully seeded notification: ${n.id}`);
         } catch (subErr) {
           console.error(`Failed to write notification ${n.id}:`, subErr);
@@ -1629,14 +1674,14 @@ async function seedDatabaseIfEmpty() {
 
   // 5. Seed activityLogs
   try {
-    const logCol = rawCollection(db, "activityLogs");
-    const logSnap = await rawGetDocs(logCol);
+    const logCol = db.collection("activityLogs");
+    const logSnap = await logCol.get();
     if (logSnap.empty) {
       console.log("Seeding activity logs into Firestore...");
       for (const l of initialActivityLogs) {
         const cleaned = cleanUndefined(l);
         try {
-          await rawSetDoc(rawDoc(db, "activityLogs", l.id), cleaned);
+          await db.collection("activityLogs").doc(l.id).set(cleaned);
           console.log(`Successfully seeded activity log: ${l.id}`);
         } catch (subErr) {
           console.error(`Failed to write activity log ${l.id}:`, subErr);
@@ -1651,14 +1696,14 @@ async function seedDatabaseIfEmpty() {
 
   // 6. Seed clients
   try {
-    const clientsCol = rawCollection(db, "clients");
-    const clientsSnap = await rawGetDocs(clientsCol);
+    const clientsCol = db.collection("clients");
+    const clientsSnap = await clientsCol.get();
     if (clientsSnap.empty) {
       console.log("Seeding clients into Firestore...");
       for (const cl of initialClients) {
         const cleaned = cleanUndefined(cl);
         try {
-          await rawSetDoc(rawDoc(db, "clients", cl.id), cleaned);
+          await db.collection("clients").doc(cl.id).set(cleaned);
           console.log(`Successfully seeded client: ${cl.id}`);
         } catch (subErr) {
           console.error(`Failed to write client ${cl.id}:`, subErr);
@@ -1673,14 +1718,14 @@ async function seedDatabaseIfEmpty() {
 
   // 7. Seed vendors
   try {
-    const vendorsCol = rawCollection(db, "vendors");
-    const vendorsSnap = await rawGetDocs(vendorsCol);
+    const vendorsCol = db.collection("vendors");
+    const vendorsSnap = await vendorsCol.get();
     if (vendorsSnap.empty) {
       console.log("Seeding vendors into Firestore...");
       for (const v of initialVendors) {
         const cleaned = cleanUndefined(v);
         try {
-          await rawSetDoc(rawDoc(db, "vendors", v.id), cleaned);
+          await db.collection("vendors").doc(v.id).set(cleaned);
           console.log(`Successfully seeded vendor: ${v.id}`);
         } catch (subErr) {
           console.error(`Failed to write vendor ${v.id}:`, subErr);
@@ -1698,7 +1743,7 @@ async function seedDatabaseIfEmpty() {
     const mapsKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || "";
     if (mapsKey) {
       console.log("Syncing active Google Maps API key into Firestore config collection...");
-      await rawSetDoc(rawDoc(db, "configs", "google_maps"), { key: mapsKey });
+      await db.collection("configs").doc("google_maps").set({ key: mapsKey });
       console.log("Successfully seeded Google Maps key config.");
     }
   } catch (err) {
@@ -2346,35 +2391,40 @@ async function startServer() {
         return res.status(415).json({ error: validation.error });
       }
 
-      if (useMemoryFallback || !firebaseApp) {
+      if (useMemoryFallback || !storageBucketRef) {
         // No durable storage available right now — say so plainly rather
         // than silently keeping the file in memory only, where it would
         // vanish on the next restart with no warning to anyone.
-        console.error("[upload] Firebase unavailable — refusing upload rather than storing it only in memory where it would be silently lost.");
+        console.error("[upload] Firebase Storage unavailable — refusing upload rather than storing it only in memory where it would be silently lost.");
         return res.status(503).json({
           error: "File storage is temporarily unavailable. Your file was NOT saved — please try again in a moment.",
         });
       }
 
       try {
-        const storage = getStorage(firebaseApp);
         const path = `uploads/${req.session!.role}/${req.session!.id}/${Date.now()}-${Math.random().toString(36).substring(2, 9)}-${filename}`;
-        const fileRef = storageRef(storage, path);
-        await uploadBytes(fileRef, buffer, { contentType: mimeType });
-        // NOTE (BUG-12): this is a real Firebase Storage getDownloadURL() —
-        // its access token is NOT revocable through anything in this app;
-        // once handed out it keeps working forever regardless of later
-        // document-visibility changes. That's fine for this authenticated
-        // endpoint, whose caller (admin/driver/client, all logged in) is
-        // meant to have access to what they themselves just uploaded. The
-        // one place this becomes unsafe is the *public*, unauthenticated
-        // share view — see buildSecureShareView and
+        // NOTE (BUG-12): this token-based URL is NOT revocable through
+        // anything in this app; once handed out it keeps working forever
+        // regardless of later document-visibility changes. That's fine for
+        // this authenticated endpoint, whose caller (admin/driver/client,
+        // all logged in) is meant to have access to what they themselves
+        // just uploaded. The one place this becomes unsafe is the *public*,
+        // unauthenticated share view — see buildSecureShareView and
         // /api/share/:token/documents/:docId below, which never forward
         // this raw URL and instead proxy through a route that re-checks
         // visibility on every request. Any new public-facing document
         // surface should use that same proxy pattern, not this URL
-        // directly.
-        const url = await getDownloadURL(fileRef);
+        // directly. Deliberately not a signed URL (those expire) — see
+        // src/lib/firebaseStorageUrl.ts.
+        const downloadToken = crypto.randomUUID();
+        const file = storageBucketRef.file(path);
+        await file.save(buffer, {
+          metadata: {
+            contentType: mimeType,
+            metadata: { firebaseStorageDownloadTokens: downloadToken },
+          },
+        });
+        const url = buildFirebaseDownloadUrl(storageBucketRef.name, path, downloadToken);
         console.log(`[upload] Stored to Firebase Storage: ${path}`);
         res.json({ url });
       } catch (storageErr: any) {
@@ -3889,9 +3939,10 @@ async function startServer() {
       }
 
       // 1. Super-admin login (sardar@maras.iq) — root account, configured via
-      //    env vars, never hardcoded. See SERVER_FIREBASE_EMAIL note: this is
-      //    a *different* credential from the server's own Firebase account;
-      //    this one is the actual human super-admin's app login.
+      //    env vars, never hardcoded. This is unrelated to how the server
+      //    itself authenticates to Firestore/Storage (Application Default
+      //    Credentials, see the Admin SDK init above) — this one is the
+      //    actual human super-admin's app login.
       const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
       const SUPER_ADMIN_PASSWORD_HASH = process.env.SUPER_ADMIN_PASSWORD_HASH || "";
       const isSuperAdminUser =
@@ -4305,7 +4356,7 @@ async function startServer() {
     res.json({
       usingMemoryFallback: useMemoryFallback,
       warning: useMemoryFallback
-        ? "This server is NOT connected to Firestore. All data (shipments, drivers, chat, everything) is being held in memory only and WILL BE PERMANENTLY LOST the next time the server restarts or redeploys. Check SERVER_FIREBASE_EMAIL/SERVER_FIREBASE_PASSWORD and the Firebase config."
+        ? "This server is NOT connected to Firestore. All data (shipments, drivers, chat, everything) is being held in memory only and WILL BE PERMANENTLY LOST the next time the server restarts or redeploys. Check Application Default Credentials (gcloud auth application-default login locally, or the Cloud Run service account in production) and the Firebase config."
         : null,
     });
   });
@@ -4572,11 +4623,11 @@ async function startServer() {
    * narrowly-scoped case where an otherwise-unauthenticated request is
    * allowed to write to Firestore — a brand-new driver creating *only*
    * their own profile, identified by their own Firebase uid. The uid claim
-   * isn't cryptographically verified (that requires Firebase Admin SDK,
-   * not available in this deployment — see SERVER_FIREBASE_EMAIL note
-   * elsewhere in this file), but this endpoint can only ever create a
-   * driver record, never read or modify anyone else's data, which bounds
-   * the impact of that residual gap.
+   * isn't cryptographically verified against a Firebase ID token here (see
+   * adminAuth.verifyIdToken usage on /api/verify-session for where that
+   * verification does happen elsewhere in this file), but this endpoint can
+   * only ever create a driver record, never read or modify anyone else's
+   * data, which bounds the impact of that residual gap.
    */
   app.post("/api/drivers/self-register", async (req, res) => {
     try {

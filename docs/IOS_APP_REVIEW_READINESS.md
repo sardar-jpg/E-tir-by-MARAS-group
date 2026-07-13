@@ -89,9 +89,9 @@ Reviewer-facing / policy-facing items, current state as of this PR:
       review target is the live Cloud Run service, so this should already
       be `firestore` mode — confirm via Cloud Run `[Startup]` logs before
       submitting (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §5). Local dev
-      (`npm run dev` on a laptop with no `SERVER_FIREBASE_EMAIL`/`_PASSWORD`
-      set) does run on memory fallback — that's expected and fine for
-      local dev, just never for what a reviewer actually hits.
+      (`npm run dev` on a laptop without `gcloud auth application-default
+      login` having been run) does run on memory fallback — that's expected
+      and fine for local dev, just never for what a reviewer actually hits.
 - [ ] **Firebase/Storage configured** — real Firestore + Storage project
       required in production (`docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`
       §4); re-confirm current production status before submitting, don't
