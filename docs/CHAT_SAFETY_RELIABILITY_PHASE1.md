@@ -252,6 +252,42 @@ overflowing. Verified live in the browser (before/after, matching a
 temporary DOM patch used to confirm the fix before editing source) and
 via `npx tsc --noEmit`.
 
+## 7b. Post-review corrections
+
+Three blocking issues were raised in review of the first version of this
+PR and fixed before merge:
+
+1. **Internal Staff mark-seen never actually fired.** `ChatCenter.tsx`
+   gated its `POST /chat/seen` call on `data.some(m => m.sender !== 'admin')`
+   — but every internal_staff message has `sender: 'admin'` (there is no
+   "other party"; every participant is an admin), so that condition was
+   always `false` for internal_staff and opening the channel never called
+   `/chat/seen` at all. Fixed by calling it whenever the channel has any
+   messages (`data.length > 0`) and letting the server's existing
+   session/channel/shipment-aware logic (`isMessageFromOtherAdmin` /
+   `isMessageUnreadForAdmin`, `chatUnreadAccess.ts`) decide which messages
+   actually get marked — it already correctly excludes the viewer's own
+   messages, so this is safe unconditionally. `onChannelRead` still only
+   fires on `seenRes.ok`. The per-message scope check itself
+   (`channelFilter` + `shipmentId`) was extracted from `server.ts` into
+   `isMessageInSeenScope` (`chatVisibility.ts`) so it's directly unit
+   tested, not just inspected.
+2. **`fileUrl` validation was scheme-naive.** `validateChatSendPayload`
+   previously only rejected `data:` URLs and accepted any other non-empty
+   string. Added `isHttpsUrl` (`chatMessageValidation.ts`): parses with
+   `new URL()` and requires `protocol === "https:"`, which rejects `"#"`,
+   `javascript:`, `file:`, `blob:`, malformed strings, and empty/whitespace,
+   while still accepting real Firebase/Cloud Storage HTTPS download URLs.
+3. **Upload-URL retry caching only existed for Internal Staff.** Extracted
+   the decision itself into `planAttachmentSend` (`chatComposerState.ts`)
+   and wired it into `App.tsx`'s admin attachment modal and
+   `DriverApplication.tsx` (which gained a new `pendingDriverAttachment` +
+   retry-banner affordance, since its attachment flow previously had no
+   "still selected, failed to send" state to retry from at all — it
+   auto-sent immediately on file pick). Both now cache the successful
+   upload's HTTPS URL, reuse it on retry without re-uploading, and clear it
+   only on a confirmed successful send or when the attachment is replaced.
+
 ## 8. Explicitly deferred (not in this PR)
 
 - **Client Owner/Client Staff per-user "seen" model.** `ClientDashboard.tsx`

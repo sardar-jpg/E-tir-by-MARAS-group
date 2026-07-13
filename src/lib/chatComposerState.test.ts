@@ -5,6 +5,7 @@ import {
   applySuccessfulChatPoll,
   applyFailedChatPoll,
   shouldConfirmChannelRead,
+  planAttachmentSend,
   type ChatPollState,
 } from "./chatComposerState";
 
@@ -83,5 +84,42 @@ describe("shouldConfirmChannelRead", () => {
 
   it("does not confirm read when the mark-seen request failed", () => {
     expect(shouldConfirmChannelRead(false)).toBe(false);
+  });
+});
+
+describe("planAttachmentSend (retry reuses the uploaded URL, never re-uploads)", () => {
+  // Exercised directly by all three attachment-sending surfaces
+  // (ChatCenter.tsx's Internal Staff composer, App.tsx's Admin attachment
+  // modal, and DriverApplication.tsx's retry handler) — this is the real
+  // decision point behind "a retry after a failed send reuses the cached
+  // Storage URL instead of uploading the file again."
+  it("plans to upload when nothing has been cached yet", () => {
+    expect(planAttachmentSend("")).toEqual({ action: "upload_then_send" });
+  });
+
+  it("plans to upload when the cache is whitespace-only", () => {
+    expect(planAttachmentSend("   ")).toEqual({ action: "upload_then_send" });
+  });
+
+  it("Admin full chat retry: a cached URL from a prior successful upload is reused, not re-uploaded", () => {
+    const cachedUrl = "https://storage.googleapis.com/bucket/admin-doc.pdf";
+    expect(planAttachmentSend(cachedUrl)).toEqual({ action: "reuse_cached_url", fileUrl: cachedUrl });
+  });
+
+  it("Driver retry: a cached URL from a prior successful upload is reused, not re-uploaded", () => {
+    const cachedUrl = "https://storage.googleapis.com/bucket/driver-photo.jpg";
+    expect(planAttachmentSend(cachedUrl)).toEqual({ action: "reuse_cached_url", fileUrl: cachedUrl });
+  });
+
+  it("Internal Staff retry: a cached URL from a prior successful upload is reused, not re-uploaded", () => {
+    const cachedUrl = "https://firebasestorage.googleapis.com/v0/b/proj.appspot.com/o/cmr.pdf?alt=media&token=abc";
+    expect(planAttachmentSend(cachedUrl)).toEqual({ action: "reuse_cached_url", fileUrl: cachedUrl });
+  });
+
+  it("trims the cached URL before reusing it", () => {
+    expect(planAttachmentSend("  https://storage.googleapis.com/bucket/file.pdf  ")).toEqual({
+      action: "reuse_cached_url",
+      fileUrl: "https://storage.googleapis.com/bucket/file.pdf",
+    });
   });
 });

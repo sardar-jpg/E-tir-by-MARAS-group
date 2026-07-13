@@ -21,7 +21,7 @@ import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
 import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
-import { canSubmitChatMessage } from "./lib/chatComposerState";
+import { canSubmitChatMessage, planAttachmentSend } from "./lib/chatComposerState";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -570,6 +570,12 @@ export default function App() {
   const [adminFileUrl, setAdminFileUrl] = useState("#");
   const [adminFile, setAdminFile] = useState<File | null>(null);
   const [isAdminUploading, setIsAdminUploading] = useState(false);
+  // fix/chat-safety-reliability-phase1 (follow-up): the real Storage URL
+  // from a successful POST /api/upload, cached so a retry after a failed
+  // POST /chat reuses it instead of uploading the same file again. Cleared
+  // only on a successful send or when a different file is picked (see the
+  // file input's onChange below) — never on a failed send.
+  const [adminUploadedFileUrl, setAdminUploadedFileUrl] = useState("");
   // fix/chat-safety-reliability-phase1: handleSendAdminMessage had no
   // in-flight guard at all — a double-tap/double-Enter could fire two
   // POSTs before the first resolved. Mirrors the existing isAdminUploading
@@ -723,9 +729,13 @@ export default function App() {
     if (!chatShipment || !adminFileName.trim() || isAdminUploading) return;
     setIsAdminUploading(true);
     try {
-      let finalFileUrl = adminFileUrl;
+      // fix/chat-safety-reliability-phase1 (follow-up): reuse a
+      // previously-successful upload's real Storage URL if this is a
+      // retry after a failed send — skips uploading the same file twice.
+      const uploadPlan = planAttachmentSend(adminUploadedFileUrl);
+      let finalFileUrl = uploadPlan.action === "reuse_cached_url" ? uploadPlan.fileUrl : adminFileUrl;
 
-      if (adminFile && adminFileUrl && adminFileUrl.startsWith("data:")) {
+      if (uploadPlan.action === "upload_then_send" && adminFile && adminFileUrl && adminFileUrl.startsWith("data:")) {
         try {
           const uploadRes = await apiFetch("/api/upload", {
             method: "POST",
@@ -738,6 +748,7 @@ export default function App() {
           if (uploadRes.ok) {
             const uploadData = await uploadRes.json();
             finalFileUrl = uploadData.url;
+            setAdminUploadedFileUrl(finalFileUrl);
             console.log("Admin uploaded successfully via media gateway:", finalFileUrl);
           } else {
             // fix/chat-safety-reliability-phase1: this used to fall back to
@@ -748,15 +759,27 @@ export default function App() {
             // record — see shouldSaveChatFileAsShipmentDocument). Block the
             // send outright instead; the attachment stays selected so the
             // admin can just retry. The server independently rejects any
-            // data: fileUrl too (validateChatSendPayload, server.ts), so
-            // this is a client-side fast-fail on top of a real backstop.
+            // non-HTTPS fileUrl too (validateChatSendPayload, server.ts),
+            // so this is a client-side fast-fail on top of a real backstop.
             console.warn("Media gateway upload failed; blocking send rather than sending inline base64 data.");
-            triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+            triggerToast(
+              lang === 'tr'
+                ? "❌ Dosya depoya yüklenemedi. Mesajınız gönderilmedi — lütfen tekrar deneyin."
+                : lang === 'ar'
+                ? "❌ تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك — يرجى المحاولة مرة أخرى."
+                : "❌ Couldn't upload the file to storage. Your message was not sent — please try again."
+            );
             return;
           }
         } catch (uploadGatewayErr) {
           console.warn("Media gateway upload request failed:", uploadGatewayErr);
-          triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+          triggerToast(
+            lang === 'tr'
+              ? "❌ Dosya depoya yüklenemedi. Mesajınız gönderilmedi — lütfen tekrar deneyin."
+              : lang === 'ar'
+              ? "❌ تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك — يرجى المحاولة مرة أخرى."
+              : "❌ Couldn't upload the file to storage. Your message was not sent — please try again."
+          );
           return;
         }
       }
@@ -779,14 +802,34 @@ export default function App() {
         setAdminFileName("");
         setAdminFileUrl("#");
         setAdminFile(null);
+        setAdminUploadedFileUrl("");
         setAdminAttachOpen(false);
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
       } else {
         // fix/chat-safety-reliability-phase1: preserve the draft (file
-        // selection + name/category) on failure so the admin can retry —
-        // previously this branch already left them intact, unchanged here.
-        triggerToast("❌ Failed to send message. Please try again.");
+        // selection + name/category, and the cached uploaded URL if there
+        // is one) on failure so the admin can retry without re-uploading —
+        // previously this branch already left the draft intact, unchanged
+        // here. Distinct copy from the upload-failure toasts above,
+        // specifically when a real upload actually succeeded and only
+        // message creation failed — a plain (no-file) manual-filename send
+        // that the server rejects gets the generic message instead, since
+        // no upload happened for it to reference.
+        const hadRealUpload = Boolean(finalFileUrl) && finalFileUrl !== "#";
+        triggerToast(
+          hadRealUpload
+            ? (lang === 'tr'
+                ? "❌ Dosya yüklendi, ancak mesaj gönderilemedi. Lütfen tekrar deneyin."
+                : lang === 'ar'
+                ? "❌ تم رفع الملف، ولكن تعذر إرسال الرسالة. يرجى المحاولة مرة أخرى."
+                : "❌ The file was uploaded, but the message could not be sent. Please try again.")
+            : (lang === 'tr'
+                ? "❌ Mesaj gönderilemedi. Lütfen tekrar deneyin."
+                : lang === 'ar'
+                ? "❌ فشل إرسال الرسالة. يرجى المحاولة مرة أخرى."
+                : "❌ Failed to send message. Please try again.")
+        );
       }
     } catch (e) {
       console.error(e);
@@ -1333,6 +1376,11 @@ export default function App() {
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           if (file) {
+                            // fix/chat-safety-reliability-phase1 (follow-up):
+                            // a newly-picked file replaces the previous one —
+                            // any cached upload URL belonged to that old
+                            // file and must not be reused for this one.
+                            setAdminUploadedFileUrl("");
                             setAdminFile(file);
                             setAdminFileName(file.name);
                             if (file.type.startsWith("image/")) {

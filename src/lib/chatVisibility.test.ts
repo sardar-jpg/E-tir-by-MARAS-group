@@ -3,6 +3,7 @@ import {
   filterChatMessagesByRole,
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
+  isMessageInSeenScope,
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
@@ -115,6 +116,41 @@ describe("resolveSeenChannelFilter", () => {
     expect(resolveSeenChannelFilter("admin", "driver_admin")).toBe("driver_admin");
     expect(resolveSeenChannelFilter("admin", "internal_staff")).toBe("internal_staff");
     expect(resolveSeenChannelFilter("admin")).toBeNull();
+  });
+});
+
+describe("isMessageInSeenScope (fix/chat-safety-reliability-phase1 follow-up)", () => {
+  const shipmentA = "shipment-1003";
+  const shipmentB = "shipment-1001";
+
+  it("opening driver_admin does not put an internal_staff message on the same shipment in scope", () => {
+    const channelFilter = resolveSeenChannelFilter("admin", "driver_admin");
+    const internalMsg = { channel: "internal_staff" as ChatChannel, shipmentId: shipmentA };
+    expect(isMessageInSeenScope(internalMsg, channelFilter, shipmentA)).toBe(false);
+  });
+
+  it("opening client_admin does not put an internal_staff message on the same shipment in scope", () => {
+    const channelFilter = resolveSeenChannelFilter("admin", "client_admin");
+    const internalMsg = { channel: "internal_staff" as ChatChannel, shipmentId: shipmentA };
+    expect(isMessageInSeenScope(internalMsg, channelFilter, shipmentA)).toBe(false);
+  });
+
+  it("opening internal_staff puts a matching-channel, matching-shipment message in scope", () => {
+    const channelFilter = resolveSeenChannelFilter("admin", "internal_staff");
+    const internalMsg = { channel: "internal_staff" as ChatChannel, shipmentId: shipmentA };
+    expect(isMessageInSeenScope(internalMsg, channelFilter, shipmentA)).toBe(true);
+  });
+
+  it("opening internal_staff for one shipment does not put the same channel's message on a different shipment in scope", () => {
+    const channelFilter = resolveSeenChannelFilter("admin", "internal_staff");
+    const internalMsgOnOtherShipment = { channel: "internal_staff" as ChatChannel, shipmentId: shipmentB };
+    expect(isMessageInSeenScope(internalMsgOnOtherShipment, channelFilter, shipmentA)).toBe(false);
+  });
+
+  it("a driver session's implicit driver_admin scope never includes internal_staff", () => {
+    const channelFilter = resolveSeenChannelFilter("driver");
+    const internalMsg = { channel: "internal_staff" as ChatChannel, shipmentId: shipmentA };
+    expect(isMessageInSeenScope(internalMsg, channelFilter, shipmentA)).toBe(false);
   });
 });
 

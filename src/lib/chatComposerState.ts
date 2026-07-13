@@ -85,3 +85,28 @@ export function applyFailedChatPoll<TMessage>(prev: ChatPollState<TMessage>): Ch
 export function shouldConfirmChannelRead(markSeenResponseOk: boolean): boolean {
   return markSeenResponseOk === true;
 }
+
+export type AttachmentSendPlan =
+  | { action: "reuse_cached_url"; fileUrl: string }
+  | { action: "upload_then_send" };
+
+/**
+ * The actual decision point behind "retry reuses the uploaded URL instead
+ * of uploading the file again" — called by all three attachment-sending
+ * surfaces (ChatCenter.tsx's Internal Staff composer, App.tsx's Admin
+ * attachment modal, and DriverApplication.tsx's retry handler) before
+ * deciding whether to hit POST /api/upload at all. `cachedUploadedUrl` is
+ * each surface's own state, set once a previous attempt's upload
+ * succeeded and cleared only on a confirmed successful send or when the
+ * attachment is replaced/removed (never on a failed send) — so as long as
+ * that contract holds, a non-empty cache here always means "this exact
+ * file was already durably uploaded; sending again should reuse that URL,
+ * not upload it a second time."
+ */
+export function planAttachmentSend(cachedUploadedUrl: string): AttachmentSendPlan {
+  const trimmed = cachedUploadedUrl.trim();
+  if (trimmed) {
+    return { action: "reuse_cached_url", fileUrl: trimmed };
+  }
+  return { action: "upload_then_send" };
+}

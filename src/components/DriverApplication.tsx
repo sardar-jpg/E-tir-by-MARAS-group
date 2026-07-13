@@ -16,7 +16,7 @@ import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABEL
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
-import { canSubmitChatMessage, isStaleChatPollResponse } from "../lib/chatComposerState";
+import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend } from "../lib/chatComposerState";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -347,6 +347,20 @@ export default function DriverApplication({
   // Native chat attachment (paperclip -> hidden file input -> auto-send)
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // fix/chat-safety-reliability-phase1 (follow-up): set when an upload
+  // succeeded but the follow-up POST /chat failed — holds the real
+  // Storage URL so retrying (handleRetryDriverAttachment) reuses it
+  // instead of uploading the file again. Cleared on a confirmed
+  // successful send or when a new file is picked; never on a failed send.
+  const [pendingDriverAttachment, setPendingDriverAttachment] = useState<{
+    fileUrl: string;
+    fileName: string;
+    fileCategory: DocumentCategory;
+  } | null>(null);
+  // Distinguishes "the upload itself failed (nothing sent)" from "the
+  // upload succeeded but creating the chat message failed" — the two
+  // need different, explicit copy.
+  const [driverAttachmentError, setDriverAttachmentError] = useState<'' | 'upload' | 'send'>('');
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
@@ -1025,6 +1039,46 @@ export default function DriverApplication({
     }
   };
 
+  // fix/chat-safety-reliability-phase1 (follow-up): if upload succeeds but
+  // this POST /chat fails, the caller caches { fileUrl, fileName,
+  // fileCategory } in pendingDriverAttachment (never the caller's own
+  // local state again) so a retry (see handleRetryDriverAttachment below)
+  // reuses that real Storage URL instead of uploading the file a second
+  // time. Cleared on a confirmed successful send; left untouched on
+  // failure so the retry banner stays actionable.
+  const sendDriverFileMessage = async (fileUrl: string, fileName: string, fileCategory: DocumentCategory) => {
+    if (!activeShipment) return;
+    try {
+      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sender: "driver",
+          senderName: getDriverName(),
+          type: "file",
+          fileName,
+          fileCategory,
+          fileUrl,
+          text: `Sent a document [${fileCategory.toUpperCase()}]: ${fileName}`
+        })
+      });
+
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
+        setPendingDriverAttachment(null);
+        setDriverAttachmentError('');
+        fetchData();
+      } else {
+        setPendingDriverAttachment({ fileUrl, fileName, fileCategory });
+        setDriverAttachmentError('send');
+      }
+    } catch (e) {
+      console.error(e);
+      setPendingDriverAttachment({ fileUrl, fileName, fileCategory });
+      setDriverAttachmentError('send');
+    }
+  };
+
   // Native chat attachment: paperclip -> OS file picker -> auto-send to Admin.
   // Category is derived from the file's MIME type, never chosen by the
   // driver, and is restricted to "photo"/"other" — CMR is not reachable
@@ -1034,6 +1088,11 @@ export default function DriverApplication({
     e.target.value = "";
     if (!file || !activeShipment) return;
 
+    // fix/chat-safety-reliability-phase1 (follow-up): picking a new file
+    // replaces any previous pending (failed-to-send) attachment — its
+    // cached URL belonged to a different file.
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
     setIsUploading(true);
 
     try {
@@ -1045,7 +1104,6 @@ export default function DriverApplication({
       });
 
       const fileCategory: DocumentCategory = file.type.startsWith("image/") ? "photo" : "other";
-      let finalFileUrl: string;
 
       try {
         const uploadRes = await apiFetch("/api/upload", {
@@ -1063,40 +1121,40 @@ export default function DriverApplication({
           // with every other chat surface — the driver gets a clear error
           // and can retry by picking the file again, rather than a message
           // going out that references a file that was never actually saved.
+          setDriverAttachmentError('upload');
           triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
           return;
         }
         const uploadData = await uploadRes.json();
-        finalFileUrl = uploadData.url;
+        await sendDriverFileMessage(uploadData.url, file.name, fileCategory);
       } catch (uploadGatewayErr) {
         console.warn("Upload request failed:", uploadGatewayErr);
+        setDriverAttachmentError('upload');
         triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
-        return;
-      }
-
-      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender: "driver",
-          senderName: getDriverName(),
-          type: "file",
-          fileName: file.name,
-          fileCategory,
-          fileUrl: finalFileUrl,
-          text: `Sent a document [${fileCategory.toUpperCase()}]: ${file.name}`
-        })
-      });
-
-      if (res.ok) {
-        triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
-        fetchData();
-      } else {
-        triggerToast("❌ Failed to send attachment. Please try again.");
       }
     } catch (e) {
       console.error(e);
       triggerToast("❌ Failed to send attachment.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): reuses the cached
+  // Storage URL from pendingDriverAttachment via the same
+  // planAttachmentSend decision ChatCenter.tsx/App.tsx use — never
+  // re-uploads the file.
+  const handleRetryDriverAttachment = async () => {
+    if (!pendingDriverAttachment || isUploading) return;
+    const plan = planAttachmentSend(pendingDriverAttachment.fileUrl);
+    if (plan.action !== "reuse_cached_url") return;
+    setIsUploading(true);
+    try {
+      await sendDriverFileMessage(
+        plan.fileUrl,
+        pendingDriverAttachment.fileName,
+        pendingDriverAttachment.fileCategory
+      );
     } finally {
       setIsUploading(false);
     }
@@ -1812,6 +1870,39 @@ export default function DriverApplication({
                       {/* Thread autoscroll anchor point */}
                       <div ref={messagesEndRef} />
                     </div>
+
+                    {/* fix/chat-safety-reliability-phase1 (follow-up):
+                        upload-failed vs upload-succeeded-but-send-failed
+                        banner, with a retry action for the latter that
+                        reuses the already-uploaded Storage URL rather than
+                        uploading the file again. */}
+                    {!isShipmentFinished && driverAttachmentError && (
+                      <div className="px-3.5 pt-2.5 bg-slate-950 flex items-center justify-between gap-2 text-[10px] font-bold">
+                        <span className="text-red-400">
+                          {driverAttachmentError === 'upload'
+                            ? (lang === 'tr'
+                                ? "Dosya depoya yüklenemedi. Mesajınız gönderilmedi."
+                                : lang === 'ar'
+                                ? "تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك."
+                                : "Couldn't upload the file to storage. Your message was not sent.")
+                            : (lang === 'tr'
+                                ? "Dosya yüklendi, ancak mesaj gönderilemedi."
+                                : lang === 'ar'
+                                ? "تم رفع الملف، ولكن تعذر إرسال الرسالة."
+                                : "The file was uploaded, but the message could not be sent.")}
+                        </span>
+                        {pendingDriverAttachment && (
+                          <button
+                            type="button"
+                            onClick={handleRetryDriverAttachment}
+                            disabled={isUploading}
+                            className="shrink-0 text-orange-400 hover:text-orange-300 underline disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {lang === 'tr' ? 'Tekrar dene' : lang === 'ar' ? 'إعادة المحاولة' : 'Retry'}
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {/* Message input */}
                     {isShipmentFinished ? (

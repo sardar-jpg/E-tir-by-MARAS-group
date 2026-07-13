@@ -9,6 +9,7 @@ import {
   canSubmitChatMessage,
   applySuccessfulChatPoll,
   shouldConfirmChannelRead,
+  planAttachmentSend,
 } from '../../lib/chatComposerState';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
@@ -300,8 +301,23 @@ export default function ChatCenter({
         setHasLoadedMessagesOnce(next.hasLoadedOnce);
         setPollError(next.pollError);
 
-        const hasMessageFromOtherParty = data.some((m: ChatMessage) => m.sender !== 'admin');
-        if (hasMessageFromOtherParty) {
+        // fix/chat-safety-reliability-phase1 (follow-up): this used to
+        // gate the /chat/seen call on `data.some(m => m.sender !== 'admin')`
+        // — meant to skip the call when there's nothing from "the other
+        // party" to mark. But every internal_staff message has
+        // sender: 'admin' (there is no other party — every participant is
+        // an admin), so that condition was ALWAYS false for internal_staff,
+        // meaning opening that channel never called /chat/seen at all and
+        // another admin's message could never be marked read. Call
+        // whenever the channel has any messages instead, and let the
+        // server's own session/channel/shipment-aware logic
+        // (isMessageFromOtherAdmin / isMessageUnreadForAdmin,
+        // chatUnreadAccess.ts) decide which messages actually get added to
+        // readByAdminIds — it already correctly excludes the viewing
+        // admin's own messages (own internal_staff messages included), so
+        // this is safe to call unconditionally rather than trying to
+        // duplicate that eligibility check client-side.
+        if (data.length > 0) {
           const seenRes = await apiFetch(`/api/shipments/${selectedShipment.id}/chat/seen`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -396,9 +412,12 @@ export default function ChatCenter({
       const body: Record<string, unknown> = { channel: 'internal_staff' };
 
       if (internalFile) {
-        let uploadedUrl = internalUploadedFileUrl;
+        const plan = planAttachmentSend(internalUploadedFileUrl);
+        let uploadedUrl: string;
 
-        if (!uploadedUrl) {
+        if (plan.action === 'reuse_cached_url') {
+          uploadedUrl = plan.fileUrl;
+        } else {
           if (!internalFileDataUrl) {
             // FileReader hasn't finished reading the file yet — nothing to
             // upload. Bail out rather than send a malformed request; the

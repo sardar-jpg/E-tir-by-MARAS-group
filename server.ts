@@ -41,6 +41,7 @@ import {
   filterChatMessagesByRole,
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
+  isMessageInSeenScope,
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
@@ -3360,8 +3361,7 @@ async function startServer() {
 
       snapshot.docs.forEach((d) => {
         const msg = d.data() as ChatMessage;
-        if (channelFilter && msg.channel !== channelFilter) return;
-        if (msg.shipmentId !== shipmentId) return;
+        if (!isMessageInSeenScope(msg, channelFilter, shipmentId)) return;
 
         if (viewerAdminId) {
           // Still also sets status: 'seen' (unchanged, first-seen-by-any-
