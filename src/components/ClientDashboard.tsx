@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Language, Shipment, Driver, DocumentCategory } from "../types";
 import {
   Globe, Star, Truck, Eye,
@@ -14,6 +14,7 @@ import { canClientSendChatMessage } from "../lib/clientAccess";
 import { validateUpload } from "../lib/uploadValidation";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage } from "../lib/chatComposerState";
+import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 
 // Local multilingual dictionary
 const t = {
@@ -158,6 +159,13 @@ interface ClientDashboardProps {
   viewOnly?: boolean;
 }
 
+// feature/chat-ui-ux-phase2: auto-growing composer bounds — two lines at
+// rest (matching the existing rows={2}), up to ~6-7 lines before the
+// textarea scrolls internally instead of pushing the rest of the page
+// down.
+const INQUIRY_COMPOSER_MIN_HEIGHT_PX = 56;
+const INQUIRY_COMPOSER_MAX_HEIGHT_PX = 160;
+
 export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, isMobile = false, viewOnly = false }: ClientDashboardProps) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -175,6 +183,52 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const [selectedFileDataUrl, setSelectedFileDataUrl] = useState("");
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [fileError, setFileError] = useState("");
+
+  // feature/chat-ui-ux-phase2: smart auto-scroll for the inquiry feed —
+  // previously this feed had no auto-scroll at all, so a new message just
+  // appended silently below the visible area of the small feed box.
+  // inquiryFeedRef is the scrollable feed; isInquiryFeedNearBottomRef
+  // tracks (via the onScroll handler below) whether the client is already
+  // close to the bottom — only then does a new message auto-scroll the
+  // view.
+  const inquiryFeedRef = useRef<HTMLDivElement>(null);
+  const inquiryFeedEndRef = useRef<HTMLDivElement>(null);
+  const isInquiryFeedNearBottomRef = useRef(true);
+  // feature/chat-ui-ux-phase2: auto-growing composer textarea.
+  const inquiryTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Opening a different shipment always starts its inquiry feed scrolled
+  // to the latest messages.
+  useEffect(() => {
+    isInquiryFeedNearBottomRef.current = true;
+  }, [selectedShipment?.id]);
+
+  // Smart auto-scroll — only scrolls to the newest message when the
+  // client was already near the bottom (or just switched shipment, per
+  // the reset above).
+  useEffect(() => {
+    const count = selectedShipment ? (inquiries[selectedShipment.id]?.length ?? 0) : 0;
+    if (count > 0 && isInquiryFeedNearBottomRef.current) {
+      inquiryFeedEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShipment?.id, selectedShipment ? inquiries[selectedShipment.id]?.length : 0]);
+
+  const handleInquiryFeedScroll = () => {
+    const el = inquiryFeedRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isInquiryFeedNearBottomRef.current = isNearBottom(distanceFromBottom);
+  };
+
+  // Auto-grow the composer textarea with its content (including
+  // shrinking back down after the draft is cleared on send).
+  useEffect(() => {
+    const el = inquiryTextareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${computeAutoGrowHeightPx(el.scrollHeight, INQUIRY_COMPOSER_MIN_HEIGHT_PX, INQUIRY_COMPOSER_MAX_HEIGHT_PX)}px`;
+  }, [inquiryText]);
 
   // Real-time Notification Center States
   const [notifications, setNotifications] = useState<any[]>([]);
@@ -1042,24 +1096,41 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                           {curT.inquiryDesc}
                         </p>
 
-                        {/* Message Feed logs */}
+                        {/* Message Feed logs — feature/chat-ui-ux-phase2:
+                            was max-h-36 (144px, ~2 messages visible at
+                            once); bumped to a genuinely usable size, plus
+                            smart auto-scroll and date separators to match
+                            the other three chat surfaces. */}
                         {inquiries[selectedShipment!.id] && inquiries[selectedShipment!.id].length > 0 && (
-                          <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-36 overflow-y-auto space-y-2 text-[11px]">
+                          <div
+                            ref={inquiryFeedRef}
+                            onScroll={handleInquiryFeedScroll}
+                            className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-72 sm:max-h-96 overflow-y-auto space-y-2 text-[11px]"
+                          >
                             {inquiries[selectedShipment!.id].map((msg, mIdx) => {
                               const isAdminSender = msg.sender === "admin" || (msg.senderName && (msg.senderName.toLowerCase().includes("admin") || msg.senderName.toLowerCase().includes("maras")));
+                              const showDateSeparator = shouldShowDateSeparator(msg.timestamp, inquiries[selectedShipment!.id][mIdx - 1]?.timestamp);
                               return (
-                                <div key={mIdx} className="space-y-0.5 text-left border-b border-slate-900 pb-1 last:border-0">
+                                <div key={mIdx}>
+                                  {showDateSeparator && (
+                                    <div className="flex items-center justify-center py-1.5">
+                                      <span className="px-2 py-0.5 rounded-full bg-slate-900 text-slate-500 text-[10px] font-bold">
+                                        {formatDateSeparatorLabel(msg.timestamp, lang)}
+                                      </span>
+                                    </div>
+                                  )}
+                                  <div className="space-y-0.5 text-left border-b border-slate-900 pb-1 last:border-0">
                                   <div className="flex items-center justify-between gap-2.5">
-                                    <span className={`font-black uppercase text-[10px] ${isAdminSender ? 'text-orange-400' : 'text-slate-300'}`}>
+                                    <span className={`font-black uppercase text-[11px] ${isAdminSender ? 'text-orange-400' : 'text-slate-300'}`}>
                                       {msg.senderName || msg.sender}
                                     </span>
-                                    <span className="text-[9px] text-slate-500 font-bold">
+                                    <span className="text-[10px] text-slate-500 font-bold">
                                       {new Date(msg.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
                                     </span>
                                   </div>
                                   {msg.type === "file" ? (
                                     <div className="space-y-1">
-                                      <span className="inline-block bg-slate-900 text-slate-400 text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">
+                                      <span className="inline-block bg-slate-900 text-slate-400 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">
                                         {msg.fileCategory || "file"}
                                       </span>
                                       <a
@@ -1069,21 +1140,23 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                                         onClick={(e) => {
                                           if (!msg.fileUrl || msg.fileUrl === "#") e.preventDefault();
                                         }}
-                                        className="flex items-center gap-1 text-slate-200 hover:text-orange-400 font-bold text-[10px] underline break-all"
+                                        className="flex items-center gap-1 text-slate-200 hover:text-orange-400 font-bold text-[11px] underline break-all"
                                       >
                                         <Download className="w-3 h-3 text-orange-400 shrink-0" />
                                         <span>{msg.fileName || "Attachment"}</span>
                                       </a>
                                       {msg.text && (
-                                        <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
+                                        <p className="text-slate-300 text-[11px] leading-tight break-words">{msg.text}</p>
                                       )}
                                     </div>
                                   ) : (
-                                    <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
+                                    <p className="text-slate-300 text-[11px] leading-tight break-words">{msg.text}</p>
                                   )}
+                                  </div>
                                 </div>
                               );
                             })}
+                            <div ref={inquiryFeedEndRef} />
                           </div>
                         )}
 
@@ -1102,19 +1175,30 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         ) : (
                           <div className="space-y-2">
                             <textarea
+                              ref={inquiryTextareaRef}
                               rows={2}
                               value={inquiryText}
                               onChange={(e) => setInquiryText(e.target.value)}
+                              onKeyDown={(e) => {
+                                // Enter sends; Shift+Enter inserts a
+                                // newline (this textarea can already grow
+                                // to multiple lines).
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleSendInquiry(selectedShipment!.id);
+                                }
+                              }}
                               placeholder={curT.inquiryPlaceholder}
                               maxLength={MAX_CHAT_TEXT_LENGTH}
                               disabled={sendingInquiry}
-                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none disabled:opacity-60"
+                              style={{ minHeight: INQUIRY_COMPOSER_MIN_HEIGHT_PX, maxHeight: INQUIRY_COMPOSER_MAX_HEIGHT_PX }}
+                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none disabled:opacity-60 overflow-y-auto leading-normal"
                             />
 
                             <div className="flex items-center gap-2">
                               <label
                                 title={curT.attachFile}
-                                className="p-2 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-400 hover:text-orange-400 cursor-pointer transition-colors shrink-0"
+                                className="p-3 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-400 hover:text-orange-400 cursor-pointer transition-colors shrink-0"
                               >
                                 <Paperclip className="w-3.5 h-3.5" />
                                 <input
@@ -1135,7 +1219,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                                     onClick={handleRemoveAttachment}
                                     title={curT.removeFile}
                                     disabled={isUploadingFile || sendingInquiry}
-                                    className="ml-auto shrink-0 text-slate-500 hover:text-red-400 border-0 bg-transparent cursor-pointer"
+                                    className="ml-auto shrink-0 p-2 -m-1 text-slate-500 hover:text-red-400 border-0 bg-transparent cursor-pointer"
                                   >
                                     <X className="w-3 h-3" />
                                   </button>
@@ -1157,7 +1241,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                               type="button"
                               onClick={() => handleSendInquiry(selectedShipment!.id)}
                               disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })}
-                              className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
+                              className="w-full py-3 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
                               {isUploadingFile ? (
                                 <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
