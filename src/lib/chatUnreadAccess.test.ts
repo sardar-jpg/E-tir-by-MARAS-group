@@ -46,6 +46,49 @@ describe("isMessageUnreadForAdmin", () => {
   });
 });
 
+describe("internal_staff multi-admin mark-seen scenario (regression for the ChatCenter.tsx mark-seen bug fix)", () => {
+  // Every internal_staff message has sender: 'admin' — there is no "other
+  // party" the way there is for driver_admin/client_admin. ChatCenter.tsx
+  // used to gate its POST /chat/seen call on "does this channel have any
+  // non-admin sender," which was always false for internal_staff, so
+  // opening it never called /chat/seen at all and readByAdminIds could
+  // never be updated. These tests exercise the actual per-message
+  // eligibility logic (isMessageFromOtherAdmin / isMessageUnreadForAdmin /
+  // appendAdminReader) the server applies once that call does happen —
+  // the fix itself is "call unconditionally whenever there are messages,"
+  // this proves the per-message logic it now actually gets a chance to
+  // run is correct.
+  it("Admin B opening internal_staff marks Admin A's message read for B", () => {
+    const messageFromA = { sender: "admin" as const, senderId: "admin-a", readByAdminIds: [] as string[] };
+    expect(isMessageUnreadForAdmin(messageFromA, "admin-b")).toBe(true);
+
+    const nextReadBy = appendAdminReader(messageFromA.readByAdminIds, "admin-b");
+    const afterBReads = { ...messageFromA, readByAdminIds: nextReadBy };
+
+    expect(isMessageUnreadForAdmin(afterBReads, "admin-b")).toBe(false);
+  });
+
+  it("Admin A's own internal_staff message is never counted unread for A, before or after any mark-seen call", () => {
+    const messageFromA = { sender: "admin" as const, senderId: "admin-a", readByAdminIds: [] as string[] };
+    expect(isMessageUnreadForAdmin(messageFromA, "admin-a")).toBe(false);
+
+    // Even if a mark-seen call somehow tried to add A as a reader of A's
+    // own message (it shouldn't — isMessageFromOtherAdmin already
+    // excludes this server-side), it would still never count as unread
+    // for A.
+    const withSelfAsReader = { ...messageFromA, readByAdminIds: appendAdminReader(messageFromA.readByAdminIds, "admin-a") };
+    expect(isMessageUnreadForAdmin(withSelfAsReader, "admin-a")).toBe(false);
+  });
+
+  it("Admin B reading Admin A's internal_staff message does not mark it read for Admin C", () => {
+    const messageFromA = { sender: "admin" as const, senderId: "admin-a", readByAdminIds: [] as string[] };
+    const afterBReads = { ...messageFromA, readByAdminIds: appendAdminReader(messageFromA.readByAdminIds, "admin-b") };
+
+    expect(isMessageUnreadForAdmin(afterBReads, "admin-b")).toBe(false);
+    expect(isMessageUnreadForAdmin(afterBReads, "admin-c")).toBe(true);
+  });
+});
+
 describe("appendAdminReader", () => {
   it("adds a new reader", () => {
     expect(appendAdminReader(undefined, "admin-a")).toEqual(["admin-a"]);

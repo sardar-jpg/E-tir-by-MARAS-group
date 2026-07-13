@@ -92,6 +92,28 @@ export function resolveSeenChannelFilter(
 }
 
 /**
+ * fix/chat-safety-reliability-phase1 (follow-up): the exact per-message
+ * scope check POST /api/shipments/:id/chat/seen (server.ts) applies to
+ * every candidate message before touching readByAdminIds/status — pulled
+ * out here (and used directly by that route, not reimplemented) so it's
+ * unit-testable on its own. `channelFilter` is `resolveSeenChannelFilter`'s
+ * output: a null filter means "no channel restriction" (the merged admin
+ * GET default); otherwise a message must match both the given channel AND
+ * shipment to be in scope. This is what guarantees, e.g., marking
+ * driver_admin as read for one shipment can never touch an internal_staff
+ * message, or the same channel's messages on a different shipment.
+ */
+export function isMessageInSeenScope(
+  message: { channel?: ChatChannel; shipmentId?: string },
+  channelFilter: ChatChannel | null,
+  shipmentId: string
+): boolean {
+  if (channelFilter && message.channel !== channelFilter) return false;
+  if (message.shipmentId !== shipmentId) return false;
+  return true;
+}
+
+/**
  * Whether a chat push notification should reach a given party (driver or
  * client) for this shipment. Non-channel-tagged notification types are
  * unaffected (always true) — 'chat' and 'doc_upload' are the two types

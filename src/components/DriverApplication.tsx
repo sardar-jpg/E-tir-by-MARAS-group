@@ -15,6 +15,8 @@ import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
+import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -122,6 +124,13 @@ export default function DriverApplication({
 
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const knownChatMessageIdsRef = React.useRef<Set<string>>(new Set());
+  // fix/chat-safety-reliability-phase1: always holds the CURRENT
+  // activeShipment id, checked after an in-flight chat fetch resolves (in
+  // both fetchData and fetchChatOnly below) — a request fired for the
+  // previously-selected shipment can otherwise resolve after the driver has
+  // already switched to a different one and overwrite chatMessages with
+  // the wrong thread's data.
+  const activeShipmentIdRef = React.useRef<string | null>(null);
   const gpsCooldownRef = React.useRef<number>(0);
   // In-flight guard for POST /api/notifications/:id/read — the 12s poll
   // (fetchData below) can re-run while a previous mark-as-read request for
@@ -156,6 +165,10 @@ export default function DriverApplication({
   // Active selected shipment for detail / chat inside driver app
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
+
+  useEffect(() => {
+    activeShipmentIdRef.current = activeShipment?.id ?? null;
+  }, [activeShipment?.id]);
 
   // Notifications scoped to this driver's own shipments, plus anything
   // addressed directly to this driver regardless of shipment (e.g.
@@ -334,6 +347,34 @@ export default function DriverApplication({
   // Native chat attachment (paperclip -> hidden file input -> auto-send)
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // fix/chat-safety-reliability-phase1 (follow-up): set when an upload
+  // succeeded but the follow-up POST /chat failed — holds the real
+  // Storage URL so retrying (handleRetryDriverAttachment) reuses it
+  // instead of uploading the file again. Cleared on a confirmed
+  // successful send or when a new file is picked; never on a failed send.
+  // `shipmentId` is the shipment this attachment was uploaded FOR — a
+  // retry must never post it into a different shipment the driver has
+  // since switched to (see handleRetryDriverAttachment and the
+  // shipment-change effect below).
+  const [pendingDriverAttachment, setPendingDriverAttachment] = useState<{
+    shipmentId: string;
+    fileUrl: string;
+    fileName: string;
+    fileCategory: DocumentCategory;
+  } | null>(null);
+  // Distinguishes "the upload itself failed (nothing sent)" from "the
+  // upload succeeded but creating the chat message failed" — the two
+  // need different, explicit copy.
+  const [driverAttachmentError, setDriverAttachmentError] = useState<'' | 'upload' | 'send'>('');
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment must never carry a pending (failed-to-send)
+  // attachment — or its cached upload URL — over to the newly-selected
+  // one.
+  useEffect(() => {
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
+  }, [activeShipment?.id]);
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
@@ -405,43 +446,48 @@ export default function DriverApplication({
         }
       }
 
-      // Fetch dynamic messages
-      if (activeShipment) {
-        const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
+      // Fetch dynamic messages.
+      //
+      // fix/chat-safety-reliability-phase1: skipped while the faster 3.5s
+      // chat-only poll below already owns this shipment's chat (activeTab
+      // === 'chat') — the two polls previously ran concurrently against
+      // the same endpoint with no coordination between them at all.
+      // knownChatMessageIdsRef is kept in sync by that faster poll in the
+      // meantime (see fetchChatOnly) specifically so that resuming here
+      // after the driver leaves the chat tab doesn't treat every message
+      // that arrived while they were on it as "new" and fire a toast for
+      // each one.
+      if (activeShipment && activeTab !== 'chat') {
+        const requestedShipmentId = activeShipment.id;
+        const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
         if (resChat.ok) {
           const msgs: ChatMessage[] = await safeJson(resChat);
-          
-          if (knownChatMessageIdsRef.current.size === 0) {
-            const initialIds = new Set<string>();
-            msgs.forEach((m) => initialIds.add(m.id));
-            knownChatMessageIdsRef.current = initialIds;
-          } else {
-            for (const m of msgs) {
-              if (!knownChatMessageIdsRef.current.has(m.id)) {
-                knownChatMessageIdsRef.current.add(m.id);
-                // Alert only if sender is 'admin' (dispatcher)
-                if (m.sender === 'admin') {
-                  if (activeTab !== 'chat') {
-                    const alertMsg = lang === 'en' 
-                      ? `💬 Dispatch: "${m.text}"` 
+
+          // fix/chat-safety-reliability-phase1: this request was for
+          // requestedShipmentId — if the driver has since switched to a
+          // different shipment, applying this response would overwrite
+          // the new shipment's chat with the old one's.
+          if (!isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) {
+            if (knownChatMessageIdsRef.current.size === 0) {
+              const initialIds = new Set<string>();
+              msgs.forEach((m) => initialIds.add(m.id));
+              knownChatMessageIdsRef.current = initialIds;
+            } else {
+              for (const m of msgs) {
+                if (!knownChatMessageIdsRef.current.has(m.id)) {
+                  knownChatMessageIdsRef.current.add(m.id);
+                  // Alert only if sender is 'admin' (dispatcher)
+                  if (m.sender === 'admin') {
+                    const alertMsg = lang === 'en'
+                      ? `💬 Dispatch: "${m.text}"`
                       : (lang === 'tr' ? `💬 Mesaj: "${m.text}"` : `💬 إشعار: "${m.text}"`);
                     triggerToast(alertMsg);
                   }
                 }
               }
             }
-          }
 
-          setChatMessages(msgs);
-          if (activeTab === 'chat') {
-            const hasUnseenFromAdmin = msgs.some((m: any) => m.sender === 'admin' && m.status !== 'seen');
-            if (hasUnseenFromAdmin) {
-              fetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ viewer: "driver" })
-              }).catch(err => console.warn(err));
-            }
+            setChatMessages(msgs);
           }
         }
       }
@@ -513,18 +559,31 @@ export default function DriverApplication({
   useEffect(() => {
     let interval: any;
     if (activeShipment && activeTab === 'chat') {
+      const requestedShipmentId = activeShipment.id;
       const fetchChatOnly = async () => {
         try {
-          const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
+          const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
           if (resChat.ok) {
             const txt = await resChat.text();
             if (txt.trim() && !txt.trim().startsWith("<")) {
               const msgs: ChatMessage[] = JSON.parse(txt);
+
+              // fix/chat-safety-reliability-phase1: guard against this
+              // response landing after the driver has already switched to
+              // a different shipment or left the chat tab.
+              if (isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) return;
+
               setChatMessages(msgs);
+              // Keep knownChatMessageIdsRef in sync while this faster poll
+              // owns chat updates — fetchData's own (slower) chat fetch is
+              // skipped whenever activeTab === 'chat' (see above), and
+              // relies on this ref already reflecting every message seen
+              // here once the driver leaves the chat tab.
+              msgs.forEach((m) => knownChatMessageIdsRef.current.add(m.id));
 
               const hasUnseenFromAdmin = msgs.some((m: any) => m.sender === 'admin' && m.status !== 'seen');
               if (hasUnseenFromAdmin) {
-                await apiFetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
+                await apiFetch(`/api/shipments/${requestedShipmentId}/chat/seen`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ viewer: "driver" })
@@ -536,7 +595,7 @@ export default function DriverApplication({
           console.warn("Active driver chat fast poll error:", err);
         }
       };
-      
+
       // Initial trigger and set quick 3.5s interval
       fetchChatOnly();
       interval = setInterval(fetchChatOnly, 3500);
@@ -955,10 +1014,17 @@ export default function DriverApplication({
     }
   };
 
+  // fix/chat-safety-reliability-phase1: in-flight guard — previously this
+  // had no reentrancy protection at all, so a double-tap/double-Enter
+  // could fire two POSTs before the first resolved.
+  const [isSendingDriverMessage, setIsSendingDriverMessage] = useState(false);
+
   // Chat message injection
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeShipment || !newMessageText.trim()) return;
+    if (!activeShipment) return;
+    if (!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })) return;
+    setIsSendingDriverMessage(true);
 
     try {
       const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
@@ -982,6 +1048,57 @@ export default function DriverApplication({
     } catch (err) {
       console.error(err);
       triggerToast("❌ Could not reach the server. Your message was not sent.");
+    } finally {
+      setIsSendingDriverMessage(false);
+    }
+  };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): if upload succeeds but
+  // this POST /chat fails, the caller caches { shipmentId, fileUrl,
+  // fileName, fileCategory } in pendingDriverAttachment (never the
+  // caller's own local state again) so a retry (see
+  // handleRetryDriverAttachment below) reuses that real Storage URL
+  // instead of uploading the file a second time. Cleared on a confirmed
+  // successful send; left untouched on failure so the retry banner stays
+  // actionable.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): takes `shipmentId`
+  // explicitly rather than reading activeShipment inside this function —
+  // this always sends to the shipment the ATTACHMENT belongs to (the one
+  // active when it was picked/uploaded), never whichever shipment happens
+  // to be active by the time this async call actually runs. The caller
+  // (handleAttachmentSelected / handleRetryDriverAttachment) is
+  // responsible for only ever passing a shipmentId that's still valid to
+  // send to.
+  const sendDriverFileMessage = async (shipmentId: string, fileUrl: string, fileName: string, fileCategory: DocumentCategory) => {
+    try {
+      const res = await apiFetch(`/api/shipments/${shipmentId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sender: "driver",
+          senderName: getDriverName(),
+          type: "file",
+          fileName,
+          fileCategory,
+          fileUrl,
+          text: `Sent a document [${fileCategory.toUpperCase()}]: ${fileName}`
+        })
+      });
+
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
+        setPendingDriverAttachment(null);
+        setDriverAttachmentError('');
+        fetchData();
+      } else {
+        setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
+        setDriverAttachmentError('send');
+      }
+    } catch (e) {
+      console.error(e);
+      setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
+      setDriverAttachmentError('send');
     }
   };
 
@@ -994,6 +1111,18 @@ export default function DriverApplication({
     e.target.value = "";
     if (!file || !activeShipment) return;
 
+    // fix/chat-safety-reliability-phase1 (follow-up): captured once, up
+    // front — this is the shipment the file was actually picked/uploaded
+    // for, and stays fixed for this whole attempt (including the retry it
+    // may end up cached for) regardless of whether the driver switches to
+    // a different shipment while the upload/send is in flight.
+    const shipmentId = activeShipment.id;
+
+    // fix/chat-safety-reliability-phase1 (follow-up): picking a new file
+    // replaces any previous pending (failed-to-send) attachment — its
+    // cached URL belonged to a different file.
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
     setIsUploading(true);
 
     try {
@@ -1005,8 +1134,6 @@ export default function DriverApplication({
       });
 
       const fileCategory: DocumentCategory = file.type.startsWith("image/") ? "photo" : "other";
-      let finalFileUrl = "#";
-      let uploadFailed = false;
 
       try {
         const uploadRes = await apiFetch("/api/upload", {
@@ -1017,44 +1144,62 @@ export default function DriverApplication({
             filename: file.name
           })
         });
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          finalFileUrl = uploadData.url;
-        } else {
-          uploadFailed = true;
+        if (!uploadRes.ok) {
+          // fix/chat-safety-reliability-phase1: this previously still sent
+          // a chat message with fileUrl: "#" (a dead link) even when the
+          // upload failed. Block the send outright instead, consistent
+          // with every other chat surface — the driver gets a clear error
+          // and can retry by picking the file again, rather than a message
+          // going out that references a file that was never actually saved.
+          setDriverAttachmentError('upload');
+          triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+          return;
         }
+        const uploadData = await uploadRes.json();
+        await sendDriverFileMessage(shipmentId, uploadData.url, file.name, fileCategory);
       } catch (uploadGatewayErr) {
-        uploadFailed = true;
         console.warn("Upload request failed:", uploadGatewayErr);
-      }
-
-      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender: "driver",
-          senderName: getDriverName(),
-          type: "file",
-          fileName: file.name,
-          fileCategory,
-          fileUrl: finalFileUrl,
-          text: `Sent a document [${fileCategory.toUpperCase()}]: ${file.name}`
-        })
-      });
-
-      if (res.ok) {
-        if (uploadFailed) {
-          triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for dispatch.");
-        } else {
-          triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
-        }
-        fetchData();
-      } else {
-        triggerToast("❌ Failed to send attachment. Please try again.");
+        setDriverAttachmentError('upload');
+        triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
       }
     } catch (e) {
       console.error(e);
       triggerToast("❌ Failed to send attachment.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): reuses the cached
+  // Storage URL from pendingDriverAttachment via the same
+  // planAttachmentSend decision ChatCenter.tsx/App.tsx use — never
+  // re-uploads the file.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): verifies
+  // pendingDriverAttachment.shipmentId still matches the currently active
+  // shipment before reusing anything. The shipment-change effect above
+  // should already have cleared pendingDriverAttachment by the time the
+  // driver could even see a retry banner for a different shipment, but
+  // this is the actual enforcement point, not just a mirror of it — if
+  // they somehow don't match, the pending attachment is cleared/blocked
+  // rather than ever being posted into the wrong shipment.
+  const handleRetryDriverAttachment = async () => {
+    if (!pendingDriverAttachment || isUploading) return;
+    if (!isCachedAttachmentForShipment(pendingDriverAttachment.shipmentId, activeShipment?.id ?? null)) {
+      setPendingDriverAttachment(null);
+      setDriverAttachmentError('');
+      return;
+    }
+    const plan = planAttachmentSend(pendingDriverAttachment.fileUrl);
+    if (plan.action !== "reuse_cached_url") return;
+    setIsUploading(true);
+    try {
+      await sendDriverFileMessage(
+        pendingDriverAttachment.shipmentId,
+        plan.fileUrl,
+        pendingDriverAttachment.fileName,
+        pendingDriverAttachment.fileCategory
+      );
     } finally {
       setIsUploading(false);
     }
@@ -1686,12 +1831,21 @@ export default function DriverApplication({
                         })
                         .map((msg) => {
                           const isMe = msg.sender === 'driver';
+                          // fix/chat-safety-reliability-phase1: this row
+                          // uses items-end/items-start (never stretch), so
+                          // a flex child sizes to its own content width
+                          // rather than the row's — an unbroken-text
+                          // bubble wider than max-w-[85%] overflowed the
+                          // whole panel despite break-words alone (found
+                          // while smoke-testing the new 5000-char limit).
+                          // max-w-full on the bubble gives it something to
+                          // wrap against.
                           return (
                             <div key={msg.id} className={`flex flex-col max-w-[85%] ${isMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                               <span className="text-[8px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                              <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm ${
-                                isMe 
-                                  ? 'bg-orange-600 text-white rounded-tr-none' 
+                              <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm break-words max-w-full ${
+                                isMe
+                                  ? 'bg-orange-600 text-white rounded-tr-none'
                                   : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none'
                               }`}>
                                  {msg.type === 'file' ? (
@@ -1762,6 +1916,39 @@ export default function DriverApplication({
                       <div ref={messagesEndRef} />
                     </div>
 
+                    {/* fix/chat-safety-reliability-phase1 (follow-up):
+                        upload-failed vs upload-succeeded-but-send-failed
+                        banner, with a retry action for the latter that
+                        reuses the already-uploaded Storage URL rather than
+                        uploading the file again. */}
+                    {!isShipmentFinished && driverAttachmentError && (
+                      <div className="px-3.5 pt-2.5 bg-slate-950 flex items-center justify-between gap-2 text-[10px] font-bold">
+                        <span className="text-red-400">
+                          {driverAttachmentError === 'upload'
+                            ? (lang === 'tr'
+                                ? "Dosya depoya yüklenemedi. Mesajınız gönderilmedi."
+                                : lang === 'ar'
+                                ? "تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك."
+                                : "Couldn't upload the file to storage. Your message was not sent.")
+                            : (lang === 'tr'
+                                ? "Dosya yüklendi, ancak mesaj gönderilemedi."
+                                : lang === 'ar'
+                                ? "تم رفع الملف، ولكن تعذر إرسال الرسالة."
+                                : "The file was uploaded, but the message could not be sent.")}
+                        </span>
+                        {pendingDriverAttachment && (
+                          <button
+                            type="button"
+                            onClick={handleRetryDriverAttachment}
+                            disabled={isUploading}
+                            className="shrink-0 text-orange-400 hover:text-orange-300 underline disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {lang === 'tr' ? 'Tekrar dene' : lang === 'ar' ? 'إعادة المحاولة' : 'Retry'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     {/* Message input */}
                     {isShipmentFinished ? (
                       <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 font-mono text-[10px] select-none">
@@ -1779,7 +1966,7 @@ export default function DriverApplication({
                         <button
                           type="button"
                           onClick={() => attachmentInputRef.current?.click()}
-                          disabled={isUploading}
+                          disabled={isUploading || isSendingDriverMessage}
                           title={lang === 'tr' ? 'Ekle' : lang === 'ar' ? 'إرفاق' : 'Attach'}
                           className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
@@ -1795,11 +1982,13 @@ export default function DriverApplication({
                           placeholder={lang === 'tr' ? 'Bir mesaj yazın...' : lang === 'ar' ? 'اكتب رسالة...' : 'Type a message...'}
                           value={newMessageText}
                           onChange={(e) => setNewMessageText(e.target.value)}
-                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono"
+                          maxLength={MAX_CHAT_TEXT_LENGTH}
+                          disabled={isSendingDriverMessage}
+                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono disabled:opacity-60"
                         />
-                        <button 
-                          type="submit" 
-                          disabled={!newMessageText.trim()}
+                        <button
+                          type="submit"
+                          disabled={!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })}
                           aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                           className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
                         >
