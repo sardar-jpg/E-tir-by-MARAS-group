@@ -12,6 +12,8 @@ import { auth } from "../googleAuth";
 import ClientShipmentMap from "./ClientShipmentMap";
 import { canClientSendChatMessage } from "../lib/clientAccess";
 import { validateUpload } from "../lib/uploadValidation";
+import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
+import { canSubmitChatMessage } from "../lib/chatComposerState";
 
 // Local multilingual dictionary
 const t = {
@@ -40,6 +42,7 @@ const t = {
     removeFile: "Remove file",
     uploadingFile: "Uploading...",
     uploadFileError: "File upload failed. Please try again.",
+    textTooLongError: `Message is too long (max ${MAX_CHAT_TEXT_LENGTH} characters).`,
     viewMap: "Smart Tracking Map",
     smartTrackingNote: "GPS updates periodically to protect driver battery and app performance.",
     close: "Close Panel",
@@ -82,6 +85,7 @@ const t = {
     removeFile: "Dosyayı kaldır",
     uploadingFile: "Yükleniyor...",
     uploadFileError: "Dosya yüklenemedi. Lütfen tekrar deneyin.",
+    textTooLongError: `Mesaj çok uzun (en fazla ${MAX_CHAT_TEXT_LENGTH} karakter).`,
     viewMap: "Akıllı Takip Haritası",
     smartTrackingNote: "Sürücü bataryasını ve uygulama performansını korumak için GPS periyodik olarak güncellenir.",
     close: "Sekmeyi Kapat",
@@ -124,6 +128,7 @@ const t = {
     removeFile: "إزالة الملف",
     uploadingFile: "جارٍ الرفع...",
     uploadFileError: "فشل رفع الملف. يرجى المحاولة مرة أخرى.",
+    textTooLongError: `الرسالة طويلة جداً (الحد الأقصى ${MAX_CHAT_TEXT_LENGTH} حرفاً).`,
     viewMap: "خارطة التتبع الذكي",
     smartTrackingNote: "يتم تحديث نظام تحديد المواقع بشكل دوري للحفاظ على بطارية السائق وأداء التطبيق.",
     close: "إغلاق التفاصيل",
@@ -450,7 +455,21 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   };
 
   const handleSendInquiry = async (shipmentId: string) => {
-    if (!inquiryText.trim() && !selectedFile) return;
+    // fix/chat-safety-reliability-phase1: in-flight guard — the Send
+    // button already disables on sendingInquiry, but that only takes
+    // effect after a re-render, so a double-tap could still race ahead of
+    // it. Matches the same guard now applied to every other chat composer
+    // (ChatCenter.tsx, App.tsx, DriverApplication.tsx).
+    if (!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })) return;
+    // fix/chat-safety-reliability-phase1: matches the shared server-side
+    // limit (validateChatSendPayload, src/lib/chatMessageValidation.ts) —
+    // the textarea's maxLength attribute already stops typing past this,
+    // but a paste can still exceed it in some browsers, so check here too
+    // rather than relying on the server's 400 alone.
+    if (inquiryText.trim().length > MAX_CHAT_TEXT_LENGTH) {
+      setFileError(curT.textTooLongError);
+      return;
+    }
     setSendingInquiry(true);
     setInquiryStatus("idle");
     setFileError("");
@@ -1056,11 +1075,11 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                                         <span>{msg.fileName || "Attachment"}</span>
                                       </a>
                                       {msg.text && (
-                                        <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                        <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
                                       )}
                                     </div>
                                   ) : (
-                                    <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                    <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
                                   )}
                                 </div>
                               );
@@ -1087,7 +1106,9 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                               value={inquiryText}
                               onChange={(e) => setInquiryText(e.target.value)}
                               placeholder={curT.inquiryPlaceholder}
-                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
+                              maxLength={MAX_CHAT_TEXT_LENGTH}
+                              disabled={sendingInquiry}
+                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none disabled:opacity-60"
                             />
 
                             <div className="flex items-center gap-2">
@@ -1135,7 +1156,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             <button
                               type="button"
                               onClick={() => handleSendInquiry(selectedShipment!.id)}
-                              disabled={sendingInquiry || (!inquiryText.trim() && !selectedFile)}
+                              disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })}
                               className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
                               {isUploadingFile ? (

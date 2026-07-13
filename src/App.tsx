@@ -20,6 +20,8 @@ import TermsModal from "./components/TermsModal";
 import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
+import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
+import { canSubmitChatMessage } from "./lib/chatComposerState";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -568,6 +570,11 @@ export default function App() {
   const [adminFileUrl, setAdminFileUrl] = useState("#");
   const [adminFile, setAdminFile] = useState<File | null>(null);
   const [isAdminUploading, setIsAdminUploading] = useState(false);
+  // fix/chat-safety-reliability-phase1: handleSendAdminMessage had no
+  // in-flight guard at all — a double-tap/double-Enter could fire two
+  // POSTs before the first resolved. Mirrors the existing isAdminUploading
+  // guard already used for the attachment send.
+  const [isSendingAdminMessage, setIsSendingAdminMessage] = useState(false);
   const adminMessagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll admin chat to bottom when a new message arrives
@@ -626,12 +633,20 @@ export default function App() {
   // Fetch direct chat context periodically for active chat drawer
   useEffect(() => {
     let interval: any;
+    // fix/chat-safety-reliability-phase1: `cancelled` guards against a
+    // stale response landing after the admin has already switched to a
+    // different shipment or channel — without it, a slow in-flight fetch
+    // for the PREVIOUS shipment/channel could resolve after the new one is
+    // selected and overwrite chatMessages with the wrong thread's data.
+    let cancelled = false;
     if (chatShipment) {
       const fetchChat = async () => {
         try {
           const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}`);
+          if (cancelled) return;
           if (res.ok) {
             const data = await res.json();
+            if (cancelled) return;
             setChatMessages(data);
 
             // feature/admin-mobile-ui correction pass: `status` is no
@@ -659,12 +674,20 @@ export default function App() {
       fetchChat();
       interval = setInterval(fetchChat, 3000);
     }
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [chatShipment?.id, chatChannel]);
 
   const handleSendAdminMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatShipment || !chatMessageText.trim()) return;
+    // fix/chat-safety-reliability-phase1: in-flight guard — previously
+    // this had no reentrancy protection at all, so a double-tap/double-
+    // Enter could fire two POSTs before the first resolved.
+    if (!chatShipment) return;
+    if (!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage })) return;
+    setIsSendingAdminMessage(true);
     try {
       const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat`, {
         method: "POST",
@@ -681,18 +704,26 @@ export default function App() {
         setChatMessageText("");
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
+      } else {
+        triggerToast("❌ Failed to send message. Please try again.");
       }
     } catch (e) {
       console.error(e);
+      triggerToast("❌ Could not reach the server.");
+    } finally {
+      setIsSendingAdminMessage(false);
     }
   };
 
   const handleSendAdminAttachment = async () => {
-    if (!chatShipment || !adminFileName.trim()) return;
+    // fix/chat-safety-reliability-phase1: in-flight guard, same reasoning
+    // as handleSendAdminMessage above — the Send/Attach button already
+    // disables on isAdminUploading, but that only takes effect after a
+    // re-render, so a double-tap could still race ahead of it.
+    if (!chatShipment || !adminFileName.trim() || isAdminUploading) return;
     setIsAdminUploading(true);
     try {
       let finalFileUrl = adminFileUrl;
-      let uploadFailed = false;
 
       if (adminFile && adminFileUrl && adminFileUrl.startsWith("data:")) {
         try {
@@ -709,18 +740,24 @@ export default function App() {
             finalFileUrl = uploadData.url;
             console.log("Admin uploaded successfully via media gateway:", finalFileUrl);
           } else {
-            // No more silent client-side Firebase Storage fallback here —
-            // Storage now requires the server's own dedicated account
-            // (see storage.rules), so a browser can't write to it directly
-            // even as a backup path. The chat message below still sends
-            // with the inline base64 representation as a last resort, but
-            // the admin is told their file wasn't durably saved.
-            uploadFailed = true;
-            console.warn("Media gateway upload failed; sending with inline data only.");
+            // fix/chat-safety-reliability-phase1: this used to fall back to
+            // sending the raw base64 data: URL as fileUrl ("as a last
+            // resort") — that can silently fail Firestore's 1 MiB
+            // per-document limit, or succeed and permanently bloat the
+            // chat message (and, for client_admin, the whole shipment
+            // record — see shouldSaveChatFileAsShipmentDocument). Block the
+            // send outright instead; the attachment stays selected so the
+            // admin can just retry. The server independently rejects any
+            // data: fileUrl too (validateChatSendPayload, server.ts), so
+            // this is a client-side fast-fail on top of a real backstop.
+            console.warn("Media gateway upload failed; blocking send rather than sending inline base64 data.");
+            triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+            return;
           }
         } catch (uploadGatewayErr) {
-          uploadFailed = true;
           console.warn("Media gateway upload request failed:", uploadGatewayErr);
+          triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+          return;
         }
       }
 
@@ -745,10 +782,10 @@ export default function App() {
         setAdminAttachOpen(false);
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
-        if (uploadFailed) {
-          triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for the recipient.");
-        }
       } else {
+        // fix/chat-safety-reliability-phase1: preserve the draft (file
+        // selection + name/category) on failure so the admin can retry —
+        // previously this branch already left them intact, unchanged here.
         triggerToast("❌ Failed to send message. Please try again.");
       }
     } catch (e) {
@@ -1050,15 +1087,23 @@ export default function App() {
                   {chatMessages.map((msg) => {
                     const isAdmin = msg.sender === 'admin';
                     const isSeenReceipt = isAdmin && msg.status === 'seen';
+                    // fix/chat-safety-reliability-phase1: this row uses
+                    // items-end/items-start (never stretch), so a flex
+                    // child sizes to its own content width rather than the
+                    // row's — an unbroken-text bubble wider than max-w-[80%]
+                    // overflowed the whole drawer despite break-words alone
+                    // (found while smoke-testing the new 5000-char limit).
+                    // max-w-full on the bubble gives it something to wrap
+                    // against.
                     return (
                       <div key={msg.id} className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                         <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                        
-                        <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 ${
-                          isAdmin 
+
+                        <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 break-words max-w-full ${
+                          isAdmin
                             ? (msg.status === 'seen'
                               ? 'bg-slate-800/95 text-slate-100 rounded-tr-none border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10'
-                              : 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700') 
+                              : 'bg-slate-800 text-slate-100 rounded-tr-none border border-slate-700')
                             : 'bg-orange-600 text-white rounded-tl-none font-medium'
                         }`}>
                           {/* Read Receipt subtle highlight overlay */}
@@ -1167,28 +1212,31 @@ export default function App() {
 
                 {/* Admin typing input bar */}
                 <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-900 flex items-center gap-2 relative">
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     onClick={() => setAdminAttachOpen(true)}
+                    disabled={isSendingAdminMessage}
                     title="Attach Document / Photo"
-                    className="p-3 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center font-sans"
+                    className="p-3 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center font-sans disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Paperclip className="w-4 h-4 shrink-0" />
                   </button>
 
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     placeholder={t('typeMessage')}
                     value={chatMessageText}
                     onChange={(e) => setChatMessageText(e.target.value)}
-                    className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500"
+                    maxLength={MAX_CHAT_TEXT_LENGTH}
+                    disabled={isSendingAdminMessage}
+                    className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500 disabled:opacity-60"
                   />
-                  
-                  <button 
-                    type="submit" 
-                    disabled={!chatMessageText.trim()}
+
+                  <button
+                    type="submit"
+                    disabled={!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage })}
                     aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
-                    className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center"
+                    className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Send className="w-4 h-4 shrink-0" />
                   </button>

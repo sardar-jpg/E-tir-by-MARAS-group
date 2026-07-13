@@ -46,6 +46,7 @@ import {
   canAccessInternalStaffChannel,
   shouldSaveChatFileAsShipmentDocument
 } from "./src/lib/chatVisibility";
+import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe } from "./src/lib/driverAccess";
@@ -3455,6 +3456,20 @@ async function startServer() {
       // viewOnly), but sending a message or a chat attachment does not.
       const shipmentId = req.params.id;
       const { type, text, fileUrl, fileName, fileCategory, channel: requestedChannel } = req.body;
+
+      // fix/chat-safety-reliability-phase1: server-side backstop —
+      // independent of which client sent this, and independent of whether
+      // that client's own upload-failure handling worked correctly. Rejects
+      // any fileUrl that is an inline `data:` URL (a client should only ever
+      // send the real Storage URL returned by POST /api/upload) and enforces
+      // the shared max text length + "not whitespace-only unless a valid
+      // attachment is present" rule. See src/lib/chatMessageValidation.ts
+      // for the full rationale — this is the one place that rule is
+      // actually enforced; every client-side check is advisory on top of it.
+      const sendValidation = validateChatSendPayload({ type, text, fileUrl });
+      if (!sendValidation.ok) {
+        return res.status(400).json({ error: sendValidation.error });
+      }
 
       // PR #34: 'internal_staff' is a MARAS-staff-only audience — reject
       // outright rather than silently reassigning to the caller's own
