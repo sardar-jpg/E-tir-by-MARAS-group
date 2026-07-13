@@ -148,6 +148,16 @@ export interface Driver {
   lastUpdated?: string;
   avatarUrl?: string;
   status?: "pending" | "approved" | "rejected";
+  /**
+   * The driver's Firebase Authentication uid, set ONLY by
+   * POST /api/verify-session (server.ts) after adminAuth.verifyIdToken has
+   * cryptographically confirmed it — never inferred from `id`, `email`,
+   * `username`, or a client-supplied value. Absent for drivers who have
+   * never signed in via Google/Firebase (username/password-only accounts
+   * have no Firebase Auth identity at all). This is the only field
+   * DELETE /api/drivers/:id trusts to also delete the Firebase Auth user.
+   */
+  firebaseUid?: string;
 }
 
 export interface Client {

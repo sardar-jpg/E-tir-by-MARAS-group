@@ -9,7 +9,7 @@ import {
   DocumentCategory,
   TRUCK_TYPES
 } from "../types";
-import { auth } from "../googleAuth";
+import { auth, reauthenticateDriverWithGoogle } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
@@ -17,6 +17,7 @@ import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
+import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -304,43 +305,75 @@ export default function DriverApplication({
     localStorage.setItem('driver_app_theme', theme);
   }, [theme]);
 
-  // Driver Account Deletion States
+  // Driver Account Deletion States — Apple Guideline 5.1.1(v). Ordering:
+  // the backend Firestore delete runs first (that's what actually makes the
+  // account unusable, since every login path is gated on that record — see
+  // POST /api/login and /api/verify-session in server.ts), then the Firebase
+  // Authentication identity is removed. "Complete success" (and logout) is
+  // only ever reported once BOTH steps are done; a Firebase-side failure
+  // (including auth/requires-recent-login) is never silently swallowed and
+  // never reported as success — see deleteFirebaseIdentityWithRetry.
   const [showDriverDeleteConfirm, setShowDriverDeleteConfirm] = useState(false);
   const [understandDriverDelete, setUnderstandDriverDelete] = useState(false);
   const [isDeletingDriverAccount, setIsDeletingDriverAccount] = useState(false);
+  const [driverDeletionState, setDriverDeletionState] = useState<DriverAccountDeletionState>("idle");
+  // Set once the backend Firestore record is confirmed gone, so a Retry tap
+  // (after a Firebase-identity-only failure) skips straight to the Firebase
+  // step instead of calling DELETE /api/drivers/:id a second time.
+  const [backendDriverRecordDeleted, setBackendDriverRecordDeleted] = useState(false);
 
   const handleDeleteDriverAccount = async () => {
     if (!understandDriverDelete) return;
+    if (isDeletingDriverAccount) return; // in-flight guard — no double-submit
     setIsDeletingDriverAccount(true);
     const targetId = loggedInDriverId || selectedDriverId;
     try {
-      // 1. Delete backing collection data
-      const response = await apiFetch(`/api/drivers/${targetId}`, {
-        method: "DELETE"
-      });
-      if (response.ok) {
-        // 2. Delete user session from Firebase auth (if exists)
-        try {
-          if (auth.currentUser) {
-            await auth.currentUser.delete();
-          }
-        } catch (authErr) {
-          console.warn("Firebase Auth deletion failed or requires reauthentication:", authErr);
+      if (!backendDriverRecordDeleted) {
+        const response = await apiFetch(`/api/drivers/${targetId}`, {
+          method: "DELETE"
+        });
+        if (!response.ok) {
+          setDriverDeletionState("backend_failure");
+          triggerToast(driverAccountDeletionCopy(lang).backendFailure);
+          return;
         }
-        triggerToast("🗑️ Account completely deleted from corporate registry.");
-        // Logout user session and clean state
+        setBackendDriverRecordDeleted(true);
+      }
+
+      const result = await deleteFirebaseIdentityWithRetry({
+        hasCurrentUser: () => !!auth.currentUser,
+        deleteCurrentUser: () => auth.currentUser!.delete(),
+        reauthenticate: reauthenticateDriverWithGoogle,
+      });
+
+      if (result.ok) {
+        setDriverDeletionState("complete_success");
+        triggerToast(driverAccountDeletionCopy(lang).completeSuccess);
+        setShowDriverDeleteConfirm(false);
+        // Logout user session and clean state — only once every required
+        // deletion step has actually completed.
         if (onLogout) {
           onLogout();
         }
       } else {
-        triggerToast("❌ Failed to initiate account purge. Try again.");
+        setDriverDeletionState(result.state);
+        const copy = driverAccountDeletionCopy(lang);
+        triggerToast(result.state === "reauthentication_required" ? copy.reauthenticationRequired : copy.firebaseIdentityDeletionFailed);
+        // Deliberately do NOT close the confirmation panel or log out here —
+        // the backend record is already gone, but the Firebase identity
+        // isn't, so the user needs the Retry affordance to stay visible.
       }
     } catch (err) {
       console.error(err);
+      // backendDriverRecordDeleted is only true once the Firestore delete is
+      // confirmed done — an exception past that point (deleteFirebaseIdentityWithRetry
+      // is designed to never throw, but guard against an unexpected bug
+      // anyway) is a Firebase-identity problem, not a backend one, so it
+      // must not be mislabeled as "your account was not deleted".
+      setDriverDeletionState(backendDriverRecordDeleted ? "firebase_identity_deletion_failed" : "backend_failure");
       triggerToast("❌ Purge action failed. Check connection.");
     } finally {
       setIsDeletingDriverAccount(false);
-      setShowDriverDeleteConfirm(false);
     }
   };
 
@@ -2332,17 +2365,19 @@ export default function DriverApplication({
                     </button>
                   )}
 
-                  <div className="mt-4 pt-4 border-t border-slate-900">
+                  <div className="mt-5 pt-4 border-t-2 border-red-950/40">
                     {!showDriverDeleteConfirm ? (
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         onClick={() => {
                           setShowDriverDeleteConfirm(true);
                           setUnderstandDriverDelete(false);
+                          setDriverDeletionState("idle");
+                          setBackendDriverRecordDeleted(false);
                         }}
-                        className="w-full py-2 bg-red-950/10 hover:bg-red-950/30 border border-red-900/30 hover:border-red-500/30 text-red-400 font-extrabold text-[10.5px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                        className="w-full py-3 bg-red-950/15 hover:bg-red-950/35 border border-red-900/40 hover:border-red-500/40 text-red-400 font-extrabold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                        <Trash2 className="w-4 h-4 shrink-0" />
                         <span>{lang === 'tr' ? "Hesabımı Tamamen Sil" : (lang === 'ar' ? "حذف الحساب نهائياً" : "Delete My Account")}</span>
                       </button>
                     ) : (
@@ -2354,9 +2389,9 @@ export default function DriverApplication({
                               {lang === 'tr' ? "Kalıcı Hesap Silme İşlemi" : (lang === 'ar' ? "حذف الحساب بشكل نهائي" : "Irreversible Profile Purge")}
                             </h5>
                             <p className="text-[9.5px] text-slate-400 leading-tight mt-0.5">
-                              {lang === 'tr' 
+                              {lang === 'tr'
                                 ? "Bu işlem geri alınamaz. Tüm lojistik geçmişiniz, aktif tır plakanız ve sürücü sevk yetkileriniz sistemden tamamen silinecektir."
-                                : (lang === 'ar' 
+                                : (lang === 'ar'
                                   ? "هذا الإجراء نهائي ولا يمكن التراجع عنه. سيتم مسح تفويض الشاحنة وتاريخ السفر بالكامل من النظم."
                                   : "This cannot be undone. Your active manifests, historical trips, and fleet registry authorization will be permanently wiped.")}
                             </p>
@@ -2367,28 +2402,53 @@ export default function DriverApplication({
                           <input
                             type="checkbox"
                             checked={understandDriverDelete}
+                            disabled={backendDriverRecordDeleted}
                             onChange={(e) => setUnderstandDriverDelete(e.target.checked)}
-                            className="w-3.5 h-3.5 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5"
+                            className="w-3.5 h-3.5 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5 disabled:opacity-60"
                           />
                           <span className="leading-tight text-left">
-                            {lang === 'tr' 
+                            {lang === 'tr'
                               ? "Hesabımın silinmesini ve sistemden çıkarılmasını istiyorum."
-                              : (lang === 'ar' 
+                              : (lang === 'ar'
                                 ? "أوافق على حذف حسابي بشكل دائم ومسح هويتي التعريفية."
                                 : "I consent to permanently purge my account identity and logs.")}
                           </span>
                         </label>
 
+                        {(driverDeletionState === "backend_failure" ||
+                          driverDeletionState === "reauthentication_required" ||
+                          driverDeletionState === "firebase_identity_deletion_failed") && (
+                          <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-2.5 text-[9.5px] text-red-300 leading-tight text-left">
+                            {driverDeletionState === "backend_failure"
+                              ? driverAccountDeletionCopy(lang).backendFailure
+                              : driverDeletionState === "reauthentication_required"
+                              ? driverAccountDeletionCopy(lang).reauthenticationRequired
+                              : driverAccountDeletionCopy(lang).firebaseIdentityDeletionFailed}
+                          </div>
+                        )}
+
                         <div className="flex gap-2 pt-1">
                           <button
                             type="button"
                             disabled={isDeletingDriverAccount}
-                            onClick={() => setShowDriverDeleteConfirm(false)}
+                            onClick={() => {
+                              if (backendDriverRecordDeleted) {
+                                // The Firestore driver record is already gone
+                                // at this point — there is nothing left to
+                                // "cancel" back to, so leaving this panel now
+                                // means leaving the app, not resuming normal use.
+                                if (onLogout) onLogout();
+                                return;
+                              }
+                              setShowDriverDeleteConfirm(false);
+                            }}
                             className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
                           >
-                            {lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء Действие" : "Cancel")}
+                            {backendDriverRecordDeleted
+                              ? driverAccountDeletionCopy(lang).logOutButton
+                              : (lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء" : "Cancel"))}
                           </button>
-                          
+
                           <button
                             type="button"
                             disabled={isDeletingDriverAccount || !understandDriverDelete}
@@ -2400,7 +2460,11 @@ export default function DriverApplication({
                             ) : (
                               <Trash2 className="w-3 h-3 shrink-0" />
                             )}
-                            <span>{lang === 'tr' ? "Profilimi Sil" : (lang === 'ar' ? "تأكيد الحذف" : "Purge Account")}</span>
+                            <span>
+                              {driverDeletionState === "reauthentication_required" || driverDeletionState === "firebase_identity_deletion_failed"
+                                ? driverAccountDeletionCopy(lang).retryButton
+                                : (lang === 'tr' ? "Profilimi Sil" : (lang === 'ar' ? "تأكيد الحذف" : "Purge Account"))}
+                            </span>
                           </button>
                         </div>
                       </div>

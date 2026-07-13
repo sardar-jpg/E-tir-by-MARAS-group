@@ -33,3 +33,23 @@ export interface PushTokenRecord {
 export function canDeletePushToken(session: PushTokenOwnerSession, record: PushTokenRecord): boolean {
   return record.userId === session.id && record.role === session.role;
 }
+
+export interface PushTokenRecordWithId extends PushTokenRecord {
+  id: string;
+}
+
+/**
+ * fix/apple-driver-account-deletion: selects exactly the push-token doc ids
+ * belonging to one account (same ownership rule as canDeletePushToken,
+ * just applied across every token that account ever registered instead of
+ * the one token a caller happens to still hold) — used by
+ * DELETE /api/drivers/:id to clean up orphaned tokens as part of account
+ * deletion, without broadening who can delete a token or touching any
+ * other account's tokens.
+ */
+export function selectPushTokensForAccountDeletion(
+  tokens: PushTokenRecordWithId[],
+  account: PushTokenOwnerSession
+): string[] {
+  return tokens.filter(t => canDeletePushToken(account, t)).map(t => t.id);
+}

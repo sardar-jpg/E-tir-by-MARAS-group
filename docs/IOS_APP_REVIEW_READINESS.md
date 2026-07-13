@@ -405,7 +405,7 @@ invented here.
 | Account/login data | Yes — email, hashed password, company name (client), assigned jobs (driver) | All roles | Standard — confirm covered |
 | Notifications | Yes — in-app + push via FCM (`@capacitor/push-notifications`, `firebase-admin`) | All roles | Confirm push notification data use is mentioned (device token storage — see `src/lib/pushTokenAccess.ts`) |
 | Support contact | `support@etir.app` used live in `LoginPage.tsx`/`AdminPanel.tsx` | — | **Resolved in PR #85.** `PrivacyPolicyModal.tsx` and `TermsModal.tsx` previously listed `info@maras.iq` instead of `support@etir.app`; owner confirmed `support@etir.app` is the official contact and both modals were updated to match. |
-| Data retention/deletion | Partial — Client Owner can self-delete their account (`canClientSelfDeleteAccount`, `src/lib/clientAccess.ts`); Client Staff cannot (admin-only removal). No explicit data-retention-period language found in the reviewed modals. | — | Add a plain-language retention/deletion note if App Privacy answers require one (don't invent a specific retention period that isn't actually implemented — state the truth: account deletion removes the account; shipment/document records tied to a company's shipments are retained for the business's own operational/accounting needs unless a separate deletion request is made). |
+| Data retention/deletion | Client Owner and Client Staff can each self-delete their own account identically (`resolveClientAccountDeleteAuthorization`, `src/lib/clientAccess.ts` — equal Owner/Staff self-delete rule as of PRs #87/#88; only deleting *another* account is Super-Admin-only). Driver self-delete additionally removes the linked Firebase Authentication identity (`fix/apple-driver-account-deletion` — see `src/lib/driverAccountDeletion.ts`, `DELETE /api/drivers/:id`). No explicit data-retention-period language found in the reviewed modals. | — | Add a plain-language retention/deletion note if App Privacy answers require one (don't invent a specific retention period that isn't actually implemented — state the truth: account deletion removes the account and, for Drivers, the Firebase Auth identity; shipment/document records tied to a company's shipments are retained for the business's own operational/accounting needs unless a separate deletion request is made). |
 | User roles / business purpose | Admin / Operation Admin / Accounts Admin / Driver / Client Owner / Client Staff — each role's actual access is fully documented in `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7's role matrix | — | Useful as source material for the App Privacy questionnaire's "why do you collect this" answers — reuse the existing, accurate role matrix rather than re-describing access from scratch |
 
 ### App Store Connect "App Privacy" (nutrition label) cross-check
@@ -844,3 +844,85 @@ readiness..." PR #85 section) for the full writeup. The
 `info@maras.iq` vs `support@etir.app` mismatch flagged in §5 of this
 document is also resolved as of PR #85's follow-up commit — the owner
 confirmed `support@etir.app` is official and both modals were updated.
+
+## 13. Apple Guideline 5.1.1(v) — Driver account-deletion verification (`fix/apple-driver-account-deletion`)
+
+**Confirmed gap fixed by this PR:** a Firebase/Google-authenticated Driver's
+`auth.currentUser.delete()` call could fail (most commonly
+`auth/requires-recent-login`), the failure was silently swallowed, and the
+UI still showed a "completely deleted" success message and logged the user
+out — leaving the Firebase Authentication identity alive. Fixed in
+`src/components/DriverApplication.tsx` (`handleDeleteDriverAccount`),
+`src/lib/driverAccountDeletion.ts` (new — retry/error-classification logic,
+unit-tested), `src/googleAuth.ts` (`reauthenticateDriverWithGoogle`, new),
+and `server.ts` (`DELETE /api/drivers/:id`, now also deletes the Firebase
+Auth user server-side when a verified uid is on record — see
+`Driver.firebaseUid` / `POST /api/verify-session`).
+
+Everything below is **manual, physical-device verification still required**
+before relying on this fix for a real App Review submission or recording —
+automated tests (`npm run lint`/`test`/`build`/`check-firebase-readiness`,
+all green as of this PR) cover the decision logic, not real Firebase/device
+behavior. Use a **disposable, non-production** driver account for both
+tests — never a real MARAS driver or real shipment data.
+
+### Test A — Driver, username/password only (no Firebase Auth identity)
+
+1. Register a throwaway driver via the in-app registration form
+   (name/username/email/phone/truck ID/password) and have an Admin approve
+   it from a separate session.
+2. Sign in on-device with that username/password.
+3. Bottom nav → **Profile** tab → scroll past the avatar/edit-profile card
+   and the Logout button → **"Delete My Account"**.
+4. Check the consent checkbox, tap **"Purge Account"**.
+5. Expect: brief spinner, then the "🗑️ Account completely deleted..."
+   toast, then automatic return to the login screen.
+6. **Firestore check:** `drivers` collection — the document is gone.
+7. **Firebase Auth check:** Firebase Console → Authentication → Users —
+   confirm **no entry ever existed** for this account (username/password
+   drivers never get a Firebase Auth user in the first place).
+8. Attempt to sign in again with the same username/password: expect the
+   generic invalid-credentials error, not a specific "deleted" message.
+
+### Test B — Driver, Google/Firebase-linked (the fixed path)
+
+1. Use a disposable Google account already linked to an approved driver
+   record (matched by uid or email — see `POST /api/verify-session`).
+2. Sign in via "Sign in with Google"; wait several minutes before
+   proceeding, to make `auth/requires-recent-login` realistically likely
+   (this is the exact condition the fix handles).
+3. Repeat steps 3–4 from Test A.
+4. **Expected new behavior:** if the first Firebase deletion attempt hits
+   `auth/requires-recent-login`, the app silently reauthenticates via
+   Google (no new sign-in screen, no popup the user has to explicitly
+   restart — see `reauthenticateDriverWithGoogle`) and retries the delete
+   once. Only once that succeeds does the app show the success toast and
+   log out.
+5. If reauthentication or the retry fails, confirm the app does **not**
+   claim success — it shows an inline error ("...we need you to confirm
+   your Google sign-in again..." or "...we could not finish removing your
+   linked Google sign-in...") with a **Retry** button, and does not log
+   out on its own. This is the negative case Apple's guideline cares
+   about — confirm it never silently reports false success.
+6. **Firebase Auth check (critical):** Firebase Console → Authentication →
+   Users → search the disposable Google account's email. It must be
+   **gone** once the flow reports success — either the client-side delete
+   succeeded, or the server-side backstop did
+   (`DELETE /api/drivers/:id` calls `adminAuth.deleteUser` when a verified
+   `firebaseUid` is stored on the record).
+7. **Firestore check:** `drivers` collection — the document is gone.
+8. Attempt to sign in again with the same Google account: expect "This
+   Google account is not linked to an existing approved driver account.
+   Please use the driver registration form instead." — the account cannot
+   be used to re-enter the app.
+
+### Notes
+
+- No production customer, driver, or shipment data was used to develop or
+  verify this fix — all reasoning above is based on code inspection and the
+  automated test suite; the device steps above are the outstanding manual
+  step before this can be cited in an App Review reply.
+- Client Owner, Client Staff, and Admin self-delete were **not** changed by
+  this PR — they never had a Firebase Auth identity to begin with (see
+  §5.1.1(v) audit), so the existing behavior already satisfied the
+  guideline for those account types.
