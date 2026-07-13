@@ -268,8 +268,12 @@ Smoke-test items (log in as each and confirm):
 - [ ] Login succeeds; sees the same company's shipments as the owner
       account, and no other company's
 - [ ] Can use `client_admin` chat and upload a file, same as the owner
-- [ ] Cannot self-delete the account, cannot access admin/driver/internal
-      surfaces (`canClientSelfDeleteAccount`, `src/lib/clientAccess.ts`)
+- [ ] As of `fix/client-create-username`/`feature/client-staff-management-ui`
+      (PRs #87/#88), Client Staff self-delete is identical to the Owner's —
+      `resolveClientAccountDeleteAuthorization` (`src/lib/clientAccess.ts`)
+      allows a Client Staff session to delete its own record the same way
+      the Owner can; only deleting *another* account is restricted (to
+      Super Admin). Still cannot access admin/driver/internal surfaces.
 
 **Driver**
 - [ ] Sees only assigned driver-safe jobs

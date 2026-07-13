@@ -6,6 +6,7 @@ import {
   getAssignableDrivers,
   getCoreDriverSelectOptions,
   resolveDriverLoginBlock,
+  canDeleteDriverAccount,
 } from "./driverAccess";
 import { resolveFullAdminStatus } from "./adminAccess";
 import type { Driver } from "../types";
@@ -181,5 +182,31 @@ describe("driver self-approval / cross-role safety (documents existing adminAcce
   it("super and operation admins can", () => {
     expect(resolveFullAdminStatus({ role: "admin", adminType: "super" })).toBe(200);
     expect(resolveFullAdminStatus({ role: "admin", adminType: "operation" })).toBe(200);
+  });
+});
+
+describe("canDeleteDriverAccount — DELETE /api/drivers/:id authorization (fix/apple-driver-account-deletion)", () => {
+  it("a driver can delete their own account", () => {
+    expect(canDeleteDriverAccount({ role: "driver", id: "driver-1" }, "driver-1")).toBe(true);
+  });
+
+  it("a driver cannot delete a different driver's account", () => {
+    expect(canDeleteDriverAccount({ role: "driver", id: "driver-1" }, "driver-2")).toBe(false);
+  });
+
+  it("a client session can never delete a driver account", () => {
+    expect(canDeleteDriverAccount({ role: "client", id: "driver-1" }, "driver-1")).toBe(false);
+  });
+
+  it("a super admin can delete any driver account", () => {
+    expect(canDeleteDriverAccount({ role: "admin", id: "admin-1", adminType: "super" }, "driver-1")).toBe(true);
+  });
+
+  it("an operation admin can delete any driver account", () => {
+    expect(canDeleteDriverAccount({ role: "admin", id: "admin-1", adminType: "operation" }, "driver-1")).toBe(true);
+  });
+
+  it("an accounts-type admin cannot delete a driver account", () => {
+    expect(canDeleteDriverAccount({ role: "admin", id: "admin-1", adminType: "accounts" }, "driver-1")).toBe(false);
   });
 });

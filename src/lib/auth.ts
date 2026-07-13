@@ -63,6 +63,63 @@ export function verifySessionToken(token: string, secret: string): SessionPayloa
   }
 }
 
+export const PENDING_FIREBASE_DELETION_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PENDING_FIREBASE_DELETION_PURPOSE = "finish-firebase-identity-deletion";
+
+export interface PendingFirebaseIdentityDeletionToken {
+  purpose: typeof PENDING_FIREBASE_DELETION_PURPOSE;
+  driverId: string;
+  firebaseUid: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Review follow-up to fix/apple-driver-account-deletion: once
+ * DELETE /api/drivers/:id removes the Firestore driver record, its
+ * firebaseUid field is gone too, so a later Retry (after the Firebase Auth
+ * deletion itself failed) has no record left to read the uid from. This
+ * signed, short-lived, single-purpose token is how the server hands that
+ * already-verified uid back to the client for exactly one thing — calling
+ * POST /api/drivers/finish-firebase-deletion — without ever exposing it as
+ * a Driver-object field (see stripFirebaseUid/sanitizeDriver). It reuses
+ * the same HMAC scheme as signSessionToken/verifySessionToken but is
+ * intentionally a separate function pair: this token must never be
+ * accepted as a session token or vice versa (the `purpose` discriminator
+ * enforces that on verify).
+ */
+export function signPendingFirebaseIdentityDeletionToken(
+  payload: { driverId: string; firebaseUid: string; issuedAt: number; expiresAt: number },
+  secret: string
+): string {
+  const full: PendingFirebaseIdentityDeletionToken = { ...payload, purpose: PENDING_FIREBASE_DELETION_PURPOSE };
+  const body = base64url(JSON.stringify(full));
+  const sig = base64url(crypto.createHmac("sha256", secret).update(body).digest());
+  return `${body}.${sig}`;
+}
+
+export function verifyPendingFirebaseIdentityDeletionToken(
+  token: string,
+  secret: string
+): PendingFirebaseIdentityDeletionToken | null {
+  try {
+    const [body, sig] = token.split(".");
+    if (!body || !sig) return null;
+    const expectedSig = base64url(crypto.createHmac("sha256", secret).update(body).digest());
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expectedSig);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const payload = JSON.parse(Buffer.from(body, "base64").toString("utf8"));
+    if (payload?.purpose !== PENDING_FIREBASE_DELETION_PURPOSE) return null;
+    if (typeof payload.driverId !== "string" || !payload.driverId) return null;
+    if (typeof payload.firebaseUid !== "string" || !payload.firebaseUid) return null;
+    if (!payload.expiresAt || Date.now() > payload.expiresAt) return null;
+    return payload as PendingFirebaseIdentityDeletionToken;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * PBKDF2 password hashing. Stored format: "pbkdf2$<salt-hex>$<hash-hex>".
  */

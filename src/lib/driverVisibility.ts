@@ -20,12 +20,20 @@
  * chatVisibility.ts) so it's unit testable without booting the server.
  */
 import type { Driver, Shipment } from "../types";
-import { stripPassword } from "./sanitize";
+import { stripPassword, stripFirebaseUid } from "./sanitize";
 
-export type SanitizedDriver = Omit<Driver, "password">;
+export type SanitizedDriver = Omit<Driver, "password" | "firebaseUid">;
 
+/**
+ * The one place every user-facing Driver response should go through —
+ * strips both the password hash and the internal, cryptographically-
+ * verified firebaseUid (review follow-up to fix/apple-driver-account-deletion:
+ * previously only password was stripped here, so GET /api/drivers leaked
+ * every driver's Firebase Auth uid to the full admin roster and to any
+ * co-driver on a shared shipment).
+ */
 export function sanitizeDriver(driver: Driver): SanitizedDriver {
-  return stripPassword(driver);
+  return stripFirebaseUid(stripPassword(driver));
 }
 
 /** Minimal, non-sensitive fields safe to show a client — no phone/email/GPS. */

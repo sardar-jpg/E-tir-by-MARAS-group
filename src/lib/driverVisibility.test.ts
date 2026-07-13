@@ -22,6 +22,7 @@ function makeDriver(overrides: Partial<Driver> = {}): Driver {
     truckType: "reefer",
     latitude: 41.01,
     longitude: 28.97,
+    firebaseUid: "google-oauth2|verified-uid-123",
     ...overrides,
   };
 }
@@ -43,6 +44,19 @@ describe("sanitizeDriver", () => {
     expect("password" in safe).toBe(false);
     expect(safe.email).toBe("ahmed@example.com");
     expect(safe.phone).toBe("+90 555 000 0000");
+  });
+
+  it("strips firebaseUid — review follow-up: the admin roster, co-driver roster, login/verify-session/update responses must never expose a driver's internal Firebase Auth uid", () => {
+    const driver = makeDriver({ firebaseUid: "google-oauth2|verified-uid-123" });
+    const safe = sanitizeDriver(driver);
+    expect("firebaseUid" in safe).toBe(false);
+    expect((safe as any).firebaseUid).toBeUndefined();
+  });
+
+  it("is a no-op on firebaseUid for a username/password-only driver with no uid on record", () => {
+    const driver = makeDriver({ firebaseUid: undefined });
+    const safe = sanitizeDriver(driver);
+    expect("firebaseUid" in safe).toBe(false);
   });
 });
 
