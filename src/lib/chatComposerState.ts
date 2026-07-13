@@ -110,3 +110,41 @@ export function planAttachmentSend(cachedUploadedUrl: string): AttachmentSendPla
   }
   return { action: "upload_then_send" };
 }
+
+/**
+ * fix/chat-safety-reliability-phase1 (follow-up): whether a cached
+ * uploaded attachment — identified by the shipment it was uploaded for —
+ * still belongs to the shipment currently being composed to. A cached
+ * URL/File must NEVER be reused across a shipment switch: uploading a
+ * file while viewing Shipment A, then switching to Shipment B before a
+ * failed send is retried, must not let that retry (or a subsequent send)
+ * post Shipment A's file into Shipment B's chat. This is the boundary
+ * check that enforces that everywhere a cached upload could be reused —
+ * ChatCenter.tsx's Internal Staff composer, App.tsx's Admin attachment
+ * modal, and DriverApplication.tsx's retry handler.
+ */
+export function isCachedAttachmentForShipment(
+  cachedShipmentId: string,
+  currentShipmentId: string | null
+): boolean {
+  return Boolean(cachedShipmentId) && cachedShipmentId === currentShipmentId;
+}
+
+/**
+ * Like planAttachmentSend, but additionally enforces the shipment
+ * boundary above — a cached upload from a DIFFERENT shipment than
+ * `currentShipmentId` is treated exactly as if nothing were cached at all
+ * (never silently reused across shipments), falling back to
+ * "upload_then_send" so the caller uploads (or blocks, if it has no fresh
+ * file to upload) rather than ever posting the wrong shipment's file.
+ */
+export function planAttachmentSendForShipment(
+  cachedUploadedUrl: string,
+  cachedShipmentId: string,
+  currentShipmentId: string | null
+): AttachmentSendPlan {
+  if (!isCachedAttachmentForShipment(cachedShipmentId, currentShipmentId)) {
+    return { action: "upload_then_send" };
+  }
+  return planAttachmentSend(cachedUploadedUrl);
+}

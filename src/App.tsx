@@ -21,7 +21,7 @@ import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
 import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
-import { canSubmitChatMessage, planAttachmentSend } from "./lib/chatComposerState";
+import { canSubmitChatMessage, planAttachmentSendForShipment } from "./lib/chatComposerState";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -576,12 +576,32 @@ export default function App() {
   // only on a successful send or when a different file is picked (see the
   // file input's onChange below) — never on a failed send.
   const [adminUploadedFileUrl, setAdminUploadedFileUrl] = useState("");
+  // fix/chat-safety-reliability-phase1 (follow-up): the shipment
+  // adminUploadedFileUrl was actually uploaded for. A cached URL must
+  // never be reused after the admin switches to a different shipment's
+  // chat drawer — enforced via planAttachmentSendForShipment
+  // (chatComposerState.ts) in handleSendAdminAttachment, and proactively
+  // cleared (along with the rest of the attachment draft) whenever
+  // chatShipment changes, below.
+  const [adminUploadShipmentId, setAdminUploadShipmentId] = useState("");
   // fix/chat-safety-reliability-phase1: handleSendAdminMessage had no
   // in-flight guard at all — a double-tap/double-Enter could fire two
   // POSTs before the first resolved. Mirrors the existing isAdminUploading
   // guard already used for the attachment send.
   const [isSendingAdminMessage, setIsSendingAdminMessage] = useState(false);
   const adminMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment's chat drawer must never carry a draft attachment
+  // (or its cached upload URL) over to the newly-selected one.
+  useEffect(() => {
+    setAdminFileName("");
+    setAdminFileCategory("other");
+    setAdminFileUrl("#");
+    setAdminFile(null);
+    setAdminUploadedFileUrl("");
+    setAdminUploadShipmentId("");
+  }, [chatShipment?.id]);
 
   // Auto-scroll admin chat to bottom when a new message arrives
   useEffect(() => {
@@ -732,7 +752,11 @@ export default function App() {
       // fix/chat-safety-reliability-phase1 (follow-up): reuse a
       // previously-successful upload's real Storage URL if this is a
       // retry after a failed send — skips uploading the same file twice.
-      const uploadPlan = planAttachmentSend(adminUploadedFileUrl);
+      // Only reused when it was uploaded for THIS shipment
+      // (planAttachmentSendForShipment) — the proactive clear-on-switch
+      // effect above should already guarantee that, but this check is the
+      // actual enforcement point, not just a mirror of it.
+      const uploadPlan = planAttachmentSendForShipment(adminUploadedFileUrl, adminUploadShipmentId, chatShipment.id);
       let finalFileUrl = uploadPlan.action === "reuse_cached_url" ? uploadPlan.fileUrl : adminFileUrl;
 
       if (uploadPlan.action === "upload_then_send" && adminFile && adminFileUrl && adminFileUrl.startsWith("data:")) {
@@ -749,6 +773,7 @@ export default function App() {
             const uploadData = await uploadRes.json();
             finalFileUrl = uploadData.url;
             setAdminUploadedFileUrl(finalFileUrl);
+            setAdminUploadShipmentId(chatShipment.id);
             console.log("Admin uploaded successfully via media gateway:", finalFileUrl);
           } else {
             // fix/chat-safety-reliability-phase1: this used to fall back to
@@ -803,6 +828,7 @@ export default function App() {
         setAdminFileUrl("#");
         setAdminFile(null);
         setAdminUploadedFileUrl("");
+        setAdminUploadShipmentId("");
         setAdminAttachOpen(false);
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
@@ -1381,6 +1407,7 @@ export default function App() {
                             // any cached upload URL belonged to that old
                             // file and must not be reused for this one.
                             setAdminUploadedFileUrl("");
+                            setAdminUploadShipmentId("");
                             setAdminFile(file);
                             setAdminFileName(file.name);
                             if (file.type.startsWith("image/")) {

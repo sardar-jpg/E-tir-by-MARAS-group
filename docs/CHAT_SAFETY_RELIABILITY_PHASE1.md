@@ -288,6 +288,59 @@ PR and fixed before merge:
    upload's HTTPS URL, reuse it on retry without re-uploading, and clear it
    only on a confirmed successful send or when the attachment is replaced.
 
+## 7c. Post-review correction: cached uploads are bound to a shipment
+
+A second review pass found that the retry-caching added in §7b (item 3)
+had a gap: a cached uploaded URL/File was never bound to the shipment it
+was uploaded for. Uploading an attachment while viewing Shipment A, having
+the message-send fail, then switching to Shipment B before retrying could
+post Shipment A's file into Shipment B's chat — in all three
+retry-capable surfaces.
+
+Fixed by adding a shipment id alongside every cached upload, and a shared
+boundary check in `chatComposerState.ts`:
+
+- **`isCachedAttachmentForShipment(cachedShipmentId, currentShipmentId)`** —
+  `true` only when both are non-empty and equal.
+- **`planAttachmentSendForShipment(cachedUploadedUrl, cachedShipmentId, currentShipmentId)`** —
+  `planAttachmentSend`, but a shipment mismatch is treated as "nothing
+  cached at all" (falls back to `upload_then_send`), never a silent reuse.
+
+Per surface:
+
+- **`ChatCenter.tsx` (Internal Staff)**: new `internalUploadShipmentId`
+  state, set alongside `internalUploadedFileUrl` on a successful upload.
+  `handleSendInternalMessage` calls `planAttachmentSendForShipment` (not
+  the plain version) before deciding to reuse. A new effect keyed on
+  `selectedShipmentId` proactively clears the entire attachment draft
+  (file, category, data URL, cached URL, cached shipment id, send error)
+  on every shipment switch — the per-send check is a second, independent
+  enforcement point, not just a mirror of it.
+- **`App.tsx` (Admin full chat)**: same shape, `adminUploadShipmentId`
+  alongside `adminUploadedFileUrl`, checked in `handleSendAdminAttachment`,
+  proactively cleared by a new effect keyed on `chatShipment?.id`.
+- **`DriverApplication.tsx`**: `pendingDriverAttachment` gained a
+  `shipmentId` field. `sendDriverFileMessage` now takes `shipmentId` as an
+  explicit parameter instead of reading `activeShipment` internally — the
+  shipment an attachment is sent to is always the one it was picked/
+  uploaded for, captured once at the start of `handleAttachmentSelected`,
+  not whatever happens to be active by the time an async call resolves.
+  `handleRetryDriverAttachment` verifies
+  `isCachedAttachmentForShipment(pendingDriverAttachment.shipmentId, activeShipment?.id)`
+  before reusing anything — if the driver has switched shipments, the
+  pending attachment is cleared instead of retried. A new effect keyed on
+  `activeShipment?.id` proactively clears `pendingDriverAttachment` (and
+  its error state) on every shipment switch, same as the other two
+  surfaces.
+
+`isCachedAttachmentForShipment` / `planAttachmentSendForShipment` are
+directly unit tested (`chatComposerState.test.ts`), including the exact
+scenarios requested in review: same-shipment reuse, cross-shipment
+non-reuse (Internal Staff, Admin, and Driver framings), a cleared
+URL+shipment-id pair never spuriously matching, and the original
+retry-without-reupload behavior still working when the shipment
+genuinely hasn't changed.
+
 ## 8. Explicitly deferred (not in this PR)
 
 - **Client Owner/Client Staff per-user "seen" model.** `ClientDashboard.tsx`

@@ -9,7 +9,7 @@ import {
   canSubmitChatMessage,
   applySuccessfulChatPoll,
   shouldConfirmChannelRead,
-  planAttachmentSend,
+  planAttachmentSendForShipment,
 } from '../../lib/chatComposerState';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
@@ -231,6 +231,13 @@ export default function ChatCenter({
   // (see resetInternalAttachment / handleInternalFileSelected) — never on a
   // failed send.
   const [internalUploadedFileUrl, setInternalUploadedFileUrl] = useState('');
+  // fix/chat-safety-reliability-phase1 (follow-up): the shipment
+  // internalUploadedFileUrl was actually uploaded for. A cached URL must
+  // never be reused after switching to a different shipment — checked via
+  // planAttachmentSendForShipment (chatComposerState.ts) before every
+  // send, and proactively cleared (along with the rest of the attachment
+  // draft) whenever selectedShipmentId changes, below.
+  const [internalUploadShipmentId, setInternalUploadShipmentId] = useState('');
   // Distinguishes "the upload itself failed (message never sent)" from
   // "the upload succeeded but creating the chat message failed" — the two
   // cases in section 2/7 of the phase-1 requirements need different copy.
@@ -361,8 +368,21 @@ export default function ChatCenter({
     // here (explicit remove, or after a confirmed successful send) — never
     // on a failed send, so a retry can reuse it instead of re-uploading.
     setInternalUploadedFileUrl('');
+    setInternalUploadShipmentId('');
     if (internalFileInputRef.current) internalFileInputRef.current.value = '';
   };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment must never carry a draft attachment (or its cached
+  // upload URL) over to the newly-selected one — proactively clears the
+  // whole attachment draft, not just the cached URL, on every shipment
+  // switch. Combined with the shipment check inside
+  // handleSendInternalMessage (belt and suspenders) below.
+  useEffect(() => {
+    resetInternalAttachment();
+    setInternalSendError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShipmentId]);
 
   // Best-effort category guess from the filename, same heuristic used by
   // the driver_admin/client_admin attachment flow in App.tsx.
@@ -385,6 +405,7 @@ export default function ChatCenter({
     // any previously-cached upload (it belonged to a different file) and
     // any previous error state.
     setInternalUploadedFileUrl('');
+    setInternalUploadShipmentId('');
     setInternalSendError('');
     const reader = new FileReader();
     reader.onload = (evt) => {
@@ -412,7 +433,12 @@ export default function ChatCenter({
       const body: Record<string, unknown> = { channel: 'internal_staff' };
 
       if (internalFile) {
-        const plan = planAttachmentSend(internalUploadedFileUrl);
+        // fix/chat-safety-reliability-phase1 (follow-up): a cached upload
+        // is only reused when it was uploaded for THIS shipment — the
+        // proactive clear-on-switch effect above should already guarantee
+        // this, but this check is the actual enforcement point, not just
+        // a mirror of it.
+        const plan = planAttachmentSendForShipment(internalUploadedFileUrl, internalUploadShipmentId, selectedShipment.id);
         let uploadedUrl: string;
 
         if (plan.action === 'reuse_cached_url') {
@@ -438,6 +464,7 @@ export default function ChatCenter({
             const uploadData = await uploadRes.json();
             uploadedUrl = uploadData.url;
             setInternalUploadedFileUrl(uploadedUrl);
+            setInternalUploadShipmentId(selectedShipment.id);
           } catch {
             setInternalSendError('upload');
             return;

@@ -16,7 +16,7 @@ import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABEL
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
-import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend } from "../lib/chatComposerState";
+import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -352,7 +352,12 @@ export default function DriverApplication({
   // Storage URL so retrying (handleRetryDriverAttachment) reuses it
   // instead of uploading the file again. Cleared on a confirmed
   // successful send or when a new file is picked; never on a failed send.
+  // `shipmentId` is the shipment this attachment was uploaded FOR — a
+  // retry must never post it into a different shipment the driver has
+  // since switched to (see handleRetryDriverAttachment and the
+  // shipment-change effect below).
   const [pendingDriverAttachment, setPendingDriverAttachment] = useState<{
+    shipmentId: string;
     fileUrl: string;
     fileName: string;
     fileCategory: DocumentCategory;
@@ -361,6 +366,15 @@ export default function DriverApplication({
   // upload succeeded but creating the chat message failed" — the two
   // need different, explicit copy.
   const [driverAttachmentError, setDriverAttachmentError] = useState<'' | 'upload' | 'send'>('');
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment must never carry a pending (failed-to-send)
+  // attachment — or its cached upload URL — over to the newly-selected
+  // one.
+  useEffect(() => {
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
+  }, [activeShipment?.id]);
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
@@ -1040,16 +1054,25 @@ export default function DriverApplication({
   };
 
   // fix/chat-safety-reliability-phase1 (follow-up): if upload succeeds but
-  // this POST /chat fails, the caller caches { fileUrl, fileName,
-  // fileCategory } in pendingDriverAttachment (never the caller's own
-  // local state again) so a retry (see handleRetryDriverAttachment below)
-  // reuses that real Storage URL instead of uploading the file a second
-  // time. Cleared on a confirmed successful send; left untouched on
-  // failure so the retry banner stays actionable.
-  const sendDriverFileMessage = async (fileUrl: string, fileName: string, fileCategory: DocumentCategory) => {
-    if (!activeShipment) return;
+  // this POST /chat fails, the caller caches { shipmentId, fileUrl,
+  // fileName, fileCategory } in pendingDriverAttachment (never the
+  // caller's own local state again) so a retry (see
+  // handleRetryDriverAttachment below) reuses that real Storage URL
+  // instead of uploading the file a second time. Cleared on a confirmed
+  // successful send; left untouched on failure so the retry banner stays
+  // actionable.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): takes `shipmentId`
+  // explicitly rather than reading activeShipment inside this function —
+  // this always sends to the shipment the ATTACHMENT belongs to (the one
+  // active when it was picked/uploaded), never whichever shipment happens
+  // to be active by the time this async call actually runs. The caller
+  // (handleAttachmentSelected / handleRetryDriverAttachment) is
+  // responsible for only ever passing a shipmentId that's still valid to
+  // send to.
+  const sendDriverFileMessage = async (shipmentId: string, fileUrl: string, fileName: string, fileCategory: DocumentCategory) => {
     try {
-      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
+      const res = await apiFetch(`/api/shipments/${shipmentId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1069,12 +1092,12 @@ export default function DriverApplication({
         setDriverAttachmentError('');
         fetchData();
       } else {
-        setPendingDriverAttachment({ fileUrl, fileName, fileCategory });
+        setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
         setDriverAttachmentError('send');
       }
     } catch (e) {
       console.error(e);
-      setPendingDriverAttachment({ fileUrl, fileName, fileCategory });
+      setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
       setDriverAttachmentError('send');
     }
   };
@@ -1087,6 +1110,13 @@ export default function DriverApplication({
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file || !activeShipment) return;
+
+    // fix/chat-safety-reliability-phase1 (follow-up): captured once, up
+    // front — this is the shipment the file was actually picked/uploaded
+    // for, and stays fixed for this whole attempt (including the retry it
+    // may end up cached for) regardless of whether the driver switches to
+    // a different shipment while the upload/send is in flight.
+    const shipmentId = activeShipment.id;
 
     // fix/chat-safety-reliability-phase1 (follow-up): picking a new file
     // replaces any previous pending (failed-to-send) attachment — its
@@ -1126,7 +1156,7 @@ export default function DriverApplication({
           return;
         }
         const uploadData = await uploadRes.json();
-        await sendDriverFileMessage(uploadData.url, file.name, fileCategory);
+        await sendDriverFileMessage(shipmentId, uploadData.url, file.name, fileCategory);
       } catch (uploadGatewayErr) {
         console.warn("Upload request failed:", uploadGatewayErr);
         setDriverAttachmentError('upload');
@@ -1144,13 +1174,28 @@ export default function DriverApplication({
   // Storage URL from pendingDriverAttachment via the same
   // planAttachmentSend decision ChatCenter.tsx/App.tsx use — never
   // re-uploads the file.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): verifies
+  // pendingDriverAttachment.shipmentId still matches the currently active
+  // shipment before reusing anything. The shipment-change effect above
+  // should already have cleared pendingDriverAttachment by the time the
+  // driver could even see a retry banner for a different shipment, but
+  // this is the actual enforcement point, not just a mirror of it — if
+  // they somehow don't match, the pending attachment is cleared/blocked
+  // rather than ever being posted into the wrong shipment.
   const handleRetryDriverAttachment = async () => {
     if (!pendingDriverAttachment || isUploading) return;
+    if (!isCachedAttachmentForShipment(pendingDriverAttachment.shipmentId, activeShipment?.id ?? null)) {
+      setPendingDriverAttachment(null);
+      setDriverAttachmentError('');
+      return;
+    }
     const plan = planAttachmentSend(pendingDriverAttachment.fileUrl);
     if (plan.action !== "reuse_cached_url") return;
     setIsUploading(true);
     try {
       await sendDriverFileMessage(
+        pendingDriverAttachment.shipmentId,
         plan.fileUrl,
         pendingDriverAttachment.fileName,
         pendingDriverAttachment.fileCategory
