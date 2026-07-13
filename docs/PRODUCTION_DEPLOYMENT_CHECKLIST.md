@@ -42,8 +42,6 @@ the repo.
 ```
 NODE_ENV=production
 SESSION_SECRET=<strong-random-secret>
-SERVER_FIREBASE_EMAIL=<dedicated-firestore-service-account-email>
-SERVER_FIREBASE_PASSWORD=<dedicated-firestore-service-account-password>
 STRICT_PERSISTENCE=true
 SEED_DEMO_DATA=false
 SUPER_ADMIN_EMAIL=sardar@maras.iq
@@ -52,6 +50,10 @@ GOOGLE_MAPS_PLATFORM_KEY=<restricted-google-maps-key>
 ALLOWED_ORIGINS=https://etir.app
 ```
 
+No Firebase credential env vars are needed (see the Admin SDK/ADC note
+below) — that's a deliberate change from the old `SERVER_FIREBASE_EMAIL`/
+`SERVER_FIREBASE_PASSWORD` setup.
+
 Notes on each:
 
 - `NODE_ENV=production` — gates `IS_LOCAL_DEV`/`DEMO_ACCOUNTS` off (see
@@ -59,11 +61,6 @@ Notes on each:
 - `SESSION_SECRET` — **required**; the server refuses to start without it
   (`server.ts`, `[FATAL] SESSION_SECRET is not set`). Generate with
   `openssl rand -base64 48`.
-- `SERVER_FIREBASE_EMAIL` / `SERVER_FIREBASE_PASSWORD` — the one dedicated
-  Firebase Auth account the server itself signs in as to read/write
-  Firestore (see §4 — this is the only UID `firestore.rules` /
-  `storage.rules` allow). Create it once in Firebase Console >
-  Authentication > Add user. Never a real human's login.
 - `STRICT_PERSISTENCE` — must be `true` (or unset — `true` is the default;
   only the literal string `"false"` turns it off). See §5.
 - `SEED_DEMO_DATA` — must be `false` (or unset — `false` is the default).
@@ -87,26 +84,28 @@ Notes on each:
 vars for the client SDK — the web app config (`projectId`, `apiKey`,
 `authDomain`, `storageBucket`, etc.) is committed in
 `firebase-applet-config.json`. That file is a public, client-side Firebase
-config (Firebase web API keys are not secret by design; real access
-control lives in `firestore.rules`/`storage.rules`, restricted to the one
-server-account UID) and does not need to change per environment unless
-production uses a different Firebase project than what's already
-configured there. If a different Firebase project is used for production,
-either replace `firebase-applet-config.json` for that environment or set
-the `FIREBASE_CONFIG` env var (JSON string) — `server.ts` reads the file
-first, then falls back to `FIREBASE_CONFIG`.
+config (Firebase web API keys are not secret by design) and does not need
+to change per environment unless production uses a different Firebase
+project than what's already configured there. If a different Firebase
+project is used for production, either replace
+`firebase-applet-config.json` for that environment or set the
+`FIREBASE_CONFIG` env var (JSON string) — `server.ts` reads the file first,
+then falls back to `FIREBASE_CONFIG`, and reads only `projectId` /
+`storageBucket` / `firestoreDatabaseId` from it server-side.
 
-**Firebase Admin/service-account variables:** none required. The
-Firebase Admin SDK (`firebase-admin`, used only for FCM push notifications
-and verifying ID tokens on `/api/verify-session`) uses Application Default
-Credentials — on Cloud Run this is automatic via the instance's own
-service account, with **no key file to manage or ship**. Do not add a
-service-account JSON to the repo or to env vars for this.
+**Firebase Admin/service-account variables:** none required. The server
+uses one Firebase Admin SDK app for **everything** Firebase-related —
+Firestore, Storage, FCM push notifications, and ID-token verification on
+`/api/verify-session` — authenticated via Application Default Credentials
+(ADC). On Cloud Run this is automatic via the instance's own **attached
+runtime service account**, with **no key file to manage or ship**. Do not
+add a service-account JSON to the repo or to env vars for this. See §4 for
+the exact IAM roles that runtime service account needs.
 
 **Storage bucket variables:** none required beyond the above — the upload
-flow (`POST /api/upload`) uses `getStorage(firebaseApp)`, which reads the
-bucket from `firebase-applet-config.json`'s `storageBucket` field, same as
-Firestore.
+flow (`POST /api/upload`) uses the Admin SDK's `getStorage(adminApp).bucket()`,
+which reads the bucket name from `firebase-applet-config.json`'s
+`storageBucket` field, same as before.
 
 **Optional / already in `.env.example`, not launch-blocking:**
 - `GEMINI_API_KEY` — AI Studio legacy prototype var; not used by any
@@ -127,37 +126,36 @@ Firestore.
       one is configured in `firebase-applet-config.json`
       (`firestoreDatabaseId`)
 - [ ] Firebase Storage enabled
-- [ ] Firebase Authentication enabled (needed for: the server's own
-      dedicated `SERVER_FIREBASE_EMAIL` account, and end-user Google
-      Sign-In / Google Workspace connect flow — see §12)
-- [ ] Production service account (`SERVER_FIREBASE_EMAIL` /
-      `SERVER_FIREBASE_PASSWORD`) created in Firebase Console >
-      Authentication > Add user, and configured as a Cloud Run
-      secret/env var
-- [ ] No service-account JSON key file committed to the repo (Admin SDK
-      uses ADC — see §3; confirm nothing under the repo root is a Google
-      service-account key)
+- [ ] Firebase Authentication enabled (needed for end-user Google Sign-In /
+      Google Workspace connect flow — see §12; **not** needed for the
+      server's own Firestore/Storage access, which uses the Admin SDK/ADC
+      instead, see below)
+- [ ] Cloud Run runtime service account (Cloud Run service settings >
+      "Security" > service account) has the IAM roles the Admin SDK needs
+      to reach Firestore and Storage: **Cloud Datastore User**
+      (`roles/datastore.user`) and **Storage Object Admin**
+      (`roles/storage.objectAdmin`, scoped to the project or the specific
+      bucket). Verify with:
+      `gcloud projects get-iam-policy <project-id> --flatten="bindings[].members" --filter="bindings.members:<runtime-service-account-email>"`
+      or Cloud Console > IAM. Grant with:
+      `gcloud projects add-iam-policy-binding <project-id> --member="serviceAccount:<runtime-service-account-email>" --role="roles/datastore.user"`
+      (repeat for `roles/storage.objectAdmin`).
+- [ ] No service-account JSON key file committed to the repo (the Admin SDK
+      uses ADC exclusively now — see §3; confirm nothing under the repo
+      root is a Google service-account key; `npm run check-firebase-readiness`
+      scans for this automatically)
 - [ ] Firestore indexes reviewed if any composite queries require them
       (check Cloud Run logs after first production traffic for
       "requires an index" errors)
-- [ ] `SERVER_FIREBASE_UID` verified — copy the UID of the
-      `SERVER_FIREBASE_EMAIL` account from Firebase Console >
-      Authentication > Users (this var is not a secret; see
-      `docs/REAL_FIREBASE_VERIFICATION.md` §5a)
-- [ ] `firestore.rules` UID matches `storage.rules` UID — both files'
-      `isServerAccount()` currently hardcode the same literal
-      (`mQadHKcpmgbLIAwQaz8AqrAytIo2` as committed); run
-      `npm run check-firebase-readiness` to check this statically
-- [ ] Both rules files' UID matches `SERVER_FIREBASE_EMAIL`'s real Firebase
-      Auth UID for the production project — **confirm this by hand in
-      Firebase Console**, updating both rule files together if a different
-      account/project is used; a mismatch fails closed (memory fallback,
-      logged loudly) rather than granting access to the wrong account
-- [ ] Firestore rules (`firestore.rules`) deployed only after the UID checks
-      above pass (Firebase Console > Firestore Database > Rules, or
-      `firebase deploy --only firestore:rules`)
-- [ ] Storage rules (`storage.rules`) deployed only after the UID checks
-      above pass (same UID-match caveat as Firestore)
+- [ ] **Legacy, pending a follow-up change:** `firestore.rules`/
+      `storage.rules` still hardcode a specific Firebase Auth UID from
+      before this server used the Admin SDK. The Admin SDK bypasses these
+      rules entirely regardless of their content, so this UID is no longer
+      load-bearing for the server's own access — `npm run
+      check-firebase-readiness` still checks the two files agree with each
+      other (hygiene only, not a launch blocker on its own). A deny-all
+      replacement for both files is proposed as a separate follow-up, only
+      after this Admin SDK migration is verified working in production.
 - [ ] Production data backup strategy decided (see §18 — Firestore export)
 
 ## 5. Persistence and demo data
@@ -507,9 +505,10 @@ All of the following must be true before real launch:
 - [ ] Real Firebase project configured (Firestore + Storage + Auth
       enabled, rules deployed)
 - [ ] Storage/upload flow working end-to-end
-- [ ] All secrets (`SESSION_SECRET`, `SERVER_FIREBASE_EMAIL`/`_PASSWORD`,
-      `SUPER_ADMIN_PASSWORD_HASH`, `GOOGLE_MAPS_PLATFORM_KEY`) configured
-      as Cloud Run env vars/secrets, none committed to the repo
+- [ ] All secrets (`SESSION_SECRET`, `SUPER_ADMIN_PASSWORD_HASH`,
+      `GOOGLE_MAPS_PLATFORM_KEY`) configured as Cloud Run env vars/secrets,
+      none committed to the repo — no Firebase credential secret is needed
+      (Admin SDK/ADC via the Cloud Run runtime service account, see §4)
 - [ ] `npm run build` passes
 - [ ] Role smoke tests (§7) pass for all roles
 - [ ] Public tracking safety confirmed (§11)

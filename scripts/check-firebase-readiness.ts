@@ -8,14 +8,22 @@
  * dangerous-in-production combinations documented in
  * src/lib/persistenceReadiness.ts apply to the current environment.
  *
+ * The server authenticates to Firestore/Storage via the Firebase Admin SDK
+ * using Application Default Credentials (ADC) — locally via
+ * `gcloud auth application-default login`, on Cloud Run automatically via
+ * the attached runtime service account. ADC availability generally can't be
+ * confirmed from env vars alone (see adcEnvHintPresent in
+ * persistenceReadiness.ts); this script reports only a best-effort static
+ * hint, never an authoritative answer — only a live server boot (or
+ * `npm run dev`) can confirm ADC actually works.
+ *
  * Also checks (src/lib/firebaseRulesUid.ts) that firestore.rules and
  * storage.rules hardcode the *same* server-account UID, and — if the
  * non-secret SERVER_FIREBASE_UID env var is set — that it matches the UID
- * found in those rules. It never reads firestore.rules/storage.rules from
- * anywhere but disk and never contacts Firebase to look up the real UID;
- * that comparison against the real SERVER_FIREBASE_EMAIL account still has
- * to be done manually in Firebase Console (see
- * docs/REAL_FIREBASE_VERIFICATION.md).
+ * found in those rules. This UID-matching check predates the Admin SDK
+ * migration and is unrelated to it (rules files are unchanged in this
+ * branch) — it never reads firestore.rules/storage.rules from anywhere but
+ * disk and never contacts Firebase.
  *
  * Usage:
  *   npx tsx scripts/check-firebase-readiness.ts
@@ -93,7 +101,7 @@ function main() {
   console.log("──────────────────────────────────────────────────────────");
   console.log(`NODE_ENV: ${env.NODE_ENV || "development"} (production: ${readiness.isProduction})`);
   console.log(`Firebase client config found: ${readiness.firebaseConfigured}`);
-  console.log(`SERVER_FIREBASE_EMAIL/PASSWORD present: ${readiness.serverFirebaseCredsConfigured}`);
+  console.log(`ADC environment hint present (GOOGLE_APPLICATION_CREDENTIALS or K_SERVICE): ${readiness.adcEnvHintPresent} (not authoritative — see header comment)`);
   console.log(`STRICT_PERSISTENCE: ${readiness.strictPersistence}`);
   console.log(`SEED_DEMO_DATA: ${readiness.seedDemoData}`);
   console.log(`Configured persistence mode: ${readiness.configuredMode}`);
