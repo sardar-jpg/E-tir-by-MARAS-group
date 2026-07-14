@@ -7,11 +7,13 @@ import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
 import { MAX_CHAT_TEXT_LENGTH } from '../../lib/chatMessageValidation';
 import {
   canSubmitChatMessage,
-  applySuccessfulChatPoll,
   shouldConfirmChannelRead,
   planAttachmentSendForShipment,
+  mergeNewerChatMessages,
+  prependOlderChatMessages,
 } from '../../lib/chatComposerState';
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from '../../lib/chatDisplay';
+import { encodePageCursor } from '../../lib/pagination';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
 // DocumentCategory — 'photo' is left out here since these are staff
@@ -233,6 +235,15 @@ export default function ChatCenter({
   // successfully-fetched messages stay on screen while this is true.
   const [pollError, setPollError] = useState(false);
   const retryNowRef = useRef<() => void>(() => {});
+  // Phase 4 (Firestore scalability audit): newest-seen cursor driving the
+  // 3s poll's `?since=` catch-up fetch (see fetchAndMarkRead below), and
+  // the "Load older messages" cursor/availability from the initial page's
+  // own nextCursor/hasMore. Both reset whenever the effect re-runs for a
+  // new shipment/channel selection.
+  const newestCursorRef = useRef<string | null>(null);
+  const olderCursorRef = useRef<string | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   // feature/chat-ui-ux-phase2: smart auto-scroll. messagesContainerRef is
   // the scrollable message list; isNearBottomRef tracks (via the onScroll
   // handler below) whether the admin is already close to the bottom —
@@ -298,6 +309,9 @@ export default function ChatCenter({
   // support (driver/client-only labels and greeting copy throughout
   // App.tsx's drawer assume one of those two audiences).
   useEffect(() => {
+    newestCursorRef.current = null;
+    olderCursorRef.current = null;
+    setHasOlderMessages(false);
     if (!selectedShipment) {
       setChannelMessages([]);
       setPollError(false);
@@ -329,19 +343,40 @@ export default function ChatCenter({
     // look empty. `hasLoadedMessagesOnce` distinguishes a genuine empty
     // conversation (loaded fine, zero messages) from "never successfully
     // loaded, nothing to show yet."
+    // Phase 4 (Firestore scalability audit): the first fetch of a
+    // shipment/channel selection loads the latest page (server default:
+    // 50); every poll tick after that uses `?since=` so this Chat Center
+    // no longer re-fetches (and the server no longer re-queries) the
+    // whole thread every 3s — only messages newer than the last one
+    // already shown (merged in, never replacing what's on screen). A
+    // status-only update on an already-loaded message (e.g. a read
+    // receipt) is picked up on the next full reselect of the
+    // shipment/channel, not mid-poll — see this PR's description.
     const fetchAndMarkRead = async (showLoading: boolean) => {
       if (showLoading) setIsLoadingMessages(true);
       try {
-        const res = await apiFetch(`/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}`);
+        const cursor = newestCursorRef.current;
+        const url = cursor
+          ? `/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}&since=${encodeURIComponent(cursor)}`
+          : `/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}`;
+        const res = await apiFetch(url);
         if (!res.ok) throw new Error(`Failed to load chat messages (${res.status})`);
-        const data = await res.json();
-        if (!Array.isArray(data)) throw new Error('Unexpected chat response shape');
+        const parsed = await res.json();
+        if (Array.isArray(parsed)) throw new Error('Unexpected chat response shape');
+        const data: ChatMessage[] = parsed.items;
         if (cancelled) return;
 
-        const next = applySuccessfulChatPoll<ChatMessage>(data);
-        setChannelMessages(next.messages);
-        setHasLoadedMessagesOnce(next.hasLoadedOnce);
-        setPollError(next.pollError);
+        setChannelMessages((prev) => (cursor ? mergeNewerChatMessages(prev, data) : data));
+        setHasLoadedMessagesOnce(true);
+        setPollError(false);
+        const newest = data[data.length - 1];
+        if (newest) {
+          newestCursorRef.current = encodePageCursor({ ts: newest.timestamp, id: (newest as any).id });
+        }
+        if (!cursor) {
+          olderCursorRef.current = parsed.nextCursor ?? null;
+          setHasOlderMessages(Boolean(parsed.hasMore));
+        }
 
         // fix/chat-safety-reliability-phase1 (follow-up): this used to
         // gate the /chat/seen call on `data.some(m => m.sender !== 'admin')`
@@ -393,6 +428,32 @@ export default function ChatCenter({
       clearInterval(interval);
     };
   }, [selectedShipment?.id, activeChannel]);
+
+  // Phase 4 (Firestore scalability audit): explicit "Load older messages"
+  // — fetches the next older page via the initial page's own cursor and
+  // prepends it, never re-fetching what's already on screen.
+  const loadOlderMessages = async () => {
+    if (!selectedShipment || !olderCursorRef.current || isLoadingOlder) return;
+    const requestedShipmentId = selectedShipment.id;
+    const requestedChannel = activeChannel;
+    const cursor = olderCursorRef.current;
+    setIsLoadingOlder(true);
+    try {
+      const res = await apiFetch(`/api/shipments/${requestedShipmentId}/chat?channel=${requestedChannel}&cursor=${encodeURIComponent(cursor)}`);
+      if (res.ok) {
+        const page = await res.json();
+        if (selectedShipment?.id === requestedShipmentId && activeChannel === requestedChannel && !Array.isArray(page)) {
+          setChannelMessages((prev) => prependOlderChatMessages(prev, page.items));
+          olderCursorRef.current = page.nextCursor ?? null;
+          setHasOlderMessages(Boolean(page.hasMore));
+        }
+      }
+    } catch (err) {
+      console.warn('Load older chat messages failed:', err);
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  };
 
   // feature/chat-ui-ux-phase2: smart auto-scroll. Only scrolls to the
   // newest message when the admin was already near the bottom (or this is
@@ -762,6 +823,18 @@ export default function ChatCenter({
                     <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-2 px-5 py-1.5 bg-amber-50 border-b border-amber-200 text-[11px] font-semibold text-amber-700 flex items-center justify-center gap-1.5">
                       <AlertTriangle className="w-3 h-3 shrink-0" />
                       {label.connectionErrorRetrying}
+                    </div>
+                  )}
+                  {hasOlderMessages && (
+                    <div className="flex justify-center pb-2">
+                      <button
+                        type="button"
+                        onClick={loadOlderMessages}
+                        disabled={isLoadingOlder}
+                        className="text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:text-slate-800 bg-white border border-slate-200 rounded-full px-3 py-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        {isLoadingOlder ? '…' : 'Load older messages'}
+                      </button>
                     </div>
                   )}
                   {channelMessages.map((msg, index) => {

@@ -148,3 +148,38 @@ export function planAttachmentSendForShipment(
   }
   return planAttachmentSend(cachedUploadedUrl);
 }
+
+/**
+ * Phase 4 (Firestore scalability audit).
+ *
+ * Paired with the server's new GET /api/shipments/:id/chat pagination
+ * (`{ items, nextCursor, hasMore }`, plus `?since=` for a live-poll delta
+ * instead of the full thread): the two merge shapes a chat surface needs
+ * on top of a plain replace (a freshly-opened thread, or a shipment/
+ * channel switch, still just replaces state — unrelated history must
+ * never linger). Both are pure array de-dup-by-id operations, so "no
+ * duplicates across pages" is directly unit-testable: a poll response or
+ * a "load older" response landing twice (e.g. a retried request) is a
+ * safe no-op, never a duplicate row.
+ */
+export function mergeNewerChatMessages<TMessage extends { id: string }>(
+  existing: TMessage[],
+  newer: TMessage[]
+): TMessage[] {
+  if (newer.length === 0) return existing;
+  const existingIds = new Set(existing.map((m) => m.id));
+  const toAdd = newer.filter((m) => !existingIds.has(m.id));
+  if (toAdd.length === 0) return existing;
+  return [...existing, ...toAdd];
+}
+
+export function prependOlderChatMessages<TMessage extends { id: string }>(
+  existing: TMessage[],
+  older: TMessage[]
+): TMessage[] {
+  if (older.length === 0) return existing;
+  const existingIds = new Set(existing.map((m) => m.id));
+  const toAdd = older.filter((m) => !existingIds.has(m.id));
+  if (toAdd.length === 0) return existing;
+  return [...toAdd, ...existing];
+}

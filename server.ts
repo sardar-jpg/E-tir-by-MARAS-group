@@ -20,7 +20,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { initializeApp as initializeAdminApp, getApps as getAdminApps, applicationDefault } from "firebase-admin/app";
-import { getFirestore as getAdminFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore as getAdminFirestore, FieldValue, FieldPath } from "firebase-admin/firestore";
 import { getStorage as getAdminStorage } from "firebase-admin/storage";
 import { getMessaging, Messaging } from "firebase-admin/messaging";
 import { getAuth as getAdminAuth, Auth as AdminAuth } from "firebase-admin/auth";
@@ -40,7 +40,6 @@ import {
 } from "./src/lib/auth";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
-  filterChatMessagesByRole,
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
   isMessageInSeenScope,
@@ -58,7 +57,18 @@ import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canVi
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
-import { isNotificationForDriver, addReaderToNotification, canMarkNotificationRead } from "./src/lib/notificationAccess";
+import { addReaderToNotification, canMarkNotificationRead, buildDriverClientNotificationQueryScopes } from "./src/lib/notificationAccess";
+import {
+  DEFAULT_PAGE_SIZE,
+  encodePageCursor,
+  decodePageCursor,
+  paginateDescending,
+  paginateAscendingSince,
+  hasUnsatisfiableFilter,
+  applyMemoryFilters,
+  type PageCursor,
+  type PageFilter,
+} from "./src/lib/pagination";
 import { resolveAdminNotificationPreferences, validateNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences, type NotificationPreferenceCategory } from "./src/lib/notificationPreferences";
 import { canDeletePushToken, selectPushTokensForAccountDeletion } from "./src/lib/pushTokenAccess";
 import { buildSecureShareView } from "./src/lib/publicShareView";
@@ -652,6 +662,165 @@ async function deleteDoc(docRef: any): Promise<void> {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return handleDeleteDocMemory(docRef);
   }
+}
+
+// Phase 4 (Firestore scalability audit): scoped, paginated collection
+// queries for the two highest-traffic full-collection-read endpoints
+// (GET /api/shipments/:id/chat, GET /api/notifications) — see
+// docs/FOLLOW_UP_ROADMAP.md's "Full-collection-scan read pattern" entry
+// for the audit this addresses. Every other `getDocs(collection(db,...))`
+// call site in this file is unchanged and intentionally out of scope
+// (see the PR description this shipped with for the full audit/priority
+// list); this is deliberately a small, additive pair of query helpers,
+// not a rewrite of the read-pattern.
+//
+// Ordering is always `(timestamp DESC, documentId DESC)` in "page" mode
+// and `(timestamp ASC, documentId ASC)` in "since" (poll) mode — the
+// document id is a genuine second sort key (via FieldPath.documentId()),
+// not cosmetic, matching src/lib/pagination.ts's own tie-breaking so a
+// live Firestore query and the memory-fallback engine agree by
+// construction on rows sharing a timestamp.
+interface DescendingPageResult {
+  items: any[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+interface AscendingSinceResult {
+  items: any[];
+  hasMore: boolean;
+}
+
+function memoryDescendingPage(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number): DescendingPageResult {
+  const mStore = getMemoryStore();
+  const items = (mStore[colName as keyof typeof mStore] as any[]) || [];
+  const filtered = applyMemoryFilters(items, filters);
+  return paginateDescending(filtered, (i) => i.timestamp, (i) => i.id, { cursor, limit });
+}
+
+function memoryAscendingSince(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number): AscendingSinceResult {
+  const mStore = getMemoryStore();
+  const items = (mStore[colName as keyof typeof mStore] as any[]) || [];
+  const filtered = applyMemoryFilters(items, filters);
+  return paginateAscendingSince(filtered, (i) => i.timestamp, (i) => i.id, cursor, limit);
+}
+
+/**
+ * "Latest N" / "older than cursor" page — real Firestore query with
+ * where/orderBy/limit/startAfter, never a full-collection fetch. Fetches
+ * `limit + 1` so `hasMore` is known from this one query instead of a
+ * second round-trip; the (possible) 51st row is trimmed before returning.
+ */
+async function queryDescendingPage(
+  colName: string,
+  filters: PageFilter[],
+  cursor: PageCursor | null,
+  limit: number = DEFAULT_PAGE_SIZE
+): Promise<DescendingPageResult> {
+  if (hasUnsatisfiableFilter(filters)) return { items: [], nextCursor: null, hasMore: false };
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryDescendingPage(colName, filters, cursor, limit);
+  }
+  try {
+    let q: FirebaseFirestore.Query = db!.collection(colName);
+    for (const f of filters) {
+      q = q.where(f.field, f.op as any, f.value);
+    }
+    q = q.orderBy("timestamp", "desc").orderBy(FieldPath.documentId(), "desc");
+    if (cursor) q = q.startAfter(cursor.ts, cursor.id);
+    q = q.limit(limit + 1);
+    const snapshot = await withTimeout(q.get(), 5000, "Firestore paginated query timed out");
+    const docs = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    const hasMore = docs.length > limit;
+    const page = docs.slice(0, limit);
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last ? encodePageCursor({ ts: last.timestamp, id: last.id }) : null;
+    return { items: page, nextCursor, hasMore };
+  } catch (error) {
+    console.warn("Firestore paginated query failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryDescendingPage(colName, filters, cursor, limit);
+  }
+}
+
+/**
+ * "Newer than cursor" catch-up query used by live polling, ascending
+ * order. `limit` is a safety cap on a single burst, not a page-size
+ * contract — see paginateAscendingSince's own header comment.
+ */
+async function queryAscendingSince(
+  colName: string,
+  filters: PageFilter[],
+  cursor: PageCursor | null,
+  limit: number = DEFAULT_PAGE_SIZE
+): Promise<AscendingSinceResult> {
+  if (hasUnsatisfiableFilter(filters)) return { items: [], hasMore: false };
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryAscendingSince(colName, filters, cursor, limit);
+  }
+  try {
+    let q: FirebaseFirestore.Query = db!.collection(colName);
+    for (const f of filters) {
+      q = q.where(f.field, f.op as any, f.value);
+    }
+    q = q.orderBy("timestamp", "asc").orderBy(FieldPath.documentId(), "asc");
+    if (cursor) q = q.startAfter(cursor.ts, cursor.id);
+    q = q.limit(limit + 1);
+    const snapshot = await withTimeout(q.get(), 5000, "Firestore since-query timed out");
+    const docs = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    const hasMore = docs.length > limit;
+    return { items: docs.slice(0, limit), hasMore };
+  } catch (error) {
+    console.warn("Firestore since-query failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryAscendingSince(colName, filters, cursor, limit);
+  }
+}
+
+/**
+ * Notifications-specific fan-in: runs one `queryDescendingPage`/
+ * `queryAscendingSince` per query scope (see
+ * buildDriverClientNotificationQueryScopes — 1 scope for admin/no-filter,
+ * up to 2 for driver/client: shipment-membership + direct-recipient) and
+ * merges the results into one correctly-ordered, deduplicated,
+ * correctly-cursored page. Never fetches more than `limit` extra rows per
+ * scope, never loads the full collection.
+ */
+async function fetchNotificationsPage(
+  scopes: PageFilter[][],
+  cursor: PageCursor | null,
+  limit: number
+): Promise<DescendingPageResult> {
+  const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+  const pages = await Promise.all(effectiveScopes.map((filters) => queryDescendingPage("notifications", filters, cursor, limit)));
+  const merged = new Map<string, any>();
+  for (const p of pages) for (const item of p.items) merged.set(item.id, item);
+  const combined = Array.from(merged.values());
+  const result = paginateDescending(combined, (i) => i.timestamp, (i) => i.id, { cursor, limit });
+  const combinedHasMore = result.hasMore || pages.some((p) => p.hasMore);
+  const last = result.items[result.items.length - 1];
+  const nextCursor = combinedHasMore && last ? encodePageCursor({ ts: last.timestamp, id: last.id }) : null;
+  return { items: result.items, nextCursor, hasMore: combinedHasMore };
+}
+
+async function fetchNotificationsSince(
+  scopes: PageFilter[][],
+  cursor: PageCursor | null,
+  limit: number
+): Promise<AscendingSinceResult> {
+  const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+  const pages = await Promise.all(effectiveScopes.map((filters) => queryAscendingSince("notifications", filters, cursor, limit)));
+  const merged = new Map<string, any>();
+  for (const p of pages) for (const item of p.items) merged.set(item.id, item);
+  const combined = Array.from(merged.values());
+  const result = paginateAscendingSince(combined, (i) => i.timestamp, (i) => i.id, cursor, limit);
+  return { items: result.items, hasMore: result.hasMore || pages.some((p) => p.hasMore) };
 }
 
 // BUG-15: shipment number/id generation used to read the shipments
@@ -3366,20 +3535,38 @@ async function startServer() {
         return res.status(403).json({ error: "You do not have permission to view this channel." });
       }
 
-      const col = collection(db, "chatMessages");
-      const snapshot = await getDocs(col);
-      let msgs = snapshot.docs.map(doc => {
-        const d = doc.data() as ChatMessage;
-        return {
-          ...d,
-          status: d.status || "sent"
-        };
-      });
-      msgs = msgs.filter(m => m.shipmentId === req.params.id);
-      msgs = filterChatMessagesByRole(msgs, req.session!.role, requestedChannel);
+      // Phase 4 (Firestore scalability audit): scoped at the query level
+      // instead of fetching every chatMessages document ever written and
+      // filtering shipmentId/channel in Node. resolveSeenChannelFilter
+      // already encodes the exact same role/requestedChannel → channel
+      // rule filterChatMessagesByRole used to apply after the fact (null
+      // = admin's "all channels" default, matching the merged-admin GET
+      // behavior this replaces) — reused here rather than duplicated.
+      const channelFilter = resolveSeenChannelFilter(req.session!.role, requestedChannel);
+      const filters: PageFilter[] = [{ field: "shipmentId", op: "==", value: req.params.id }];
+      if (channelFilter) filters.push({ field: "channel", op: "==", value: channelFilter });
 
-      msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      res.json(msgs);
+      const limitParam = parseInt(req.query.limit as string, 10);
+      const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 200 ? limitParam : DEFAULT_PAGE_SIZE;
+
+      // Live-poll "catch up" mode: only rows newer than the caller's own
+      // last-known cursor, never a full re-fetch of the thread. A
+      // missing/malformed `since` decodes to null, which is the same as
+      // "no cursor yet" (fetch from the start) rather than an error.
+      if (typeof req.query.since === "string") {
+        const sincePage = await queryAscendingSince("chatMessages", filters, decodePageCursor(req.query.since), limit);
+        const items = sincePage.items.map((m) => ({ ...m, status: m.status || "sent" }));
+        return res.json({ items, hasMore: sincePage.hasMore });
+      }
+
+      const cursor = decodePageCursor(req.query.cursor);
+      const page = await queryDescendingPage("chatMessages", filters, cursor, limit);
+      // page.items come back newest-first (matching the query's own
+      // orderBy direction) — reversed to oldest-first here so the
+      // response shape every chat surface renders is unchanged: a page of
+      // messages in the order they should appear top-to-bottom.
+      const items = page.items.slice().reverse().map((m) => ({ ...m, status: m.status || "sent" }));
+      res.json({ items, nextCursor: page.nextCursor, hasMore: page.hasMore });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get chat messages" });
@@ -5244,41 +5431,31 @@ async function startServer() {
   // 13. System Notifications
   app.get("/api/notifications", requireAuth, async (req, res) => {
     try {
-      const col = collection(db, "notifications");
-      const snapshot = await getDocs(col);
-      let list = snapshot.docs.map(doc => doc.data() as AppNotification);
-      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-      // Never show a notification to the same user it was excluded for
-      // (e.g. a chat sender shouldn't be notified of their own message).
-      list = list.filter(n => n.excludeUserId !== req.session!.id);
-
-      // Scope to the session's own shipments for drivers/clients — same
-      // reasoning as /api/shipments above. Admins see everything.
+      // Phase 4 (Firestore scalability audit): query-scoped instead of
+      // fetching the entire notifications collection on every call.
+      // buildDriverClientNotificationQueryScopes turns the same
+      // own-shipment-OR-direct-recipient rule isNotificationForDriver used
+      // to apply after the fact into the actual Firestore query scopes —
+      // see its own header comment (src/lib/notificationAccess.ts) for why
+      // this is 1-2 independent queries merged in Node rather than one
+      // combined query, and the documented 30-shipment `in`-filter cap.
+      // The shipment-membership lookup itself (which shipments does this
+      // driver/client own) is unchanged — still a full `shipments` read;
+      // Orders/Shipments is priority 3, deferred (see PR description).
+      let scopes: PageFilter[][] = [[]]; // admin default: no filter, sees everything
       if (req.session!.role === "driver") {
         const driverId = req.session!.id;
         const shipCol = collection(db, "shipments");
         const shipSnap = await getDocs(shipCol);
-        const myShipmentIds = new Set(
+        const myShipmentIds = Array.from(new Set(
           shipSnap.docs
             .map(d => d.data() as Shipment)
             .filter(s => s.assignedDriverId === driverId || (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId)))
             .map(s => s.id)
-        );
-        // Notification Phase 1 fix: also include notifications addressed
-        // directly to this driver via recipientUserId (e.g. "Driver
-        // Approved", which has no shipment at all) — previously this
-        // filter was shipmentId-only, so a recipientUserId-only
-        // notification was silently dropped for every driver, no matter
-        // who it was actually for. isNotificationForDriver (shared with
-        // DriverApplication.tsx's own client-side filtering) is the single
-        // source of truth for this rule.
-        list = list.filter(n => isNotificationForDriver(n, driverId, myShipmentIds));
-        // BUG-03: a "chat" notification's title/body carries the sender's
-        // name and message text. Only let the driver_admin channel through
-        // — legacy untagged chat notifications have no reliable audience,
-        // so they're excluded rather than risk showing a client's message.
-        list = list.filter(n => isChatNotificationVisibleToRole(n.type, "driver", n.channel));
+        ));
+        scopes = buildDriverClientNotificationQueryScopes(driverId, myShipmentIds).map(scope => [
+          { field: scope.field, op: scope.op, value: scope.value } as PageFilter,
+        ]);
       } else if (req.session!.role === "client") {
         const clientsCol = collection(db, "clients");
         const clientsSnap = await getDocs(clientsCol);
@@ -5286,33 +5463,55 @@ async function startServer() {
         if (myClient) {
           const shipCol = collection(db, "shipments");
           const shipSnap = await getDocs(shipCol);
-          const myShipmentIds = new Set(
+          const myShipmentIds = Array.from(new Set(
             shipSnap.docs
               .map(d => d.data() as Shipment)
               .filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName))
               .map(s => s.id)
-          );
-          list = list.filter(n => myShipmentIds.has(n.shipmentId));
-          list = list.filter(n => isChatNotificationVisibleToRole(n.type, "client", n.channel));
+          ));
+          scopes = buildDriverClientNotificationQueryScopes(req.session!.id, myShipmentIds).map(scope => [
+            { field: scope.field, op: scope.op, value: scope.value } as PageFilter,
+          ]);
         } else {
-          list = [];
+          scopes = [];
         }
-      } else if (req.session!.role === "admin") {
-        // Notification Preferences Phase 2 (Admin only): this admin's own
-        // saved preferences (or the all-enabled default, for an admin who
-        // has never saved any) gate which categories show up in THEIR OWN
-        // in-app list — a different admin's list is filtered by their own
-        // preferences independently (own Firestore doc, keyed by
-        // req.session.id, never by email). Driver/Client branches above
-        // are completely untouched by this. security_system_alerts-mapped
-        // notifications (and anything with no clear category) always
-        // pass through regardless of preferences.
-        const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
-        const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
-        list = list.filter(n => shouldDeliverNotificationToAdmin(preferences, n.type, n.channel));
       }
 
-      res.json(list);
+      const limitParam = parseInt(req.query.limit as string, 10);
+      const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 200 ? limitParam : DEFAULT_PAGE_SIZE;
+
+      // applyRoleRules re-applies exactly the same excludeUserId/
+      // channel-visibility/admin-preference rules the old full-scan
+      // version did — unchanged logic, just run against an already-scoped
+      // page instead of the whole collection.
+      const applyRoleRules = async (items: any[]): Promise<any[]> => {
+        let list = items.filter(n => n.excludeUserId !== req.session!.id);
+        if (req.session!.role === "driver") {
+          list = list.filter(n => isChatNotificationVisibleToRole(n.type, "driver", n.channel));
+        } else if (req.session!.role === "client") {
+          list = list.filter(n => isChatNotificationVisibleToRole(n.type, "client", n.channel));
+        } else if (req.session!.role === "admin") {
+          const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
+          const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
+          list = list.filter(n => shouldDeliverNotificationToAdmin(preferences, n.type, n.channel));
+        }
+        return list;
+      };
+
+      if (typeof req.query.since === "string") {
+        const sincePage = scopes.length > 0
+          ? await fetchNotificationsSince(scopes, decodePageCursor(req.query.since), limit)
+          : { items: [] as any[], hasMore: false };
+        const items = await applyRoleRules(sincePage.items);
+        return res.json({ items, hasMore: sincePage.hasMore });
+      }
+
+      const cursor = decodePageCursor(req.query.cursor);
+      const page = scopes.length > 0
+        ? await fetchNotificationsPage(scopes, cursor, limit)
+        : { items: [] as any[], nextCursor: null as string | null, hasMore: false };
+      const items = await applyRoleRules(page.items);
+      res.json({ items, nextCursor: page.nextCursor, hasMore: page.hasMore });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get notifications" });

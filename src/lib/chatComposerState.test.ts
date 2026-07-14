@@ -8,6 +8,8 @@ import {
   planAttachmentSend,
   isCachedAttachmentForShipment,
   planAttachmentSendForShipment,
+  mergeNewerChatMessages,
+  prependOlderChatMessages,
   type ChatPollState,
 } from "./chatComposerState";
 
@@ -225,5 +227,52 @@ describe("isCachedAttachmentForShipment / planAttachmentSendForShipment (cached 
     expect(planAttachmentSendForShipment(clearedUploadedUrl, clearedUploadShipmentId, shipmentA)).toEqual({
       action: "upload_then_send",
     });
+  });
+});
+
+describe("mergeNewerChatMessages — Phase 4 (Firestore scalability audit)", () => {
+  it("appends newer messages to the end, preserving existing order", () => {
+    const existing = [{ id: "a" }, { id: "b" }];
+    const result = mergeNewerChatMessages(existing, [{ id: "c" }, { id: "d" }]);
+    expect(result.map((m) => m.id)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("never duplicates a message that arrives twice (e.g. a retried poll)", () => {
+    const existing = [{ id: "a" }, { id: "b" }];
+    const result = mergeNewerChatMessages(existing, [{ id: "b" }, { id: "c" }]);
+    expect(result.map((m) => m.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("an empty delta is a safe no-op, returning the same array reference", () => {
+    const existing = [{ id: "a" }];
+    expect(mergeNewerChatMessages(existing, [])).toBe(existing);
+  });
+
+  it("a fully-duplicate delta is a safe no-op, returning the same array reference", () => {
+    const existing = [{ id: "a" }, { id: "b" }];
+    expect(mergeNewerChatMessages(existing, [{ id: "a" }])).toBe(existing);
+  });
+
+  it("starting from an empty thread just becomes the delta", () => {
+    expect(mergeNewerChatMessages([], [{ id: "a" }, { id: "b" }]).map((m) => m.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("prependOlderChatMessages — Phase 4 (Firestore scalability audit)", () => {
+  it("prepends older messages before the existing thread", () => {
+    const existing = [{ id: "c" }, { id: "d" }];
+    const result = prependOlderChatMessages(existing, [{ id: "a" }, { id: "b" }]);
+    expect(result.map((m) => m.id)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("never duplicates a message already present (e.g. a retried 'load older' request)", () => {
+    const existing = [{ id: "b" }, { id: "c" }];
+    const result = prependOlderChatMessages(existing, [{ id: "a" }, { id: "b" }]);
+    expect(result.map((m) => m.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("an empty older page is a safe no-op, returning the same array reference", () => {
+    const existing = [{ id: "a" }];
+    expect(prependOlderChatMessages(existing, [])).toBe(existing);
   });
 });

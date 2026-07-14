@@ -4,6 +4,7 @@ import {
   isNotificationReadForUser,
   addReaderToNotification,
   canMarkNotificationRead,
+  buildDriverClientNotificationQueryScopes,
 } from "./notificationAccess";
 
 describe("isNotificationForDriver — Notification Phase 1", () => {
@@ -301,5 +302,35 @@ describe("Full per-role read migration — Admin, Client, Driver (Notification P
     expect(isNotificationReadForUser(legacyNotif, "admin@maras.iq")).toBe(false);
     expect(isNotificationReadForUser(legacyNotif, "client-1")).toBe(false);
     expect(isNotificationReadForUser(legacyNotif, "driver-1")).toBe(false);
+  });
+});
+
+describe("buildDriverClientNotificationQueryScopes — Phase 4 (Firestore scalability audit)", () => {
+  it("returns a shipmentId-in scope and a recipientUserId scope when the caller owns shipments", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("driver-1", ["ship-A", "ship-B"]);
+    expect(scopes).toEqual([
+      { field: "shipmentId", op: "in", value: ["ship-A", "ship-B"] },
+      { field: "recipientUserId", op: "==", value: "driver-1" },
+    ]);
+  });
+
+  it("still returns the direct-recipient scope even with zero owned shipments — a brand-new driver isn't left with no scopes at all", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("driver-new", []);
+    expect(scopes).toEqual([{ field: "recipientUserId", op: "==", value: "driver-new" }]);
+  });
+
+  it("caps the shipmentId `in` list at Firestore's 30-value limit — narrows, never broadens, visibility", () => {
+    const manyShipments = Array.from({ length: 45 }, (_, i) => `ship-${i}`);
+    const scopes = buildDriverClientNotificationQueryScopes("driver-1", manyShipments);
+    const shipmentScope = scopes.find((s) => s.field === "shipmentId");
+    expect(shipmentScope).toBeDefined();
+    expect((shipmentScope!.value as string[]).length).toBe(30);
+    expect(shipmentScope!.value).toEqual(manyShipments.slice(0, 30));
+  });
+
+  it("the recipientUserId scope always uses the caller's own session id, never a shipment id or anything else", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("client-42", ["ship-X"]);
+    const recipientScope = scopes.find((s) => s.field === "recipientUserId");
+    expect(recipientScope).toEqual({ field: "recipientUserId", op: "==", value: "client-42" });
   });
 });

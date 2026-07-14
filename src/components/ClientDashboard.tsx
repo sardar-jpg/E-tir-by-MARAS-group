@@ -300,7 +300,8 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       if (resNotifications.ok) {
         const text = await resNotifications.text();
         if (!text.trim().startsWith("<")) {
-          const allNotifications = JSON.parse(text);
+          const notifPage = JSON.parse(text);
+          const allNotifications = Array.isArray(notifPage) ? notifPage : notifPage.items;
           const myShipmentIds = new Set(shipments.map(s => s.id));
           const myNotifs = allNotifications.filter((n: any) => 
             n.shipmentId && 
@@ -432,7 +433,8 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         if (resNotifications.ok) {
           const text = await resNotifications.text();
           if (!text.trim().startsWith("<")) {
-            const allNotifications = JSON.parse(text);
+            const notifPage = JSON.parse(text);
+            const allNotifications = Array.isArray(notifPage) ? notifPage : notifPage.items;
             const myShipmentIds = new Set(myShipments.map(s => s.id));
             const myNotifs = allNotifications.filter((n: any) => 
               n.shipmentId && 
@@ -461,7 +463,8 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           if (resChat.ok) {
             const chatText = await resChat.text();
             if (!chatText.trim().startsWith("<")) {
-              const msgs = JSON.parse(chatText);
+              const chatPage = JSON.parse(chatText);
+              const msgs = Array.isArray(chatPage) ? chatPage : chatPage.items;
               setInquiries(prev => ({ ...prev, [sh.id]: msgs }));
             }
           }
@@ -596,7 +599,8 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         if (resChat.ok) {
           const chatText = await resChat.text();
           if (!chatText.trim().startsWith("<")) {
-            const msgs = JSON.parse(chatText);
+            const chatPage = JSON.parse(chatText);
+            const msgs = Array.isArray(chatPage) ? chatPage : chatPage.items;
             setInquiries(prev => ({ ...prev, [shipmentId]: msgs }));
           }
         }
