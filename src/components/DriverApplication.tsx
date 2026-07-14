@@ -14,12 +14,12 @@ import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
-import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment, mergeNewerChatMessages, prependOlderChatMessages } from "../lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 import { encodePageCursor } from "../lib/pagination";
-import { fetchAllShipmentPages } from "../lib/shipmentPagination";
+import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
@@ -184,6 +184,14 @@ export default function DriverApplication({
   }, [loggedInDriverId]);
 
   const [shipments, setShipments] = useState<Shipment[]>([]);
+  // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+  // returns only the latest page (default 50) — these track cursor
+  // pagination for the explicit "Load Older Shipments" action, and the
+  // ref tracks the delta-poll ("since") position for the 12s interval.
+  const [shipmentsNextCursor, setShipmentsNextCursor] = useState<string | null>(null);
+  const [shipmentsHasMore, setShipmentsHasMore] = useState(false);
+  const [shipmentsLoadingMore, setShipmentsLoadingMore] = useState(false);
+  const shipmentsSinceCursorRef = React.useRef<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   
@@ -195,18 +203,20 @@ export default function DriverApplication({
     activeShipmentIdRef.current = activeShipment?.id ?? null;
   }, [activeShipment?.id]);
 
-  // Notifications scoped to this driver's own shipments, plus anything
-  // addressed directly to this driver regardless of shipment (e.g.
-  // "Driver Approved" — see AppNotification.recipientUserId).
-  // isNotificationForDriver is shared with server.ts's own GET
-  // /api/notifications scoping so the two can't silently drift apart.
-  const myNotifications = useMemo(() => {
-    const myShipmentIds = new Set([
-      ...shipments.map(s => s.id),
-      ...(activeShipment ? [activeShipment.id] : [])
-    ]);
-    return notifications.filter(n => isNotificationForDriver(n, loggedInDriverId || "", myShipmentIds));
-  }, [notifications, shipments, activeShipment, loggedInDriverId]);
+  // Phase 2A follow-up (blocking-issue fix): `notifications` state is
+  // already scoped to this driver's own shipments server-side (GET
+  // /api/notifications — buildDriverOwnedShipmentQueryScopes +
+  // fetchOwnedShipmentIds, server.ts), independently of whatever page of
+  // GET /api/shipments happens to be loaded into `shipments`. Previously
+  // this re-filtered by `myShipmentIds` derived from `shipments` as a
+  // "can't silently drift from the server" mirror — back when `shipments`
+  // always held this driver's ENTIRE list that was a harmless no-op; now
+  // that GET /api/shipments returns only the latest page, the same
+  // re-check would silently hide a notification for any shipment older
+  // than the loaded page from the driver's own notification bell. Removed
+  // rather than left in as a stale, now-incorrect gate — `notifications`
+  // is used directly.
+  const myNotifications = notifications;
   // Notification Phase 1 correction: unread status is per-user
   // (readByUserIds), not the legacy shared `read` flag — reading the
   // shared flag here would mean one driver's (or admin's, or client's)
@@ -594,7 +604,15 @@ export default function DriverApplication({
   };
 
   // Fetch drivers list & shipment context
-  const fetchData = async () => {
+  // Phase 2A follow-up (blocking-issue fix): `force` controls whether
+  // this reloads the latest-50 page (full replace, resets pagination —
+  // initial load, driver/active-shipment switch, and every "just
+  // performed an action, refresh now" call site) or fetches only a
+  // `since` delta merged into whatever is already loaded (the 12s
+  // interval poll below, force=false) — never a recurring full paginated
+  // reload. fetchAllShipmentPages (page-through-to-exhaustion) is no
+  // longer used on this normal loading path at all.
+  const fetchData = async (force = true) => {
     try {
       const safeJson = async (res: Response) => {
         const text = await res.text();
@@ -613,31 +631,58 @@ export default function DriverApplication({
         setDrivers(driversList);
       }
 
-      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
-      // cursor-paginated and scoped server-side to this driver's own
-      // assigned/additional-driver shipments (buildDriverOwnedShipmentQueryScopes,
-      // server.ts) — the `driverId` query param below was already ignored
-      // by the server (scoping always came from the verified session, not
-      // a client-supplied id) and is left in place only for backward-
-      // compatible URL logging/debugging, not because the server reads it.
-      // fetchAllShipmentPages pages through to exhaustion (in practice a
-      // single page for one driver's own shipment count) so
-      // `activeShipmentsList` below keeps meaning "every shipment this
-      // driver can see," unchanged.
-      let activeShipmentsList: Shipment[] = [];
-      const list = await fetchAllShipmentPages(async (cursor) => {
-        const url = `/api/shipments?driverId=${selectedDriverId}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      // Phase 2A follow-up (blocking-issue fix): GET /api/shipments is
+      // scoped server-side to this driver's own assigned/additional-driver
+      // shipments (buildDriverOwnedShipmentQueryScopes, server.ts) — the
+      // `driverId` query param below was already ignored by the server
+      // (scoping always came from the verified session, not a
+      // client-supplied id) and is left in place only for backward-
+      // compatible URL logging/debugging, not because the server reads
+      // it. `force` fetches the latest 50 (full replace); otherwise a
+      // `since` delta is merged into the existing list by id
+      // (mergeShipmentsSince) — an upsert, never a replace/truncate, so
+      // already-loaded older pages (from "Load Older Shipments") survive
+      // every poll tick.
+      let mergedList: Shipment[] = shipments;
+      if (force) {
+        const url = `/api/shipments?driverId=${selectedDriverId}&limit=50`;
         const res = await apiFetch(url);
-        if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
-        const data = await safeJson(res);
-        return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
-      });
-      activeShipmentsList = list;
-      setShipments(list);
+        if (res.ok) {
+          const data = await safeJson(res);
+          const items: Shipment[] = data.items || [];
+          mergedList = items;
+          setShipments(items);
+          setShipmentsNextCursor(data.nextCursor ?? null);
+          setShipmentsHasMore(!!data.hasMore);
+          const newestUpdated = items.reduce<Shipment | null>(
+            (latest, s) => (!latest || s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest),
+            null
+          );
+          shipmentsSinceCursorRef.current = newestUpdated
+            ? encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id })
+            : null;
+        }
+      } else {
+        const cursor = shipmentsSinceCursorRef.current;
+        if (cursor) {
+          const res = await apiFetch(`/api/shipments?driverId=${selectedDriverId}&since=${encodeURIComponent(cursor)}`);
+          if (res.ok) {
+            const data = await safeJson(res);
+            const items: Shipment[] = data.items || [];
+            if (items.length > 0) {
+              mergedList = mergeShipmentsSince(shipments, items);
+              setShipments(mergedList);
+              const newestUpdated = items.reduce<Shipment>((latest, s) => (s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest), items[0]);
+              shipmentsSinceCursorRef.current = encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id });
+            }
+          }
+        }
+      }
+      const activeShipmentsList = mergedList;
 
       // update active shipment details dynamically if it is loaded
       if (activeShipment) {
-        const fresh = list.find((s: Shipment) => s.id === activeShipment.id);
+        const fresh = mergedList.find((s: Shipment) => s.id === activeShipment.id);
         if (fresh) {
           setActiveShipment(fresh);
           const isCompleted = fresh.status === 'Delivered' || fresh.status === 'Arrived' || fresh.status === 'Closed' || fresh.status === 'Completed';
@@ -700,18 +745,21 @@ export default function DriverApplication({
         const notifPage = await safeJson(resNotifs);
         const rawList: AppNotification[] = Array.isArray(notifPage) ? notifPage : notifPage.items;
 
-        // Filter list strictly to this driver's shipments, plus anything
-        // addressed directly to this driver regardless of shipment (e.g.
-        // "Driver Approved" — see AppNotification.recipientUserId). The
-        // backend (GET /api/notifications) already scopes both cases the
-        // same way via the same isNotificationForDriver helper; this
-        // mirrors that so a locally-computed active-job list can't
-        // disagree with it.
-        const driverShipmentIds = new Set([
-          ...activeShipmentsList.map(s => s.id),
-          ...(activeShipment ? [activeShipment.id] : [])
-        ]);
-        const list = rawList.filter(n => isNotificationForDriver(n, loggedInDriverId || "", driverShipmentIds));
+        // Phase 2A follow-up (blocking-issue fix): GET /api/notifications
+        // already scopes results to this driver's own
+        // assigned/additional-driver shipments server-side, INDEPENDENTLY
+        // of GET /api/shipments (buildDriverOwnedShipmentQueryScopes +
+        // fetchOwnedShipmentIds, server.ts) — it does not depend on what's
+        // currently loaded into `activeShipmentsList` here. The old
+        // `driverShipmentIds`-based re-filter below was redundant (and
+        // harmless) back when `activeShipmentsList` always held this
+        // driver's ENTIRE shipment list; now that GET /api/shipments
+        // returns only the latest page, that same re-check would have
+        // silently hidden every notification for a shipment older than
+        // the loaded page — removed rather than left in as a stale,
+        // now-incorrect gate. isNotificationForDriver's recipientUserId
+        // branch (e.g. "Driver Approved") is unaffected either way.
+        const list = rawList;
         
         if (knownNotificationIdsRef.current.size === 0) {
           const initialIds = new Set<string>();
@@ -752,9 +800,52 @@ export default function DriverApplication({
     }
   };
 
+  // Phase 2A follow-up (blocking-issue fix): explicit "Load Older
+  // Shipments" action, same pattern as AdminPanel/ClientDashboard. Always
+  // strictly older rows (cursor mode is createdAt DESC from wherever the
+  // currently-loaded list ends) — plain concatenation is correct; still
+  // de-duplicated by id defensively.
+  const handleLoadMoreShipments = async () => {
+    if (!shipmentsHasMore || !shipmentsNextCursor || shipmentsLoadingMore) return;
+    setShipmentsLoadingMore(true);
+    try {
+      const res = await apiFetch(`/api/shipments?driverId=${selectedDriverId}&limit=50&cursor=${encodeURIComponent(shipmentsNextCursor)}`);
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text.trim().startsWith("<")) return;
+      const data = JSON.parse(text);
+      const newItems: Shipment[] = data.items || [];
+      setShipments(prev => {
+        const seenIds = new Set(prev.map(s => s.id));
+        return [...prev, ...newItems.filter(s => !seenIds.has(s.id))];
+      });
+      setShipmentsNextCursor(data.nextCursor ?? null);
+      setShipmentsHasMore(!!data.hasMore);
+    } catch (err) {
+      console.warn("Failed to load older shipments:", err);
+    } finally {
+      setShipmentsLoadingMore(false);
+    }
+  };
+
+  // Phase 2A follow-up (blocking-issue fix): the recurring 12s poll is
+  // always a `since` delta (force=false) — never a full paginated
+  // reload. The effect-triggered call itself (on mount, and whenever
+  // selectedDriverId/activeShipment?.id changes) stays a full force=true
+  // latest-50 load, which is also where pagination state gets reset —
+  // explicitly so for a genuine selectedDriverId (account/scope) change,
+  // not merely switching which already-loaded shipment is "active."
+  const prevSelectedDriverIdRef = React.useRef<string | null>(null);
   useEffect(() => {
+    if (shouldResetShipmentPagination(prevSelectedDriverIdRef.current, selectedDriverId)) {
+      setShipments([]);
+      setShipmentsNextCursor(null);
+      setShipmentsHasMore(false);
+      shipmentsSinceCursorRef.current = null;
+    }
+    prevSelectedDriverIdRef.current = selectedDriverId;
     fetchData();
-    const interval = setInterval(fetchData, 12000);
+    const interval = setInterval(() => fetchData(false), 12000);
     return () => clearInterval(interval);
   }, [selectedDriverId, activeShipment?.id]);
 
@@ -1805,6 +1896,25 @@ export default function DriverApplication({
                           <p className="text-xs text-slate-400 font-bold">{t('noAssignedShipments')}</p>
                           <p className="text-[10px] text-slate-500 mt-1">Check back later for new assignments</p>
                         </div>
+                      </div>
+                    )}
+
+                    {/* Phase 2A follow-up (blocking-issue fix): explicit
+                        "Load Older Shipments" action — GET /api/shipments
+                        now returns only the latest 50 (default) at a
+                        time. */}
+                    {shipmentsHasMore && (
+                      <div className="flex justify-center pt-1">
+                        <button
+                          type="button"
+                          onClick={handleLoadMoreShipments}
+                          disabled={shipmentsLoadingMore}
+                          className="px-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-[11px] font-bold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                        >
+                          {shipmentsLoadingMore
+                            ? (lang === 'tr' ? "Yükleniyor..." : (lang === 'ar' ? "جارٍ التحميل..." : "Loading..."))
+                            : (lang === 'tr' ? "Daha Eski Sevkiyatları Yükle" : (lang === 'ar' ? "تحميل شحنات أقدم" : "Load Older Shipments"))}
+                        </button>
                       </div>
                     )}
                   </div>

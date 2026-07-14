@@ -15,7 +15,6 @@ import { validateUpload } from "../lib/uploadValidation";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage } from "../lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
-import { fetchAllShipmentPages } from "../lib/shipmentPagination";
 
 // Local multilingual dictionary
 const t = {
@@ -169,11 +168,23 @@ const INQUIRY_COMPOSER_MAX_HEIGHT_PX = 160;
 
 export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, isMobile = false, viewOnly = false }: ClientDashboardProps) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
+  // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+  // returns only the latest page (default 50) — these track cursor
+  // pagination for the explicit "Load Older Shipments" action.
+  const [shipmentsNextCursor, setShipmentsNextCursor] = useState<string | null>(null);
+  const [shipmentsHasMore, setShipmentsHasMore] = useState(false);
+  const [shipmentsLoadingMore, setShipmentsLoadingMore] = useState(false);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [freightTypeFilter, setFreightTypeFilter] = useState<'all' | 'land' | 'sea' | 'air'>('all');
   const [selectedShipment, setSelectedShipment] = useState<Shipment | null>(null);
+  const [selectedShipmentLoading, setSelectedShipmentLoading] = useState(false);
+  // Phase 2A follow-up (blocking-issue fix): GET /api/shipments/stats —
+  // a real, full-scope server aggregate (not `shipments.length`) for the
+  // "Total Shipments" tile below, so it stays accurate once only a page
+  // is loaded client-side.
+  const [shipmentStatsTotal, setShipmentStatsTotal] = useState<number | null>(null);
 
   // Chat/Inquiry States
   const [inquiries, setInquiries] = useState<{[shipmentId: string]: any[]}>({});
@@ -401,27 +412,45 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       setLoading(true);
       // Fetch core logistics datasets using apiFetch.
       //
-      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
-      // cursor-paginated and already scoped server-side to this client's
-      // own company (buildClientOwnedShipmentQueryScopes, server.ts) —
-      // fetchAllShipmentPages pages through to exhaustion (in practice a
-      // single page for one company's shipment count) so `allShipments`
-      // below keeps meaning "every shipment this client can see," same as
-      // before, just via bounded requests instead of one unbounded one.
+      // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+      // returns only the LATEST page (default 50), already scoped
+      // server-side to this client's own company
+      // (buildClientOwnedShipmentQueryScopes, server.ts) — no more
+      // page-through-to-exhaustion on this normal loading path. A client
+      // with more than one page of shipments sees the newest 50 first and
+      // reaches older ones via the explicit "Load Older Shipments" action
+      // (handleLoadMoreShipments below), the same UX pattern as
+      // AdminPanel's Shipments Registry tab.
       const resDrivers = await apiFetch("/api/drivers");
+      const resShipmentsPage = await apiFetch("/api/shipments?limit=50");
+      const resShipmentsStats = await apiFetch("/api/shipments/stats");
 
-      let allShipments: Shipment[] = [];
       let allDrivers: Driver[] = [];
+      let myShipments: Shipment[] = [];
+      let nextCursor: string | null = null;
+      let hasMore = false;
 
-      allShipments = await fetchAllShipmentPages(async (cursor) => {
-        const url = `/api/shipments?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-        const res = await apiFetch(url);
-        if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
-        const text = await res.text();
-        if (text.trim().startsWith("<")) return { items: [], nextCursor: null, hasMore: false };
-        const data = JSON.parse(text);
-        return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
-      });
+      if (resShipmentsPage.ok) {
+        const text = await resShipmentsPage.text();
+        if (!text.trim().startsWith("<")) {
+          const data = JSON.parse(text);
+          // The server already scopes this to the client's own company —
+          // this re-filter is a display-side belt-and-suspenders check
+          // only (see clientAccess.ts's own note on the server's strict,
+          // unnormalized companyName match vs. this normalized one), not
+          // a second source of truth.
+          myShipments = (data.items || []).filter((s: Shipment) =>
+            (s.companyName || "").toLowerCase().trim() === clientCompanyName.toLowerCase().trim()
+          );
+          nextCursor = data.nextCursor ?? null;
+          hasMore = !!data.hasMore;
+        }
+      }
+
+      if (resShipmentsStats.ok) {
+        const statsData = await resShipmentsStats.json();
+        setShipmentStatsTotal(typeof statsData.total === "number" ? statsData.total : null);
+      }
 
       if (resDrivers.ok) {
         const text = await resDrivers.text();
@@ -430,12 +459,9 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         }
       }
 
-      // Filter shipments strictly belonging to this corporate client
-      const myShipments = allShipments.filter(s => 
-        (s.companyName || "").toLowerCase().trim() === clientCompanyName.toLowerCase().trim()
-      );
-
       setShipments(myShipments);
+      setShipmentsNextCursor(nextCursor);
+      setShipmentsHasMore(hasMore);
       setDrivers(allDrivers);
 
       // Fetch customer notifications
@@ -446,12 +472,21 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           if (!text.trim().startsWith("<")) {
             const notifPage = JSON.parse(text);
             const allNotifications = Array.isArray(notifPage) ? notifPage : notifPage.items;
-            const myShipmentIds = new Set(myShipments.map(s => s.id));
-            const myNotifs = allNotifications.filter((n: any) => 
-              n.shipmentId && 
-              myShipmentIds.has(n.shipmentId) && 
-              n.type !== 'chat' && 
-              n.type !== 'doc_upload' && 
+            // Phase 2A follow-up (blocking-issue fix): GET /api/notifications
+            // already scopes results to this client's own company
+            // server-side, independently of GET /api/shipments
+            // (buildClientOwnedShipmentQueryScopes + fetchOwnedShipmentIds,
+            // server.ts) — it does NOT depend on what's currently loaded
+            // into `myShipments` here. The old `myShipmentIds.has(...)`
+            // re-check below was redundant (and harmless) back when
+            // `myShipments` always held the client's ENTIRE shipment list;
+            // now that GET /api/shipments returns only the latest page,
+            // that same re-check would have silently hidden every
+            // notification for a shipment older than the loaded page —
+            // removed rather than left in as a stale, now-incorrect gate.
+            const myNotifs = allNotifications.filter((n: any) =>
+              n.type !== 'chat' &&
+              n.type !== 'doc_upload' &&
               n.type !== 'assignment'
             );
             
@@ -488,6 +523,71 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
       console.error("Client dashboard loading exception: ", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Phase 2A follow-up (blocking-issue fix): explicit "Load Older
+  // Shipments" action, same pattern as AdminPanel's Shipments Registry
+  // tab. Always strictly older rows (cursor mode is createdAt DESC from
+  // wherever the currently-loaded list ends) — plain concatenation is
+  // correct; still de-duplicated by id defensively.
+  const handleLoadMoreShipments = async () => {
+    if (!shipmentsHasMore || !shipmentsNextCursor || shipmentsLoadingMore) return;
+    setShipmentsLoadingMore(true);
+    try {
+      const res = await apiFetch(`/api/shipments?limit=50&cursor=${encodeURIComponent(shipmentsNextCursor)}`);
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text.trim().startsWith("<")) return;
+      const data = JSON.parse(text);
+      const newItems: Shipment[] = (data.items || []).filter((s: Shipment) =>
+        (s.companyName || "").toLowerCase().trim() === clientCompanyName.toLowerCase().trim()
+      );
+      setShipments(prev => {
+        const seenIds = new Set(prev.map(s => s.id));
+        return [...prev, ...newItems.filter(s => !seenIds.has(s.id))];
+      });
+      setShipmentsNextCursor(data.nextCursor ?? null);
+      setShipmentsHasMore(!!data.hasMore);
+    } catch (err) {
+      console.warn("Failed to load older shipments:", err);
+    } finally {
+      setShipmentsLoadingMore(false);
+    }
+  };
+
+  // Phase 2A follow-up (blocking-issue fix): opening a specific shipment's
+  // detail (e.g. from a notification pointing at a shipment older than
+  // whatever page happens to be loaded) must not require downloading the
+  // whole list first — GET /api/shipments/:id is already permission-
+  // scoped exactly like the list endpoint (a client can only ever reach
+  // their own company's shipment; server.ts 403s otherwise), so this is
+  // safe to call directly for any shipment id.
+  const fetchShipmentById = async (id: string): Promise<Shipment | null> => {
+    try {
+      const res = await apiFetch(`/api/shipments/${id}`);
+      if (!res.ok) return null;
+      const text = await res.text();
+      if (text.trim().startsWith("<")) return null;
+      return JSON.parse(text);
+    } catch (err) {
+      console.warn("Failed to fetch shipment by id:", id, err);
+      return null;
+    }
+  };
+
+  const openShipmentById = async (id: string) => {
+    const alreadyLoaded = shipments.find(s => s.id === id);
+    if (alreadyLoaded) {
+      setSelectedShipment(alreadyLoaded);
+      return;
+    }
+    setSelectedShipmentLoading(true);
+    try {
+      const fetched = await fetchShipmentById(id);
+      if (fetched) setSelectedShipment(fetched);
+    } finally {
+      setSelectedShipmentLoading(false);
     }
   };
 
@@ -627,11 +727,21 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   };
 
   // Stats Counters
-  const totalShipments = shipments.length;
-  const activeShipments = shipments.filter(s => 
+  //
+  // Phase 2A follow-up (blocking-issue fix: dashboard aggregate
+  // accuracy). "Total Shipments" is the real server aggregate
+  // (GET /api/shipments/stats, fetched in fetchDashboardData) — never
+  // `shipments.length`, which would silently under-report the moment
+  // there's more than one page. "Active"/"Completed" below are NOT
+  // server-aggregated (client role only gets a plain total, not a status
+  // breakdown — see fetchShipmentStats' own header comment, server.ts,
+  // for why) and remain computed from whichever shipments are currently
+  // loaded — labeled as such wherever they're rendered.
+  const totalShipments = shipmentStatsTotal ?? 0;
+  const activeShipments = shipments.filter(s =>
     !["Delivered", "Completed", "Closed", "Arrived"].includes(s.status)
   ).length;
-  const completedShipments = shipments.filter(s => 
+  const completedShipments = shipments.filter(s =>
     ["Delivered", "Completed", "Closed", "Arrived"].includes(s.status)
   ).length;
 
@@ -744,7 +854,10 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         {/* Active Transits */}
         <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
           <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">{curT.statsActive}</span>
+            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+              {curT.statsActive}
+              {shipmentsHasMore && <span className="text-slate-600 normal-case font-medium"> ({lang === 'tr' ? 'yüklenen' : (lang === 'ar' ? 'المحمّل' : 'loaded')})</span>}
+            </span>
             <span className="text-2xl font-black text-orange-400">{activeShipments}</span>
           </div>
           <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-orange-400 border border-slate-800">
@@ -755,7 +868,10 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
         {/* Deliveries Completed */}
         <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
           <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">{curT.statsCompleted}</span>
+            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+              {curT.statsCompleted}
+              {shipmentsHasMore && <span className="text-slate-600 normal-case font-medium"> ({lang === 'tr' ? 'yüklenen' : (lang === 'ar' ? 'المحمّل' : 'loaded')})</span>}
+            </span>
             <span className="text-2xl font-black text-emerald-400">{completedShipments}</span>
           </div>
           <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-emerald-400 border border-slate-800">
@@ -896,11 +1012,36 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 </div>
               );
             })}
+
+            {/* Phase 2A follow-up (blocking-issue fix): explicit "Load
+                Older Shipments" action — GET /api/shipments now returns
+                only the latest 50 (default) at a time. Search/filter
+                above only searches whatever is currently loaded. */}
+            {shipmentsHasMore && (
+              <div className="flex justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={handleLoadMoreShipments}
+                  disabled={shipmentsLoadingMore}
+                  className="px-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-xs font-bold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {shipmentsLoadingMore
+                    ? (lang === 'tr' ? "Yükleniyor..." : (lang === 'ar' ? "جارٍ التحميل..." : "Loading..."))
+                    : (lang === 'tr' ? "Daha Eski Sevkiyatları Yükle" : (lang === 'ar' ? "تحميل شحنات أقدم" : "Load Older Shipments"))}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* RIGHT: Selected Shipment Deep-dive Panel */}
           <div className="lg:col-span-7">
-            {selectedShipment ? (
+            {selectedShipmentLoading ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 flex items-center justify-center h-64">
+                <div className="animate-pulse text-slate-500 text-xs font-bold">
+                  {lang === 'tr' ? "Sevkiyat yükleniyor..." : (lang === 'ar' ? "جارٍ تحميل الشحنة..." : "Loading shipment...")}
+                </div>
+              </div>
+            ) : selectedShipment ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 text-left space-y-6">
                 
                 {/* Header overview */}
@@ -1341,9 +1482,6 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
                   const isUnread = !isNotificationReadForUser(notif, clientId);
 
-                  // Find shipment link
-                  const linkedShipment = shipments.find(s => s.id === notif.shipmentId);
-
                   return (
                     <div 
                       key={notif.id} 
@@ -1372,11 +1510,17 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                         <span>
                           {new Date(notif.timestamp).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "short", day: "numeric" })} at {new Date(notif.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
                         </span>
-                        {linkedShipment && (
+                        {notif.shipmentId && (
+                          // Phase 2A follow-up (blocking-issue fix): no
+                          // longer gated on the shipment already being in
+                          // the loaded page — openShipmentById fetches it
+                          // directly via GET /api/shipments/:id when it
+                          // isn't, so a notification for an older shipment
+                          // is still reachable.
                           <button
-                            onClick={() => {
-                              setSelectedShipment(linkedShipment);
+                            onClick={async () => {
                               setIsNotifOpen(false);
+                              await openShipmentById(notif.shipmentId);
                             }}
                             className="text-orange-400 hover:text-white flex items-center gap-0.5 uppercase tracking-wider font-mono font-extrabold cursor-pointer transition-all active:scale-95"
                           >

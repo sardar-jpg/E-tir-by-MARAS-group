@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSecureShareView } from "./publicShareView";
+import { buildSecureShareView, resolveUniqueShareTokenMatch } from "./publicShareView";
 import type { Shipment } from "../types";
 
 function makeShipment(overrides: Partial<Shipment> = {}): Shipment {
@@ -116,5 +116,41 @@ describe("buildSecureShareView", () => {
     expect(view.documents[0].url).toBe("/api/share/tok_abc123/documents/doc-1");
     expect(view.photos).toHaveLength(1);
     expect(view.photos[0].url).toBe("/api/share/tok_abc123/documents/doc-2");
+  });
+});
+
+describe("resolveUniqueShareTokenMatch — Phase 2A follow-up (blocking-issue fix, duplicate shareToken safety)", () => {
+  it("returns null for zero matches — an unknown/malformed token", () => {
+    expect(resolveUniqueShareTokenMatch([])).toBeNull();
+  });
+
+  it("returns the single match unchanged in the normal (non-duplicate) case", () => {
+    const shipment = makeShipment({ id: "shipment-1" });
+    expect(resolveUniqueShareTokenMatch([shipment])).toBe(shipment);
+  });
+
+  it("INVARIANT: resolves a duplicate-token match set deterministically by lowest document id, never an arbitrary/first-seen one", () => {
+    const a = makeShipment({ id: "shipment-B" });
+    const b = makeShipment({ id: "shipment-A" });
+    const c = makeShipment({ id: "shipment-C" });
+    // Order in the input array must not affect the result — a real
+    // Firestore query's row order for a `.limit(n)` query with no
+    // orderBy is undefined, so this must not depend on input order.
+    expect(resolveUniqueShareTokenMatch([a, b, c])!.id).toBe("shipment-A");
+    expect(resolveUniqueShareTokenMatch([c, a, b])!.id).toBe("shipment-A");
+    expect(resolveUniqueShareTokenMatch([b, c, a])!.id).toBe("shipment-A");
+  });
+
+  it("INVARIANT: never returns a shipment NOT in the matches array — the wrong-shipment-exposure guard", () => {
+    const matches = [makeShipment({ id: "shipment-X" }), makeShipment({ id: "shipment-Y" })];
+    const resolved = resolveUniqueShareTokenMatch(matches);
+    expect(matches.map((m) => m.id)).toContain(resolved!.id);
+  });
+
+  it("is idempotent — resolving the same duplicate set twice always returns the same shipment", () => {
+    const matches = [makeShipment({ id: "shipment-2" }), makeShipment({ id: "shipment-1" })];
+    const first = resolveUniqueShareTokenMatch(matches);
+    const second = resolveUniqueShareTokenMatch(matches);
+    expect(first!.id).toBe(second!.id);
   });
 });

@@ -39,6 +39,10 @@ interface AdminDashboardSectionProps {
   activeShipmentsCount: number;
   totalShipmentsCount: number;
   completedShipmentsCount: number;
+  /** Phase 2A follow-up (blocking-issue fix): true when more shipments
+      exist beyond what's currently loaded (GET /api/shipments' own
+      `hasMore`) — gates the "loaded records only" notice below. */
+  shipmentsHasMore: boolean;
   pendingDocumentsCount: number;
   realTimeDocsStats: { name: string; count: number }[];
   notificationCountsChartData: { name: string; Alerts: number }[];
@@ -121,6 +125,7 @@ export default function AdminDashboardSection({
   activeShipmentsCount,
   totalShipmentsCount,
   completedShipmentsCount,
+  shipmentsHasMore,
   pendingDocumentsCount,
   realTimeDocsStats,
   notificationCountsChartData,
@@ -352,6 +357,28 @@ export default function AdminDashboardSection({
           </div>
         )}
       </div>
+
+      {/* Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+          returns only a bounded page — "Total Shipments," "Completed
+          Deliveries," "Active Shipments," and the Status Breakdown chart
+          below are real, full-scope server aggregates (GET
+          /api/shipments/stats), never a partial count presented as
+          complete. Everything else on this page (routes, fleet
+          utilization, freight-type split, currency totals) is computed
+          from whichever shipments are currently loaded in this session —
+          this notice only shows while more exist beyond that. */}
+      {shipmentsHasMore && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-[11px] text-amber-800 font-medium flex items-start gap-2">
+          <span className="mt-0.5">ℹ️</span>
+          <span>
+            {lang === 'tr'
+              ? "Toplam Sevkiyat, Tamamlanan Teslimat, Aktif Sevkiyat ve Durum Dağılımı grafiği tam ve doğru toplam rakamlardır. Bu sayfadaki diğer tüm metrikler (rotalar, filo doluluğu, para birimi toplamları) yalnızca şu anda yüklenmiş sevkiyatları yansıtır — daha fazlası mevcut."
+              : lang === 'ar'
+                ? "إجمالي الشحنات، التسليمات المكتملة، الشحنات النشطة، ورسم توزيع الحالة أدناه هي إجماليات دقيقة وكاملة. جميع المقاييس الأخرى في هذه الصفحة (المسارات، إشغال الأسطول، إجماليات العملات) تعكس فقط الشحنات المحمّلة حالياً — يوجد المزيد."
+                : "Total Shipments, Completed Deliveries, Active Shipments, and the Status Breakdown chart below are exact, complete totals. Every other metric on this page (routes, fleet utilization, currency totals) reflects only the shipments currently loaded — more exist beyond what's shown here."}
+          </span>
+        </div>
+      )}
 
       {/* KPI Summary Banner */}
       <div className={`grid ${isMobileMode ? 'grid-cols-1 gap-3' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'}`}>

@@ -52,6 +52,7 @@ import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession, deriveAdditionalDriverIds, buildDriverOwnedShipmentQueryScopes } from "./src/lib/driverVisibility";
 import { resolveShipmentListQueryScopes } from "./src/lib/shipmentListAccess";
+import { SHIPMENT_STATUS_GROUPS, zeroedShipmentStatusGroupCounts } from "./src/lib/shipmentStatusGroups";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
 import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
@@ -75,7 +76,8 @@ import {
 } from "./src/lib/pagination";
 import { resolveAdminNotificationPreferences, validateNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences, type NotificationPreferenceCategory } from "./src/lib/notificationPreferences";
 import { canDeletePushToken, selectPushTokensForAccountDeletion } from "./src/lib/pushTokenAccess";
-import { buildSecureShareView } from "./src/lib/publicShareView";
+import { buildSecureShareView, resolveUniqueShareTokenMatch } from "./src/lib/publicShareView";
+import { isMissingIndexError } from "./src/lib/firestoreErrors";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
 import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
@@ -145,6 +147,28 @@ class ServiceUnavailableError extends Error {
     super(message);
     this.name = "ServiceUnavailableError";
   }
+}
+
+/**
+ * Blocking-issue fix (Phase 2A follow-up, shipments/orders pagination):
+ * every query helper this PR added (queryDescendingPage/queryAscendingSince/
+ * findShipmentByShareToken) already throws ServiceUnavailableError under
+ * STRICT_PERSISTENCE instead of silently degrading to memory fallback —
+ * but a route handler's own generic `catch (err) { res.status(500)... }`
+ * previously swallowed that distinction and always answered 500. Call
+ * this first in a route's catch block so a genuine "the database isn't
+ * ready" condition (including a still-building composite index — see
+ * src/lib/firestoreErrors.ts) reaches the client as a retryable 503, not
+ * an opaque 500. Returns true (and has already written the response)
+ * when `err` was a ServiceUnavailableError; false otherwise, so the
+ * caller's own generic 500 handling still runs for anything else.
+ */
+function respondIfServiceUnavailable(err: unknown, res: express.Response): boolean {
+  if (err instanceof ServiceUnavailableError) {
+    res.status(503).json({ error: err.message });
+    return true;
+  }
+  return false;
 }
 
 
@@ -752,6 +776,18 @@ async function queryDescendingPage(
     const nextCursor = hasMore && last ? encodePageCursor({ ts: last[tsField], id: last.id }) : null;
     return { items: page, nextCursor, hasMore };
   } catch (error) {
+    // Blocking-issue fix: a missing/still-building composite index is a
+    // property of THIS query shape, not of Firestore's availability —
+    // never flip the process-wide useMemoryFallback flag for it (that
+    // would silently degrade every other Firestore-backed endpoint too).
+    // See src/lib/firestoreErrors.ts's own header comment for the full
+    // rationale and firestore.indexes.json's deployment-order note in the
+    // PR description this shipped with.
+    if (isMissingIndexError(error)) {
+      console.error(`Firestore composite index missing or still building for a paginated query on "${colName}" (filters: ${JSON.stringify(filters)}, order: ${tsField}). NOT switching to memory fallback — deploy/wait for firestore.indexes.json first. Underlying error:`, error);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError("Database index not ready yet. Please try again shortly.");
+      return memoryDescendingPage(colName, filters, cursor, limit, tsField);
+    }
     console.warn("Firestore paginated query failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
@@ -791,6 +827,13 @@ async function queryAscendingSince(
     const hasMore = docs.length > limit;
     return { items: docs.slice(0, limit), hasMore };
   } catch (error) {
+    // See queryDescendingPage's matching catch block above for why a
+    // missing index is handled separately from a connectivity failure.
+    if (isMissingIndexError(error)) {
+      console.error(`Firestore composite index missing or still building for a since-query on "${colName}" (filters: ${JSON.stringify(filters)}, order: ${tsField}). NOT switching to memory fallback — deploy/wait for firestore.indexes.json first. Underlying error:`, error);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError("Database index not ready yet. Please try again shortly.");
+      return memoryAscendingSince(colName, filters, cursor, limit, tsField);
+    }
     console.warn("Firestore since-query failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
@@ -911,6 +954,109 @@ async function fetchShipmentsSince(
   return { items: result.items, hasMore: result.hasMore || pages.some((p) => p.hasMore) };
 }
 
+export interface ShipmentStatsResult {
+  total: number;
+  byStatusGroup?: Record<string, number>;
+}
+
+/**
+ * Phase 2A follow-up (Firestore scalability audit, shipments/orders —
+ * blocking-issue fix: dashboard aggregate accuracy).
+ *
+ * With GET /api/shipments now returning only a bounded page (default 50,
+ * "load more" for older) instead of the caller's entire accessible scope,
+ * AdminPanel/ClientDashboard/DriverApplication can no longer honestly
+ * compute "how many shipments total" from `shipments.length` on whatever
+ * happens to be loaded — that would silently present a partial count as
+ * a complete business total the moment there are more than one page's
+ * worth. This is a real Firestore `.count()` AGGREGATE query (Admin SDK,
+ * firebase-admin v11.5+) — it counts matching documents server-side
+ * without transferring or reading their field data, so it stays cheap
+ * and bounded even for a collection far larger than any single page.
+ *
+ * Status-group breakdown (`byStatusGroup`, SHIPMENT_STATUS_GROUPS) is
+ * computed the same way — ADMIN ONLY. A driver/client's own count is
+ * already cheap and accurate via `total` alone; adding a `status`
+ * equality/`in` filter on TOP of their own ownership scope (a second
+ * field) would need a new composite index per role per status group,
+ * which this PR deliberately does not add (see the PR description's
+ * "prefer dedicated server aggregates ... without broadening this PR
+ * excessively" note) — admin's own scope is empty (`[]`), so a
+ * `status in [...]` filter alone needs no composite index at all (same
+ * reasoning as the admin no-filter list query). Driver/client dashboards
+ * fall back to computing any status breakdown they show from their own
+ * loaded records, clearly labeled as such in the UI — acceptable because
+ * a single driver/client's OWN shipment count is realistically far
+ * smaller than the whole system's, unlike admin's.
+ */
+async function fetchShipmentStats(scopes: PageFilter[][], includeStatusGroups: boolean): Promise<ShipmentStatsResult> {
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryShipmentStats(scopes, includeStatusGroups);
+  }
+  try {
+    const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+    const scopeCounts = await Promise.all(effectiveScopes.map((filters) => countShipmentsForScope(filters)));
+    // Summed, not deduplicated across scopes — see this function's own
+    // header comment: only affects the rare case of a driver who is
+    // simultaneously the primary AND an additional driver on the exact
+    // same shipment (a data anomaly, not a normal state), and only for
+    // this display-only total, never for permissions.
+    const total = scopeCounts.reduce((a, b) => a + b, 0);
+    if (!includeStatusGroups) return { total };
+    const groupCounts = await Promise.all(
+      SHIPMENT_STATUS_GROUPS.map((g) => countShipmentsForScope([{ field: "status", op: "in", value: g.statuses }]))
+    );
+    const byStatusGroup: Record<string, number> = {};
+    SHIPMENT_STATUS_GROUPS.forEach((g, i) => { byStatusGroup[g.key] = groupCounts[i]; });
+    return { total, byStatusGroup };
+  } catch (error) {
+    if (isMissingIndexError(error)) {
+      console.error(`Firestore composite index missing or still building for a shipment stats aggregate query. NOT switching to memory fallback — deploy/wait for firestore.indexes.json first. Underlying error:`, error);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError("Database index not ready yet. Please try again shortly.");
+      return memoryShipmentStats(scopes, includeStatusGroups);
+    }
+    console.warn("Firestore shipment stats query failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryShipmentStats(scopes, includeStatusGroups);
+  }
+}
+
+async function countShipmentsForScope(filters: PageFilter[]): Promise<number> {
+  if (hasUnsatisfiableFilter(filters)) return 0;
+  let q: FirebaseFirestore.Query = db!.collection("shipments");
+  for (const f of filters) {
+    q = q.where(f.field, f.op as any, f.value);
+  }
+  const snapshot = await withTimeout(q.count().get(), 5000, "Firestore count aggregate query timed out");
+  return snapshot.data().count;
+}
+
+function memoryShipmentStats(scopes: PageFilter[][], includeStatusGroups: boolean): ShipmentStatsResult {
+  const mStore = getMemoryStore();
+  const items = (mStore.shipments || []) as any[];
+  const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+  // Memory fallback naturally dedupes across scopes via the Set (more
+  // accurate than the real-Firestore summed-counts path above for the
+  // rare driver double-match edge case) — an intentional, harmless
+  // real-vs-memory asymmetry for a display-only total, not a correctness
+  // requirement either mode needs to match exactly.
+  const matchedIds = new Set<string>();
+  for (const filters of effectiveScopes) {
+    for (const item of applyMemoryFilters(items, filters)) matchedIds.add(item.id);
+  }
+  const total = matchedIds.size;
+  if (!includeStatusGroups) return { total };
+  const scopedItems = items.filter((i) => matchedIds.has(i.id));
+  const byStatusGroup: Record<string, number> = {};
+  for (const group of SHIPMENT_STATUS_GROUPS) {
+    byStatusGroup[group.key] = scopedItems.filter((i) => group.statuses.includes(i.status)).length;
+  }
+  return { total, byStatusGroup };
+}
+
 /**
  * Phase 2A (Firestore scalability audit, shipments/orders).
  *
@@ -918,11 +1064,22 @@ async function fetchShipmentsSince(
  * proxy, subscribe) each used to read the ENTIRE `shipments` collection
  * just to find the one document whose `shareToken` matches — the same
  * "full scan to find one row" shape already fixed elsewhere in this PR.
- * `shareToken` has always been a plain, unique, always-populated field
- * (generateShareToken() at shipment-creation time — see POST
- * /api/shipments), so this is a single real `where("shareToken","==",...)
- * .limit(1)` query, not a scan. A malformed/unknown token simply matches
- * zero documents, same as the old `.find()` returning `undefined`; the
+ * Every `shareToken` generated today (generateShareToken(), POST
+ * /api/shipments) is a 192-bit crypto-random value, not a practical
+ * collision risk — but this is NOT bounded to `.limit(1)`. Firestore has
+ * no unique-constraint mechanism on a plain document field, and
+ * isLegacyShareToken's own existence (below) proves this app once
+ * assigned predictable, non-crypto-random tokens to older shipments —
+ * a duplicate is a real, if rare, possibility for legacy/migrated data
+ * (blocking-issue fix: "do not expose the wrong shipment if duplicate
+ * tokens exist"). Fetching a small bounded page (5, not 1) and resolving
+ * through resolveUniqueShareTokenMatch (src/lib/publicShareView.ts) means
+ * a duplicate is detected, logged loudly for operator follow-up, and
+ * resolved the SAME way on every request/server instance — never
+ * "whichever one Firestore's undefined internal ordering returns first,"
+ * which could otherwise show different visitors different shipments for
+ * the exact same link. A malformed/unknown token simply matches zero
+ * documents, same as the old `.find()` returning `undefined`; the
  * `isLinkShared` check callers already perform is unchanged.
  */
 async function findShipmentByShareToken(token: string): Promise<Shipment | null> {
@@ -932,12 +1089,27 @@ async function findShipmentByShareToken(token: string): Promise<Shipment | null>
     return memoryFindShipmentByShareToken(token);
   }
   try {
-    const q: FirebaseFirestore.Query = db!.collection("shipments").where("shareToken", "==", token).limit(1);
+    const q: FirebaseFirestore.Query = db!.collection("shipments").where("shareToken", "==", token).limit(5);
     const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore share-token lookup timed out");
     if (snapshot.empty) return null;
-    const d = snapshot.docs[0];
-    return { id: d.id, ...(d.data() as any) } as Shipment;
+    const matches = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }) as Shipment);
+    if (matches.length > 1) {
+      console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — resolving deterministically to the lowest document id. This indicates a legacy/migrated record and should be investigated; see resolveUniqueShareTokenMatch's header comment.`);
+    }
+    return resolveUniqueShareTokenMatch(matches);
   } catch (error) {
+    if (isMissingIndexError(error)) {
+      // where("shareToken","==",...) with no orderBy is a single-field
+      // equality query — Firestore's automatic per-field indexing already
+      // covers this with no composite index required, so this branch is
+      // not expected to actually trigger for this query. Handled anyway
+      // for consistency with queryDescendingPage/queryAscendingSince
+      // above and defense against a future change to this query adding
+      // an orderBy without updating firestore.indexes.json.
+      console.error(`Firestore index issue on share-token lookup (unexpected for a single-field equality query). NOT switching to memory fallback. Underlying error:`, error);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError("Database index not ready yet. Please try again shortly.");
+      return memoryFindShipmentByShareToken(token);
+    }
     console.warn("Firestore share-token lookup failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
@@ -949,7 +1121,11 @@ async function findShipmentByShareToken(token: string): Promise<Shipment | null>
 function memoryFindShipmentByShareToken(token: string): Shipment | null {
   const mStore = getMemoryStore();
   const items = (mStore.shipments || []) as Shipment[];
-  return items.find((s) => s.shareToken === token) || null;
+  const matches = items.filter((s) => s.shareToken === token);
+  if (matches.length > 1) {
+    console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — resolving deterministically to the lowest document id.`);
+  }
+  return resolveUniqueShareTokenMatch(matches);
 }
 
 /**
@@ -2948,6 +3124,7 @@ async function startServer() {
       const page = await fetchShipmentsPage(scopes, cursorParam.cursor, limit);
       res.json({ items: applyRoleView(page.items), nextCursor: page.nextCursor, hasMore: page.hasMore });
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to fetch shipments" });
     }
@@ -3122,6 +3299,42 @@ async function startServer() {
     }
   });
 
+  // 2.5. Get Shipment Stats (dashboard aggregate totals)
+  //
+  // Phase 2A follow-up (blocking-issue fix: dashboard aggregate
+  // accuracy). Registered BEFORE GET /api/shipments/:id so Express
+  // doesn't swallow this path as `:id === "stats"` — see
+  // fetchShipmentStats' own header comment for what this returns and
+  // why the status breakdown is admin-only. Role-scoped exactly like
+  // GET /api/shipments (resolveShipmentListQueryScopes) — a driver/
+  // client never sees a count of anyone else's shipments.
+  app.get("/api/shipments/stats", requireAuth, async (req, res) => {
+    try {
+      if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
+        return res.status(403).json({ error: "Accounts-role admins cannot view the shipment registry." });
+      }
+      let clientCompanyName: string | null = null;
+      if (req.session!.role === "client") {
+        const clientDoc = await getDoc(doc(db, "clients", req.session!.id));
+        clientCompanyName = clientDoc.exists() ? (clientDoc.data() as Client).companyName || null : null;
+      }
+      const { scopes, isEmpty } = resolveShipmentListQueryScopes(
+        { role: req.session!.role, id: req.session!.id },
+        clientCompanyName
+      );
+      const includeStatusGroups = req.session!.role === "admin";
+      if (isEmpty) {
+        return res.json({ total: 0, ...(includeStatusGroups ? { byStatusGroup: zeroedShipmentStatusGroupCounts() } : {}) });
+      }
+      const stats = await fetchShipmentStats(scopes, includeStatusGroups);
+      res.json(stats);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to fetch shipment stats" });
+    }
+  });
+
   // 3. Get Shipment Profile
   app.get("/api/shipments/:id", requireAuth, async (req, res) => {
     try {
@@ -3153,6 +3366,7 @@ async function startServer() {
 
       res.json(buildShipmentViewForRole(shipment, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to fetch shipment details" });
     }
@@ -4303,6 +4517,7 @@ async function startServer() {
 
       res.json(buildSecureShareView(shipment));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to look up shared tracking link" });
     }
@@ -4350,6 +4565,7 @@ async function startServer() {
       res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(docItem.name || "document")}"`);
       res.send(Buffer.from(arrayBuffer));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error("Public document download failed:", err);
       res.status(500).json({ error: "Failed to retrieve document." });
     }
@@ -4402,6 +4618,7 @@ async function startServer() {
       // expects from /api/share/:token, not the full internal record.
       res.json(buildSecureShareView(updatedShipment));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error("Public subscribe failed:", err);
       res.status(500).json({ error: "Failed to subscribe to updates." });
     }

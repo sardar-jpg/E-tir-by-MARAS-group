@@ -32,6 +32,38 @@ import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./docum
 
 export type PublicShareView = ReturnType<typeof buildSecureShareView>;
 
+/**
+ * Phase 2A follow-up (Firestore scalability audit, shipments/orders —
+ * blocking-issue fix).
+ *
+ * `shareToken` has always been generated with generateShareToken()
+ * (server.ts) — 192 bits of crypto.randomBytes, base64url-encoded — which
+ * is not a practical collision risk going forward. The real risk is
+ * historical: this codebase's own isLegacyShareToken (server.ts) exists
+ * specifically because OLDER shipments were assigned predictable,
+ * sequential "token-N" values before the crypto-random scheme shipped,
+ * and nothing ever enforced uniqueness on that field at write time (no
+ * Firestore unique-constraint mechanism exists for a plain document
+ * field). A duplicate token — whether from that legacy scheme, a data
+ * migration mistake, or manual Firestore editing — combined with
+ * findShipmentByShareToken's `where("shareToken","==",token)` query
+ * (server.ts) returning MULTIPLE matches would otherwise resolve to
+ * "whichever document Firestore's undefined internal ordering happens to
+ * return first" — non-deterministic across requests/server instances,
+ * meaning the exact same public tracking link could show one visitor a
+ * different shipment than it shows another. This makes that resolution
+ * deterministic instead: every caller, on every server instance, for the
+ * same set of duplicate matches, picks the same one (lowest document id)
+ * — never the wrong shipment inconsistently, even though a duplicate
+ * token is itself a data-integrity bug that should be fixed at the
+ * source (see the migration note in this PR's description).
+ */
+export function resolveUniqueShareTokenMatch(matches: Shipment[]): Shipment | null {
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+  return [...matches].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+}
+
 export function buildSecureShareView(shipment: Shipment) {
   return {
     shipmentNumber: shipment.shipmentNumber,

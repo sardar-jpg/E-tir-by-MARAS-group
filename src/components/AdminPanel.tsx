@@ -19,7 +19,7 @@ import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { encodePageCursor } from "../lib/pagination";
-import { fetchAllShipmentPages, mergeShipmentsSince } from "../lib/shipmentPagination";
+import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import {
   Plus, Search, Filter, ShieldCheck, Share2, MessageSquare,
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
@@ -309,6 +309,16 @@ export default function AdminPanel({
 
   // State Management
   const [shipments, setShipments] = useState<Shipment[]>([]);
+  // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+  // returns only the latest page (default 50) — these track the cursor
+  // pagination state for the explicit "Load Older Shipments" action, and
+  // shipmentStats holds the server-computed accessible-scope totals
+  // (GET /api/shipments/stats) so the dashboard never presents a partial
+  // "however many happen to be loaded" count as a global business total.
+  const [shipmentsNextCursor, setShipmentsNextCursor] = useState<string | null>(null);
+  const [shipmentsHasMore, setShipmentsHasMore] = useState(false);
+  const [shipmentsLoadingMore, setShipmentsLoadingMore] = useState(false);
+  const [shipmentStats, setShipmentStats] = useState<{ total: number; byStatusGroup?: Record<string, number> } | null>(null);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [selectedPerformanceDriver, setSelectedPerformanceDriver] = useState<Driver | null>(null);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
@@ -1263,26 +1273,37 @@ MARAS Group etir Center`;
       // admins can't view the shipment/driver registry, adminAccess.ts)
       // instead of firing it and discarding a 403.
       //
-      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
-      // cursor-paginated (bounded ≤200/page) instead of one unbounded
-      // read — fetchAllShipmentPages pages through to exhaustion so this
-      // dashboard's aggregates/search (computed below from the full
-      // `shipments` state) keep seeing the complete accessible scope,
-      // exactly as before, just via N bounded requests instead of one
-      // unbounded one.
-      let shipmentsData: Shipment[] | null = null;
-      if (canViewShipmentRegistry(resolvedAdminTypeForSWR)) {
-        shipmentsData = await fetchAllShipmentPages(async (cursor) => {
-          const url = `/api/shipments?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-          const res = await apiFetch(url);
-          if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
-          const text = await res.text();
+      // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
+      // returns only the LATEST page (default 50) — fetchAllShipmentPages
+      // (page-through-to-exhaustion) is no longer used on this normal
+      // loading path at all; a user with thousands of shipments must no
+      // longer download and hold all of them just to open the dashboard.
+      // Only fetched on a `force` call (initial mount / manual refresh) —
+      // the throttled 12s SWR cycle (`force: false`) deliberately skips
+      // shipments entirely and relies on the dedicated since-mode delta
+      // poll (pollShipments, below) to keep the already-loaded list
+      // fresh, so this is never a "recurring full paginated reload every
+      // 12 seconds." Dashboard totals come from GET /api/shipments/stats
+      // (a real server-side aggregate, not `shipments.length`) so they
+      // stay accurate even though only one page is held client-side.
+      let shipmentsPage: { items: Shipment[]; nextCursor: string | null; hasMore: boolean } | null = null;
+      let shipmentsStatsData: { total: number; byStatusGroup?: Record<string, number> } | null = null;
+      if (canViewShipmentRegistry(resolvedAdminTypeForSWR) && force) {
+        const [resShipmentsPage, resShipmentsStats] = await Promise.all([
+          apiFetch("/api/shipments?limit=50"),
+          apiFetch("/api/shipments/stats"),
+        ]);
+        if (resShipmentsPage.ok) {
+          const text = await resShipmentsPage.text();
           if (text.trim().startsWith("<")) {
             throw new Error("Received HTML instead of JSON. The backend server might still be initializing.");
           }
           const data = JSON.parse(text);
-          return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
-        });
+          shipmentsPage = { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
+        }
+        if (resShipmentsStats.ok) {
+          shipmentsStatsData = await resShipmentsStats.json();
+        }
       }
       let resDrivers: Response | null = null;
       if (canViewDriverRoster(resolvedAdminTypeForSWR)) {
@@ -1321,12 +1342,18 @@ MARAS Group etir Center`;
         return JSON.parse(text);
       };
 
-      if (shipmentsData) {
-        setShipments(shipmentsData);
-        // Re-seed the delta-poll cursor from this full load's newest
+      if (shipmentsPage) {
+        // A `force` load always REPLACES local state with the fresh
+        // latest-50 page — this is a deliberate pagination reset (fresh
+        // account/session context, or an explicit user refresh), not a
+        // merge with whatever older pages happened to be loaded before.
+        setShipments(shipmentsPage.items);
+        setShipmentsNextCursor(shipmentsPage.nextCursor);
+        setShipmentsHasMore(shipmentsPage.hasMore);
+        // Re-seed the delta-poll cursor from this page's newest
         // `updatedAt` — every subsequent pollShipments tick asks for only
         // what changed after this point instead of re-fetching everything.
-        const newestUpdated = shipmentsData.reduce<Shipment | null>(
+        const newestUpdated = shipmentsPage.items.reduce<Shipment | null>(
           (latest, s) => (!latest || s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest),
           null
         );
@@ -1334,6 +1361,7 @@ MARAS Group etir Center`;
           ? encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id })
           : null;
       }
+      if (shipmentsStatsData) setShipmentStats(shipmentsStatsData);
       if (resDrivers && resDrivers.ok) setDrivers(await safeJson(resDrivers));
       if (resClients.ok) setClients(await safeJson(resClients));
       if (resVendors.ok) setVendors(await safeJson(resVendors));
@@ -1391,6 +1419,35 @@ MARAS Group etir Center`;
     }
   };
 
+  // Phase 2A follow-up (blocking-issue fix): explicit "Load Older
+  // Shipments" action — GET /api/shipments/:id/... requirement #3. Only
+  // ever appends strictly-older rows (cursor mode is always createdAt
+  // DESC from wherever the currently-loaded list ends), so a plain
+  // concatenation is correct; still de-duplicated by id defensively in
+  // case of an overlapping retry.
+  const handleLoadMoreShipments = async () => {
+    if (!shipmentsHasMore || !shipmentsNextCursor || shipmentsLoadingMore) return;
+    setShipmentsLoadingMore(true);
+    try {
+      const res = await apiFetch(`/api/shipments?limit=50&cursor=${encodeURIComponent(shipmentsNextCursor)}`);
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text.trim().startsWith("<")) return;
+      const data = JSON.parse(text);
+      const newItems: Shipment[] = data.items || [];
+      setShipments(prev => {
+        const seenIds = new Set(prev.map(s => s.id));
+        return [...prev, ...newItems.filter(s => !seenIds.has(s.id))];
+      });
+      setShipmentsNextCursor(data.nextCursor ?? null);
+      setShipmentsHasMore(!!data.hasMore);
+    } catch (err) {
+      console.warn("Failed to load older shipments:", err);
+    } finally {
+      setShipmentsLoadingMore(false);
+    }
+  };
+
   // SWR: Revalidate on Window Focus, Visibility Change, and Network state changes
   useEffect(() => {
     const handleFocus = () => {
@@ -1431,6 +1488,31 @@ MARAS Group etir Center`;
     };
   }, []);
 
+  // Phase 2A follow-up (blocking-issue fix): reset shipment pagination
+  // state whenever this AdminPanel instance's own account/role identity
+  // changes (adminEmail/adminType) WITHOUT necessarily unmounting — e.g.
+  // if a future/impersonation-style flow ever swaps which admin's data
+  // this session sees mid-session. Skips the very first run (already
+  // handled by the mount-time fetchData() above) so this only fires on
+  // an actual CHANGE, never doubles the initial load. Without this, a
+  // stale `nextCursor`/`shipmentsSinceCursorRef` from the PREVIOUS
+  // account's scope could resume "Load Older Shipments"/delta-polling
+  // against a cursor that belongs to a completely different accessible
+  // scope.
+  const prevAdminIdentityRef = React.useRef<string | null>(null);
+  useEffect(() => {
+    const identity = `${adminEmail || ""}:${adminType || ""}`;
+    const shouldReset = shouldResetShipmentPagination(prevAdminIdentityRef.current, identity);
+    prevAdminIdentityRef.current = identity;
+    if (!shouldReset) return;
+    setShipments([]);
+    setShipmentsNextCursor(null);
+    setShipmentsHasMore(false);
+    setShipmentStats(null);
+    shipmentsSinceCursorRef.current = null;
+    fetchData(true);
+  }, [adminEmail, adminType]);
+
   // SWR: Intelligent periodic background polling pattern that pauses on window blur
   useEffect(() => {
     const runPollingCycle = () => {
@@ -1454,22 +1536,29 @@ MARAS Group etir Center`;
 
   // Global polling mechanism to periodically refresh the shipment list data from the backend every 60 seconds
   //
-  // Phase 2A (Firestore scalability audit): delta (`since`) poll instead of
-  // a full re-fetch every tick — only shipments that are new or whose own
-  // fields changed since the last tick come back, merged into the existing
-  // `shipments` state by id (mergeShipmentsSince, shipmentPagination.ts).
-  // Known, documented limitation carried over from server.ts's own note:
-  // a shipment whose ONLY change was a document upload / share-link config
-  // update (both out of scope for this PR) won't appear here until the
-  // next full fetchData() load (the 12s SWR cycle above already provides
-  // that within ~15s in practice) — not a silent data-loss risk, just a
-  // bounded staleness window for that one specific case.
+  // Phase 2A follow-up (blocking-issue fix): delta (`since`) poll only —
+  // never a full re-fetch, and never pages through to exhaustion. Only
+  // shipments that are new or whose own fields changed since the last
+  // tick come back, merged into the existing `shipments` state BY ID
+  // (mergeShipmentsSince, shipmentPagination.ts) — a delta merge upserts
+  // into whatever is already loaded (including any older pages fetched
+  // via "Load Older Shipments"), it never replaces/truncates the list, so
+  // already-loaded older pages are preserved across every poll tick.
+  // fetchData's own 12s SWR cycle deliberately skips shipments entirely
+  // now (see fetchData's comment) — this 60s poll is the ONLY recurring
+  // shipments refresh, and it is always bounded/delta, never a full
+  // paginated reload. Known, documented limitation carried over from
+  // server.ts's own note: a shipment whose ONLY change was a document
+  // upload / share-link config update (both out of scope for this PR)
+  // won't appear here until the next explicit full load (manual refresh,
+  // or next mount) — not a silent data-loss risk, just a bounded
+  // staleness window for that one specific, out-of-scope case.
   useEffect(() => {
     const pollShipments = async () => {
       try {
         if (typeof window !== "undefined" && !navigator.onLine) return;
         // Accounts admins can't view the shipment registry (adminAccess.ts,
-        // same as fetchData's shipmentsData above) — skip rather than poll
+        // same as fetchData's shipmentsPage above) — skip rather than poll
         // into a guaranteed 403 every 60s.
         if (!canViewShipmentRegistry(adminType || 'super')) return;
         // Not yet seeded by an initial fetchData load (e.g. this tick fired
@@ -1487,6 +1576,15 @@ MARAS Group etir Center`;
               setShipments(prev => mergeShipmentsSince(prev, items));
               const newestUpdated = items.reduce<Shipment>((latest, s) => (s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest), items[0]);
               shipmentsSinceCursorRef.current = encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id });
+              // The dashboard's aggregate totals are a real server-side
+              // count, not derived from `shipments.length` — re-fetched
+              // here (a cheap count() aggregate, not a list read) only
+              // when something actually changed, so the totals stay
+              // accurate without a full shipments reload.
+              try {
+                const resStats = await apiFetch("/api/shipments/stats");
+                if (resStats.ok) setShipmentStats(await resStats.json());
+              } catch { /* stats refresh is best-effort; next poll tick retries */ }
             }
             console.log(`[Global Polling] Periodically refreshed shipment list data (60s timer, ${items.length} changed).`);
           }
@@ -3405,19 +3503,47 @@ MARAS Group etir Center`;
   };
 
   // Statistics calculation
-  const totalShipmentsCount = shipments.length;
-  const activeShipmentsCount = shipments.filter(s => s.status !== "Delivered" && s.status !== "Closed").length;
-  const completedShipmentsCount = shipments.filter(s => s.status === "Delivered" || s.status === "Closed").length;
+  //
+  // Phase 2A follow-up (blocking-issue fix: dashboard aggregate
+  // accuracy). GET /api/shipments now returns only a bounded page — these
+  // headline totals/status-breakdown numbers MUST NOT be derived from
+  // `shipments.length`/`shipments.filter(...)` anymore (that would
+  // silently present "however many happen to be loaded" as a complete
+  // business total the moment there's more than one page). They come
+  // from `shipmentStats` (GET /api/shipments/stats — a real Firestore
+  // `.count()` aggregate over the FULL accessible scope) instead.
+  // `shipmentStats` is null until it loads; these fall back to 0 rather
+  // than the misleading `shipments.length` in that brief window.
+  const totalShipmentsCount = shipmentStats?.total ?? 0;
+  // "Completed" here reuses the status pie chart's own "delivered" bucket
+  // (Arrived + Delivered + Closed — SHIPMENT_STATUS_GROUPS, shared with
+  // the server) for consistency between the two dashboard tiles; "Active"
+  // is everything else in the accessible scope, not a separate query.
+  const completedShipmentsCount = shipmentStats?.byStatusGroup?.delivered ?? 0;
+  const activeShipmentsCount = Math.max(0, totalShipmentsCount - completedShipmentsCount);
 
-  // Recharts metric generation
+  // Recharts metric generation — same accurate, full-scope aggregate as
+  // the tiles above, not `shipments.filter(...)` on the loaded page.
   const statusData = [
-    { name: 'New', value: shipments.filter(s => s.status === 'New').length, color: '#94a3b8' },
-    { name: 'Assigned', value: shipments.filter(s => s.status === 'Assigned' || s.status === 'Accepted').length, color: '#f97316' },
-    { name: 'Transit', value: shipments.filter(s => ['Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance'].includes(s.status)).length, color: '#3b82f6' },
-    { name: 'Delivered', value: shipments.filter(s => s.status === 'Arrived' || s.status === 'Delivered' || s.status === 'Closed').length, color: '#10b981' },
+    { name: 'New', value: shipmentStats?.byStatusGroup?.new ?? 0, color: '#94a3b8' },
+    { name: 'Assigned', value: shipmentStats?.byStatusGroup?.assigned ?? 0, color: '#f97316' },
+    { name: 'Transit', value: shipmentStats?.byStatusGroup?.transit ?? 0, color: '#3b82f6' },
+    { name: 'Delivered', value: shipmentStats?.byStatusGroup?.delivered ?? 0, color: '#10b981' },
   ].filter(d => d.value > 0);
 
-  // Currency summary list
+  // Everything below this point (currency totals, route breakdown, the
+  // day-by-day completed chart, and the pending-documents count) reads
+  // raw field values (agreedAmount/currency/loadingCity/documents), not
+  // just a count — Firestore has no server-side GROUP-BY/SUM aggregation
+  // for that, and building/maintaining denormalized counters for all of
+  // these was judged a larger architecture change than this PR should
+  // take on (see the PR description's "prefer dedicated server
+  // aggregates ... without broadening this PR excessively" note).
+  // DELIBERATE, LABELED SCOPE: these remain computed from `shipments`
+  // (the currently-loaded page(s) only) and are rendered with an explicit
+  // "(loaded records only)" qualifier in the UI — see
+  // LOADED_RECORDS_ONLY_LABEL below — so none of them are ever presented
+  // as a confirmed complete business total.
   const currencySum = shipments.reduce((acc, s) => {
     acc[s.currency] = (acc[s.currency] || 0) + s.agreedAmount;
     return acc;
@@ -4286,6 +4412,7 @@ MARAS Group etir Center`;
             activeShipmentsCount={activeShipmentsCount}
             totalShipmentsCount={totalShipmentsCount}
             completedShipmentsCount={completedShipmentsCount}
+            shipmentsHasMore={shipmentsHasMore}
             pendingDocumentsCount={pendingDocumentsCount}
             realTimeDocsStats={realTimeDocsStats}
             notificationCountsChartData={notificationCountsChartData}
@@ -4632,6 +4759,29 @@ MARAS Group etir Center`;
               </table>
             </div>
           </div>
+
+          {/* Phase 2A follow-up (blocking-issue fix): explicit "Load
+              Older Shipments" action — GET /api/shipments now returns
+              only the latest 50 (default) at a time, this is the only
+              way to reach older ones. Search/filter above only searches
+              whatever is currently loaded (searchQuery/typeFilter/
+              statusFilter all operate on `shipments` client-side) — an
+              older, not-yet-loaded shipment won't be found by search
+              until it's been paged in with this button. */}
+          {shipmentsHasMore && (
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                onClick={handleLoadMoreShipments}
+                disabled={shipmentsLoadingMore}
+                className="px-5 py-2.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-xs font-bold rounded-lg shadow-xs transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {shipmentsLoadingMore
+                  ? (lang === 'tr' ? "Yükleniyor..." : (lang === 'ar' ? "جارٍ التحميل..." : "Loading..."))
+                  : (lang === 'tr' ? "Daha Eski Sevkiyatları Yükle" : (lang === 'ar' ? "تحميل شحنات أقدم" : "Load Older Shipments"))}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -4835,6 +4985,7 @@ MARAS Group etir Center`;
             avgDailyCompleted={avgDailyCompleted}
             peakFormattedDay={peakFormattedDay}
             performanceAnalyticsData={performanceAnalyticsData}
+            shipmentsHasMore={shipmentsHasMore}
           />
         </React.Suspense>
       )}

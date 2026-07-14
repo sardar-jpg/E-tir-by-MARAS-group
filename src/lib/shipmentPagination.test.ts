@@ -1,69 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { fetchAllShipmentPages, mergeShipmentsSince } from "./shipmentPagination";
+import { mergeShipmentsSince, shouldResetShipmentPagination } from "./shipmentPagination";
 import type { Shipment } from "../types";
 
 function makeShipment(id: string, createdAt: string, updatedAt: string = createdAt): Shipment {
   return { id, createdAt, updatedAt } as Shipment;
 }
-
-describe("fetchAllShipmentPages — Phase 2A (Firestore scalability audit, shipments/orders)", () => {
-  it("returns a single page's items unchanged when hasMore is false", async () => {
-    const items = [makeShipment("s1", "2026-01-03"), makeShipment("s2", "2026-01-02")];
-    const result = await fetchAllShipmentPages(async () => ({ items, nextCursor: null, hasMore: false }));
-    expect(result).toEqual(items);
-  });
-
-  it("pages through to exhaustion, concatenating in fetched order (newest-first, preserved)", async () => {
-    const pages = [
-      { items: [makeShipment("s1", "2026-01-03"), makeShipment("s2", "2026-01-02")], nextCursor: "cursor-1", hasMore: true },
-      { items: [makeShipment("s3", "2026-01-01")], nextCursor: null, hasMore: false },
-    ];
-    let calls = 0;
-    const result = await fetchAllShipmentPages(async (cursor) => {
-      expect(cursor).toBe(calls === 0 ? null : "cursor-1");
-      return pages[calls++];
-    });
-    expect(result.map((s) => s.id)).toEqual(["s1", "s2", "s3"]);
-    expect(calls).toBe(2);
-  });
-
-  it("passes the previous page's nextCursor to the next call, unchanged", async () => {
-    const seenCursors: (string | null)[] = [];
-    await fetchAllShipmentPages(async (cursor) => {
-      seenCursors.push(cursor);
-      if (cursor === null) return { items: [makeShipment("s1", "2026-01-01")], nextCursor: "abc", hasMore: true };
-      if (cursor === "abc") return { items: [makeShipment("s2", "2026-01-02")], nextCursor: "xyz", hasMore: true };
-      return { items: [], nextCursor: null, hasMore: false };
-    });
-    expect(seenCursors).toEqual([null, "abc", "xyz"]);
-  });
-
-  it("stops if hasMore is true but nextCursor is missing — never loops on a broken page", async () => {
-    let calls = 0;
-    const result = await fetchAllShipmentPages(async () => {
-      calls++;
-      return { items: [makeShipment("s1", "2026-01-01")], nextCursor: null, hasMore: true };
-    });
-    expect(calls).toBe(1);
-    expect(result).toHaveLength(1);
-  });
-
-  it("returns an empty array for an empty first page", async () => {
-    const result = await fetchAllShipmentPages(async () => ({ items: [], nextCursor: null, hasMore: false }));
-    expect(result).toEqual([]);
-  });
-
-  it("has a hard cap on the number of page fetches — never loops unboundedly", async () => {
-    let calls = 0;
-    const result = await fetchAllShipmentPages(async () => {
-      calls++;
-      return { items: [makeShipment(`s${calls}`, `2026-01-${String(calls).padStart(2, "0")}`)], nextCursor: `c${calls}`, hasMore: true };
-    });
-    // MAX_PAGES = 50 — should stop there, not loop forever.
-    expect(calls).toBe(50);
-    expect(result).toHaveLength(50);
-  });
-});
 
 describe("mergeShipmentsSince — Phase 2A (Firestore scalability audit, shipments/orders)", () => {
   it("appends a genuinely new shipment id", () => {
@@ -109,5 +50,68 @@ describe("mergeShipmentsSince — Phase 2A (Firestore scalability audit, shipmen
     expect(merged).toBe(existing); // empty incoming short-circuits, both still present
     const mergedWithChange = mergeShipmentsSince(existing, [makeShipment("c", "2026-01-01T00:00:00.000Z")]);
     expect(mergedWithChange.map((s) => s.id).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  // Blocking-issue fix requirement: "Load More appends without
+  // duplicates" — this is exactly the manual concatenation
+  // AdminPanel/ClientDashboard/DriverApplication's handleLoadMoreShipments
+  // performs (seenIds Set + filter), modeled here directly since cursor
+  // mode pages are always strictly older and non-overlapping in the
+  // normal case, with a defensive overlap included.
+  it("Load More semantics: appending an older page never introduces a duplicate id, even on a retried/overlapping page", () => {
+    const currentlyLoaded = [makeShipment("s3", "2026-01-03"), makeShipment("s2", "2026-01-02")];
+    const olderPageWithOverlap = [makeShipment("s2", "2026-01-02"), makeShipment("s1", "2026-01-01")];
+    const seenIds = new Set(currentlyLoaded.map((s) => s.id));
+    const appended = [...currentlyLoaded, ...olderPageWithOverlap.filter((s) => !seenIds.has(s.id))];
+    expect(appended.map((s) => s.id)).toEqual(["s3", "s2", "s1"]);
+    expect(new Set(appended.map((s) => s.id)).size).toBe(appended.length);
+  });
+
+  // Blocking-issue fix requirement: "polling does not erase older loaded
+  // pages" — a delta merge over a list that already includes an OLDER
+  // page (fetched via Load More) must still contain every one of those
+  // older rows afterward; the poll only ever adds to/updates the map, it
+  // never rebuilds it from the delta alone.
+  it("a since-mode delta poll preserves shipments from an older page fetched via Load More", () => {
+    const afterLoadMore = [
+      makeShipment("newest", "2026-01-10"),
+      makeShipment("mid", "2026-01-05"),
+      makeShipment("olderPageRow1", "2026-01-02"), // fetched via a prior "Load Older Shipments" click
+      makeShipment("olderPageRow2", "2026-01-01"),
+    ];
+    const pollDelta = [{ ...makeShipment("mid", "2026-01-05", "2026-01-11"), status: "In Transit" } as Shipment];
+    const afterPoll = mergeShipmentsSince(afterLoadMore, pollDelta);
+    const ids = afterPoll.map((s) => s.id);
+    expect(ids).toContain("olderPageRow1");
+    expect(ids).toContain("olderPageRow2");
+    expect(afterPoll.find((s) => s.id === "mid")!.status).toBe("In Transit");
+    expect(afterPoll).toHaveLength(4);
+  });
+});
+
+describe("shouldResetShipmentPagination — Phase 2A follow-up (blocking-issue fix)", () => {
+  it("returns false on the very first check (prevIdentity null) — startup is not a 'change'", () => {
+    expect(shouldResetShipmentPagination(null, "admin-1:super")).toBe(false);
+  });
+
+  it("returns false when the identity is unchanged", () => {
+    expect(shouldResetShipmentPagination("admin-1:super", "admin-1:super")).toBe(false);
+    expect(shouldResetShipmentPagination("driver-42", "driver-42")).toBe(false);
+  });
+
+  it("returns true on a genuine account/role change", () => {
+    expect(shouldResetShipmentPagination("admin-1:super", "admin-2:super")).toBe(true);
+    expect(shouldResetShipmentPagination("admin-1:accounts", "admin-1:super")).toBe(true);
+    expect(shouldResetShipmentPagination("driver-1", "driver-2")).toBe(true);
+  });
+
+  it("a reset is only ever triggered once per real change, not repeatedly for the same new identity", () => {
+    let prev: string | null = null;
+    const seenResets: boolean[] = [];
+    for (const identity of ["driver-1", "driver-1", "driver-2", "driver-2", "driver-2"]) {
+      seenResets.push(shouldResetShipmentPagination(prev, identity));
+      prev = identity;
+    }
+    expect(seenResets).toEqual([false, false, true, false, false]);
   });
 });

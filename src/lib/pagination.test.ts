@@ -461,3 +461,66 @@ describe("finalizeFilledSincePage — PR #99 review: filtered-page top-up (since
     expect(result.hasMore).toBe(true);
   });
 });
+
+describe("Missing-ordering-field exclusion — Phase 2A follow-up (blocking-issue fix, legacy records)", () => {
+  // A real Firestore `.orderBy(field)` query silently excludes any
+  // document that doesn't have `field` set at all. These prove
+  // paginateDescending/paginateAscendingSince now reproduce that exact
+  // behavior in memory-fallback mode instead of unpredictably sorting a
+  // legacy record (e.g. a Shipment missing createdAt/updatedAt — see
+  // scripts/backfill-shipment-timestamps.ts) to one end of the list.
+  interface TestRow {
+    id: string;
+    ts?: string;
+  }
+  const getTs = (r: TestRow) => r.ts as string;
+  const getId = (r: TestRow) => r.id;
+
+  it("paginateDescending excludes an item with an undefined timestamp field", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "legacy-no-ts" }, // ts is undefined — simulates a Shipment missing createdAt
+    ];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("paginateDescending excludes an item with an empty-string timestamp field", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "empty-ts", ts: "" },
+    ];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("paginateDescending returns an empty page (not an error) when EVERY item lacks the ordering field", () => {
+    const items: TestRow[] = [{ id: "a" }, { id: "b" }];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items).toEqual([]);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("paginateAscendingSince (live-poll delta mode) excludes an item with a missing timestamp the same way", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "legacy-no-ts" },
+    ];
+    const result = paginateAscendingSince(items, getTs, getId, null);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("a legacy item without a timestamp never corrupts cursor/hasMore math for the well-formed items around it", () => {
+    const items: TestRow[] = [
+      { id: "c", ts: "2026-01-03T00:00:00Z" },
+      { id: "legacy" },
+      { id: "b", ts: "2026-01-02T00:00:00Z" },
+      { id: "a", ts: "2026-01-01T00:00:00Z" },
+    ];
+    const result = paginateDescending(items, getTs, getId, { limit: 2 });
+    expect(result.items.map((i) => i.id)).toEqual(["c", "b"]);
+    expect(result.hasMore).toBe(true);
+    expect(decodePageCursor(result.nextCursor!)).toEqual({ ts: "2026-01-02T00:00:00Z", id: "b" });
+  });
+});
