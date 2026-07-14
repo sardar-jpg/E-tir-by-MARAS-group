@@ -74,3 +74,23 @@ export function formatUnreadBadge(count: number): string | null {
   if (count > 99) return "99+";
   return String(count);
 }
+
+/**
+ * Phase 4 follow-up (chat seen/unread scalability audit) — the exact
+ * filter+sort GET /api/chat/unread applies to whatever candidate messages
+ * it fetched (server.ts, via fetchAllMatchingDescending — a scoped,
+ * paginated walk, never a full-collection scan). Pulled out so this is
+ * unit-testable independent of how the candidates were fetched: feeding it
+ * the same candidate set regardless of whether it came from one big page
+ * or many small chunked pages must always produce the identical result
+ * (memory-fallback parity, and parity between a single Firestore read and
+ * a chunked one).
+ */
+export function selectUnreadMessagesForAdmin<T extends UnreadCandidateMessage & { timestamp: string }>(
+  messages: T[],
+  viewerAdminId: string
+): T[] {
+  return messages
+    .filter((m) => isMessageUnreadForAdmin(m, viewerAdminId))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
