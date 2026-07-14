@@ -6,6 +6,7 @@ import {
   paginateDescending,
   paginateAscendingSince,
   applyMemoryFilters,
+  countDistinctAcrossScopes,
   hasUnsatisfiableFilter,
   finalizeFilledDescendingPage,
   finalizeFilledSincePage,
@@ -359,6 +360,66 @@ describe("applyMemoryFilters — array-contains (PR #99 review: shipment ownersh
   });
 });
 
+describe("countDistinctAcrossScopes — blocking-issue fix: exact dedup, never double-counted", () => {
+  const getId = (s: { id: string }) => s.id;
+  const driverScopes = (driverId: string): PageFilter[][] => [
+    [{ field: "assignedDriverId", op: "==", value: driverId }],
+    [{ field: "additionalDriverIds", op: "array-contains", value: driverId }],
+  ];
+
+  it("REQUIRED CASE: a shipment matching BOTH assignedDriverId and additionalDriverIds for the same driver counts exactly once, not twice", () => {
+    // The data anomaly this fix exists for: driver-1 is simultaneously
+    // the primary assigned driver AND listed as an additional driver on
+    // the exact same shipment.
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: ["driver-1"] },
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(1);
+  });
+
+  it("a driver's normal (non-anomalous) shipments still sum correctly across the two independent scopes", () => {
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: [] },
+      { id: "s2", assignedDriverId: "driver-9", additionalDriverIds: ["driver-1"] },
+      { id: "s3", assignedDriverId: "driver-9", additionalDriverIds: [] }, // not driver-1's at all
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(2); // s1 (assigned) + s2 (additional), s3 excluded
+  });
+
+  it("a single-scope role (client: companyName ==) is unaffected — same result as a plain filter+count", () => {
+    const shipments = [
+      { id: "s1", companyName: "Acme" },
+      { id: "s2", companyName: "Acme" },
+      { id: "s3", companyName: "Other Co" },
+    ];
+    const total = countDistinctAcrossScopes(shipments, [[{ field: "companyName", op: "==", value: "Acme" }]], getId);
+    expect(total).toBe(2);
+  });
+
+  it("admin's no-filter scope ([[]]) counts every item exactly once", () => {
+    const shipments = [{ id: "s1" }, { id: "s2" }, { id: "s3" }];
+    const total = countDistinctAcrossScopes(shipments, [[]], getId);
+    expect(total).toBe(3);
+  });
+
+  it("returns 0 for an empty items array or a scope with zero matches", () => {
+    expect(countDistinctAcrossScopes([], driverScopes("driver-1"), getId)).toBe(0);
+    expect(countDistinctAcrossScopes([{ id: "s1", assignedDriverId: "driver-9" }], driverScopes("driver-1"), getId)).toBe(0);
+  });
+
+  it("three-way overlap (a shipment matching multiple scopes among several) still counts once per distinct id", () => {
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: ["driver-1"] }, // matches both scopes
+      { id: "s2", assignedDriverId: "driver-1", additionalDriverIds: [] }, // matches only assigned
+      { id: "s3", assignedDriverId: "driver-9", additionalDriverIds: ["driver-1"] }, // matches only additional
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(3); // s1, s2, s3 — each a distinct id, s1's double-match doesn't inflate the count
+  });
+});
+
 describe("parseCursorParam — PR #99 review: malformed vs missing cursor", () => {
   it("a missing (undefined) param is valid — null cursor, not an error", () => {
     expect(parseCursorParam(undefined)).toEqual({ ok: true, cursor: null });
@@ -459,5 +520,68 @@ describe("finalizeFilledSincePage — PR #99 review: filtered-page top-up (since
     const result = finalizeFilledSincePage(collected, 2, true);
     expect(result.items).toEqual([{ id: "a" }, { id: "b" }]);
     expect(result.hasMore).toBe(true);
+  });
+});
+
+describe("Missing-ordering-field exclusion — Phase 2A follow-up (blocking-issue fix, legacy records)", () => {
+  // A real Firestore `.orderBy(field)` query silently excludes any
+  // document that doesn't have `field` set at all. These prove
+  // paginateDescending/paginateAscendingSince now reproduce that exact
+  // behavior in memory-fallback mode instead of unpredictably sorting a
+  // legacy record (e.g. a Shipment missing createdAt/updatedAt — see
+  // scripts/backfill-shipment-timestamps.ts) to one end of the list.
+  interface TestRow {
+    id: string;
+    ts?: string;
+  }
+  const getTs = (r: TestRow) => r.ts as string;
+  const getId = (r: TestRow) => r.id;
+
+  it("paginateDescending excludes an item with an undefined timestamp field", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "legacy-no-ts" }, // ts is undefined — simulates a Shipment missing createdAt
+    ];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("paginateDescending excludes an item with an empty-string timestamp field", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "empty-ts", ts: "" },
+    ];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("paginateDescending returns an empty page (not an error) when EVERY item lacks the ordering field", () => {
+    const items: TestRow[] = [{ id: "a" }, { id: "b" }];
+    const result = paginateDescending(items, getTs, getId);
+    expect(result.items).toEqual([]);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("paginateAscendingSince (live-poll delta mode) excludes an item with a missing timestamp the same way", () => {
+    const items: TestRow[] = [
+      { id: "has-ts", ts: "2026-01-02T00:00:00Z" },
+      { id: "legacy-no-ts" },
+    ];
+    const result = paginateAscendingSince(items, getTs, getId, null);
+    expect(result.items.map((i) => i.id)).toEqual(["has-ts"]);
+  });
+
+  it("a legacy item without a timestamp never corrupts cursor/hasMore math for the well-formed items around it", () => {
+    const items: TestRow[] = [
+      { id: "c", ts: "2026-01-03T00:00:00Z" },
+      { id: "legacy" },
+      { id: "b", ts: "2026-01-02T00:00:00Z" },
+      { id: "a", ts: "2026-01-01T00:00:00Z" },
+    ];
+    const result = paginateDescending(items, getTs, getId, { limit: 2 });
+    expect(result.items.map((i) => i.id)).toEqual(["c", "b"]);
+    expect(result.hasMore).toBe(true);
+    expect(decodePageCursor(result.nextCursor!)).toEqual({ ts: "2026-01-02T00:00:00Z", id: "b" });
   });
 });

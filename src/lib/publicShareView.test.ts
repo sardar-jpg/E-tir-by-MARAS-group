@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSecureShareView } from "./publicShareView";
+import { buildSecureShareView, resolveShareTokenLookup } from "./publicShareView";
 import type { Shipment } from "../types";
 
 function makeShipment(overrides: Partial<Shipment> = {}): Shipment {
@@ -116,5 +116,57 @@ describe("buildSecureShareView", () => {
     expect(view.documents[0].url).toBe("/api/share/tok_abc123/documents/doc-1");
     expect(view.photos).toHaveLength(1);
     expect(view.photos[0].url).toBe("/api/share/tok_abc123/documents/doc-2");
+  });
+});
+
+describe("resolveShareTokenLookup — blocking-issue fix: duplicate shareToken fails closed", () => {
+  it("returns not_found for zero matches — an unknown/malformed token", () => {
+    expect(resolveShareTokenLookup([])).toEqual({ status: "not_found" });
+  });
+
+  it("returns found with the single match in the normal (non-duplicate) case", () => {
+    const shipment = makeShipment({ id: "shipment-1" });
+    expect(resolveShareTokenLookup([shipment])).toEqual({ status: "found", shipment });
+  });
+
+  it("SECURITY INVARIANT: two matches for the same token returns conflict — never picks one and serves it", () => {
+    const a = makeShipment({ id: "shipment-A" });
+    const b = makeShipment({ id: "shipment-B" });
+    const result = resolveShareTokenLookup([a, b]);
+    expect(result.status).toBe("conflict");
+    expect(result).not.toHaveProperty("shipment");
+  });
+
+  it("SECURITY INVARIANT: conflict holds regardless of match order or which shipment id is 'lowest' — no id-based tiebreak survives", () => {
+    const a = makeShipment({ id: "shipment-B" });
+    const b = makeShipment({ id: "shipment-A" }); // lexicographically lowest id
+    const c = makeShipment({ id: "shipment-C" });
+    expect(resolveShareTokenLookup([a, b, c]).status).toBe("conflict");
+    expect(resolveShareTokenLookup([c, a, b]).status).toBe("conflict");
+    expect(resolveShareTokenLookup([b, c, a]).status).toBe("conflict");
+  });
+
+  it("SECURITY INVARIANT: no shipment data of ANY kind (from either candidate) is present on a conflict result", () => {
+    const a = makeShipment({ id: "shipment-X", companyName: "Secret Co A", agreedAmount: 9999 });
+    const b = makeShipment({ id: "shipment-Y", companyName: "Secret Co B", agreedAmount: 8888 });
+    const result = resolveShareTokenLookup([a, b]);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("Secret Co A");
+    expect(serialized).not.toContain("Secret Co B");
+    expect(serialized).not.toContain("9999");
+    expect(serialized).not.toContain("8888");
+    expect(serialized).not.toContain("shipment-X");
+    expect(serialized).not.toContain("shipment-Y");
+  });
+
+  it("three or more duplicate matches still conflicts, not just exactly two", () => {
+    const matches = [makeShipment({ id: "s1" }), makeShipment({ id: "s2" }), makeShipment({ id: "s3" })];
+    expect(resolveShareTokenLookup(matches)).toEqual({ status: "conflict" });
+  });
+
+  it("is idempotent — resolving the same duplicate set twice always returns conflict, never flips to found", () => {
+    const matches = [makeShipment({ id: "shipment-2" }), makeShipment({ id: "shipment-1" })];
+    expect(resolveShareTokenLookup(matches).status).toBe("conflict");
+    expect(resolveShareTokenLookup(matches).status).toBe("conflict");
   });
 });

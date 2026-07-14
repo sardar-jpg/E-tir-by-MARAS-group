@@ -131,11 +131,32 @@ export interface PaginateDescendingResult<T> {
 }
 
 /**
+ * Phase 2A follow-up (Firestore scalability audit, shipments/orders —
+ * blocking-issue fix). A real Firestore `.orderBy(field)` query silently
+ * EXCLUDES any document that doesn't have `field` set at all — this is
+ * documented Firestore behavior, not a bug in this app's queries. Every
+ * caller of paginateDescending/paginateAscendingSince below must see the
+ * SAME exclusion in memory-fallback mode, or memory-fallback stops being
+ * a faithful stand-in for real Firestore the moment a legacy record is
+ * missing its ordering field (e.g. a pre-migration Shipment missing
+ * createdAt/updatedAt — see docs/FOLLOW_UP_ROADMAP.md's shipments-
+ * pagination entry and scripts/backfill-shipment-timestamps.ts for the
+ * migration this documents). `getTs` returning `""`/`undefined`/`null`
+ * is treated as "field absent," matching Firestore's own semantics
+ * (Firestore has no field type that would produce a falsy-but-present
+ * timestamp any of this app's real records use).
+ */
+function hasOrderableTimestamp<T>(item: T, getTs: (item: T) => string): boolean {
+  return !!getTs(item);
+}
+
+/**
  * The memory-fallback pagination engine. `items` should already be scoped
  * to the right collection/role/channel by the caller (this function does
  * no filtering) — it only sorts, cursors, and limits, exactly mirroring
  * what `.orderBy("timestamp","desc").orderBy(docId,"desc").limit(n).startAfter(cursor)`
- * would do against real Firestore.
+ * would do against real Firestore, INCLUDING excluding any item missing
+ * its ordering field entirely (see hasOrderableTimestamp above).
  */
 export function paginateDescending<T>(
   items: T[],
@@ -146,9 +167,9 @@ export function paginateDescending<T>(
   const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_PAGE_SIZE;
   const cursor = options.cursor ?? null;
 
-  const sorted = [...items].sort((a, b) =>
-    compareDescending({ ts: getTs(a), id: getId(a) }, { ts: getTs(b), id: getId(b) })
-  );
+  const sorted = items
+    .filter((item) => hasOrderableTimestamp(item, getTs))
+    .sort((a, b) => compareDescending({ ts: getTs(a), id: getId(a) }, { ts: getTs(b), id: getId(b) }));
 
   // Looking for the first row *older* than the cursor (i.e. sorting
   // strictly *after* it in this descending order) — compareDescending
@@ -184,7 +205,9 @@ export interface PaginateAscendingResult<T> {
  * between two 3-second polls should still never return an unbounded
  * result), not a page-size contract — `hasMore` tells the caller a
  * (rare) burst exceeded the cap so it can poll again immediately rather
- * than wait a full interval.
+ * than wait a full interval. Excludes any item missing its ordering
+ * field entirely, same as paginateDescending — see hasOrderableTimestamp
+ * above.
  */
 export function paginateAscendingSince<T>(
   items: T[],
@@ -193,9 +216,9 @@ export function paginateAscendingSince<T>(
   cursor: PageCursor | null,
   limit: number = DEFAULT_PAGE_SIZE
 ): PaginateAscendingResult<T> {
-  const sorted = [...items].sort(
-    (a, b) => -compareDescending({ ts: getTs(a), id: getId(a) }, { ts: getTs(b), id: getId(b) })
-  );
+  const sorted = items
+    .filter((item) => hasOrderableTimestamp(item, getTs))
+    .sort((a, b) => -compareDescending({ ts: getTs(a), id: getId(a) }, { ts: getTs(b), id: getId(b) }));
   const filtered = cursor
     ? sorted.filter((item) => compareDescending({ ts: getTs(item), id: getId(item) }, cursor) < 0)
     : sorted;
@@ -246,6 +269,35 @@ export function applyMemoryFilters<T extends Record<string, any>>(items: T[], fi
       return true;
     })
   );
+}
+
+/**
+ * Blocking-issue fix: an exact, deduplicated count of items matching ANY
+ * of several independent scopes (OR-via-independent-queries — e.g. a
+ * driver's assignedDriverId == OR additionalDriverIds array-contains).
+ * Summing each scope's own count independently — the old
+ * GET /api/shipments/stats behavior — double-counts any item that
+ * matches MORE than one scope simultaneously (a data anomaly for a
+ * driver being both the primary AND an additional driver on the exact
+ * same shipment, but one this count must never get wrong regardless of
+ * how it arose). Deduplicating by id via a Set is what makes this exact:
+ * an item counted under two different scopes still contributes exactly
+ * one to the final total.
+ *
+ * Mirrors the real-Firestore path (server.ts's
+ * countDistinctShipmentsAcrossScopes — fetches ids only per scope via
+ * `.select()`, then dedupes the SAME way with a Set) exactly, so this
+ * pure function's correctness stands in for both: any test proving the
+ * dedup-by-id algorithm is correct here proves it for the real query
+ * path too, since both do "collect matched ids per scope into one Set,
+ * return its size."
+ */
+export function countDistinctAcrossScopes<T extends Record<string, any>>(items: T[], scopes: PageFilter[][], getId: (item: T) => string): number {
+  const matchedIds = new Set<string>();
+  for (const filters of scopes) {
+    for (const item of applyMemoryFilters(items, filters)) matchedIds.add(getId(item));
+  }
+  return matchedIds.size;
 }
 
 export interface FilledPageResult<T> {

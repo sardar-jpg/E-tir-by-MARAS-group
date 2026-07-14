@@ -17,6 +17,12 @@ interface AdminReportsSectionProps {
   avgDailyCompleted: string;
   peakFormattedDay: string;
   performanceAnalyticsData: Array<{ date: string; label: string; [key: string]: string | number }>;
+  /** Phase 2A follow-up (blocking-issue fix): true when more shipments
+      exist beyond what's currently loaded (GET /api/shipments' own
+      `hasMore`). `totalShipmentsCount`/`statusData` are exact, full-scope
+      server aggregates regardless — this only gates the notice about
+      currencyChartData/performanceAnalyticsData below, which are NOT. */
+  shipmentsHasMore: boolean;
 }
 
 /**
@@ -37,6 +43,7 @@ export default function AdminReportsSection({
   avgDailyCompleted,
   peakFormattedDay,
   performanceAnalyticsData,
+  shipmentsHasMore,
 }: AdminReportsSectionProps) {
   const performanceDataKey = lang === 'tr' ? 'Tamamlanan' : (lang === 'ar' ? 'المكتملة' : 'Completed');
 
@@ -54,11 +61,26 @@ export default function AdminReportsSection({
           </p>
           <p className="text-slate-400 text-xs mt-1">
             {lang === 'tr'
-              ? `Veri kaynağı: sevkiyat kayıtları — ${totalShipmentsCount} kayıt`
+              ? `Veri kaynağı: sevkiyat kayıtları — toplam ${totalShipmentsCount} kayıt (tam rakam)`
               : (lang === 'ar'
-                ? `مصدر البيانات: سجلات الشحنات — ${totalShipmentsCount} سجل`
-                : `Data source: shipment records — ${totalShipmentsCount} record${totalShipmentsCount === 1 ? '' : 's'}`)}
+                ? `مصدر البيانات: سجلات الشحنات — إجمالي ${totalShipmentsCount} سجل (رقم دقيق)`
+                : `Data source: shipment records — ${totalShipmentsCount} total record${totalShipmentsCount === 1 ? '' : 's'} (exact figure)`)}
           </p>
+          {/* Phase 2A follow-up (blocking-issue fix): totalShipmentsCount/
+              statusData above are exact, full-scope server aggregates —
+              currencyChartData and performanceAnalyticsData below are NOT
+              (Firestore has no server-side SUM/GROUP-BY; see this PR's
+              description). This notice makes that distinction visible
+              instead of silently presenting a partial figure as complete. */}
+          {shipmentsHasMore && (
+            <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] font-medium mt-2">
+              {lang === 'tr'
+                ? "Not: Para Birimi Toplamları ve Teslimat Performansı grafikleri yalnızca şu anda yüklenmiş sevkiyat kayıtlarını yansıtır (tam veri seti değil)."
+                : (lang === 'ar'
+                  ? "ملاحظة: رسوم إجماليات العملات وأداء التسليم أدناه تعكس فقط سجلات الشحنات المحمّلة حالياً (ليست المجموعة الكاملة)."
+                  : "Note: the Currency Totals and Delivery Performance charts below reflect only the shipment records currently loaded in this session, not the complete dataset.")}
+            </p>
+          )}
         </div>
 
         <div className={`grid grid-cols-1 ${isMobileMode ? '' : 'lg:grid-cols-2'} gap-6 pt-5`}>

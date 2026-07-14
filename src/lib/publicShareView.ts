@@ -32,6 +32,44 @@ import { isDocumentVisibleForShare, buildPublicShareDocumentPath } from "./docum
 
 export type PublicShareView = ReturnType<typeof buildSecureShareView>;
 
+/**
+ * Blocking-issue fix (security/correctness review): a duplicate
+ * shareToken must FAIL CLOSED, never guess.
+ *
+ * `shareToken` has always been generated with generateShareToken()
+ * (server.ts) — 192 bits of crypto.randomBytes, base64url-encoded — which
+ * is not a practical collision risk going forward. The real risk is
+ * historical: this codebase's own isLegacyShareToken (server.ts) exists
+ * specifically because OLDER shipments were assigned predictable,
+ * sequential "token-N" values before the crypto-random scheme shipped,
+ * and nothing ever enforced uniqueness on that field at write time (no
+ * Firestore unique-constraint mechanism exists for a plain document
+ * field). A duplicate token — whether from that legacy scheme, a data
+ * migration mistake, or manual Firestore editing — combined with
+ * findShipmentByShareToken's `where("shareToken","==",token)` query
+ * (server.ts) returning MULTIPLE matches previously picked "the lowest
+ * document id" as a deterministic tiebreak. That was wrong: it still
+ * served ONE OF the ambiguous shipments' real data to a caller who
+ * presented a token that cannot actually prove which shipment they're
+ * entitled to see — an ambiguous credential must never resolve to "pick
+ * one and serve it," the same way a duplicate session token or API key
+ * would not. This resolves a genuine conflict to a `conflict` result
+ * instead — no shipment, no data, of either candidate, ever leaves this
+ * function. The caller (server.ts) turns this into a 409 and logs the
+ * conflict loudly for operator follow-up; it never turns it into "pick
+ * one and serve it," at either layer.
+ */
+export type ShareTokenLookupResult =
+  | { status: "not_found" }
+  | { status: "conflict" }
+  | { status: "found"; shipment: Shipment };
+
+export function resolveShareTokenLookup(matches: Shipment[]): ShareTokenLookupResult {
+  if (matches.length === 0) return { status: "not_found" };
+  if (matches.length > 1) return { status: "conflict" };
+  return { status: "found", shipment: matches[0] };
+}
+
 export function buildSecureShareView(shipment: Shipment) {
   return {
     shipmentNumber: shipment.shipmentNumber,
