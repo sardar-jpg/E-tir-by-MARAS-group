@@ -42,7 +42,6 @@ import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
-  isMessageInSeenScope,
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
@@ -72,6 +71,7 @@ import {
   countDistinctAcrossScopes,
   finalizeFilledDescendingPage,
   finalizeFilledSincePage,
+  walkAllDescendingPages,
   type PageCursor,
   type PageFilter,
 } from "./src/lib/pagination";
@@ -82,7 +82,8 @@ import { isMissingIndexError } from "./src/lib/firestoreErrors";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
 import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
-import { isMessageFromOtherAdmin, isMessageUnreadForAdmin, appendAdminReader } from "./src/lib/chatUnreadAccess";
+import { selectUnreadMessagesForAdmin } from "./src/lib/chatUnreadAccess";
+import { buildSeenScopeFilters, planSeenWrites } from "./src/lib/chatSeenPlan";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -869,6 +870,31 @@ async function queryAscendingSince(
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return memoryAscendingSince(colName, filters, cursor, limit, tsField);
   }
+}
+
+/**
+ * Phase 4 follow-up (chat seen/unread scalability audit). Thin wrapper
+ * around walkAllDescendingPages (src/lib/pagination.ts) bound to a real
+ * queryDescendingPage call — for the two call sites that genuinely need
+ * every eligible row, not a bounded page (POST .../chat/seen must mark
+ * every eligible message in its shipment(+channel) scope as seen in one
+ * call; GET /api/chat/unread must compute one admin's true unread set).
+ * Each page is still a real, ordered, timeout-protected, indexed Firestore
+ * query (or its exact memory-fallback equivalent) — see
+ * queryDescendingPage's own header comment for the STRICT_PERSISTENCE /
+ * missing-index / memory-fallback behavior every page here inherits
+ * unchanged. This replaces one unbounded `getDocs(collection(db, colName))`
+ * read of the entire collection with a bounded sequence of small indexed
+ * reads; `filters` (shipmentId/channel equality, or none) is what keeps
+ * each individual read scoped rather than scanning unrelated
+ * shipments/channels. Never call this where a single bounded page would do.
+ */
+async function fetchAllMatchingDescending(
+  colName: string,
+  filters: PageFilter[],
+  pageLimit: number = 200
+): Promise<any[]> {
+  return walkAllDescendingPages((cursor) => queryDescendingPage(colName, filters, cursor, pageLimit));
 }
 
 /**
@@ -4179,32 +4205,21 @@ async function startServer() {
       // per shipment and no per-user concept applies there.
       const viewerAdminId = viewer === "admin" ? req.session!.id : null;
 
-      const col = collection(db, "chatMessages");
-      const snapshot = await getDocs(col);
-      const batchWrites: Promise<void>[] = [];
-
-      snapshot.docs.forEach((d) => {
-        const msg = d.data() as ChatMessage;
-        if (!isMessageInSeenScope(msg, channelFilter, shipmentId)) return;
-
-        if (viewerAdminId) {
-          // Still also sets status: 'seen' (unchanged, first-seen-by-any-
-          // admin only) for the driver/client-facing read receipt, which
-          // stays a single global flag — a genuinely different concern
-          // from this admin's own per-admin unread state.
-          if (!isMessageFromOtherAdmin(msg, viewerAdminId)) return;
-          const nextReadBy = appendAdminReader(msg.readByAdminIds, viewerAdminId);
-          const alreadyGloballySeen = msg.status === "seen";
-          if (nextReadBy === msg.readByAdminIds && alreadyGloballySeen) return;
-          batchWrites.push(
-            setDoc(doc(db, "chatMessages", d.id), { ...msg, status: "seen", readByAdminIds: nextReadBy })
-          );
-        } else if (msg.sender !== viewer && msg.status !== "seen") {
-          batchWrites.push(
-            setDoc(doc(db, "chatMessages", d.id), { ...msg, status: "seen" })
-          );
-        }
-      });
+      // Phase 4 follow-up (Firestore scalability audit): scoped at the
+      // query level to this shipment (+ channel, when the caller's role
+      // fixes one) instead of fetching every chatMessages document ever
+      // written and filtering shipmentId/channel in Node — same rationale,
+      // and the same already-deployed composite indexes (firestore.indexes.json),
+      // as the sibling GET /api/shipments/:id/chat route just above.
+      // buildSeenScopeFilters/planSeenWrites (src/lib/chatSeenPlan.ts) are
+      // the single, unit-tested source of truth for both the query scope
+      // and the per-message write decision — isMessageInSeenScope is
+      // re-checked there anyway as defense in depth (never rely on query
+      // scoping alone for a permission boundary).
+      const filters = buildSeenScopeFilters(shipmentId, channelFilter);
+      const candidates = await fetchAllMatchingDescending("chatMessages", filters);
+      const writes = planSeenWrites(candidates as ChatMessage[], { viewer, channelFilter, shipmentId, viewerAdminId });
+      const batchWrites = writes.map((w) => setDoc(doc(db, "chatMessages", w.id), w.data));
 
       if (batchWrites.length > 0) {
         await Promise.all(batchWrites);
@@ -4213,6 +4228,7 @@ async function startServer() {
       res.json({ success: true, updatedCount: batchWrites.length });
     } catch (err) {
       console.error(err);
+      if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to mark messages as seen" });
     }
   });
@@ -6472,18 +6488,31 @@ async function startServer() {
       // excluded outright by the old `sender !== "admin"` filter, since
       // every admin's messages share that same sender value).
       const viewerAdminId = req.session!.id;
-      const col = collection(db, "chatMessages");
-      const snapshot = await getDocs(col);
-      const unreadMsgs = snapshot.docs
-        .map(doc => doc.data() as ChatMessage)
-        .filter(m => isMessageUnreadForAdmin(m, viewerAdminId));
 
-      // Sort messages by timestamp descending
-      unreadMsgs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      // Phase 4 follow-up (Firestore scalability audit): this used to be
+      // one unbounded getDocs(collection(db, "chatMessages")) read of
+      // every message ever written, on every call (an admin dashboard
+      // polls this every ~12s). "Unread for this specific admin" has no
+      // Firestore-queryable shape here — readByAdminIds is an array field
+      // and Firestore has no "array does not contain" operator, so there
+      // is no equality/range where-clause that scopes this the way
+      // shipmentId scopes /chat/seen above. fetchAllMatchingDescending
+      // still walks to exhaustion in the worst case, but every read is now
+      // a small, ordered, timeout-protected, indexed page
+      // (.orderBy("timestamp","desc").limit(n).startAfter(cursor) — a bare
+      // sort with no where clause, which Firestore indexes automatically;
+      // no new firestore.indexes.json entry is required for this query
+      // shape) instead of one unbounded whole-collection materialization.
+      // A true O(this admin's unread set) query would need a maintained
+      // per-admin unread structure (schema/write-path change) — tracked as
+      // a deferred follow-up, not attempted here (see docs/FOLLOW_UP_ROADMAP.md).
+      const candidates = await fetchAllMatchingDescending("chatMessages", []);
+      const unreadMsgs = selectUnreadMessagesForAdmin(candidates as ChatMessage[], viewerAdminId);
 
       res.json(unreadMsgs);
     } catch (err: any) {
       console.error(err);
+      if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to fetch unread chat messages" });
     }
   });

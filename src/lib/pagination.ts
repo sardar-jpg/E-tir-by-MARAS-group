@@ -358,3 +358,42 @@ export function finalizeFilledSincePage<T>(collected: T[], limit: number, rawHas
   }
   return { items: collected, hasMore: rawHasMore };
 }
+
+export interface DescendingPageFetchResult<T> {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * Phase 4 follow-up (chat seen/unread scalability audit). Walks a
+ * queryDescendingPage-shaped fetcher to exhaustion and returns every
+ * matching item — for the rare call site that genuinely needs every
+ * eligible row, not a bounded page (server.ts's fetchAllMatchingDescending
+ * is the real caller: POST .../chat/seen must mark every eligible message
+ * in its shipment(+channel) scope as seen in one call; GET /api/chat/unread
+ * must compute one admin's true unread set). `fetchPage` is injected so
+ * this stays collection-agnostic and independently testable — it's
+ * whatever single-page fetch (real Firestore or memory-fallback) the
+ * caller already has; this function only knows how to keep asking for the
+ * next page and stitch the results together, replacing one unbounded
+ * fetch-everything call with a bounded sequence of small page fetches.
+ */
+export async function walkAllDescendingPages<T>(
+  fetchPage: (cursor: PageCursor | null) => Promise<DescendingPageFetchResult<T>>
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: PageCursor | null = null;
+  for (;;) {
+    const page = await fetchPage(cursor);
+    all.push(...page.items);
+    if (!page.hasMore) break;
+    cursor = page.nextCursor ? decodePageCursor(page.nextCursor) : null;
+    // Defensive only — a well-behaved fetchPage always pairs hasMore: true
+    // with a non-null nextCursor (see queryDescendingPage/memoryDescendingPage),
+    // so this should never trigger; it exists purely to prevent an
+    // infinite loop if that invariant is ever violated.
+    if (!cursor) break;
+  }
+  return all;
+}

@@ -10,8 +10,11 @@ import {
   hasUnsatisfiableFilter,
   finalizeFilledDescendingPage,
   finalizeFilledSincePage,
+  walkAllDescendingPages,
   DEFAULT_PAGE_SIZE,
   type PageFilter,
+  type PageCursor,
+  type DescendingPageFetchResult,
 } from "./pagination";
 
 interface Row {
@@ -583,5 +586,87 @@ describe("Missing-ordering-field exclusion — Phase 2A follow-up (blocking-issu
     expect(result.items.map((i) => i.id)).toEqual(["c", "b"]);
     expect(result.hasMore).toBe(true);
     expect(decodePageCursor(result.nextCursor!)).toEqual({ ts: "2026-01-02T00:00:00Z", id: "b" });
+  });
+});
+
+describe("walkAllDescendingPages — exhaustive walk (Phase 4 follow-up: chat seen/unread scalability)", () => {
+  // server.ts's fetchAllMatchingDescending binds this to a real
+  // queryDescendingPage call; here `fetchPage` is a plain in-memory stand-in
+  // (applyMemoryFilters -> paginateDescending, the exact memory-fallback
+  // pair already proven to match a scoped Firestore query above) so the
+  // walking algorithm itself is tested without any Firestore/server
+  // dependency.
+  function makeFetcher(items: Row[], filters: PageFilter[], pageLimit: number) {
+    const scoped = applyMemoryFilters(items, filters);
+    return async (cursor: PageCursor | null): Promise<DescendingPageFetchResult<Row>> => {
+      const page = paginateDescending(scoped, getTs, getId, { cursor, limit: pageLimit });
+      return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
+    };
+  }
+
+  function mixedDataset(): Row[] {
+    return [
+      row("m1", "2026-01-01T00:00:00Z", { shipmentId: "ship-A", channel: "driver_admin" }),
+      row("m2", "2026-01-01T00:05:00Z", { shipmentId: "ship-A", channel: "driver_admin" }),
+      row("m3", "2026-01-01T00:10:00Z", { shipmentId: "ship-A", channel: "client_admin" }), // wrong channel
+      row("m4", "2026-01-01T00:15:00Z", { shipmentId: "ship-B", channel: "driver_admin" }), // wrong shipment
+      row("m5", "2026-01-01T00:20:00Z", { shipmentId: "ship-A", channel: "driver_admin" }),
+      row("m6", "2026-01-01T00:25:00Z", { shipmentId: "ship-A", channel: "driver_admin" }),
+      row("m7", "2026-01-01T00:30:00Z", { shipmentId: "ship-A", channel: "driver_admin" }),
+    ];
+  }
+
+  const shipmentAScope: PageFilter[] = [
+    { field: "shipmentId", op: "==", value: "ship-A" },
+    { field: "channel", op: "==", value: "driver_admin" },
+  ];
+
+  it("accumulates every matching item across many small pages (page size 1)", async () => {
+    const result = await walkAllDescendingPages(makeFetcher(mixedDataset(), shipmentAScope, 1));
+    expect(result.map((r) => r.id)).toEqual(["m7", "m6", "m5", "m2", "m1"]); // newest-first, cross-shipment/channel excluded
+  });
+
+  it("terminates in a single page when everything fits within the page limit", async () => {
+    const result = await walkAllDescendingPages(makeFetcher(mixedDataset(), shipmentAScope, 50));
+    expect(result.map((r) => r.id)).toEqual(["m7", "m6", "m5", "m2", "m1"]);
+  });
+
+  it("never leaks a different shipment's or channel's messages into the walked result, no matter the page size", async () => {
+    for (const pageLimit of [1, 2, 3, 50]) {
+      const result = await walkAllDescendingPages(makeFetcher(mixedDataset(), shipmentAScope, pageLimit));
+      expect(result.some((r) => r.shipmentId !== "ship-A")).toBe(false);
+      expect(result.some((r) => r.channel !== "driver_admin")).toBe(false);
+    }
+  });
+
+  it("memory-fallback parity: the final accumulated set is identical regardless of how the walk is chunked", async () => {
+    const dataset = mixedDataset();
+    const viaOnePage = await walkAllDescendingPages(makeFetcher(dataset, shipmentAScope, 50));
+    const viaManySmallPages = await walkAllDescendingPages(makeFetcher(dataset, shipmentAScope, 2));
+    const viaSinglePages = await walkAllDescendingPages(makeFetcher(dataset, shipmentAScope, 1));
+    expect(viaManySmallPages.map((r) => r.id)).toEqual(viaOnePage.map((r) => r.id));
+    expect(viaSinglePages.map((r) => r.id)).toEqual(viaOnePage.map((r) => r.id));
+  });
+
+  it("returns an empty array, without ever calling fetchPage more than once, when nothing matches", async () => {
+    let calls = 0;
+    const fetcher = async (cursor: PageCursor | null): Promise<DescendingPageFetchResult<Row>> => {
+      calls++;
+      return { items: [], nextCursor: null, hasMore: false };
+    };
+    const result = await walkAllDescendingPages(fetcher);
+    expect(result).toEqual([]);
+    expect(calls).toBe(1);
+  });
+
+  it("stops defensively instead of looping forever if a misbehaving fetcher reports hasMore with no cursor", async () => {
+    let calls = 0;
+    const fetcher = async (): Promise<DescendingPageFetchResult<Row>> => {
+      calls++;
+      return { items: [row(`x${calls}`, "2026-01-01T00:00:00Z")], nextCursor: null, hasMore: true };
+    };
+    const result = await walkAllDescendingPages(fetcher);
+    expect(calls).toBe(1);
+    expect(result.map((r) => r.id)).toEqual(["x1"]);
   });
 });
