@@ -22,6 +22,7 @@ import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, Fol
 import { apiFetch } from "./lib/api";
 import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
 import { canSubmitChatMessage, planAttachmentSendForShipment } from "./lib/chatComposerState";
+import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -47,6 +48,12 @@ function RouteLoadingFallback() {
     </div>
   );
 }
+
+// feature/chat-ui-ux-phase2: auto-growing composer bounds — one line at
+// rest, up to ~5-6 lines before the textarea scrolls internally instead of
+// pushing the rest of the drawer off-screen.
+const COMPOSER_MIN_HEIGHT_PX = 44;
+const COMPOSER_MAX_HEIGHT_PX = 128;
 
 export default function App() {
   // 1. Language State
@@ -590,6 +597,17 @@ export default function App() {
   // guard already used for the attachment send.
   const [isSendingAdminMessage, setIsSendingAdminMessage] = useState(false);
   const adminMessagesEndRef = useRef<HTMLDivElement>(null);
+  // feature/chat-ui-ux-phase2: smart auto-scroll. adminMessagesContainerRef
+  // is the scrollable message list; isAdminNearBottomRef tracks (via the
+  // onScroll handler below) whether the admin is already close to the
+  // bottom — only then does a new message auto-scroll the view. Reading
+  // older history and having a new message arrive must never yank the
+  // view back down.
+  const adminMessagesContainerRef = useRef<HTMLDivElement>(null);
+  const isAdminNearBottomRef = useRef(true);
+  // feature/chat-ui-ux-phase2: auto-growing composer textarea (replaces
+  // the previous single-line input).
+  const adminTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // fix/chat-safety-reliability-phase1 (follow-up): switching to a
   // different shipment's chat drawer must never carry a draft attachment
@@ -603,14 +621,42 @@ export default function App() {
     setAdminUploadShipmentId("");
   }, [chatShipment?.id]);
 
-  // Auto-scroll admin chat to bottom when a new message arrives
+  // feature/chat-ui-ux-phase2: opening a different shipment's drawer
+  // always starts scrolled to its latest messages.
   useEffect(() => {
-    if (chatShipment && chatMessages.length > 0) {
+    isAdminNearBottomRef.current = true;
+  }, [chatShipment?.id]);
+
+  // feature/chat-ui-ux-phase2: smart auto-scroll — only scrolls to the
+  // newest message when the admin was already near the bottom (or this is
+  // the drawer's first render for this shipment, per the reset above).
+  // Previously this scrolled unconditionally on every new message, which
+  // yanked the admin back to the bottom even while they were scrolled up
+  // reading older history.
+  useEffect(() => {
+    if (chatShipment && chatMessages.length > 0 && isAdminNearBottomRef.current) {
       setTimeout(() => {
         adminMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
       }, 80);
     }
   }, [chatMessages.length, chatShipment?.id]);
+
+  const handleAdminMessagesScroll = () => {
+    const el = adminMessagesContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isAdminNearBottomRef.current = isNearBottom(distanceFromBottom);
+  };
+
+  // feature/chat-ui-ux-phase2: auto-grow the composer textarea with its
+  // content (including shrinking back down after the draft is cleared on
+  // send).
+  useEffect(() => {
+    const el = adminTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${computeAutoGrowHeightPx(el.scrollHeight, COMPOSER_MIN_HEIGHT_PX, COMPOSER_MAX_HEIGHT_PX)}px`;
+  }, [chatMessageText]);
 
   // 4. Token identification for Guest direct links
   const [urlToken, setUrlToken] = useState<string | null>(null);
@@ -1141,7 +1187,7 @@ export default function App() {
                 }`}
               >
                 <span>Documents & Scans</span>
-                <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${
                   chatDrawerTab === 'attachments' ? 'bg-orange-950 text-orange-400' : 'bg-slate-900 text-slate-500'
                 }`}>
                   {chatShipment.documents?.length || 0}
@@ -1152,10 +1198,13 @@ export default function App() {
             {chatDrawerTab === 'messages' ? (
               <>
                 {/* Message Thread Scrollable */}
-                <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                  {chatMessages.map((msg) => {
+                <div ref={adminMessagesContainerRef} onScroll={handleAdminMessagesScroll} className="flex-1 overflow-y-auto p-5 space-y-4">
+                  {chatMessages.map((msg, index) => {
                     const isAdmin = msg.sender === 'admin';
                     const isSeenReceipt = isAdmin && msg.status === 'seen';
+                    // feature/chat-ui-ux-phase2: date separators, grouped
+                    // by the viewer's local calendar day.
+                    const showDateSeparator = shouldShowDateSeparator(msg.timestamp, chatMessages[index - 1]?.timestamp);
                     // fix/chat-safety-reliability-phase1: this row uses
                     // items-end/items-start (never stretch), so a flex
                     // child sizes to its own content width rather than the
@@ -1165,8 +1214,16 @@ export default function App() {
                     // max-w-full on the bubble gives it something to wrap
                     // against.
                     return (
-                      <div key={msg.id} className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                        <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
+                      <div key={msg.id}>
+                        {showDateSeparator && (
+                          <div className="flex items-center justify-center py-2">
+                            <span className="px-2.5 py-1 rounded-full bg-slate-800/80 text-slate-400 text-[10px] font-bold">
+                              {formatDateSeparatorLabel(msg.timestamp, lang)}
+                            </span>
+                          </div>
+                        )}
+                        <div className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                        <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
 
                         <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm relative transition-all duration-500 break-words max-w-full ${
                           isAdmin
@@ -1182,7 +1239,7 @@ export default function App() {
                           
                           {msg.type === 'file' ? (
                             <div className="space-y-2">
-                              <span className={`${isAdmin ? 'bg-slate-900 text-slate-400' : 'bg-orange-800 text-orange-200'} text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
+                              <span className={`${isAdmin ? 'bg-slate-900 text-slate-400' : 'bg-orange-800 text-orange-200'} text-[10px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
                                 {msg.fileCategory}
                               </span>
                               <a 
@@ -1216,7 +1273,7 @@ export default function App() {
                             <p>{msg.text}</p>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 mt-1 text-[8px] text-slate-500 font-mono select-none">
+                        <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500 font-mono select-none">
                           <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                           {isAdmin ? (
                             <span className={`inline-flex items-center gap-1 px-1 py-0.5 rounded-md transition-all ${
@@ -1266,6 +1323,7 @@ export default function App() {
                             </span>
                           )}
                         </div>
+                        </div>
                       </div>
                     );
                   })}
@@ -1291,14 +1349,26 @@ export default function App() {
                     <Paperclip className="w-4 h-4 shrink-0" />
                   </button>
 
-                  <input
-                    type="text"
+                  <textarea
+                    ref={adminTextareaRef}
+                    rows={1}
                     placeholder={t('typeMessage')}
                     value={chatMessageText}
                     onChange={(e) => setChatMessageText(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter sends (matching the previous single-line
+                      // input's implicit submit-on-Enter); Shift+Enter
+                      // inserts a newline, now that this can grow to
+                      // multiple lines.
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendAdminMessage(e);
+                      }
+                    }}
                     maxLength={MAX_CHAT_TEXT_LENGTH}
                     disabled={isSendingAdminMessage}
-                    className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500 disabled:opacity-60"
+                    style={{ minHeight: COMPOSER_MIN_HEIGHT_PX, maxHeight: COMPOSER_MAX_HEIGHT_PX }}
+                    className="flex-1 p-3 bg-slate-900 border border-slate-800 text-white text-xs rounded-xl focus:outline-none placeholder-slate-500 focus:border-slate-500 disabled:opacity-60 resize-none overflow-y-auto leading-normal"
                   />
 
                   <button
@@ -1355,7 +1425,7 @@ export default function App() {
                             )}
                             <div className="truncate text-xs">
                               <p className="font-bold text-slate-200 truncate">{doc.name}</p>
-                              <span className="text-[9px] text-slate-500 font-mono block uppercase">{doc.category} • {doc.uploadedBy}</span>
+                              <span className="text-[10px] text-slate-500 font-mono block uppercase">{doc.category} • {doc.uploadedBy}</span>
                             </div>
                           </div>
 
@@ -1368,7 +1438,7 @@ export default function App() {
                                 triggerToast("Sample document downloaded");
                               }
                             }}
-                            className="p-1 px-2.5 bg-slate-800 hover:bg-slate-800 text-slate-200 border border-slate-800 hover:border-slate-700 rounded text-[10px] font-mono leading-none transition-all cursor-pointer"
+                            className="py-2.5 px-3 min-h-[44px] flex items-center justify-center bg-slate-800 hover:bg-slate-800 text-slate-200 border border-slate-800 hover:border-slate-700 rounded text-[11px] font-mono leading-none transition-all cursor-pointer"
                           >
                             GET
                           </a>

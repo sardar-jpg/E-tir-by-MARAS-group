@@ -17,6 +17,7 @@ import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
+import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
@@ -42,6 +43,12 @@ interface DriverApplicationProps {
   onLanguageChange?: (lang: Language) => void;
   isMobile?: boolean;
 }
+
+// feature/chat-ui-ux-phase2: auto-growing composer bounds — one line at
+// rest, up to ~5-6 lines before the textarea scrolls internally instead of
+// pushing the rest of the panel off-screen.
+const DRIVER_COMPOSER_MIN_HEIGHT_PX = 44;
+const DRIVER_COMPOSER_MAX_HEIGHT_PX = 128;
 
 export default function DriverApplication({
   lang,
@@ -285,15 +292,66 @@ export default function DriverApplication({
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [remarks, setRemarks] = useState("");
   const [selectedStatusVal, setSelectedStatusVal] = useState<ShipmentStatus>("Accepted");
-  
-  // Auto-scroll chat to bottom
+
+  // feature/chat-ui-ux-phase2: smart auto-scroll. messagesContainerRef is
+  // the scrollable message list; isNearBottomChatRef tracks (via the
+  // onScroll handler below) whether the driver is already close to the
+  // bottom — only then does a new message auto-scroll the view. Reading
+  // older history and having a new message arrive must never yank the
+  // view back down.
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isNearBottomChatRef = useRef(true);
+
+  // Opening a different shipment (or the chat tab itself) always starts
+  // scrolled to its latest messages.
   useEffect(() => {
-    if (activeTab === 'chat' && chatMessages.length > 0) {
+    isNearBottomChatRef.current = true;
+  }, [activeShipment?.id, activeTab]);
+
+  // Auto-scroll chat to bottom — feature/chat-ui-ux-phase2: only when
+  // already near the bottom (or just switched shipment/tab, per the reset
+  // above). Previously this scrolled unconditionally on every new
+  // message, yanking the driver back down even while scrolled up reading
+  // older history.
+  useEffect(() => {
+    if (activeTab === 'chat' && chatMessages.length > 0 && isNearBottomChatRef.current) {
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 80);
     }
   }, [chatMessages.length, activeTab, activeShipment?.id]);
+
+  const handleMessagesScroll = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomChatRef.current = isNearBottom(distanceFromBottom);
+  };
+
+  // feature/chat-ui-ux-phase2: auto-grow the composer textarea with its
+  // content (including shrinking back down after the draft is cleared on
+  // send).
+  useEffect(() => {
+    const el = driverTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${computeAutoGrowHeightPx(el.scrollHeight, DRIVER_COMPOSER_MIN_HEIGHT_PX, DRIVER_COMPOSER_MAX_HEIGHT_PX)}px`;
+  }, [newMessageText]);
+
+  // feature/chat-ui-ux-phase2: computed once and reused for both the
+  // rendered list and the "no search results" empty-state check below
+  // (previously the same filter ran twice, independently) — also gives
+  // date-separator lookups a stable array to index into.
+  const visibleChatMessages = useMemo(() => {
+    const q = chatSearchQuery.toLowerCase().trim();
+    if (!q) return chatMessages;
+    return chatMessages.filter(
+      (msg) =>
+        (msg.text || "").toLowerCase().includes(q) ||
+        (msg.fileName || "").toLowerCase().includes(q) ||
+        (msg.senderName || "").toLowerCase().includes(q)
+    );
+  }, [chatMessages, chatSearchQuery]);
   
   // Theme mode switch (light vs dark)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -455,6 +513,9 @@ export default function DriverApplication({
 
   // Native chat attachment (paperclip -> hidden file input -> auto-send)
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  // feature/chat-ui-ux-phase2: auto-growing composer textarea (replaces
+  // the previous single-line input).
+  const driverTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   // fix/chat-safety-reliability-phase1 (follow-up): set when an upload
   // succeeded but the follow-up POST /chat failed — holds the real
@@ -1882,7 +1943,16 @@ export default function DriverApplication({
             {activeTab === 'chat' && (
               <div className="h-full flex flex-col justify-between pt-1 text-slate-200">
                 {activeShipment ? (
-                  <div className="flex-1 flex flex-col justify-between overflow-hidden h-[540px]">
+                  /* feature/chat-ui-ux-phase2: was a fixed h-[540px] —
+                     overflowed on short devices (the outer overflow-y-auto
+                     ancestor at line ~1423 would then scroll the WHOLE
+                     page to reach the bottom of the thread/composer
+                     instead of the thread scrolling internally) and
+                     wasted space on tall ones. flex-1 + min-h-0 fills
+                     whatever height the dvh-based mobile shell (line
+                     ~1221) actually has available, which also responds
+                     correctly to the on-screen keyboard opening/closing. */
+                  <div className="flex-1 flex flex-col justify-between overflow-hidden min-h-0">
                     <div className="bg-slate-900/60 p-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
                       <div className="flex items-center gap-2">
                         {isShipmentFinished ? (
@@ -1897,7 +1967,7 @@ export default function DriverApplication({
                         )}
                         <div>
                           <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">MARAS Admin Chat</h4>
-                          <span className="text-[9px] text-[#f97316] font-mono font-bold">
+                          <span className="text-[11px] text-[#f97316] font-mono font-bold">
                             {isShipmentFinished
                               ? (lang === 'tr' ? `Tamamlanan Görev #${activeShipment.shipmentNumber}` : lang === 'ar' ? `المهمة المكتملة #${activeShipment.shipmentNumber}` : `Finished Duty #${activeShipment.shipmentNumber}`)
                               : `Transit Duty #${activeShipment.shipmentNumber}`
@@ -1921,25 +1991,25 @@ export default function DriverApplication({
                         <button
                           type="button"
                           onClick={() => setChatSearchQuery("")}
-                          className="text-slate-400 hover:text-white text-[9px] font-bold px-2 py-0.5 bg-slate-900 border border-slate-800 rounded cursor-pointer border-0"
+                          className="text-slate-400 hover:text-white text-[11px] font-bold px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded cursor-pointer border-0"
                         >
                           Clear
                         </button>
                       )}
                     </div>
 
-                    {/* Messages list scrollable */}
-                    <div className="flex-1 overflow-y-auto p-2 my-1 space-y-3 max-h-[380px]">
-                      {chatMessages
-                        .filter(msg => {
-                          if (!chatSearchQuery.trim()) return true;
-                          const q = chatSearchQuery.toLowerCase().trim();
-                          return (msg.text || "").toLowerCase().includes(q) || 
-                                 (msg.fileName || "").toLowerCase().includes(q) || 
-                                 (msg.senderName || "").toLowerCase().includes(q);
-                        })
-                        .map((msg) => {
+                    {/* Messages list scrollable — feature/chat-ui-ux-phase2:
+                        dropped the max-h-[380px] cap now that the parent
+                        panel is properly sized (min-h-0 above) rather than
+                        artificially limiting this below its natural
+                        flex-1 share of that space. */}
+                    <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto p-2 my-1 space-y-3">
+                      {visibleChatMessages
+                        .map((msg, index) => {
                           const isMe = msg.sender === 'driver';
+                          // feature/chat-ui-ux-phase2: date separators,
+                          // grouped by the viewer's local calendar day.
+                          const showDateSeparator = shouldShowDateSeparator(msg.timestamp, visibleChatMessages[index - 1]?.timestamp);
                           // fix/chat-safety-reliability-phase1: this row
                           // uses items-end/items-start (never stretch), so
                           // a flex child sizes to its own content width
@@ -1950,8 +2020,16 @@ export default function DriverApplication({
                           // max-w-full on the bubble gives it something to
                           // wrap against.
                           return (
-                            <div key={msg.id} className={`flex flex-col max-w-[85%] ${isMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                              <span className="text-[8px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
+                            <div key={msg.id}>
+                              {showDateSeparator && (
+                                <div className="flex items-center justify-center py-2">
+                                  <span className="px-2.5 py-1 rounded-full bg-slate-900 text-slate-500 text-[10px] font-bold">
+                                    {formatDateSeparatorLabel(msg.timestamp, lang)}
+                                  </span>
+                                </div>
+                              )}
+                              <div className={`flex flex-col max-w-[85%] ${isMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                              <span className="text-[10px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
                               <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm break-words max-w-full ${
                                 isMe
                                   ? 'bg-orange-600 text-white rounded-tr-none'
@@ -1959,7 +2037,7 @@ export default function DriverApplication({
                               }`}>
                                  {msg.type === 'file' ? (
                                   <div className="space-y-2">
-                                    <span className="bg-slate-950 text-orange-400 text-[8px] font-bold px-1.5 py-0.5 rounded uppercase block w-max">{msg.fileCategory}</span>
+                                    <span className="bg-slate-950 text-orange-400 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase block w-max">{msg.fileCategory}</span>
                                     <a 
                                       href={msg.fileUrl || "#"} 
                                       download={msg.fileName || "document.bin"}
@@ -1991,13 +2069,14 @@ export default function DriverApplication({
                                   <p>{msg.text}</p>
                                 )}
                               </div>
-                              <div className="flex items-center gap-1.5 mt-0.5 text-[8px] text-slate-500 font-mono">
+                              <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-slate-500 font-mono">
                                 <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                 {isMe && (
                                   <span className={`inline-flex items-center gap-0.5 ${msg.status === 'seen' ? 'text-emerald-400 font-bold' : 'text-slate-500'}`}>
                                     • {msg.status === 'seen' ? '✓✓ Seen' : '✓ Sent'}
                                   </span>
                                 )}
+                              </div>
                               </div>
                             </div>
                           );
@@ -2009,13 +2088,7 @@ export default function DriverApplication({
                         </div>
                       )}
 
-                      {chatMessages.length > 0 && chatMessages.filter(msg => {
-                        if (!chatSearchQuery.trim()) return true;
-                        const q = chatSearchQuery.toLowerCase().trim();
-                        return (msg.text || "").toLowerCase().includes(q) || 
-                               (msg.fileName || "").toLowerCase().includes(q) || 
-                               (msg.senderName || "").toLowerCase().includes(q);
-                      }).length === 0 && (
+                      {chatMessages.length > 0 && visibleChatMessages.length === 0 && (
                         <div className="py-10 text-center text-slate-600 text-xs italic">
                           No search results matching "{chatSearchQuery}".
                         </div>
@@ -2086,14 +2159,27 @@ export default function DriverApplication({
                           )}
                         </button>
 
-                        <input
-                          type="text"
+                        <textarea
+                          ref={driverTextareaRef}
+                          rows={1}
                           placeholder={lang === 'tr' ? 'Bir mesaj yazın...' : lang === 'ar' ? 'اكتب رسالة...' : 'Type a message...'}
                           value={newMessageText}
                           onChange={(e) => setNewMessageText(e.target.value)}
+                          onKeyDown={(e) => {
+                            // Enter sends (matching the previous
+                            // single-line input's implicit
+                            // submit-on-Enter); Shift+Enter inserts a
+                            // newline, now that this can grow to multiple
+                            // lines.
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage(e);
+                            }
+                          }}
                           maxLength={MAX_CHAT_TEXT_LENGTH}
                           disabled={isSendingDriverMessage}
-                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono disabled:opacity-60"
+                          style={{ minHeight: DRIVER_COMPOSER_MIN_HEIGHT_PX, maxHeight: DRIVER_COMPOSER_MAX_HEIGHT_PX }}
+                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono disabled:opacity-60 resize-none overflow-y-auto leading-normal"
                         />
                         <button
                           type="submit"

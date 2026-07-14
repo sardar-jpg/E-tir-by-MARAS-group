@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, Check, CheckCheck, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
 import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment } from '../../lib/chatCenterView';
@@ -11,6 +11,7 @@ import {
   shouldConfirmChannelRead,
   planAttachmentSendForShipment,
 } from '../../lib/chatComposerState';
+import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from '../../lib/chatDisplay';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
 // DocumentCategory — 'photo' is left out here since these are staff
@@ -24,6 +25,12 @@ const INTERNAL_FILE_CATEGORIES: DocumentCategory[] = [
   'customs',
   'other',
 ];
+
+// feature/chat-ui-ux-phase2: auto-growing composer bounds — one line at
+// rest, up to ~5-6 lines before the textarea scrolls internally instead of
+// pushing the rest of the panel off-screen.
+const COMPOSER_MIN_HEIGHT_PX = 40;
+const COMPOSER_MAX_HEIGHT_PX = 120;
 
 // 'internal_staff' (src/types.ts) is a real, admin-only chat channel — see
 // server.ts chat routes and chatVisibility.ts for the read/write gating.
@@ -79,6 +86,8 @@ const LABELS: Record<Language, {
   connectionError: string;
   connectionErrorRetrying: string;
   retryNow: string;
+  sentStatus: string;
+  seenStatus: string;
   category: Record<DocumentCategory, string>;
 }> = {
   en: {
@@ -107,6 +116,8 @@ const LABELS: Record<Language, {
     connectionError: "Couldn't load messages. Check your connection and try again.",
     connectionErrorRetrying: 'Connection lost — retrying…',
     retryNow: 'Retry now',
+    sentStatus: 'Sent',
+    seenStatus: 'Seen',
     category: {
       cmr: 'CMR',
       invoice: 'Invoice',
@@ -143,6 +154,8 @@ const LABELS: Record<Language, {
     connectionError: 'Mesajlar yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.',
     connectionErrorRetrying: 'Bağlantı kesildi — yeniden deneniyor…',
     retryNow: 'Şimdi tekrar dene',
+    sentStatus: 'Gönderildi',
+    seenStatus: 'Görüldü',
     category: {
       cmr: 'CMR',
       invoice: 'Fatura',
@@ -179,6 +192,8 @@ const LABELS: Record<Language, {
     connectionError: 'تعذر تحميل الرسائل. تحقق من اتصالك وحاول مرة أخرى.',
     connectionErrorRetrying: 'انقطع الاتصال — جارٍ إعادة المحاولة…',
     retryNow: 'إعادة المحاولة الآن',
+    sentStatus: 'تم الإرسال',
+    seenStatus: 'تمت المشاهدة',
     category: {
       cmr: 'CMR',
       invoice: 'فاتورة',
@@ -218,6 +233,21 @@ export default function ChatCenter({
   // successfully-fetched messages stay on screen while this is true.
   const [pollError, setPollError] = useState(false);
   const retryNowRef = useRef<() => void>(() => {});
+  // feature/chat-ui-ux-phase2: smart auto-scroll. messagesContainerRef is
+  // the scrollable message list; isNearBottomRef tracks (via the onScroll
+  // handler below) whether the admin is already close to the bottom —
+  // only then does a newly-arrived message auto-scroll the view. Reading
+  // older history and having a new message arrive must never yank the
+  // view back down. Defaults to true so the very first load of a
+  // channel scrolls to its latest messages.
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+  // feature/chat-ui-ux-phase2: auto-growing composer textarea (replaces
+  // the previous single-line input) — grows with content up to
+  // COMPOSER_MAX_HEIGHT_PX, then scrolls internally rather than taking
+  // over the screen for a very long message.
+  const internalTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [internalMessageText, setInternalMessageText] = useState('');
   const [isSendingInternal, setIsSendingInternal] = useState(false);
   const [internalFile, setInternalFile] = useState<File | null>(null);
@@ -277,6 +307,11 @@ export default function ChatCenter({
     let cancelled = false;
     setPollError(false);
     setHasLoadedMessagesOnce(false);
+    // feature/chat-ui-ux-phase2: a freshly-selected shipment/channel
+    // always starts scrolled to its latest messages, regardless of where
+    // the admin happened to be scrolled to in whatever they were
+    // viewing before.
+    isNearBottomRef.current = true;
 
     // feature/admin-mobile-ui correction pass: marks this channel read
     // for the signed-in admin (per-admin — src/lib/chatUnreadAccess.ts,
@@ -358,6 +393,35 @@ export default function ChatCenter({
       clearInterval(interval);
     };
   }, [selectedShipment?.id, activeChannel]);
+
+  // feature/chat-ui-ux-phase2: smart auto-scroll. Only scrolls to the
+  // newest message when the admin was already near the bottom (or this is
+  // the first render of a freshly-selected shipment/channel, per the
+  // isNearBottomRef reset above) — reading older history and having a new
+  // message arrive must never yank the view back down.
+  useEffect(() => {
+    if (channelMessages.length === 0) return;
+    if (!isNearBottomRef.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [channelMessages.length, selectedShipment?.id, activeChannel]);
+
+  const handleMessagesScroll = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = isNearBottom(distanceFromBottom);
+  };
+
+  // feature/chat-ui-ux-phase2: auto-grow the composer textarea with its
+  // content (including shrinking back down after the draft is cleared on
+  // send) — reset to "auto" first so scrollHeight reflects the content
+  // alone, not whatever height was previously forced.
+  useEffect(() => {
+    const el = internalTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${computeAutoGrowHeightPx(el.scrollHeight, COMPOSER_MIN_HEIGHT_PX, COMPOSER_MAX_HEIGHT_PX)}px`;
+  }, [internalMessageText]);
 
   const resetInternalAttachment = () => {
     setInternalFile(null);
@@ -535,13 +599,18 @@ export default function ChatCenter({
             {label.title}
           </h2>
           <div className="relative mt-3">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute top-1/2 -translate-y-1/2 left-3" />
+            {/* feature/chat-ui-ux-phase2: logical start/ps-/pe- instead of
+                physical left-3/pl-8/pr-3 — the icon now sits on the
+                correct side (and the input's own text/placeholder
+                alignment) in RTL (Arabic) instead of staying pinned to
+                the physical left regardless of direction. */}
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute top-1/2 -translate-y-1/2 start-3" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={label.searchPlaceholder}
-              className="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+              className="w-full ps-8 pe-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
             />
           </div>
         </div>
@@ -566,7 +635,7 @@ export default function ChatCenter({
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
                   {formatUnreadBadge(unread.count) && (
-                    <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold flex items-center justify-center">
+                    <span className="shrink-0 min-w-[20px] h-[20px] px-1 rounded-full bg-orange-500 text-white text-[11px] font-bold flex items-center justify-center">
                       {formatUnreadBadge(unread.count)}
                     </span>
                   )}
@@ -650,7 +719,7 @@ export default function ChatCenter({
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50/50">
+            <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50/50">
               {isLoadingMessages ? (
                 <p className="text-xs text-slate-400 text-center py-10">{label.loading}</p>
               ) : pollError && !hasLoadedMessagesOnce ? (
@@ -695,12 +764,22 @@ export default function ChatCenter({
                       {label.connectionErrorRetrying}
                     </div>
                   )}
-                  {channelMessages.map((msg) => {
+                  {channelMessages.map((msg, index) => {
                     const isAdmin = msg.sender === 'admin';
                     const formattedTime = new Date(msg.timestamp).toLocaleTimeString(
                       lang === 'tr' ? 'tr-TR' : lang === 'ar' ? 'ar-IQ' : 'en-US',
                       { hour: '2-digit', minute: '2-digit' }
                     );
+                    // feature/chat-ui-ux-phase2: date separators, grouped
+                    // by the viewer's local calendar day.
+                    const showDateSeparator = shouldShowDateSeparator(msg.timestamp, channelMessages[index - 1]?.timestamp);
+                    // Read status only means anything for driver_admin/
+                    // client_admin — `status` is the single global
+                    // driver/client-facing read receipt (see
+                    // ChatMessage.status, types.ts); internal_staff has no
+                    // such "other party" to read it, so this stays absent
+                    // there rather than showing a status that isn't real.
+                    const showReadStatus = isAdmin && activeChannel !== 'internal_staff';
                     const isImageAttachment =
                       msg.type === 'file' &&
                       !!msg.fileUrl &&
@@ -716,7 +795,15 @@ export default function ChatCenter({
                     // shrink into. `max-w-full` on the bubble itself
                     // (below) gives it something to wrap against.
                     return (
-                      <div key={msg.id} className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                      <div key={msg.id}>
+                        {showDateSeparator && (
+                          <div className="flex items-center justify-center py-2">
+                            <span className="px-2.5 py-1 rounded-full bg-slate-200/70 text-slate-500 text-[11px] font-bold">
+                              {formatDateSeparatorLabel(msg.timestamp, lang)}
+                            </span>
+                          </div>
+                        )}
+                        <div className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                         <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
                         {msg.type === 'file' ? (
                           <div className="flex flex-col gap-1.5">
@@ -742,13 +829,13 @@ export default function ChatCenter({
                               <FileText className="w-4 h-4 shrink-0" />
                               <div className="min-w-0 flex-1">
                                 <p className="font-bold truncate underline decoration-dotted underline-offset-2">{msg.fileName || 'Attachment'}</p>
-                                <span className={`text-[10px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
+                                <span className={`text-[11px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
                                   {label.category[msg.fileCategory ?? 'other']}
                                 </span>
                               </div>
                               {msg.fileUrl && <Download className="w-3.5 h-3.5 shrink-0" />}
                               {msg.channel === 'internal_staff' && (
-                                <span className="shrink-0 flex items-center gap-1 text-[10px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
+                                <span className="shrink-0 flex items-center gap-1 text-[11px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
                                   <Lock className="w-2.5 h-2.5" />
                                   {label.internalOnly}
                                 </span>
@@ -780,10 +867,24 @@ export default function ChatCenter({
                             {msg.text}
                           </div>
                         )}
-                        <span className="text-[10px] text-slate-400 font-mono mt-0.5">{formattedTime}</span>
+                        <span className="flex items-center gap-1 text-[11px] text-slate-400 font-mono mt-0.5">
+                          {formattedTime}
+                          {showReadStatus && (
+                            <span className={`inline-flex items-center gap-0.5 ${msg.status === 'seen' ? 'text-emerald-500 font-bold' : 'text-slate-400'}`}>
+                              {msg.status === 'seen' ? (
+                                <CheckCheck className="w-3 h-3" />
+                              ) : (
+                                <Check className="w-3 h-3" />
+                              )}
+                              {msg.status === 'seen' ? label.seenStatus : label.sentStatus}
+                            </span>
+                          )}
+                        </span>
+                        </div>
                       </div>
                     );
                   })}
+                  <div ref={messagesEndRef} />
                 </>
               )}
             </div>
@@ -847,14 +948,26 @@ export default function ChatCenter({
                   >
                     <Paperclip className="w-4 h-4" />
                   </button>
-                  <input
-                    type="text"
+                  <textarea
+                    ref={internalTextareaRef}
+                    rows={1}
                     value={internalMessageText}
                     onChange={(e) => setInternalMessageText(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter sends (matching the previous single-line
+                      // input's implicit submit-on-Enter); Shift+Enter
+                      // inserts a newline, now that this can grow to
+                      // multiple lines.
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendInternalMessage();
+                      }
+                    }}
                     placeholder={label.internalInputPlaceholder}
                     maxLength={MAX_CHAT_TEXT_LENGTH}
                     disabled={isSendingInternal}
-                    className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60"
+                    style={{ minHeight: COMPOSER_MIN_HEIGHT_PX, maxHeight: COMPOSER_MAX_HEIGHT_PX }}
+                    className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60 resize-none overflow-y-auto leading-normal"
                   />
                   <button
                     type="submit"
