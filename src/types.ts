@@ -148,6 +148,16 @@ export interface Driver {
   lastUpdated?: string;
   avatarUrl?: string;
   status?: "pending" | "approved" | "rejected";
+  /**
+   * The driver's Firebase Authentication uid, set ONLY by
+   * POST /api/verify-session (server.ts) after adminAuth.verifyIdToken has
+   * cryptographically confirmed it — never inferred from `id`, `email`,
+   * `username`, or a client-supplied value. Absent for drivers who have
+   * never signed in via Google/Firebase (username/password-only accounts
+   * have no Firebase Auth identity at all). This is the only field
+   * DELETE /api/drivers/:id trusts to also delete the Firebase Auth user.
+   */
+  firebaseUid?: string;
 }
 
 export interface Client {
@@ -286,6 +296,40 @@ export interface AppNotification {
   // driver would be paged for a document event that belongs to the
   // client_admin audience. Absent for other notification types.
   channel?: ChatChannel;
+  // Notification Phase 1: session id of a specific user this notification
+  // is directly addressed to, independent of shipmentId. Some events (e.g.
+  // a driver being approved) have no associated shipment at all — without
+  // this, GET /api/notifications' shipment-scoping filter for
+  // driver/client sessions would silently drop the notification for
+  // everyone except admins, and POST /api/notifications/:id/read's
+  // ownership check (which looks up notif.shipmentId) would 404 rather
+  // than let the intended recipient mark it read. When set, both routes
+  // treat `recipientUserId === the caller's own session id` as sufficient
+  // access on its own, on top of (not instead of) the existing
+  // shipment-scoped rules. Absent for the ordinary shipment-scoped
+  // notification types.
+  recipientUserId?: string;
+  // Notification Phase 1 correction: per-user read tracking. `read` above
+  // is a legacy GLOBAL flag on the shared notification document — every
+  // driver/client/admin who can see a given notification reads the SAME
+  // doc, so one user's read request flipping `read` to true marked it
+  // read for every other user too (a real bug: Driver A opening their
+  // notifications silently marked it read for Driver B, Admin, and
+  // Client, none of whom had actually seen it). `readByUserIds` is the
+  // source of truth for whether a SPECIFIC user has read this
+  // notification: a user's own verified session id must appear in this
+  // array for it to count as read for them. Absent/empty means unread
+  // for everyone, including on notifications written before this field
+  // existed — those remain safely readable; reading one just adds the
+  // reader's id here rather than requiring a data migration. Only ids are
+  // ever added, never removed, by POST /api/notifications/:id/read.
+  // `read` itself is left in place, untouched by per-user reads — it
+  // still exists as-is for the legacy admin-wide POST
+  // /api/notifications/clear and for Admin/Client code paths not yet
+  // migrated to this per-user model (see
+  // docs/NOTIFICATION_SYSTEM_AUDIT.md). DriverApplication.tsx is the only
+  // consumer migrated to readByUserIds in this PR.
+  readByUserIds?: string[];
 }
 
 // PR #44 — MARAS AI notification readiness. Reserved notification type

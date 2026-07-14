@@ -28,16 +28,17 @@ static readiness script only.
 ## 2. Safety rules
 
 - **Never commit a Firebase/GCP service-account JSON key file.** This app's
-  Admin SDK usage (`firebase-admin`, for FCM push and verifying session
-  tokens) is designed to use Application Default Credentials — see §3 — so
-  no key file should ever need to exist in this repo. `scripts/check-firebase-readiness.ts`
-  (§10) scans for one as a safety net.
+  Admin SDK usage (`firebase-admin` — Firestore, Storage, FCM push, and
+  session-token verification alike) is designed to use Application Default
+  Credentials — see §3 — so no key file should ever need to exist in this
+  repo. `scripts/check-firebase-readiness.ts` (§10) scans for one as a
+  safety net.
 - **Never commit `.env.local` or any file containing real secrets.**
   `.gitignore` already excludes `.env*` (except `.env.example`) — do not
   override that.
 - **Use local environment variables or Cloud Run secrets, never files
-  tracked by git**, for `SESSION_SECRET`, `SERVER_FIREBASE_PASSWORD`,
-  `SUPER_ADMIN_PASSWORD_HASH`, `GOOGLE_MAPS_PLATFORM_KEY`, etc.
+  tracked by git**, for `SESSION_SECRET`, `SUPER_ADMIN_PASSWORD_HASH`,
+  `GOOGLE_MAPS_PLATFORM_KEY`, etc.
 - **Do not run verification against real production customer data** (real
   shipments, real client accounts, real chat/document content) unless
   explicitly approved by whoever owns that data. Everything in §7–§9 can be
@@ -61,9 +62,8 @@ NODE_ENV=production                # or a staging-equivalent value; gates DEMO_A
 SESSION_SECRET=<strong-random-secret>       # required — server exits at startup without it
 STRICT_PERSISTENCE=true            # default; only the literal string "false" turns it off
 SEED_DEMO_DATA=false               # default; only "true" seeds a full demo dataset
-SERVER_FIREBASE_EMAIL=<dedicated-server-account-email>
-SERVER_FIREBASE_PASSWORD=<dedicated-server-account-password>
-SERVER_FIREBASE_UID=<firebase-auth-uid-for-server-account>   # NOT a secret — see §5a
+GOOGLE_APPLICATION_CREDENTIALS=<absolute-path-to-a-service-account-key, optional> # see §3a — not needed on Cloud Run, not needed locally if using gcloud login
+SERVER_FIREBASE_UID=<firebase-auth-uid-for-server-account>   # NOT a secret — see §5a; legacy, only relevant until firestore.rules/storage.rules are updated
 SUPER_ADMIN_EMAIL=<root-admin-login-email>
 SUPER_ADMIN_PASSWORD_HASH=<generate-with-npm-run-hash-password>
 GOOGLE_MAPS_PLATFORM_KEY=<restricted-maps-key>    # only needed to test GPS/map pages
@@ -72,15 +72,25 @@ ALLOWED_ORIGINS=<comma-separated-extra-origins>   # optional — see below
 
 Notes:
 
-- **`SERVER_FIREBASE_EMAIL` / `SERVER_FIREBASE_PASSWORD`** — the one
-  Firebase Auth account the server signs in as (`firebase/auth`
-  `signInWithEmailAndPassword`, `server.ts` `authenticateServerAccount`).
-  `firestore.rules` / `storage.rules` reject every request except from this
-  account's UID (currently hardcoded as `mQadHKcpmgbLIAwQaz8AqrAytIo2` in
-  both rule files) — **confirm that UID matches the actual account these
-  credentials belong to** before relying on a "successful" Firestore
-  connection; a mismatched UID fails closed (falls back to memory, logged
-  loudly) rather than silently granting access.
+- **Server-side Firestore/Storage auth — Application Default Credentials
+  (ADC), no username/password, no committed key file.** The server uses the
+  Firebase Admin SDK (`firebase-admin/firestore`, `firebase-admin/storage`)
+  for all Firestore/Storage access, authenticating via ADC:
+  - **Local development**: run `gcloud auth application-default login` once
+    (interactive; stores credentials in a file outside this repo — nothing
+    to put in `.env.local`).
+  - **Cloud Run**: ADC resolves automatically via the instance's own
+    attached runtime service account — no key file, no env var. That
+    service account needs the Cloud Datastore User and Storage Object Admin
+    IAM roles (see `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md`).
+  - **Alternative**: set `GOOGLE_APPLICATION_CREDENTIALS` to an absolute
+    path (outside this repo) of a downloaded service-account JSON key, if
+    you specifically don't want to use your own `gcloud` login locally.
+  - The Admin SDK bypasses `firestore.rules`/`storage.rules` entirely (it's
+    a trusted-server identity, not a rules-checked end user) — those rule
+    files still hardcode a UID from the previous email/password-based setup
+    (§5a), which is no longer load-bearing for the server's own access but
+    hasn't been changed in this branch (see §5–§6).
 - **`APP_URL` / `CLIENT_URL` / `PUBLIC_APP_URL`** — all optional,
   equivalent, additional CORS-allowlist entries (`src/lib/cors.ts`,
   `parseAllowedOriginsFromEnv`). `https://etir.app`, `https://www.etir.app`,
@@ -90,25 +100,30 @@ Notes:
   cross-origin access.
 - **Firebase client config — no separate env vars used by default.** The
   web SDK config (`projectId`, `apiKey`, `authDomain`, `storageBucket`,
-  `firestoreDatabaseId`) is committed in `firebase-applet-config.json` and
-  read directly by both `server.ts` and `src/googleAuth.ts`. This is
-  intentional and safe: Firebase web API keys are not secret by design,
-  real access control is `firestore.rules`/`storage.rules`. To point at a
-  **different** Firebase project (e.g. a real staging project), either
-  swap that file's contents for that environment, or set the
-  **`FIREBASE_CONFIG`** env var to the same JSON as a string —
-  `server.ts` checks the file first, then falls back to `FIREBASE_CONFIG`.
+  `firestoreDatabaseId`) is committed in `firebase-applet-config.json`,
+  unchanged by the Admin SDK migration. `src/googleAuth.ts` (the browser)
+  still reads the whole file for its own Google Sign-In use. `server.ts`
+  now reads only `projectId`, `storageBucket`, and `firestoreDatabaseId`
+  from it, to configure the Admin SDK — it no longer uses this file to sign
+  in as anything. This is intentional and safe: Firebase web API keys are
+  not secret by design. To point at a **different** Firebase project (e.g.
+  a real staging project), either swap that file's contents for that
+  environment, or set the **`FIREBASE_CONFIG`** env var to the same JSON as
+  a string — `server.ts` checks the file first, then falls back to
+  `FIREBASE_CONFIG`.
 - **Firebase Admin SDK — Application Default Credentials, no explicit env
-  vars.** `server.ts` initializes `firebase-admin` with no credentials
-  argument (`initializeAdminApp()`), which resolves ADC automatically —
-  on Cloud Run this is the instance's own service account, with no key
-  file to manage. This is used only for FCM push notifications and for
-  verifying Firebase ID tokens on `/api/verify-session` — it is unrelated
-  to the client-SDK sign-in above, and no service-account JSON should ever
-  be added to this repo or to env vars for it.
-- **Not required for storage** — no separate bucket-name env var exists;
-  `POST /api/upload` calls `getStorage(firebaseApp)`, which reads the
-  bucket from `firebase-applet-config.json`'s `storageBucket` field.
+  vars required.** `server.ts` initializes one `firebase-admin` app with
+  `credential: applicationDefault()`, which resolves ADC automatically — on
+  Cloud Run this is the instance's own attached service account, with no
+  key file to manage; locally, run `gcloud auth application-default login`
+  once. This single app now backs Firestore, Storage, FCM push
+  notifications, and Firebase ID-token verification (`/api/verify-session`)
+  alike — no service-account JSON should ever be added to this repo.
+- **Storage bucket — read from `firebase-applet-config.json`, same as
+  before.** No separate bucket-name env var exists; `server.ts` reads
+  `storageBucket` from that file at startup and calls
+  `getStorage(adminApp).bucket()` (Admin SDK) once, reused for every
+  `POST /api/upload`.
 - **Present in `.env.example` but not read by any shipped feature:**
   `GEMINI_API_KEY` (leftover AI Studio scaffold var — the MARAS AI Monitor
   header is UI-only today). `DD_API_KEY` / `DD_ENV` are optional Datadog
@@ -133,33 +148,51 @@ Recommended, in order:
      test records and explicit approval (§2).
 2. In that project's Firebase Console: enable **Firestore** (matching the
    `firestoreDatabaseId` your config points at — production currently uses
-   a non-default database, see `ETIR-PROJECT-REFERENCE.md` §1), enable
-   **Storage**, and enable **Authentication** (email/password provider, for
-   the server's own account).
-3. Create the **dedicated server Firebase Auth account** under
-   Authentication > Add user — never a real human's login. Note its UID.
-4. Deploy `firestore.rules` and `storage.rules` to that project, after
-   updating the hardcoded UID in both files to match the account created in
-   step 3 (§5–§6 explain how to confirm this matches). **Do not deploy rule
-   changes to the production project as part of this verification** unless
-   that is genuinely the intent — see "Not allowed" scope in the PR this
-   guide shipped with.
+   a non-default database, see `ETIR-PROJECT-REFERENCE.md` §1) and enable
+   **Storage**.
+3. Make sure Application Default Credentials are available for that
+   project: run `gcloud auth application-default login` and, if needed,
+   `gcloud config set project <the-verification-project-id>` (or
+   `gcloud auth application-default set-quota-project <project-id>`) so ADC
+   resolves against the right project rather than whatever your default
+   `gcloud` project is. Confirm the account/service-account you're using has
+   the Cloud Datastore User and Storage Object Admin IAM roles on that
+   project.
+4. `firestore.rules`/`storage.rules` are unaffected by this — the Admin SDK
+   bypasses them entirely, and this branch does not change them (§5–§6 still
+   describe the pre-migration UID-based rules, kept as-is pending a separate
+   follow-up).
 5. Set env vars **locally in your shell or `.env.local`** (never committed —
-   already gitignored) per §3, including the new project's
-   `SERVER_FIREBASE_EMAIL` / `SERVER_FIREBASE_PASSWORD`.
+   already gitignored) per §3. No Firebase credential env vars are needed —
+   only point `firebase-applet-config.json`/`FIREBASE_CONFIG` at the right
+   project if verifying against something other than the default config.
 6. Run with `STRICT_PERSISTENCE=true` and `SEED_DEMO_DATA=false` — the
    production defaults — so verification reflects real production behavior,
    not the more forgiving local-dev defaults.
 7. Start the app (`npm run dev`, or `npm run build && npm start` to test the
    production bundle) and read the `[Startup]` log block (§9) to confirm it
    reports `Configured persistence mode: firestore`, not `memory-fallback`.
-8. Deliberately test the unsafe-fallback path once: temporarily unset
-   `SERVER_FIREBASE_PASSWORD` (or point at a nonexistent project) and
-   restart — confirm the server logs the `[STARTUP ERROR]` block and falls
-   back to memory rather than silently proceeding as if nothing were wrong.
-   Then restore the real value.
+8. Deliberately test the unsafe-fallback path once: run
+   `gcloud auth application-default revoke` (or temporarily point at a
+   nonexistent project) and restart — confirm the server logs the
+   `[Firestore] Connection check failed` warning and falls back to memory
+   rather than silently proceeding as if nothing were wrong. Then run
+   `gcloud auth application-default login` again to restore it.
 
 ## 5. Firestore rules verification
+
+> **Legacy, pending a follow-up change.** This section (and §6, §5a) still
+> describes the pre-Admin-SDK-migration model, where `firestore.rules`/
+> `storage.rules` hardcode a specific Firebase Auth UID and the server signs
+> in as that account. The server no longer does that (see §3) — it now uses
+> the Admin SDK, which bypasses these rules entirely regardless of their
+> content. These rule files are intentionally **unchanged** in this branch;
+> a proposed deny-all replacement (since the UID they authorize is no
+> longer load-bearing for the server's own access) is a separate follow-up,
+> to be done only after the Admin SDK migration itself is verified working.
+> The checks below remain accurate for what these rule files currently do,
+> but are no longer part of what makes the server's own Firestore/Storage
+> access work.
 
 - [ ] `firestore.rules` deployed to the target project (Firebase Console >
       Firestore Database > Rules, or `firebase deploy --only firestore:rules`
@@ -354,13 +387,13 @@ as concrete real-Firebase checks (not just tab visibility) — see
 - [ ] Admin chat upload into `client_admin` does auto-publish as a document
       (§6 — this is current intended behavior, not a bug)
 - [ ] **Storage unavailable path**: temporarily break Storage access (e.g.
-      revoke the server account's Storage rule access, or point at an
-      invalid bucket) and confirm `POST /api/upload` returns a clear 503
-      ("File storage is temporarily unavailable... NOT saved") rather than
-      silently succeeding into memory — this is enforced explicitly in
-      `server.ts`'s upload handler (`useMemoryFallback || !firebaseApp`
-      check), independent of `STRICT_PERSISTENCE`. Restore access
-      afterward.
+      revoke ADC's Storage IAM role, or point at an invalid bucket name in
+      `firebase-applet-config.json`) and confirm `POST /api/upload` returns
+      a clear 503 ("File storage is temporarily unavailable... NOT saved")
+      rather than silently succeeding into memory — this is enforced
+      explicitly in `server.ts`'s upload handler
+      (`useMemoryFallback || !storageBucketRef` check), independent of
+      `STRICT_PERSISTENCE`. Restore access afterward.
 
 ## 9. Persistence verification
 
@@ -436,11 +469,12 @@ environment is not production-ready:
 
 - `"Running using Robust Memory Fallback"` or `"utilizing default Memory
   Fallback"` in startup logs
-- `[STARTUP ERROR] Server failed to authenticate to Firebase` or `[STARTUP
-  ERROR] SERVER_FIREBASE_EMAIL / SERVER_FIREBASE_PASSWORD are not set`
+- `[Firestore] Connection check failed` in startup logs — usually means ADC
+  is missing or unusable (run `gcloud auth application-default login`
+  locally; verify the Cloud Run service account's IAM roles in production)
 - `Configured persistence mode: memory-fallback` in the `[Startup]` block
 - Uploads returning "File storage is temporarily unavailable"
-  (`useMemoryFallback || !firebaseApp` — means Firestore/Storage isn't
+  (`useMemoryFallback || !storageBucketRef` — means Firestore/Storage isn't
   actually connected, not just an upload-specific failure)
 - `*.demo.local` / `demo_driver` / `demo_client` / `demo_client_staff`
   accounts reachable, or `SEED_DEMO_DATA=true` while `NODE_ENV=production`
@@ -448,12 +482,12 @@ environment is not production-ready:
 - A wildcard (`*`) origin anywhere in `ALLOWED_ORIGINS`/`APP_URL`/
   `CLIENT_URL`/`PUBLIC_APP_URL`, or the server reflecting an arbitrary
   Origin header (would indicate `src/lib/cors.ts` was changed unsafely)
-- Firestore/Storage rules' hardcoded UID not matching the actual
-  `SERVER_FIREBASE_EMAIL` account's UID for the project in use — run
-  `npm run check-firebase-readiness` (§5a) to at least confirm
-  `firestore.rules` and `storage.rules` agree with each other and (if set)
-  with `SERVER_FIREBASE_UID`; the underlying Firebase Console comparison
-  still has to be done by hand
+- (Legacy, see §5) Firestore/Storage rules' hardcoded UID disagreeing
+  between the two files — run `npm run check-firebase-readiness` (§5a) to
+  confirm `firestore.rules` and `storage.rules` still agree with each
+  other; this UID is no longer load-bearing for the server's own access
+  (the Admin SDK bypasses these rules), so a mismatch here is a hygiene
+  issue, not a connectivity-blocking one
 - Accounts admin able to fetch `GET /api/shipments`, `GET /api/drivers`, or
   `GET /api/logs` (should 403)
 - Public tracking (`GET /api/share/:token`) returning internal documents,

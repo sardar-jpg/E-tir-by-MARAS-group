@@ -17,6 +17,7 @@ import {
 } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import {
   Plus, Search, Filter, ShieldCheck, Share2, MessageSquare,
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
@@ -1164,7 +1165,27 @@ MARAS Group etir Center`;
     }, 10000);
   };
 
+  // Notification Phase 1 correction: this admin's own reader id for the
+  // per-user read model (readByUserIds), NOT adminEmail — for a sub-admin,
+  // req.session.id server-side is their admins/{id} doc id, not their
+  // email (only the super-admin's id and email happen to be the same
+  // value). getOwnSessionId() decodes that same id straight out of this
+  // admin's own signed session token (already used just above for the
+  // "is this my own chat message" toast guard, same non-authorization,
+  // own-identity-recognition purpose), so it matches req.session.id for
+  // every admin type. Falls back to adminEmail only if the token can't be
+  // read at all.
+  const ownAdminId = React.useMemo(() => getOwnSessionId() || adminEmail, [adminEmail]);
+
+  // In-flight guard for POST /api/notifications/:id/read — prevents a
+  // duplicate request for the same id firing before a previous one for it
+  // has settled (e.g. a fast double-click, or overlapping with a
+  // background refresh).
+  const markingNotifsReadRef = React.useRef<Set<string>>(new Set());
+
   const handleMarkNotifRead = async (id: string) => {
+    if (markingNotifsReadRef.current.has(id)) return;
+    markingNotifsReadRef.current.add(id);
     try {
       const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
       // Only reflect the change locally once the backend actually recorded
@@ -1175,20 +1196,36 @@ MARAS Group etir Center`;
         console.error(`Failed to mark notification ${id} as read: ${res.status}`);
         return;
       }
-      setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+      // Notification Phase 1 correction: only this admin's own id is added
+      // (readByUserIds), preserving whatever ids were already there — this
+      // admin reading a notification never marks it read for another
+      // admin, a driver, or a client, the way the legacy shared `read`
+      // flag used to.
+      setNotifications(prev => prev.map(n => n.id === id
+        ? { ...n, readByUserIds: addReaderToNotification(n.readByUserIds, ownAdminId) }
+        : n
+      ));
     } catch (err) {
       console.error(err);
+    } finally {
+      markingNotifsReadRef.current.delete(id);
     }
   };
 
   const handleMarkAllNotifsRead = async () => {
     try {
+      // Notification Phase 1 correction: POST /api/notifications/clear no
+      // longer sets the legacy shared `read` flag — it now atomically adds
+      // this calling admin's own id to readByUserIds on every notification
+      // visible to them (still admin-only; still never touches `read`;
+      // never marks anything read for another admin, a driver, or a
+      // client). This local update mirrors that new server behavior.
       const res = await apiFetch(`/api/notifications/clear`, { method: "POST" });
       if (!res.ok) {
         console.error(`Failed to mark all notifications as read: ${res.status}`);
         return;
       }
-      setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+      setNotifications(prev => prev.map(n => ({ ...n, readByUserIds: addReaderToNotification(n.readByUserIds, ownAdminId) })));
     } catch (err) {
       console.error(err);
     }
@@ -3637,7 +3674,7 @@ MARAS Group etir Center`;
         isRtl={isRtl}
         title={filteredAdminTabs.find((tab) => tab.id === activeTab)?.label ?? ''}
         TitleIcon={filteredAdminTabs.find((tab) => tab.id === activeTab)?.icon}
-        unreadNotifications={notifications.filter(n => !n.read).length}
+        unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
         onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
         onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
       />
@@ -3832,14 +3869,14 @@ MARAS Group etir Center`;
               className="p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg relative transition-all cursor-pointer flex items-center justify-center border-0 focus:outline-none"
               title="Notifications"
             >
-              {notifications.filter(n => !n.read).length > 0 ? (
+              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 ? (
                 <BellRing className="w-5 h-5 text-orange-500 animate-bounce" />
               ) : (
                 <Bell className="w-5 h-5 text-slate-500" />
               )}
-              {notifications.filter(n => !n.read).length > 0 && (
+              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
                 <span className="absolute -top-1 -end-1 bg-orange-500 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
-                  {notifications.filter(n => !n.read).length}
+                  {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
                 </span>
               )}
             </button>
@@ -3850,14 +3887,14 @@ MARAS Group etir Center`;
                   <div className="flex items-center gap-1.5 font-bold text-sm text-slate-800">
                     <Bell className="w-4 h-4 text-slate-600" />
                     <span>{lang === 'tr' ? 'Bildirimler' : lang === 'ar' ? 'الإشعارات' : 'Notifications'}</span>
-                    {notifications.filter(n => !n.read).length > 0 && (
+                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
                       <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full">
-                        {notifications.filter(n => !n.read).length} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
+                        {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {notifications.filter(n => !n.read).length > 0 && (
+                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
                       <button
                         onClick={handleMarkAllNotifsRead}
                         className="text-xs text-orange-500 hover:text-orange-600 font-semibold cursor-pointer border-0 bg-transparent"
@@ -3884,7 +3921,7 @@ MARAS Group etir Center`;
                   ) : (
                     notifications.map((notif) => {
                       const shipment = shipments.find(s => s.id === notif.shipmentId);
-                      const isUnread = !notif.read;
+                      const isUnread = !isNotificationReadForUser(notif, ownAdminId);
                       return (
                         <div
                           key={notif.id}
@@ -9638,7 +9675,7 @@ MARAS Group etir Center`;
             isRtl={isRtl}
             tabs={mobileMoreMenuTabs}
             onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
-            unreadNotifications={notifications.filter(n => !n.read).length}
+            unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
             onOpenNotifications={() => { setIsNotifOpen(true); setIsMoreMenuOpen(false); }}
             onLangChange={onLangChange}
             onLogout={onLogout}
@@ -9652,6 +9689,7 @@ MARAS Group etir Center`;
           isRtl={isRtl}
           notifications={notifications}
           shipments={shipments}
+          currentUserId={ownAdminId}
           onClose={() => setIsNotifOpen(false)}
           onMarkAllRead={handleMarkAllNotifsRead}
           onMarkOneRead={handleMarkNotifRead}

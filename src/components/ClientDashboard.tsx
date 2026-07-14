@@ -7,10 +7,13 @@ import {
   Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert, Paperclip
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
+import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { auth } from "../googleAuth";
 import ClientShipmentMap from "./ClientShipmentMap";
 import { canClientSendChatMessage } from "../lib/clientAccess";
 import { validateUpload } from "../lib/uploadValidation";
+import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
+import { canSubmitChatMessage } from "../lib/chatComposerState";
 
 // Local multilingual dictionary
 const t = {
@@ -39,6 +42,7 @@ const t = {
     removeFile: "Remove file",
     uploadingFile: "Uploading...",
     uploadFileError: "File upload failed. Please try again.",
+    textTooLongError: `Message is too long (max ${MAX_CHAT_TEXT_LENGTH} characters).`,
     viewMap: "Smart Tracking Map",
     smartTrackingNote: "GPS updates periodically to protect driver battery and app performance.",
     close: "Close Panel",
@@ -81,6 +85,7 @@ const t = {
     removeFile: "Dosyayı kaldır",
     uploadingFile: "Yükleniyor...",
     uploadFileError: "Dosya yüklenemedi. Lütfen tekrar deneyin.",
+    textTooLongError: `Mesaj çok uzun (en fazla ${MAX_CHAT_TEXT_LENGTH} karakter).`,
     viewMap: "Akıllı Takip Haritası",
     smartTrackingNote: "Sürücü bataryasını ve uygulama performansını korumak için GPS periyodik olarak güncellenir.",
     close: "Sekmeyi Kapat",
@@ -123,6 +128,7 @@ const t = {
     removeFile: "إزالة الملف",
     uploadingFile: "جارٍ الرفع...",
     uploadFileError: "فشل رفع الملف. يرجى المحاولة مرة أخرى.",
+    textTooLongError: `الرسالة طويلة جداً (الحد الأقصى ${MAX_CHAT_TEXT_LENGTH} حرفاً).`,
     viewMap: "خارطة التتبع الذكي",
     smartTrackingNote: "يتم تحديث نظام تحديد المواقع بشكل دوري للحفاظ على بطارية السائق وأداء التطبيق.",
     close: "إغلاق التفاصيل",
@@ -175,6 +181,10 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
+  // In-flight guard for POST /api/notifications/:id/read — prevents a
+  // duplicate request for the same id firing before a previous one for it
+  // has settled.
+  const markingNotifsReadRef = React.useRef<Set<string>>(new Set());
 
   // Client Account Deletion States
   const [showClientDeleteConfirm, setShowClientDeleteConfirm] = useState(false);
@@ -251,7 +261,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             for (const notif of myNotifs) {
               if (!knownNotificationIdsRef.current.has(notif.id)) {
                 knownNotificationIdsRef.current.add(notif.id);
-                if (!notif.read) {
+                if (!isNotificationReadForUser(notif, clientId)) {
                   hasNew = true;
                   const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
                   const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
@@ -294,19 +304,40 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
     return () => clearInterval(handle);
   }, [shipments.length]);
 
+  // Notification Phase 1 correction: per-user read tracking
+  // (readByUserIds), not the legacy shared `read` flag — this Client
+  // account's own id (clientId, the verified session id, distinct for the
+  // Owner vs. each Staff account on the same company) is added only for
+  // notifications this account itself reads, and only after each
+  // individual request succeeds. A failed request leaves that
+  // notification unread, both locally and on the server, so it's not
+  // silently lost from the badge count. Client Owner reading a
+  // notification never marks it read for Client Staff, and vice versa —
+  // they have distinct ids even though they share a company.
   const handleMarkAllRead = async () => {
-    try {
-      const unread = notifications.filter(n => !n.read);
-      if (unread.length === 0) return;
-      
-      setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-      
-      await Promise.all(unread.map(n => 
-        apiFetch(`/api/notifications/${n.id}/read`, { method: "POST" })
-      ));
-    } catch (err) {
-      console.error("Failed to mark all as read:", err);
-    }
+    const unreadIds = notifications
+      .filter(n => !isNotificationReadForUser(n, clientId))
+      .map(n => n.id)
+      .filter(id => !markingNotifsReadRef.current.has(id));
+    if (unreadIds.length === 0) return;
+    unreadIds.forEach(id => markingNotifsReadRef.current.add(id));
+    await Promise.all(unreadIds.map(async (id) => {
+      try {
+        const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+        if (res.ok) {
+          setNotifications(prev => prev.map(n => n.id === id
+            ? { ...n, readByUserIds: addReaderToNotification(n.readByUserIds, clientId) }
+            : n
+          ));
+        } else {
+          console.error(`Failed to mark notification ${id} as read: ${res.status}`);
+        }
+      } catch (err) {
+        console.error(`Failed to mark notification ${id} as read:`, err);
+      } finally {
+        markingNotifsReadRef.current.delete(id);
+      }
+    }));
   };
 
   const fetchDashboardData = async () => {
@@ -424,7 +455,21 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   };
 
   const handleSendInquiry = async (shipmentId: string) => {
-    if (!inquiryText.trim() && !selectedFile) return;
+    // fix/chat-safety-reliability-phase1: in-flight guard — the Send
+    // button already disables on sendingInquiry, but that only takes
+    // effect after a re-render, so a double-tap could still race ahead of
+    // it. Matches the same guard now applied to every other chat composer
+    // (ChatCenter.tsx, App.tsx, DriverApplication.tsx).
+    if (!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })) return;
+    // fix/chat-safety-reliability-phase1: matches the shared server-side
+    // limit (validateChatSendPayload, src/lib/chatMessageValidation.ts) —
+    // the textarea's maxLength attribute already stops typing past this,
+    // but a paste can still exceed it in some browsers, so check here too
+    // rather than relying on the server's 400 alone.
+    if (inquiryText.trim().length > MAX_CHAT_TEXT_LENGTH) {
+      setFileError(curT.textTooLongError);
+      return;
+    }
     setSendingInquiry(true);
     setInquiryStatus("idle");
     setFileError("");
@@ -572,7 +617,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
             title={curT.notifications}
           >
             <Bell className="w-4 h-4 animate-bounce" />
-            {notifications.some(n => !n.read) && (
+            {notifications.some(n => !isNotificationReadForUser(n, clientId)) && (
               <span id="client-notification-bell-badge" className="absolute -top-1 -end-1 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-slate-950 animate-pulse"></span>
             )}
           </button>
@@ -1030,11 +1075,11 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                                         <span>{msg.fileName || "Attachment"}</span>
                                       </a>
                                       {msg.text && (
-                                        <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                        <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
                                       )}
                                     </div>
                                   ) : (
-                                    <p className="text-slate-300 text-[10px] leading-tight">{msg.text}</p>
+                                    <p className="text-slate-300 text-[10px] leading-tight break-words">{msg.text}</p>
                                   )}
                                 </div>
                               );
@@ -1061,7 +1106,9 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                               value={inquiryText}
                               onChange={(e) => setInquiryText(e.target.value)}
                               placeholder={curT.inquiryPlaceholder}
-                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none"
+                              maxLength={MAX_CHAT_TEXT_LENGTH}
+                              disabled={sendingInquiry}
+                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none disabled:opacity-60"
                             />
 
                             <div className="flex items-center gap-2">
@@ -1109,7 +1156,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             <button
                               type="button"
                               onClick={() => handleSendInquiry(selectedShipment!.id)}
-                              disabled={sendingInquiry || (!inquiryText.trim() && !selectedFile)}
+                              disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })}
                               className="w-full py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
                               {isUploadingFile ? (
@@ -1162,11 +1209,11 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                   <span>{curT.notifsTitle}</span>
                 </h3>
                 <p className="text-[10px] text-slate-500 font-medium">
-                  {notifications.filter(n => !n.read).length} unread updates matching your shipments
+                  {notifications.filter(n => !isNotificationReadForUser(n, clientId)).length} unread updates matching your shipments
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {notifications.some(n => !n.read) && (
+                {notifications.some(n => !isNotificationReadForUser(n, clientId)) && (
                   <button
                     onClick={handleMarkAllRead}
                     className="p-1 px-2.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 hover:border-orange-500/30 text-[9px] uppercase tracking-wider font-mono font-black rounded-lg transition-all active:scale-95 cursor-pointer"
@@ -1193,7 +1240,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 [...notifications].sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map((notif) => {
                   const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
                   const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
-                  const isUnread = !notif.read;
+                  const isUnread = !isNotificationReadForUser(notif, clientId);
 
                   // Find shipment link
                   const linkedShipment = shipments.find(s => s.id === notif.shipmentId);

@@ -9,11 +9,15 @@ import {
   DocumentCategory,
   TRUCK_TYPES
 } from "../types";
-import { auth } from "../googleAuth";
+import { auth, reauthenticateDriverWithGoogle } from "../googleAuth";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABELS } from "../lib/driverVisibility";
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
+import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
+import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
+import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -121,7 +125,21 @@ export default function DriverApplication({
 
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const knownChatMessageIdsRef = React.useRef<Set<string>>(new Set());
+  // fix/chat-safety-reliability-phase1: always holds the CURRENT
+  // activeShipment id, checked after an in-flight chat fetch resolves (in
+  // both fetchData and fetchChatOnly below) — a request fired for the
+  // previously-selected shipment can otherwise resolve after the driver has
+  // already switched to a different one and overwrite chatMessages with
+  // the wrong thread's data.
+  const activeShipmentIdRef = React.useRef<string | null>(null);
   const gpsCooldownRef = React.useRef<number>(0);
+  // In-flight guard for POST /api/notifications/:id/read — the 12s poll
+  // (fetchData below) can re-run while a previous mark-as-read request for
+  // the same id is still pending, which would otherwise fire a duplicate
+  // request. An id is added here right before its request starts and
+  // removed once that request settles (success or failure), regardless of
+  // outcome.
+  const markingNotifsReadRef = React.useRef<Set<string>>(new Set());
 
   // Keep loggedInDriver in sync with drivers catalog
   useEffect(() => {
@@ -149,11 +167,67 @@ export default function DriverApplication({
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
 
-  // Notifications scoped to this driver's own shipments
-  const myNotifications = useMemo(() => notifications.filter(n =>
-    n.shipmentId && (shipments.some(s => s.id === n.shipmentId) || (activeShipment && activeShipment.id === n.shipmentId))
-  ), [notifications, shipments, activeShipment]);
-  const unreadNotificationCount = useMemo(() => myNotifications.filter(n => !n.read).length, [myNotifications]);
+  useEffect(() => {
+    activeShipmentIdRef.current = activeShipment?.id ?? null;
+  }, [activeShipment?.id]);
+
+  // Notifications scoped to this driver's own shipments, plus anything
+  // addressed directly to this driver regardless of shipment (e.g.
+  // "Driver Approved" — see AppNotification.recipientUserId).
+  // isNotificationForDriver is shared with server.ts's own GET
+  // /api/notifications scoping so the two can't silently drift apart.
+  const myNotifications = useMemo(() => {
+    const myShipmentIds = new Set([
+      ...shipments.map(s => s.id),
+      ...(activeShipment ? [activeShipment.id] : [])
+    ]);
+    return notifications.filter(n => isNotificationForDriver(n, loggedInDriverId || "", myShipmentIds));
+  }, [notifications, shipments, activeShipment, loggedInDriverId]);
+  // Notification Phase 1 correction: unread status is per-user
+  // (readByUserIds), not the legacy shared `read` flag — reading the
+  // shared flag here would mean one driver's (or admin's, or client's)
+  // read marks the notification read for every other driver too, since
+  // they all read the same underlying document.
+  const unreadNotificationCount = useMemo(
+    () => myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).length,
+    [myNotifications, loggedInDriverId]
+  );
+
+  // Marks the given notification ids as read via the same authenticated
+  // per-notification endpoint every other role already uses
+  // (POST /api/notifications/:id/read) — never the admin-only
+  // /api/notifications/clear route, which this driver session has no
+  // permission to call anyway. Local state (and therefore the unread
+  // badge) is only updated for an id once its own request actually
+  // succeeds; a failed request leaves that notification unread both on
+  // the server and locally, so it's retried the next time this runs
+  // instead of silently disappearing from the badge count. Only this
+  // driver's own id is added to readByUserIds (addReaderToNotification
+  // preserves whatever ids were already there) — this driver reading a
+  // notification never marks it read for any other driver, admin, or
+  // client.
+  const markNotificationsRead = React.useCallback((ids: string[]) => {
+    const toMark = ids.filter(id => !markingNotifsReadRef.current.has(id));
+    if (toMark.length === 0) return;
+    toMark.forEach(id => markingNotifsReadRef.current.add(id));
+    toMark.forEach(async (id) => {
+      try {
+        const res = await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+        if (res.ok) {
+          setNotifications(prev => prev.map(n => n.id === id
+            ? { ...n, readByUserIds: addReaderToNotification(n.readByUserIds, loggedInDriverId || "") }
+            : n
+          ));
+        } else {
+          console.error(`Failed to mark notification ${id} as read: ${res.status}`);
+        }
+      } catch (err) {
+        console.error(`Failed to mark notification ${id} as read:`, err);
+      } finally {
+        markingNotifsReadRef.current.delete(id);
+      }
+    });
+  }, [loggedInDriverId]);
 
   // Determine the primary active job to feature on the Home screen.
   // Priority: Assigned > In Transit / Border Crossing / Customs Clearance > others (most recently updated first).
@@ -176,6 +250,19 @@ export default function DriverApplication({
   }, [shipments]);
 
   const [activeTab, setActiveTab] = useState<'home' | 'shipments' | 'chat' | 'notifications' | 'profile' | 'menu'>('home');
+
+  // Opening the Notifications screen marks every currently-visible unread
+  // notification as read. Re-runs whenever the visible list changes (e.g.
+  // a new notification arrives from the 12s poll while this tab is still
+  // open) so it also catches unread items that appear after the initial
+  // open, not just the ones present at the moment of opening.
+  useEffect(() => {
+    if (activeTab !== 'notifications') return;
+    const unreadIds = myNotifications.filter(n => !isNotificationReadForUser(n, loggedInDriverId || "")).map(n => n.id);
+    if (unreadIds.length > 0) {
+      markNotificationsRead(unreadIds);
+    }
+  }, [activeTab, myNotifications, markNotificationsRead, loggedInDriverId]);
 
   // Profile Form States
   const [profileName, setProfileName] = useState("");
@@ -218,49 +305,185 @@ export default function DriverApplication({
     localStorage.setItem('driver_app_theme', theme);
   }, [theme]);
 
-  // Driver Account Deletion States
+  // Driver Account Deletion States — Apple Guideline 5.1.1(v). Ordering:
+  // the backend Firestore delete runs first (that's what actually makes the
+  // account unusable, since every login path is gated on that record — see
+  // POST /api/login and /api/verify-session in server.ts), then the Firebase
+  // Authentication identity is removed. "Complete success" (and logout) is
+  // only ever reported once BOTH steps are done; a Firebase-side failure
+  // (including auth/requires-recent-login) is never silently swallowed and
+  // never reported as success — see deleteFirebaseIdentityWithRetry.
   const [showDriverDeleteConfirm, setShowDriverDeleteConfirm] = useState(false);
   const [understandDriverDelete, setUnderstandDriverDelete] = useState(false);
   const [isDeletingDriverAccount, setIsDeletingDriverAccount] = useState(false);
+  const [driverDeletionState, setDriverDeletionState] = useState<DriverAccountDeletionState>("idle");
+  // Set once the backend Firestore record is confirmed gone, so a Retry tap
+  // (after a Firebase-identity-only failure) skips straight to the Firebase
+  // step instead of calling DELETE /api/drivers/:id a second time.
+  const [backendDriverRecordDeleted, setBackendDriverRecordDeleted] = useState(false);
+  // Review follow-up: signed capability token from DELETE /api/drivers/:id
+  // (or a subsequent finish-firebase-deletion response), letting Retry
+  // resume the server-side Firebase deletion attempt when this device has
+  // no live Firebase session to retry with itself. Only ever set from a
+  // server response — never fabricated client-side.
+  const [pendingFirebaseDeletionToken, setPendingFirebaseDeletionToken] = useState<string | null>(null);
+
+  const applyDriverDeletionOutcome = (
+    outcome: ReturnType<typeof resolveDriverAccountDeletionOutcome>,
+    serverToken: string | undefined
+  ) => {
+    if (outcome.complete) {
+      setDriverDeletionState("complete_success");
+      setPendingFirebaseDeletionToken(null);
+      triggerToast(driverAccountDeletionCopy(lang).completeSuccess);
+      setShowDriverDeleteConfirm(false);
+      // Logout user session and clean state — only once every required
+      // deletion step has actually completed.
+      if (onLogout) {
+        onLogout();
+      }
+      return;
+    }
+
+    setDriverDeletionState(outcome.state);
+    if (outcome.state === "firebase_identity_deletion_unresolved") {
+      // A fresh server response's own token (possibly absent) always wins;
+      // otherwise preserve whatever token is already stored rather than
+      // clobbering a still-valid one with null on a retry path that made
+      // no new server round-trip (e.g. hasCurrentUser() flipped false
+      // between attempts without a fresh DELETE call).
+      setPendingFirebaseDeletionToken(prev => serverToken !== undefined ? serverToken : prev);
+    } else {
+      setPendingFirebaseDeletionToken(null);
+    }
+    const copy = driverAccountDeletionCopy(lang);
+    triggerToast(
+      outcome.state === "reauthentication_required"
+        ? copy.reauthenticationRequired
+        : outcome.state === "firebase_identity_deletion_unresolved"
+        ? copy.firebaseIdentityDeletionUnresolved
+        : copy.firebaseIdentityDeletionFailed
+    );
+    // Deliberately do NOT close the confirmation panel or log out here —
+    // the backend record is already gone, but the Firebase identity isn't
+    // confirmed deleted, so the user needs the Retry affordance to stay
+    // visible instead of a false "complete" signal.
+  };
 
   const handleDeleteDriverAccount = async () => {
     if (!understandDriverDelete) return;
+    if (isDeletingDriverAccount) return; // in-flight guard — no double-submit
     setIsDeletingDriverAccount(true);
     const targetId = loggedInDriverId || selectedDriverId;
     try {
-      // 1. Delete backing collection data
-      const response = await apiFetch(`/api/drivers/${targetId}`, {
-        method: "DELETE"
-      });
-      if (response.ok) {
-        // 2. Delete user session from Firebase auth (if exists)
-        try {
-          if (auth.currentUser) {
-            await auth.currentUser.delete();
-          }
-        } catch (authErr) {
-          console.warn("Firebase Auth deletion failed or requires reauthentication:", authErr);
+      let serverBody: unknown = {};
+      if (!backendDriverRecordDeleted) {
+        const response = await apiFetch(`/api/drivers/${targetId}`, {
+          method: "DELETE"
+        });
+        if (!response.ok) {
+          setDriverDeletionState("backend_failure");
+          triggerToast(driverAccountDeletionCopy(lang).backendFailure);
+          return;
         }
-        triggerToast("🗑️ Account completely deleted from corporate registry.");
-        // Logout user session and clean state
-        if (onLogout) {
-          onLogout();
-        }
-      } else {
-        triggerToast("❌ Failed to initiate account purge. Try again.");
+        serverBody = await response.json().catch(() => ({}));
+        setBackendDriverRecordDeleted(true);
       }
+
+      const server = normalizeDriverAccountDeletionServerSignal(serverBody);
+      const clientResult = await deleteFirebaseIdentityWithRetry({
+        hasCurrentUser: () => !!auth.currentUser,
+        deleteCurrentUser: () => auth.currentUser!.delete(),
+        reauthenticate: reauthenticateDriverWithGoogle,
+      });
+
+      applyDriverDeletionOutcome(
+        resolveDriverAccountDeletionOutcome({ server, clientResult }),
+        server.pendingFirebaseDeletionToken
+      );
+    } catch (err) {
+      console.error(err);
+      // backendDriverRecordDeleted is only true once the Firestore delete is
+      // confirmed done — an exception past that point is a Firebase-identity
+      // problem, not a backend one, so it must not be mislabeled as "your
+      // account was not deleted".
+      setDriverDeletionState(backendDriverRecordDeleted ? "firebase_identity_deletion_failed" : "backend_failure");
+      triggerToast("❌ Purge action failed. Check connection.");
+    } finally {
+      setIsDeletingDriverAccount(false);
+    }
+  };
+
+  // Review follow-up: resumes the Firebase identity deletion server-side
+  // when there is no live Firebase session on this device to retry with
+  // (driverDeletionState === "firebase_identity_deletion_unresolved") —
+  // the Firestore driver record is already gone, so this relies entirely
+  // on the signed pendingFirebaseDeletionToken rather than a fresh lookup.
+  const handleFinishFirebaseDeletion = async () => {
+    if (isDeletingDriverAccount) return;
+    if (!pendingFirebaseDeletionToken) {
+      // No recoverable uid was ever captured for this device (the rare
+      // pre-delete lookup failure case) — there is nothing to automatically
+      // retry. Stay in the unresolved state rather than claiming success.
+      triggerToast(driverAccountDeletionCopy(lang).firebaseIdentityDeletionUnresolved);
+      return;
+    }
+    setIsDeletingDriverAccount(true);
+    try {
+      const response = await apiFetch("/api/drivers/finish-firebase-deletion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: pendingFirebaseDeletionToken }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        triggerToast(driverAccountDeletionCopy(lang).firebaseIdentityDeletionUnresolved);
+        return;
+      }
+      const server = normalizeDriverAccountDeletionServerSignal(body);
+      applyDriverDeletionOutcome(
+        resolveDriverAccountDeletionOutcome({ server, clientResult: { ok: true, attempted: false } }),
+        server.pendingFirebaseDeletionToken
+      );
     } catch (err) {
       console.error(err);
       triggerToast("❌ Purge action failed. Check connection.");
     } finally {
       setIsDeletingDriverAccount(false);
-      setShowDriverDeleteConfirm(false);
     }
   };
 
   // Native chat attachment (paperclip -> hidden file input -> auto-send)
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // fix/chat-safety-reliability-phase1 (follow-up): set when an upload
+  // succeeded but the follow-up POST /chat failed — holds the real
+  // Storage URL so retrying (handleRetryDriverAttachment) reuses it
+  // instead of uploading the file again. Cleared on a confirmed
+  // successful send or when a new file is picked; never on a failed send.
+  // `shipmentId` is the shipment this attachment was uploaded FOR — a
+  // retry must never post it into a different shipment the driver has
+  // since switched to (see handleRetryDriverAttachment and the
+  // shipment-change effect below).
+  const [pendingDriverAttachment, setPendingDriverAttachment] = useState<{
+    shipmentId: string;
+    fileUrl: string;
+    fileName: string;
+    fileCategory: DocumentCategory;
+  } | null>(null);
+  // Distinguishes "the upload itself failed (nothing sent)" from "the
+  // upload succeeded but creating the chat message failed" — the two
+  // need different, explicit copy.
+  const [driverAttachmentError, setDriverAttachmentError] = useState<'' | 'upload' | 'send'>('');
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment must never carry a pending (failed-to-send)
+  // attachment — or its cached upload URL — over to the newly-selected
+  // one.
+  useEffect(() => {
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
+  }, [activeShipment?.id]);
 
   // GPS state — null = not yet checked, true = real fix obtained, false = unavailable/denied
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
@@ -332,43 +555,48 @@ export default function DriverApplication({
         }
       }
 
-      // Fetch dynamic messages
-      if (activeShipment) {
-        const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
+      // Fetch dynamic messages.
+      //
+      // fix/chat-safety-reliability-phase1: skipped while the faster 3.5s
+      // chat-only poll below already owns this shipment's chat (activeTab
+      // === 'chat') — the two polls previously ran concurrently against
+      // the same endpoint with no coordination between them at all.
+      // knownChatMessageIdsRef is kept in sync by that faster poll in the
+      // meantime (see fetchChatOnly) specifically so that resuming here
+      // after the driver leaves the chat tab doesn't treat every message
+      // that arrived while they were on it as "new" and fire a toast for
+      // each one.
+      if (activeShipment && activeTab !== 'chat') {
+        const requestedShipmentId = activeShipment.id;
+        const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
         if (resChat.ok) {
           const msgs: ChatMessage[] = await safeJson(resChat);
-          
-          if (knownChatMessageIdsRef.current.size === 0) {
-            const initialIds = new Set<string>();
-            msgs.forEach((m) => initialIds.add(m.id));
-            knownChatMessageIdsRef.current = initialIds;
-          } else {
-            for (const m of msgs) {
-              if (!knownChatMessageIdsRef.current.has(m.id)) {
-                knownChatMessageIdsRef.current.add(m.id);
-                // Alert only if sender is 'admin' (dispatcher)
-                if (m.sender === 'admin') {
-                  if (activeTab !== 'chat') {
-                    const alertMsg = lang === 'en' 
-                      ? `💬 Dispatch: "${m.text}"` 
+
+          // fix/chat-safety-reliability-phase1: this request was for
+          // requestedShipmentId — if the driver has since switched to a
+          // different shipment, applying this response would overwrite
+          // the new shipment's chat with the old one's.
+          if (!isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) {
+            if (knownChatMessageIdsRef.current.size === 0) {
+              const initialIds = new Set<string>();
+              msgs.forEach((m) => initialIds.add(m.id));
+              knownChatMessageIdsRef.current = initialIds;
+            } else {
+              for (const m of msgs) {
+                if (!knownChatMessageIdsRef.current.has(m.id)) {
+                  knownChatMessageIdsRef.current.add(m.id);
+                  // Alert only if sender is 'admin' (dispatcher)
+                  if (m.sender === 'admin') {
+                    const alertMsg = lang === 'en'
+                      ? `💬 Dispatch: "${m.text}"`
                       : (lang === 'tr' ? `💬 Mesaj: "${m.text}"` : `💬 إشعار: "${m.text}"`);
                     triggerToast(alertMsg);
                   }
                 }
               }
             }
-          }
 
-          setChatMessages(msgs);
-          if (activeTab === 'chat') {
-            const hasUnseenFromAdmin = msgs.some((m: any) => m.sender === 'admin' && m.status !== 'seen');
-            if (hasUnseenFromAdmin) {
-              fetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ viewer: "driver" })
-              }).catch(err => console.warn(err));
-            }
+            setChatMessages(msgs);
           }
         }
       }
@@ -378,12 +606,18 @@ export default function DriverApplication({
       if (resNotifs.ok) {
         const rawList: AppNotification[] = await safeJson(resNotifs);
         
-        // Filter list strictly to this driver's shipments
+        // Filter list strictly to this driver's shipments, plus anything
+        // addressed directly to this driver regardless of shipment (e.g.
+        // "Driver Approved" — see AppNotification.recipientUserId). The
+        // backend (GET /api/notifications) already scopes both cases the
+        // same way via the same isNotificationForDriver helper; this
+        // mirrors that so a locally-computed active-job list can't
+        // disagree with it.
         const driverShipmentIds = new Set([
           ...activeShipmentsList.map(s => s.id),
           ...(activeShipment ? [activeShipment.id] : [])
         ]);
-        const list = rawList.filter(n => n.shipmentId && driverShipmentIds.has(n.shipmentId));
+        const list = rawList.filter(n => isNotificationForDriver(n, loggedInDriverId || "", driverShipmentIds));
         
         if (knownNotificationIdsRef.current.size === 0) {
           const initialIds = new Set<string>();
@@ -434,18 +668,31 @@ export default function DriverApplication({
   useEffect(() => {
     let interval: any;
     if (activeShipment && activeTab === 'chat') {
+      const requestedShipmentId = activeShipment.id;
       const fetchChatOnly = async () => {
         try {
-          const resChat = await apiFetch(`/api/shipments/${activeShipment.id}/chat`);
+          const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
           if (resChat.ok) {
             const txt = await resChat.text();
             if (txt.trim() && !txt.trim().startsWith("<")) {
               const msgs: ChatMessage[] = JSON.parse(txt);
+
+              // fix/chat-safety-reliability-phase1: guard against this
+              // response landing after the driver has already switched to
+              // a different shipment or left the chat tab.
+              if (isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) return;
+
               setChatMessages(msgs);
+              // Keep knownChatMessageIdsRef in sync while this faster poll
+              // owns chat updates — fetchData's own (slower) chat fetch is
+              // skipped whenever activeTab === 'chat' (see above), and
+              // relies on this ref already reflecting every message seen
+              // here once the driver leaves the chat tab.
+              msgs.forEach((m) => knownChatMessageIdsRef.current.add(m.id));
 
               const hasUnseenFromAdmin = msgs.some((m: any) => m.sender === 'admin' && m.status !== 'seen');
               if (hasUnseenFromAdmin) {
-                await apiFetch(`/api/shipments/${activeShipment.id}/chat/seen`, {
+                await apiFetch(`/api/shipments/${requestedShipmentId}/chat/seen`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ viewer: "driver" })
@@ -457,7 +704,7 @@ export default function DriverApplication({
           console.warn("Active driver chat fast poll error:", err);
         }
       };
-      
+
       // Initial trigger and set quick 3.5s interval
       fetchChatOnly();
       interval = setInterval(fetchChatOnly, 3500);
@@ -876,10 +1123,17 @@ export default function DriverApplication({
     }
   };
 
+  // fix/chat-safety-reliability-phase1: in-flight guard — previously this
+  // had no reentrancy protection at all, so a double-tap/double-Enter
+  // could fire two POSTs before the first resolved.
+  const [isSendingDriverMessage, setIsSendingDriverMessage] = useState(false);
+
   // Chat message injection
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeShipment || !newMessageText.trim()) return;
+    if (!activeShipment) return;
+    if (!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })) return;
+    setIsSendingDriverMessage(true);
 
     try {
       const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
@@ -903,6 +1157,57 @@ export default function DriverApplication({
     } catch (err) {
       console.error(err);
       triggerToast("❌ Could not reach the server. Your message was not sent.");
+    } finally {
+      setIsSendingDriverMessage(false);
+    }
+  };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): if upload succeeds but
+  // this POST /chat fails, the caller caches { shipmentId, fileUrl,
+  // fileName, fileCategory } in pendingDriverAttachment (never the
+  // caller's own local state again) so a retry (see
+  // handleRetryDriverAttachment below) reuses that real Storage URL
+  // instead of uploading the file a second time. Cleared on a confirmed
+  // successful send; left untouched on failure so the retry banner stays
+  // actionable.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): takes `shipmentId`
+  // explicitly rather than reading activeShipment inside this function —
+  // this always sends to the shipment the ATTACHMENT belongs to (the one
+  // active when it was picked/uploaded), never whichever shipment happens
+  // to be active by the time this async call actually runs. The caller
+  // (handleAttachmentSelected / handleRetryDriverAttachment) is
+  // responsible for only ever passing a shipmentId that's still valid to
+  // send to.
+  const sendDriverFileMessage = async (shipmentId: string, fileUrl: string, fileName: string, fileCategory: DocumentCategory) => {
+    try {
+      const res = await apiFetch(`/api/shipments/${shipmentId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sender: "driver",
+          senderName: getDriverName(),
+          type: "file",
+          fileName,
+          fileCategory,
+          fileUrl,
+          text: `Sent a document [${fileCategory.toUpperCase()}]: ${fileName}`
+        })
+      });
+
+      if (res.ok) {
+        triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
+        setPendingDriverAttachment(null);
+        setDriverAttachmentError('');
+        fetchData();
+      } else {
+        setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
+        setDriverAttachmentError('send');
+      }
+    } catch (e) {
+      console.error(e);
+      setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
+      setDriverAttachmentError('send');
     }
   };
 
@@ -915,6 +1220,18 @@ export default function DriverApplication({
     e.target.value = "";
     if (!file || !activeShipment) return;
 
+    // fix/chat-safety-reliability-phase1 (follow-up): captured once, up
+    // front — this is the shipment the file was actually picked/uploaded
+    // for, and stays fixed for this whole attempt (including the retry it
+    // may end up cached for) regardless of whether the driver switches to
+    // a different shipment while the upload/send is in flight.
+    const shipmentId = activeShipment.id;
+
+    // fix/chat-safety-reliability-phase1 (follow-up): picking a new file
+    // replaces any previous pending (failed-to-send) attachment — its
+    // cached URL belonged to a different file.
+    setPendingDriverAttachment(null);
+    setDriverAttachmentError('');
     setIsUploading(true);
 
     try {
@@ -926,8 +1243,6 @@ export default function DriverApplication({
       });
 
       const fileCategory: DocumentCategory = file.type.startsWith("image/") ? "photo" : "other";
-      let finalFileUrl = "#";
-      let uploadFailed = false;
 
       try {
         const uploadRes = await apiFetch("/api/upload", {
@@ -938,44 +1253,62 @@ export default function DriverApplication({
             filename: file.name
           })
         });
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          finalFileUrl = uploadData.url;
-        } else {
-          uploadFailed = true;
+        if (!uploadRes.ok) {
+          // fix/chat-safety-reliability-phase1: this previously still sent
+          // a chat message with fileUrl: "#" (a dead link) even when the
+          // upload failed. Block the send outright instead, consistent
+          // with every other chat surface — the driver gets a clear error
+          // and can retry by picking the file again, rather than a message
+          // going out that references a file that was never actually saved.
+          setDriverAttachmentError('upload');
+          triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
+          return;
         }
+        const uploadData = await uploadRes.json();
+        await sendDriverFileMessage(shipmentId, uploadData.url, file.name, fileCategory);
       } catch (uploadGatewayErr) {
-        uploadFailed = true;
         console.warn("Upload request failed:", uploadGatewayErr);
-      }
-
-      const res = await apiFetch(`/api/shipments/${activeShipment.id}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender: "driver",
-          senderName: getDriverName(),
-          type: "file",
-          fileName: file.name,
-          fileCategory,
-          fileUrl: finalFileUrl,
-          text: `Sent a document [${fileCategory.toUpperCase()}]: ${file.name}`
-        })
-      });
-
-      if (res.ok) {
-        if (uploadFailed) {
-          triggerToast("⚠️ Message sent, but the file couldn't be saved to storage. It may not display correctly for dispatch.");
-        } else {
-          triggerToast(lang === 'tr' ? "📎 Dosya gönderildi!" : lang === 'ar' ? "📎 تم إرسال الملف!" : "📎 File sent to Admin!");
-        }
-        fetchData();
-      } else {
-        triggerToast("❌ Failed to send attachment. Please try again.");
+        setDriverAttachmentError('upload');
+        triggerToast("❌ Couldn't upload the file to storage. Your message was not sent — please try again.");
       }
     } catch (e) {
       console.error(e);
       triggerToast("❌ Failed to send attachment.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): reuses the cached
+  // Storage URL from pendingDriverAttachment via the same
+  // planAttachmentSend decision ChatCenter.tsx/App.tsx use — never
+  // re-uploads the file.
+  //
+  // fix/chat-safety-reliability-phase1 (follow-up): verifies
+  // pendingDriverAttachment.shipmentId still matches the currently active
+  // shipment before reusing anything. The shipment-change effect above
+  // should already have cleared pendingDriverAttachment by the time the
+  // driver could even see a retry banner for a different shipment, but
+  // this is the actual enforcement point, not just a mirror of it — if
+  // they somehow don't match, the pending attachment is cleared/blocked
+  // rather than ever being posted into the wrong shipment.
+  const handleRetryDriverAttachment = async () => {
+    if (!pendingDriverAttachment || isUploading) return;
+    if (!isCachedAttachmentForShipment(pendingDriverAttachment.shipmentId, activeShipment?.id ?? null)) {
+      setPendingDriverAttachment(null);
+      setDriverAttachmentError('');
+      return;
+    }
+    const plan = planAttachmentSend(pendingDriverAttachment.fileUrl);
+    if (plan.action !== "reuse_cached_url") return;
+    setIsUploading(true);
+    try {
+      await sendDriverFileMessage(
+        pendingDriverAttachment.shipmentId,
+        plan.fileUrl,
+        pendingDriverAttachment.fileName,
+        pendingDriverAttachment.fileCategory
+      );
     } finally {
       setIsUploading(false);
     }
@@ -1607,12 +1940,21 @@ export default function DriverApplication({
                         })
                         .map((msg) => {
                           const isMe = msg.sender === 'driver';
+                          // fix/chat-safety-reliability-phase1: this row
+                          // uses items-end/items-start (never stretch), so
+                          // a flex child sizes to its own content width
+                          // rather than the row's — an unbroken-text
+                          // bubble wider than max-w-[85%] overflowed the
+                          // whole panel despite break-words alone (found
+                          // while smoke-testing the new 5000-char limit).
+                          // max-w-full on the bubble gives it something to
+                          // wrap against.
                           return (
                             <div key={msg.id} className={`flex flex-col max-w-[85%] ${isMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                               <span className="text-[8px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                              <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm ${
-                                isMe 
-                                  ? 'bg-orange-600 text-white rounded-tr-none' 
+                              <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm break-words max-w-full ${
+                                isMe
+                                  ? 'bg-orange-600 text-white rounded-tr-none'
                                   : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none'
                               }`}>
                                  {msg.type === 'file' ? (
@@ -1683,6 +2025,39 @@ export default function DriverApplication({
                       <div ref={messagesEndRef} />
                     </div>
 
+                    {/* fix/chat-safety-reliability-phase1 (follow-up):
+                        upload-failed vs upload-succeeded-but-send-failed
+                        banner, with a retry action for the latter that
+                        reuses the already-uploaded Storage URL rather than
+                        uploading the file again. */}
+                    {!isShipmentFinished && driverAttachmentError && (
+                      <div className="px-3.5 pt-2.5 bg-slate-950 flex items-center justify-between gap-2 text-[10px] font-bold">
+                        <span className="text-red-400">
+                          {driverAttachmentError === 'upload'
+                            ? (lang === 'tr'
+                                ? "Dosya depoya yüklenemedi. Mesajınız gönderilmedi."
+                                : lang === 'ar'
+                                ? "تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك."
+                                : "Couldn't upload the file to storage. Your message was not sent.")
+                            : (lang === 'tr'
+                                ? "Dosya yüklendi, ancak mesaj gönderilemedi."
+                                : lang === 'ar'
+                                ? "تم رفع الملف، ولكن تعذر إرسال الرسالة."
+                                : "The file was uploaded, but the message could not be sent.")}
+                        </span>
+                        {pendingDriverAttachment && (
+                          <button
+                            type="button"
+                            onClick={handleRetryDriverAttachment}
+                            disabled={isUploading}
+                            className="shrink-0 text-orange-400 hover:text-orange-300 underline disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {lang === 'tr' ? 'Tekrar dene' : lang === 'ar' ? 'إعادة المحاولة' : 'Retry'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     {/* Message input */}
                     {isShipmentFinished ? (
                       <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 font-mono text-[10px] select-none">
@@ -1700,7 +2075,7 @@ export default function DriverApplication({
                         <button
                           type="button"
                           onClick={() => attachmentInputRef.current?.click()}
-                          disabled={isUploading}
+                          disabled={isUploading || isSendingDriverMessage}
                           title={lang === 'tr' ? 'Ekle' : lang === 'ar' ? 'إرفاق' : 'Attach'}
                           className="p-3 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer inline-flex items-center active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
@@ -1716,11 +2091,13 @@ export default function DriverApplication({
                           placeholder={lang === 'tr' ? 'Bir mesaj yazın...' : lang === 'ar' ? 'اكتب رسالة...' : 'Type a message...'}
                           value={newMessageText}
                           onChange={(e) => setNewMessageText(e.target.value)}
-                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono"
+                          maxLength={MAX_CHAT_TEXT_LENGTH}
+                          disabled={isSendingDriverMessage}
+                          className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/50 outline-none rounded-xl text-xs text-white placeholder-slate-600 transition-all font-mono disabled:opacity-60"
                         />
-                        <button 
-                          type="submit" 
-                          disabled={!newMessageText.trim()}
+                        <button
+                          type="submit"
+                          disabled={!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })}
                           aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                           className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
                         >
@@ -2064,17 +2441,19 @@ export default function DriverApplication({
                     </button>
                   )}
 
-                  <div className="mt-4 pt-4 border-t border-slate-900">
+                  <div className="mt-5 pt-4 border-t-2 border-red-950/40">
                     {!showDriverDeleteConfirm ? (
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         onClick={() => {
                           setShowDriverDeleteConfirm(true);
                           setUnderstandDriverDelete(false);
+                          setDriverDeletionState("idle");
+                          setBackendDriverRecordDeleted(false);
                         }}
-                        className="w-full py-2 bg-red-950/10 hover:bg-red-950/30 border border-red-900/30 hover:border-red-500/30 text-red-400 font-extrabold text-[10.5px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                        className="w-full py-3 bg-red-950/15 hover:bg-red-950/35 border border-red-900/40 hover:border-red-500/40 text-red-400 font-extrabold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                        <Trash2 className="w-4 h-4 shrink-0" />
                         <span>{lang === 'tr' ? "Hesabımı Tamamen Sil" : (lang === 'ar' ? "حذف الحساب نهائياً" : "Delete My Account")}</span>
                       </button>
                     ) : (
@@ -2086,9 +2465,9 @@ export default function DriverApplication({
                               {lang === 'tr' ? "Kalıcı Hesap Silme İşlemi" : (lang === 'ar' ? "حذف الحساب بشكل نهائي" : "Irreversible Profile Purge")}
                             </h5>
                             <p className="text-[9.5px] text-slate-400 leading-tight mt-0.5">
-                              {lang === 'tr' 
+                              {lang === 'tr'
                                 ? "Bu işlem geri alınamaz. Tüm lojistik geçmişiniz, aktif tır plakanız ve sürücü sevk yetkileriniz sistemden tamamen silinecektir."
-                                : (lang === 'ar' 
+                                : (lang === 'ar'
                                   ? "هذا الإجراء نهائي ولا يمكن التراجع عنه. سيتم مسح تفويض الشاحنة وتاريخ السفر بالكامل من النظم."
                                   : "This cannot be undone. Your active manifests, historical trips, and fleet registry authorization will be permanently wiped.")}
                             </p>
@@ -2099,32 +2478,60 @@ export default function DriverApplication({
                           <input
                             type="checkbox"
                             checked={understandDriverDelete}
+                            disabled={backendDriverRecordDeleted}
                             onChange={(e) => setUnderstandDriverDelete(e.target.checked)}
-                            className="w-3.5 h-3.5 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5"
+                            className="w-3.5 h-3.5 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5 disabled:opacity-60"
                           />
                           <span className="leading-tight text-left">
-                            {lang === 'tr' 
+                            {lang === 'tr'
                               ? "Hesabımın silinmesini ve sistemden çıkarılmasını istiyorum."
-                              : (lang === 'ar' 
+                              : (lang === 'ar'
                                 ? "أوافق على حذف حسابي بشكل دائم ومسح هويتي التعريفية."
                                 : "I consent to permanently purge my account identity and logs.")}
                           </span>
                         </label>
 
+                        {(driverDeletionState === "backend_failure" ||
+                          driverDeletionState === "reauthentication_required" ||
+                          driverDeletionState === "firebase_identity_deletion_failed" ||
+                          driverDeletionState === "firebase_identity_deletion_unresolved") && (
+                          <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-2.5 text-[9.5px] text-red-300 leading-tight text-left">
+                            {driverDeletionState === "backend_failure"
+                              ? driverAccountDeletionCopy(lang).backendFailure
+                              : driverDeletionState === "reauthentication_required"
+                              ? driverAccountDeletionCopy(lang).reauthenticationRequired
+                              : driverDeletionState === "firebase_identity_deletion_unresolved"
+                              ? driverAccountDeletionCopy(lang).firebaseIdentityDeletionUnresolved
+                              : driverAccountDeletionCopy(lang).firebaseIdentityDeletionFailed}
+                          </div>
+                        )}
+
                         <div className="flex gap-2 pt-1">
                           <button
                             type="button"
                             disabled={isDeletingDriverAccount}
-                            onClick={() => setShowDriverDeleteConfirm(false)}
+                            onClick={() => {
+                              if (backendDriverRecordDeleted) {
+                                // The Firestore driver record is already gone
+                                // at this point — there is nothing left to
+                                // "cancel" back to, so leaving this panel now
+                                // means leaving the app, not resuming normal use.
+                                if (onLogout) onLogout();
+                                return;
+                              }
+                              setShowDriverDeleteConfirm(false);
+                            }}
                             className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
                           >
-                            {lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء Действие" : "Cancel")}
+                            {backendDriverRecordDeleted
+                              ? driverAccountDeletionCopy(lang).logOutButton
+                              : (lang === 'tr' ? "Vazgeç" : (lang === 'ar' ? "إلغاء" : "Cancel"))}
                           </button>
-                          
+
                           <button
                             type="button"
                             disabled={isDeletingDriverAccount || !understandDriverDelete}
-                            onClick={handleDeleteDriverAccount}
+                            onClick={driverDeletionState === "firebase_identity_deletion_unresolved" ? handleFinishFirebaseDeletion : handleDeleteDriverAccount}
                             className="flex-1 py-1.5 bg-gradient-to-r from-red-600 to-red-600 hover:from-red-600 hover:to-red-700 disabled:opacity-40 text-white font-black text-[10px] rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md border-0"
                           >
                             {isDeletingDriverAccount ? (
@@ -2132,7 +2539,13 @@ export default function DriverApplication({
                             ) : (
                               <Trash2 className="w-3 h-3 shrink-0" />
                             )}
-                            <span>{lang === 'tr' ? "Profilimi Sil" : (lang === 'ar' ? "تأكيد الحذف" : "Purge Account")}</span>
+                            <span>
+                              {driverDeletionState === "reauthentication_required" ||
+                              driverDeletionState === "firebase_identity_deletion_failed" ||
+                              driverDeletionState === "firebase_identity_deletion_unresolved"
+                                ? driverAccountDeletionCopy(lang).retryButton
+                                : (lang === 'tr' ? "Profilimi Sil" : (lang === 'ar' ? "تأكيد الحذف" : "Purge Account"))}
+                            </span>
                           </button>
                         </div>
                       </div>

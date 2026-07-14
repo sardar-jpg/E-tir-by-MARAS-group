@@ -117,3 +117,21 @@ export function resolveDriverLoginBlock(status: Driver["status"]): DriverLoginBl
   if (status === "rejected") return { blocked: true, message: REJECTED_MESSAGE };
   return { blocked: false };
 }
+
+export interface DriverDeleteSession {
+  role: string;
+  id: string;
+  adminType?: string;
+}
+
+/**
+ * fix/apple-driver-account-deletion: DELETE /api/drivers/:id's
+ * authorization rule, extracted so it's unit-testable independent of the
+ * Express route — a full admin (any adminType except "accounts") may
+ * delete any driver; a driver session may only ever delete itself.
+ */
+export function canDeleteDriverAccount(session: DriverDeleteSession, targetDriverId: string): boolean {
+  const isFullAdmin = session.role === "admin" && session.adminType !== "accounts";
+  const isSelf = session.role === "driver" && session.id === targetDriverId;
+  return isFullAdmin || isSelf;
+}

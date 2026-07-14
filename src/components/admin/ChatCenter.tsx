@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
 import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment } from '../../lib/chatCenterView';
 import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
+import { MAX_CHAT_TEXT_LENGTH } from '../../lib/chatMessageValidation';
+import {
+  canSubmitChatMessage,
+  applySuccessfulChatPoll,
+  shouldConfirmChannelRead,
+  planAttachmentSendForShipment,
+} from '../../lib/chatComposerState';
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
 // DocumentCategory — 'photo' is left out here since these are staff
@@ -67,7 +74,11 @@ const LABELS: Record<Language, {
   attach: string;
   removeAttachment: string;
   internalOnly: string;
-  uploadFailedInline: string;
+  uploadFailedError: string;
+  sendFailedError: string;
+  connectionError: string;
+  connectionErrorRetrying: string;
+  retryNow: string;
   category: Record<DocumentCategory, string>;
 }> = {
   en: {
@@ -91,7 +102,11 @@ const LABELS: Record<Language, {
     attach: 'Attach file',
     removeAttachment: 'Remove attachment',
     internalOnly: 'Internal Only',
-    uploadFailedInline: "Couldn't save to storage — sent with a temporary copy only.",
+    uploadFailedError: "Couldn't upload the file to storage. Your message was not sent — please try again.",
+    sendFailedError: 'The file was uploaded, but the message could not be sent. Please try again.',
+    connectionError: "Couldn't load messages. Check your connection and try again.",
+    connectionErrorRetrying: 'Connection lost — retrying…',
+    retryNow: 'Retry now',
     category: {
       cmr: 'CMR',
       invoice: 'Invoice',
@@ -123,7 +138,11 @@ const LABELS: Record<Language, {
     attach: 'Dosya ekle',
     removeAttachment: 'Eki kaldır',
     internalOnly: 'Sadece Dahili',
-    uploadFailedInline: 'Depoya kaydedilemedi — yalnızca geçici bir kopyayla gönderildi.',
+    uploadFailedError: 'Dosya depoya yüklenemedi. Mesajınız gönderilmedi — lütfen tekrar deneyin.',
+    sendFailedError: 'Dosya yüklendi, ancak mesaj gönderilemedi. Lütfen tekrar deneyin.',
+    connectionError: 'Mesajlar yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.',
+    connectionErrorRetrying: 'Bağlantı kesildi — yeniden deneniyor…',
+    retryNow: 'Şimdi tekrar dene',
     category: {
       cmr: 'CMR',
       invoice: 'Fatura',
@@ -155,7 +174,11 @@ const LABELS: Record<Language, {
     attach: 'إرفاق ملف',
     removeAttachment: 'إزالة المرفق',
     internalOnly: 'داخلي فقط',
-    uploadFailedInline: 'تعذر الحفظ في التخزين — تم الإرسال بنسخة مؤقتة فقط.',
+    uploadFailedError: 'تعذر رفع الملف إلى التخزين. لم يتم إرسال رسالتك — يرجى المحاولة مرة أخرى.',
+    sendFailedError: 'تم رفع الملف، ولكن تعذر إرسال الرسالة. يرجى المحاولة مرة أخرى.',
+    connectionError: 'تعذر تحميل الرسائل. تحقق من اتصالك وحاول مرة أخرى.',
+    connectionErrorRetrying: 'انقطع الاتصال — جارٍ إعادة المحاولة…',
+    retryNow: 'إعادة المحاولة الآن',
     category: {
       cmr: 'CMR',
       invoice: 'فاتورة',
@@ -185,12 +208,40 @@ export default function ChatCenter({
   const [activeChannel, setActiveChannel] = useState<ChatCenterChannel>('internal_staff');
   const [channelMessages, setChannelMessages] = useState<ChatMessage[]>([]);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  // fix/chat-safety-reliability-phase1: distinguishes "never successfully
+  // loaded this channel yet" from "loaded, then a later poll failed" — used
+  // below to tell a genuine empty conversation apart from a connection
+  // failure, instead of collapsing both into the same empty-state copy.
+  const [hasLoadedMessagesOnce, setHasLoadedMessagesOnce] = useState(false);
+  // True whenever the most recent fetch (initial or background poll)
+  // failed. Deliberately never clears channelMessages by itself — the last
+  // successfully-fetched messages stay on screen while this is true.
+  const [pollError, setPollError] = useState(false);
+  const retryNowRef = useRef<() => void>(() => {});
   const [internalMessageText, setInternalMessageText] = useState('');
   const [isSendingInternal, setIsSendingInternal] = useState(false);
   const [internalFile, setInternalFile] = useState<File | null>(null);
   const [internalFileName, setInternalFileName] = useState('');
   const [internalFileCategory, setInternalFileCategory] = useState<DocumentCategory>('other');
   const [internalFileDataUrl, setInternalFileDataUrl] = useState('');
+  // fix/chat-safety-reliability-phase1: the real Storage URL from a
+  // successful POST /api/upload, cached so a retry after a failed POST
+  // /chat reuses it instead of uploading the same file again. Cleared only
+  // on a successful send or when the user removes/replaces the attachment
+  // (see resetInternalAttachment / handleInternalFileSelected) — never on a
+  // failed send.
+  const [internalUploadedFileUrl, setInternalUploadedFileUrl] = useState('');
+  // fix/chat-safety-reliability-phase1 (follow-up): the shipment
+  // internalUploadedFileUrl was actually uploaded for. A cached URL must
+  // never be reused after switching to a different shipment — checked via
+  // planAttachmentSendForShipment (chatComposerState.ts) before every
+  // send, and proactively cleared (along with the rest of the attachment
+  // draft) whenever selectedShipmentId changes, below.
+  const [internalUploadShipmentId, setInternalUploadShipmentId] = useState('');
+  // Distinguishes "the upload itself failed (message never sent)" from
+  // "the upload succeeded but creating the chat message failed" — the two
+  // cases in section 2/7 of the phase-1 requirements need different copy.
+  const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send'>('');
   const internalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Shortcut buttons (Shipment Details modal) preselect a shipment + channel.
@@ -219,9 +270,13 @@ export default function ChatCenter({
   useEffect(() => {
     if (!selectedShipment) {
       setChannelMessages([]);
+      setPollError(false);
+      setHasLoadedMessagesOnce(false);
       return;
     }
     let cancelled = false;
+    setPollError(false);
+    setHasLoadedMessagesOnce(false);
 
     // feature/admin-mobile-ui correction pass: marks this channel read
     // for the signed-in admin (per-admin — src/lib/chatUnreadAccess.ts,
@@ -231,30 +286,71 @@ export default function ChatCenter({
     // drawer — so a message that arrives while this exact shipment+
     // channel is already open still gets picked up and marked read
     // without the admin having to reselect anything.
+    //
+    // fix/chat-safety-reliability-phase1: a failed fetch (non-OK response
+    // or thrown error, on the initial load OR any background poll) now
+    // only sets `pollError` — it never clears `channelMessages`. A
+    // transient network blip or a 500 must never make a populated thread
+    // look empty. `hasLoadedMessagesOnce` distinguishes a genuine empty
+    // conversation (loaded fine, zero messages) from "never successfully
+    // loaded, nothing to show yet."
     const fetchAndMarkRead = async (showLoading: boolean) => {
       if (showLoading) setIsLoadingMessages(true);
       try {
         const res = await apiFetch(`/api/shipments/${selectedShipment.id}/chat?channel=${activeChannel}`);
-        const data = res.ok ? await res.json() : [];
+        if (!res.ok) throw new Error(`Failed to load chat messages (${res.status})`);
+        const data = await res.json();
+        if (!Array.isArray(data)) throw new Error('Unexpected chat response shape');
         if (cancelled) return;
-        setChannelMessages(Array.isArray(data) ? data : []);
 
-        const hasMessageFromOtherParty = Array.isArray(data) && data.some((m: ChatMessage) => m.sender !== 'admin');
-        if (hasMessageFromOtherParty) {
-          await apiFetch(`/api/shipments/${selectedShipment.id}/chat/seen`, {
+        const next = applySuccessfulChatPoll<ChatMessage>(data);
+        setChannelMessages(next.messages);
+        setHasLoadedMessagesOnce(next.hasLoadedOnce);
+        setPollError(next.pollError);
+
+        // fix/chat-safety-reliability-phase1 (follow-up): this used to
+        // gate the /chat/seen call on `data.some(m => m.sender !== 'admin')`
+        // — meant to skip the call when there's nothing from "the other
+        // party" to mark. But every internal_staff message has
+        // sender: 'admin' (there is no other party — every participant is
+        // an admin), so that condition was ALWAYS false for internal_staff,
+        // meaning opening that channel never called /chat/seen at all and
+        // another admin's message could never be marked read. Call
+        // whenever the channel has any messages instead, and let the
+        // server's own session/channel/shipment-aware logic
+        // (isMessageFromOtherAdmin / isMessageUnreadForAdmin,
+        // chatUnreadAccess.ts) decide which messages actually get added to
+        // readByAdminIds — it already correctly excludes the viewing
+        // admin's own messages (own internal_staff messages included), so
+        // this is safe to call unconditionally rather than trying to
+        // duplicate that eligibility check client-side.
+        if (data.length > 0) {
+          const seenRes = await apiFetch(`/api/shipments/${selectedShipment.id}/chat/seen`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ viewer: 'admin', channel: activeChannel }),
           });
-          if (!cancelled) onChannelRead?.(selectedShipment.id, activeChannel);
+          // fix/chat-safety-reliability-phase1: only tell the parent this
+          // channel was marked read when the server actually confirmed it
+          // (res.ok). Previously this fired unconditionally, so a failed
+          // mark-seen write could still optimistically clear this admin's
+          // local unread badge even though the server never recorded it.
+          if (!cancelled && shouldConfirmChannelRead(seenRes.ok)) {
+            onChannelRead?.(selectedShipment.id, activeChannel);
+          }
         }
       } catch {
-        if (!cancelled) setChannelMessages([]);
+        // Matches applyFailedChatPoll's contract (see chatComposerState.ts
+        // and its tests): a failed poll only ever flips pollError — it
+        // never touches channelMessages or hasLoadedMessagesOnce, which is
+        // exactly what NOT calling their setters here achieves.
+        if (!cancelled) setPollError(true);
       } finally {
         if (!cancelled && showLoading) setIsLoadingMessages(false);
       }
     };
 
+    retryNowRef.current = () => { fetchAndMarkRead(true); };
     fetchAndMarkRead(true);
     const interval = setInterval(() => fetchAndMarkRead(false), 3000);
     return () => {
@@ -263,15 +359,30 @@ export default function ChatCenter({
     };
   }, [selectedShipment?.id, activeChannel]);
 
-  const [attachmentWarning, setAttachmentWarning] = useState('');
-
   const resetInternalAttachment = () => {
     setInternalFile(null);
     setInternalFileName('');
     setInternalFileCategory('other');
     setInternalFileDataUrl('');
+    // fix/chat-safety-reliability-phase1: clear the cached upload only
+    // here (explicit remove, or after a confirmed successful send) — never
+    // on a failed send, so a retry can reuse it instead of re-uploading.
+    setInternalUploadedFileUrl('');
+    setInternalUploadShipmentId('');
     if (internalFileInputRef.current) internalFileInputRef.current.value = '';
   };
+
+  // fix/chat-safety-reliability-phase1 (follow-up): switching to a
+  // different shipment must never carry a draft attachment (or its cached
+  // upload URL) over to the newly-selected one — proactively clears the
+  // whole attachment draft, not just the cached URL, on every shipment
+  // switch. Combined with the shipment check inside
+  // handleSendInternalMessage (belt and suspenders) below.
+  useEffect(() => {
+    resetInternalAttachment();
+    setInternalSendError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShipmentId]);
 
   // Best-effort category guess from the filename, same heuristic used by
   // the driver_admin/client_admin attachment flow in App.tsx.
@@ -290,6 +401,12 @@ export default function ChatCenter({
     setInternalFile(file);
     setInternalFileName(file.name);
     setInternalFileCategory(guessCategoryFromFile(file));
+    // fix/chat-safety-reliability-phase1: a newly-picked file invalidates
+    // any previously-cached upload (it belonged to a different file) and
+    // any previous error state.
+    setInternalUploadedFileUrl('');
+    setInternalUploadShipmentId('');
+    setInternalSendError('');
     const reader = new FileReader();
     reader.onload = (evt) => {
       setInternalFileDataUrl((evt.target?.result as string) || '');
@@ -297,38 +414,67 @@ export default function ChatCenter({
     reader.readAsDataURL(file);
   };
 
+  // fix/chat-safety-reliability-phase1: rewritten to (1) never fall back to
+  // sending the raw base64 data: URL as fileUrl when the upload fails —
+  // the send is blocked outright instead, (2) cache the real Storage URL
+  // from a successful upload so a retry after a failed message-send reuses
+  // it rather than uploading the same file twice, and (3) surface a
+  // distinct, translated error for "upload failed" vs. "upload succeeded
+  // but the message wasn't created," instead of silently swallowing either
+  // case. The draft text and the selected attachment are only ever cleared
+  // on a confirmed successful send (see resetInternalAttachment above).
   const handleSendInternalMessage = async () => {
     const text = internalMessageText.trim();
-    if (!selectedShipment || isSendingInternal) return;
-    if (!text && !internalFile) return;
+    if (!selectedShipment) return;
+    if (!canSubmitChatMessage({ text, hasAttachment: Boolean(internalFile), isSending: isSendingInternal })) return;
     setIsSendingInternal(true);
-    setAttachmentWarning('');
+    setInternalSendError('');
     try {
-      let uploadFailed = false;
       const body: Record<string, unknown> = { channel: 'internal_staff' };
 
-      if (internalFile && internalFileDataUrl) {
-        let finalFileUrl = internalFileDataUrl;
-        try {
-          const uploadRes = await apiFetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base64DataUrl: internalFileDataUrl, filename: internalFileName }),
-          });
-          if (uploadRes.ok) {
-            const uploadData = await uploadRes.json();
-            finalFileUrl = uploadData.url;
-          } else {
-            uploadFailed = true;
+      if (internalFile) {
+        // fix/chat-safety-reliability-phase1 (follow-up): a cached upload
+        // is only reused when it was uploaded for THIS shipment — the
+        // proactive clear-on-switch effect above should already guarantee
+        // this, but this check is the actual enforcement point, not just
+        // a mirror of it.
+        const plan = planAttachmentSendForShipment(internalUploadedFileUrl, internalUploadShipmentId, selectedShipment.id);
+        let uploadedUrl: string;
+
+        if (plan.action === 'reuse_cached_url') {
+          uploadedUrl = plan.fileUrl;
+        } else {
+          if (!internalFileDataUrl) {
+            // FileReader hasn't finished reading the file yet — nothing to
+            // upload. Bail out rather than send a malformed request; the
+            // attachment stays selected so the admin can just hit Send again.
+            setInternalSendError('upload');
+            return;
           }
-        } catch {
-          uploadFailed = true;
+          try {
+            const uploadRes = await apiFetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ base64DataUrl: internalFileDataUrl, filename: internalFileName }),
+            });
+            if (!uploadRes.ok) {
+              setInternalSendError('upload');
+              return;
+            }
+            const uploadData = await uploadRes.json();
+            uploadedUrl = uploadData.url;
+            setInternalUploadedFileUrl(uploadedUrl);
+            setInternalUploadShipmentId(selectedShipment.id);
+          } catch {
+            setInternalSendError('upload');
+            return;
+          }
         }
 
         body.type = 'file';
         body.fileName = internalFileName;
         body.fileCategory = internalFileCategory;
-        body.fileUrl = finalFileUrl;
+        body.fileUrl = uploadedUrl;
         if (text) body.text = text;
       } else {
         body.type = 'text';
@@ -345,11 +491,15 @@ export default function ChatCenter({
         setChannelMessages((prev) => [...prev, msg]);
         setInternalMessageText('');
         resetInternalAttachment();
-        if (uploadFailed) setAttachmentWarning(label.uploadFailedInline);
+        setInternalSendError('');
+      } else {
+        // Upload (if any) already succeeded at this point — only the
+        // message creation failed. internalUploadedFileUrl stays cached so
+        // a retry reuses it instead of uploading the file again.
+        setInternalSendError('send');
       }
     } catch {
-      // Swallow — the message simply won't appear; the input/attachment
-      // stay in place so the admin can retry.
+      setInternalSendError('send');
     } finally {
       setIsSendingInternal(false);
     }
@@ -366,8 +516,12 @@ export default function ChatCenter({
   return (
     /* feature/admin-mobile-ui correction pass: taller on mobile now that
        App.tsx's dark header/footer are hidden there (freed-up viewport
-       height — see AdminPanel.tsx's mobile content padding). */
-    <div className="flex flex-col lg:flex-row h-[78vh] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
+       height — see AdminPanel.tsx's mobile content padding).
+       fix/chat-safety-reliability-phase1: dvh (not vh) so the iOS on-screen
+       keyboard/collapsing address bar can't leave the composer hidden
+       below the fold — vh is computed against the layout viewport, which
+       doesn't shrink when the keyboard opens. */
+    <div className="flex flex-col lg:flex-row h-[78dvh] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
       {/* Left: shipment conversation list.
           feature/admin-mobile-ui: on mobile this list and the selected
           conversation (below) are shown one at a time — list when nothing
@@ -499,55 +653,148 @@ export default function ChatCenter({
             <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50/50">
               {isLoadingMessages ? (
                 <p className="text-xs text-slate-400 text-center py-10">{label.loading}</p>
+              ) : pollError && !hasLoadedMessagesOnce ? (
+                /* fix/chat-safety-reliability-phase1: never had a
+                   successful fetch for this channel to show anything for —
+                   a distinct retry state, not the same copy as a
+                   genuinely empty conversation (which requires having
+                   loaded successfully at least once). */
+                <div className="h-full flex flex-col items-center justify-center text-center gap-2 py-10">
+                  <AlertTriangle className="w-6 h-6 text-amber-500" />
+                  <p className="text-xs font-semibold text-slate-500">{label.connectionError}</p>
+                  <button
+                    type="button"
+                    onClick={() => retryNowRef.current()}
+                    className="mt-1 inline-flex items-center gap-1.5 text-[11px] font-bold text-orange-600 hover:text-orange-700 px-3 py-2 rounded-lg border border-orange-200 hover:bg-orange-50 transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    {label.retryNow}
+                  </button>
+                </div>
               ) : channelMessages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center gap-2 py-10">
+                  {pollError && (
+                    <p className="text-[11px] font-semibold text-amber-600 flex items-center gap-1.5 mb-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      {label.connectionErrorRetrying}
+                    </p>
+                  )}
                   <MessageSquare className="w-6 h-6 text-slate-300" />
                   <p className="text-xs text-slate-400">{label.noMessages}</p>
                 </div>
               ) : (
-                channelMessages.map((msg) => {
-                  const isAdmin = msg.sender === 'admin';
-                  return (
-                    <div key={msg.id} className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                      <span className="text-[9px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                      {msg.type === 'file' ? (
-                        <div className="flex flex-col gap-1.5">
-                          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs border ${isAdmin ? 'bg-orange-500 border-orange-500 text-white' : 'bg-white border-slate-200 text-slate-700'}`}>
-                            <FileText className="w-4 h-4 shrink-0" />
-                            <div className="min-w-0">
-                              <p className="font-bold truncate">{msg.fileName || 'Attachment'}</p>
-                              <span className={`text-[9px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
-                                {label.category[msg.fileCategory ?? 'other']}
-                              </span>
-                            </div>
-                            {msg.channel === 'internal_staff' && (
-                              <span className="shrink-0 flex items-center gap-1 text-[9px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
-                                <Lock className="w-2.5 h-2.5" />
-                                {label.internalOnly}
-                              </span>
+                <>
+                  {pollError && (
+                    /* fix/chat-safety-reliability-phase1: messages we
+                       already have stay fully visible — this is just a
+                       small heads-up that the latest poll failed and is
+                       being retried automatically, not a replacement for
+                       the thread. */
+                    <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-2 px-5 py-1.5 bg-amber-50 border-b border-amber-200 text-[11px] font-semibold text-amber-700 flex items-center justify-center gap-1.5">
+                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                      {label.connectionErrorRetrying}
+                    </div>
+                  )}
+                  {channelMessages.map((msg) => {
+                    const isAdmin = msg.sender === 'admin';
+                    const formattedTime = new Date(msg.timestamp).toLocaleTimeString(
+                      lang === 'tr' ? 'tr-TR' : lang === 'ar' ? 'ar-IQ' : 'en-US',
+                      { hour: '2-digit', minute: '2-digit' }
+                    );
+                    const isImageAttachment =
+                      msg.type === 'file' &&
+                      !!msg.fileUrl &&
+                      (msg.fileCategory === 'photo' || !!msg.fileName?.match(/\.(jpe?g|gif|png|webp)$/i));
+                    // fix/chat-safety-reliability-phase1: this row is
+                    // `items-end`/`items-start` (never `stretch`), so a
+                    // flex child here sizes to its own content width, not
+                    // the row's — a bubble with unbroken text longer than
+                    // the row's max-w-[75%] (found while smoke-testing the
+                    // new 5000-char limit with a no-whitespace string)
+                    // rendered at full content width and overflowed the
+                    // whole panel, `break-words` alone had nothing to
+                    // shrink into. `max-w-full` on the bubble itself
+                    // (below) gives it something to wrap against.
+                    return (
+                      <div key={msg.id} className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                        <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
+                        {msg.type === 'file' ? (
+                          <div className="flex flex-col gap-1.5">
+                            {/* fix/chat-safety-reliability-phase1: a real,
+                                clickable open/download control — this used
+                                to be a plain, non-interactive div with no
+                                way to open or download the attached file. */}
+                            <a
+                              href={msg.fileUrl || undefined}
+                              target="_blank"
+                              rel="noreferrer"
+                              download={msg.fileName || undefined}
+                              onClick={(e) => {
+                                if (!msg.fileUrl) e.preventDefault();
+                              }}
+                              aria-disabled={!msg.fileUrl}
+                              className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs border transition-colors ${
+                                isAdmin
+                                  ? 'bg-orange-500 border-orange-500 text-white hover:bg-orange-600'
+                                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                              } ${msg.fileUrl ? 'cursor-pointer' : 'cursor-default opacity-80'}`}
+                            >
+                              <FileText className="w-4 h-4 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="font-bold truncate underline decoration-dotted underline-offset-2">{msg.fileName || 'Attachment'}</p>
+                                <span className={`text-[10px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
+                                  {label.category[msg.fileCategory ?? 'other']}
+                                </span>
+                              </div>
+                              {msg.fileUrl && <Download className="w-3.5 h-3.5 shrink-0" />}
+                              {msg.channel === 'internal_staff' && (
+                                <span className="shrink-0 flex items-center gap-1 text-[10px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
+                                  <Lock className="w-2.5 h-2.5" />
+                                  {label.internalOnly}
+                                </span>
+                              )}
+                            </a>
+                            {isImageAttachment && (
+                              <a
+                                href={msg.fileUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block rounded-lg overflow-hidden border border-slate-200 max-w-[180px]"
+                              >
+                                <img
+                                  src={msg.fileUrl}
+                                  alt={msg.fileName || 'attachment'}
+                                  className="w-full h-auto object-cover max-h-[140px]"
+                                  referrerPolicy="no-referrer"
+                                />
+                              </a>
+                            )}
+                            {msg.text && (
+                              <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                                {msg.text}
+                              </div>
                             )}
                           </div>
-                          {msg.text && (
-                            <div className={`px-3 py-2 rounded-xl text-xs ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
-                              {msg.text}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className={`px-3 py-2 rounded-xl text-xs ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
-                          {msg.text}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
+                        ) : (
+                          <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                            {msg.text}
+                          </div>
+                        )}
+                        <span className="text-[10px] text-slate-400 font-mono mt-0.5">{formattedTime}</span>
+                      </div>
+                    );
+                  })}
+                </>
               )}
             </div>
 
             {activeChannel === 'internal_staff' && (
               <div className="border-t border-slate-200">
-                {attachmentWarning && (
-                  <p className="px-3 pt-2 text-[10px] font-bold text-amber-600">{attachmentWarning}</p>
+                {internalSendError === 'upload' && (
+                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.uploadFailedError}</p>
+                )}
+                {internalSendError === 'send' && (
+                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.sendFailedError}</p>
                 )}
                 {internalFile && (
                   <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
@@ -567,7 +814,7 @@ export default function ChatCenter({
                       onClick={resetInternalAttachment}
                       aria-label={label.removeAttachment}
                       title={label.removeAttachment}
-                      className="p-1 text-slate-400 hover:text-slate-600"
+                      className="p-2 -m-1 text-slate-400 hover:text-slate-600"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -593,9 +840,10 @@ export default function ChatCenter({
                   <button
                     type="button"
                     onClick={() => internalFileInputRef.current?.click()}
+                    disabled={isSendingInternal}
                     title={label.attach}
                     aria-label={label.attach}
-                    className="p-2.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shrink-0"
+                    className="p-3 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Paperclip className="w-4 h-4" />
                   </button>
@@ -604,12 +852,14 @@ export default function ChatCenter({
                     value={internalMessageText}
                     onChange={(e) => setInternalMessageText(e.target.value)}
                     placeholder={label.internalInputPlaceholder}
-                    className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+                    maxLength={MAX_CHAT_TEXT_LENGTH}
+                    disabled={isSendingInternal}
+                    className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60"
                   />
                   <button
                     type="submit"
-                    disabled={(!internalMessageText.trim() && !internalFile) || isSendingInternal}
-                    className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-2 rounded-lg transition-colors"
+                    disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal })}
+                    className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-3 rounded-lg transition-colors"
                   >
                     <Send className="w-3.5 h-3.5" />
                     {label.send}

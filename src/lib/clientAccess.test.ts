@@ -15,6 +15,7 @@ import {
   scopeStaffToCompany,
   validateStaffCredentials,
   groupClientsByCompany,
+  resolveClientPushRecipientIds,
 } from "./clientAccess";
 
 describe("isClientStaffAccount", () => {
@@ -725,5 +726,60 @@ describe("groupClientsByCompany", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].owner?.id).toBe("owner-1");
     expect(groups[0].staff).toEqual([]);
+  });
+});
+
+describe("resolveClientPushRecipientIds — Notification Phase 1", () => {
+  it("returns both the Owner and every active Staff account on the same company, not just one", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", active: true },
+      { id: "staff-1", companyName: "Acme Freight", active: true },
+      { id: "staff-2", companyName: "Acme Freight", active: undefined },
+    ];
+    const ids = resolveClientPushRecipientIds(clients, "Acme Freight");
+    expect(ids.sort()).toEqual(["owner-1", "staff-1", "staff-2"]);
+  });
+
+  it("excludes a disabled account (active: false) even though it matches the company", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", active: true },
+      { id: "staff-disabled", companyName: "Acme Freight", active: false },
+    ];
+    const ids = resolveClientPushRecipientIds(clients, "Acme Freight");
+    expect(ids).toEqual(["owner-1"]);
+    expect(ids).not.toContain("staff-disabled");
+  });
+
+  it("never includes an account from a different company", () => {
+    const clients = [
+      { id: "owner-1", companyName: "Acme Freight", active: true },
+      { id: "owner-2", companyName: "Other Logistics Co", active: true },
+    ];
+    const ids = resolveClientPushRecipientIds(clients, "Acme Freight");
+    expect(ids).toEqual(["owner-1"]);
+  });
+
+  it("returns an empty array when companyName is undefined, rather than matching every client with an undefined companyName", () => {
+    const clients = [{ id: "owner-1", companyName: "Acme Freight", active: true }];
+    expect(resolveClientPushRecipientIds(clients, undefined)).toEqual([]);
+  });
+
+  it("returns an empty array when no client matches the company at all", () => {
+    const clients = [{ id: "owner-1", companyName: "Acme Freight", active: true }];
+    expect(resolveClientPushRecipientIds(clients, "Nonexistent Co")).toEqual([]);
+  });
+
+  it("regression: previously only the first matching client (Owner or Staff, whichever came first in Firestore order) was ever returned", () => {
+    // Simulates a snapshot where a Staff record happens to be ordered
+    // before the Owner — the old `.find()`-based implementation would
+    // have returned only "staff-1" here, silently dropping the Owner.
+    const clients = [
+      { id: "staff-1", companyName: "Acme Freight", active: true },
+      { id: "owner-1", companyName: "Acme Freight", active: true },
+    ];
+    const ids = resolveClientPushRecipientIds(clients, "Acme Freight");
+    expect(ids).toContain("owner-1");
+    expect(ids).toContain("staff-1");
+    expect(ids).toHaveLength(2);
   });
 });
