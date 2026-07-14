@@ -2,10 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   encodePageCursor,
   decodePageCursor,
+  parseCursorParam,
   paginateDescending,
   paginateAscendingSince,
   applyMemoryFilters,
   hasUnsatisfiableFilter,
+  finalizeFilledDescendingPage,
+  finalizeFilledSincePage,
   DEFAULT_PAGE_SIZE,
   type PageFilter,
 } from "./pagination";
@@ -322,5 +325,139 @@ describe("Firestore / memory-fallback parity at the helper level", () => {
     const scoped = applyMemoryFilters(messages, filters);
     const page = paginateDescending(scoped, getTs, getId, { limit: 50 });
     expect(page.items.map((r) => r.id)).toEqual(["m5", "m2", "m1"]); // newest-first, correctly scoped
+  });
+});
+
+describe("applyMemoryFilters — array-contains (PR #99 review: shipment ownership)", () => {
+  const shipments = [
+    { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: ["driver-2"] },
+    { id: "s2", assignedDriverId: "driver-2", additionalDriverIds: ["driver-1", "driver-3"] },
+    { id: "s3", assignedDriverId: "driver-3", additionalDriverIds: [] },
+    { id: "s4", assignedDriverId: "driver-4" }, // legacy: no additionalDriverIds field at all
+  ];
+
+  it("matches a document whose array field contains the value", () => {
+    const result = applyMemoryFilters(shipments, [{ field: "additionalDriverIds", op: "array-contains", value: "driver-1" }]);
+    expect(result.map((s) => s.id)).toEqual(["s2"]);
+  });
+
+  it("does not match a document whose array field does not contain the value", () => {
+    const result = applyMemoryFilters(shipments, [{ field: "additionalDriverIds", op: "array-contains", value: "driver-9" }]);
+    expect(result).toEqual([]);
+  });
+
+  it("a legacy document with no array field at all never matches (not a crash, not a false positive)", () => {
+    const result = applyMemoryFilters(shipments, [{ field: "additionalDriverIds", op: "array-contains", value: "driver-4" }]);
+    expect(result.find((s) => s.id === "s4")).toBeUndefined();
+  });
+
+  it("assignedDriverId (==) and additionalDriverIds (array-contains) as independent OR-style scopes together cover both ownership paths", () => {
+    const byAssigned = applyMemoryFilters(shipments, [{ field: "assignedDriverId", op: "==", value: "driver-1" }]);
+    const byAdditional = applyMemoryFilters(shipments, [{ field: "additionalDriverIds", op: "array-contains", value: "driver-1" }]);
+    const unionIds = new Set([...byAssigned.map((s) => s.id), ...byAdditional.map((s) => s.id)]);
+    expect(Array.from(unionIds).sort()).toEqual(["s1", "s2"]); // driver-1 owns s1 (assigned) and s2 (additional)
+  });
+});
+
+describe("parseCursorParam — PR #99 review: malformed vs missing cursor", () => {
+  it("a missing (undefined) param is valid — null cursor, not an error", () => {
+    expect(parseCursorParam(undefined)).toEqual({ ok: true, cursor: null });
+  });
+
+  it("a null param is valid — null cursor, not an error", () => {
+    expect(parseCursorParam(null)).toEqual({ ok: true, cursor: null });
+  });
+
+  it("a valid, well-formed cursor decodes successfully", () => {
+    const cursor = { ts: "2026-07-14T10:00:00.000Z", id: "msg-1" };
+    expect(parseCursorParam(encodePageCursor(cursor))).toEqual({ ok: true, cursor });
+  });
+
+  it("an empty string is malformed, not 'missing'", () => {
+    expect(parseCursorParam("")).toEqual({ ok: false });
+  });
+
+  it("garbage text is malformed", () => {
+    expect(parseCursorParam("not-a-real-cursor")).toEqual({ ok: false });
+  });
+
+  it("a tampered/truncated cursor is malformed", () => {
+    const cursor = encodePageCursor({ ts: "2026-07-14T10:00:00.000Z", id: "msg-1" });
+    expect(parseCursorParam(cursor.slice(0, 5))).toEqual({ ok: false });
+  });
+
+  it("a non-string value (e.g. an array from a repeated query param) is malformed", () => {
+    expect(parseCursorParam(["a", "b"])).toEqual({ ok: false });
+  });
+
+  it("valid JSON missing required fields is malformed", () => {
+    expect(parseCursorParam(encodeURIComponent(JSON.stringify({ ts: "2026-01-01" })))).toEqual({ ok: false });
+  });
+});
+
+describe("finalizeFilledDescendingPage — PR #99 review: filtered-page top-up", () => {
+  const getTs = (r: Row) => r.timestamp;
+  const getId = (r: Row) => r.id;
+
+  it("passes through untrimmed with the raw cursor/hasMore when collected is within the limit and more exists", () => {
+    const collected = [row("a", "2026-01-01T00:00:00Z"), row("b", "2026-01-02T00:00:00Z")];
+    const result = finalizeFilledDescendingPage(collected, 5, true, "raw-cursor-value", getTs, getId);
+    expect(result.items).toBe(collected);
+    expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).toBe("raw-cursor-value");
+  });
+
+  it("reports no more and a null cursor when the underlying source is genuinely exhausted, regardless of how few items were collected", () => {
+    const collected = [row("a", "2026-01-01T00:00:00Z")];
+    const result = finalizeFilledDescendingPage(collected, 50, false, "stale-cursor-should-be-ignored", getTs, getId);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("trims an overshoot down to exactly the limit and recomputes the cursor from the last KEPT row, not the last fetched row", () => {
+    const collected = [
+      row("a", "2026-01-05T00:00:00Z"),
+      row("b", "2026-01-04T00:00:00Z"),
+      row("c", "2026-01-03T00:00:00Z"), // this should be the last kept row for limit=2
+      row("d", "2026-01-02T00:00:00Z"), // trimmed off
+      row("e", "2026-01-01T00:00:00Z"), // trimmed off
+    ];
+    const result = finalizeFilledDescendingPage(collected, 2, true, "irrelevant-raw-cursor", getTs, getId);
+    expect(result.items.map((r) => r.id)).toEqual(["a", "b"]);
+    expect(result.hasMore).toBe(true);
+    expect(decodePageCursor(result.nextCursor!)).toEqual({ ts: "2026-01-04T00:00:00Z", id: "b" });
+  });
+
+  it("an exact match at the limit is not treated as an overshoot", () => {
+    const collected = [row("a", "2026-01-02T00:00:00Z"), row("b", "2026-01-01T00:00:00Z")];
+    const result = finalizeFilledDescendingPage(collected, 2, true, "raw-cursor", getTs, getId);
+    expect(result.items.map((r) => r.id)).toEqual(["a", "b"]);
+    expect(result.nextCursor).toBe("raw-cursor"); // untouched, not recomputed
+  });
+
+  it("an empty collected result with the source exhausted is a valid, non-error empty page", () => {
+    const result = finalizeFilledDescendingPage([], 50, false, null, getTs, getId);
+    expect(result.items).toEqual([]);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+});
+
+describe("finalizeFilledSincePage — PR #99 review: filtered-page top-up (since/poll mode)", () => {
+  it("passes through when within the limit", () => {
+    const collected = [{ id: "a" }, { id: "b" }];
+    expect(finalizeFilledSincePage(collected, 5, true)).toEqual({ items: collected, hasMore: true });
+  });
+
+  it("reports no more when the source is exhausted, regardless of collected count", () => {
+    const collected = [{ id: "a" }];
+    expect(finalizeFilledSincePage(collected, 50, false)).toEqual({ items: collected, hasMore: false });
+  });
+
+  it("trims an overshoot down to exactly the limit and reports hasMore", () => {
+    const collected = [{ id: "a" }, { id: "b" }, { id: "c" }];
+    const result = finalizeFilledSincePage(collected, 2, true);
+    expect(result.items).toEqual([{ id: "a" }, { id: "b" }]);
+    expect(result.hasMore).toBe(true);
   });
 });

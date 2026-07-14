@@ -89,6 +89,28 @@ export function decodePageCursor(raw: unknown): PageCursor | null {
   return null;
 }
 
+export type CursorParamResult = { ok: true; cursor: PageCursor | null } | { ok: false };
+
+/**
+ * PR #99 review fix: routes previously called decodePageCursor directly
+ * on a query param and treated *any* failure (including a genuinely
+ * malformed/tampered value, not just an absent one) the same as "no
+ * cursor — start from the top." That's the wrong behavior for a
+ * supplied-but-invalid cursor: silently resetting to page one instead of
+ * telling the caller their request was bad can look like data went
+ * missing (a "Load older" click that quietly jumps back to the newest
+ * page instead of erroring). This distinguishes the two cases so a route
+ * can 400 on a malformed *supplied* value while still treating a
+ * missing/undefined param as perfectly valid (no cursor at all).
+ */
+export function parseCursorParam(raw: unknown): CursorParamResult {
+  if (raw === undefined || raw === null) return { ok: true, cursor: null };
+  if (typeof raw !== "string" || raw.length === 0) return { ok: false };
+  const decoded = decodePageCursor(raw);
+  if (decoded === null) return { ok: false };
+  return { ok: true, cursor: decoded };
+}
+
 /**
  * Deterministic (timestamp DESC, id DESC) comparator. Equal timestamps
  * (two messages/notifications created in the same millisecond, or legacy
@@ -184,15 +206,20 @@ export function paginateAscendingSince<T>(
 }
 
 /**
- * The equality/`in` filter shape server.ts's real-Firestore query builder
- * and the memory-fallback engine below both consume — one small vocabulary
- * (`==` / `in`) is enough for every scope this app needs (shipmentId,
- * channel, recipientUserId), deliberately not a general Firestore
- * query-builder DSL.
+ * The equality/`in`/`array-contains` filter shape server.ts's
+ * real-Firestore query builder and the memory-fallback engine below both
+ * consume — one small vocabulary is enough for every scope this app needs
+ * (shipmentId, channel, recipientUserId, and — PR #99 review —
+ * assignedDriverId/additionalDriverIds/companyName for the shipment-
+ * ownership lookup), deliberately not a general Firestore query-builder
+ * DSL. `array-contains` matches a document whose `field` is an array
+ * containing `value` — used for Shipment.additionalDriverIds (a flat
+ * array of driver ids; see src/lib/driverVisibility.ts's
+ * deriveAdditionalDriverIds for why that field exists at all).
  */
 export interface PageFilter {
   field: string;
-  op: "==" | "in";
+  op: "==" | "in" | "array-contains";
   value: any;
 }
 
@@ -203,18 +230,79 @@ export function hasUnsatisfiableFilter(filters: PageFilter[]): boolean {
 
 /**
  * The memory-fallback filter engine — mirrors exactly what a chain of
- * Firestore `.where(field, "==", value)` / `.where(field, "in", values)`
- * clauses would match. This is the piece that guarantees "no
- * cross-shipment leakage" / "no cross-channel leakage": a message or
- * notification is only ever included if it satisfies every filter, the
- * same all-AND semantics a chained Firestore query has.
+ * Firestore `.where(field, "==", value)` / `.where(field, "in", values)` /
+ * `.where(field, "array-contains", value)` clauses would match. This is
+ * the piece that guarantees "no cross-shipment leakage" / "no
+ * cross-channel leakage": a message or notification is only ever included
+ * if it satisfies every filter, the same all-AND semantics a chained
+ * Firestore query has.
  */
 export function applyMemoryFilters<T extends Record<string, any>>(items: T[], filters: PageFilter[]): T[] {
   return items.filter((item) =>
     filters.every((f) => {
       if (f.op === "==") return item[f.field] === f.value;
       if (f.op === "in") return Array.isArray(f.value) && f.value.includes(item[f.field]);
+      if (f.op === "array-contains") return Array.isArray(item[f.field]) && item[f.field].includes(f.value);
       return true;
     })
   );
+}
+
+export interface FilledPageResult<T> {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * PR #99 review fix: excludeUserId / chat-channel-visibility / admin-
+ * preference filtering happens on an already-fetched page in server.ts
+ * (too fine-grained per-notification a rule to express as a Firestore
+ * `where`), so a raw page can filter down to fewer than `limit` eligible
+ * items even when more exist. server.ts's fetchFilledNotificationsPage
+ * loops, re-fetching + re-filtering additional bounded pages and
+ * concatenating into `collected`, until it has enough or genuinely runs
+ * out — this is the final, pure "did we overshoot, or truly reach the
+ * end" decision that loop reduces to on each iteration and at the end,
+ * pulled out so it's unit-testable without mocking Firestore/the
+ * memory store.
+ *
+ * - `collected.length > limit` means at least one round fetched more
+ *   filtered-eligible rows than needed to fill the page — trim to
+ *   exactly `limit` and recompute the cursor from the last KEPT row
+ *   (not the last fetched one), so the next "load older" request resumes
+ *   correctly from the trimmed boundary rather than skipping the
+ *   trimmed-off rows.
+ * - Otherwise, the page holds every eligible row collected so far, and
+ *   `hasMore`/`nextCursor` are whatever the raw underlying query last
+ *   reported — `rawHasMore: false` means the source itself is exhausted,
+ *   which must always win regardless of how much filtering removed.
+ */
+export function finalizeFilledDescendingPage<T>(
+  collected: T[],
+  limit: number,
+  rawHasMore: boolean,
+  rawNextCursor: string | null,
+  getTs: (item: T) => string,
+  getId: (item: T) => string
+): FilledPageResult<T> {
+  if (collected.length > limit) {
+    const trimmed = collected.slice(0, limit);
+    const last = trimmed[trimmed.length - 1];
+    return { items: trimmed, nextCursor: encodePageCursor({ ts: getTs(last), id: getId(last) }), hasMore: true };
+  }
+  return { items: collected, nextCursor: rawHasMore ? rawNextCursor : null, hasMore: rawHasMore };
+}
+
+export interface FilledSinceResult<T> {
+  items: T[];
+  hasMore: boolean;
+}
+
+/** The since-mode (ascending catch-up) equivalent of finalizeFilledDescendingPage — simpler, since since-mode has no cursor to hand back (the caller keeps its own newest-seen position client-side). */
+export function finalizeFilledSincePage<T>(collected: T[], limit: number, rawHasMore: boolean): FilledSinceResult<T> {
+  if (collected.length > limit) {
+    return { items: collected.slice(0, limit), hasMore: true };
+  }
+  return { items: collected, hasMore: rawHasMore };
 }

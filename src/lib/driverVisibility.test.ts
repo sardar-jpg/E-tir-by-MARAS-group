@@ -5,6 +5,8 @@ import {
   scopeDriverListForSession,
   resolveDriverAgreedAmount,
   resolveDriverTruckNumber,
+  deriveAdditionalDriverIds,
+  buildDriverOwnedShipmentQueryScopes,
 } from "./driverVisibility";
 import type { Driver, Shipment } from "../types";
 
@@ -212,5 +214,52 @@ describe("resolveDriverTruckNumber", () => {
   it("returns null for a driver with no recorded truck", () => {
     const shipment = makeShipment({ assignedDriverId: "driver-1", truckNumber: "34 ABC 123" });
     expect(resolveDriverTruckNumber(shipment as Shipment, "driver-3")).toBeNull();
+  });
+});
+
+describe("deriveAdditionalDriverIds — Phase 4 follow-up (Firestore scalability audit, PR #99 review)", () => {
+  it("extracts a flat, deduplicated array of driver ids", () => {
+    const additionalDrivers = [
+      { driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" },
+      { driverId: "driver-3", driverName: "Cem", truckNumber: "07 AAA 111" },
+    ];
+    expect(deriveAdditionalDriverIds(additionalDrivers)).toEqual(["driver-2", "driver-3"]);
+  });
+
+  it("deduplicates a driver id appearing more than once", () => {
+    const additionalDrivers = [
+      { driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" },
+      { driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" },
+    ];
+    expect(deriveAdditionalDriverIds(additionalDrivers)).toEqual(["driver-2"]);
+  });
+
+  it("returns an empty array for undefined/empty input, never throws", () => {
+    expect(deriveAdditionalDriverIds(undefined)).toEqual([]);
+    expect(deriveAdditionalDriverIds([])).toEqual([]);
+  });
+
+  it("skips malformed entries (missing/non-string driverId) rather than crashing or including garbage", () => {
+    const additionalDrivers = [
+      { driverId: "driver-2", driverName: "Baran", truckNumber: "06 XYZ 456" },
+      { driverName: "No id", truckNumber: "x" } as any,
+      { driverId: "", driverName: "Empty id", truckNumber: "x" },
+    ];
+    expect(deriveAdditionalDriverIds(additionalDrivers)).toEqual(["driver-2"]);
+  });
+});
+
+describe("buildDriverOwnedShipmentQueryScopes — Phase 4 follow-up (Firestore scalability audit, PR #99 review)", () => {
+  it("returns an assignedDriverId equality scope and an additionalDriverIds array-contains scope", () => {
+    const scopes = buildDriverOwnedShipmentQueryScopes("driver-1");
+    expect(scopes).toEqual([
+      { field: "assignedDriverId", op: "==", value: "driver-1" },
+      { field: "additionalDriverIds", op: "array-contains", value: "driver-1" },
+    ]);
+  });
+
+  it("both scopes always use the same driver id — never mixed up", () => {
+    const scopes = buildDriverOwnedShipmentQueryScopes("driver-42");
+    expect(scopes.every((s) => s.value === "driver-42")).toBe(true);
   });
 });

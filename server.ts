@@ -50,22 +50,25 @@ import {
 } from "./src/lib/chatVisibility";
 import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
 import { stripPassword } from "./src/lib/sanitize";
-import { sanitizeDriver, scopeDriverListForSession } from "./src/lib/driverVisibility";
+import { sanitizeDriver, scopeDriverListForSession, deriveAdditionalDriverIds, buildDriverOwnedShipmentQueryScopes } from "./src/lib/driverVisibility";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
 import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
-import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
 import { addReaderToNotification, canMarkNotificationRead, buildDriverClientNotificationQueryScopes } from "./src/lib/notificationAccess";
 import {
   DEFAULT_PAGE_SIZE,
   encodePageCursor,
   decodePageCursor,
+  parseCursorParam,
   paginateDescending,
   paginateAscendingSince,
   hasUnsatisfiableFilter,
   applyMemoryFilters,
+  finalizeFilledDescendingPage,
+  finalizeFilledSincePage,
   type PageCursor,
   type PageFilter,
 } from "./src/lib/pagination";
@@ -821,6 +824,116 @@ async function fetchNotificationsSince(
   const combined = Array.from(merged.values());
   const result = paginateAscendingSince(combined, (i) => i.timestamp, (i) => i.id, cursor, limit);
   return { items: result.items, hasMore: result.hasMore || pages.some((p) => p.hasMore) };
+}
+
+/**
+ * Phase 4 follow-up (Firestore scalability audit, PR #99 review).
+ *
+ * Replaces "read the entire shipments collection, keep the ones this
+ * driver/client owns" with one real, indexed Firestore query per scope
+ * (see buildDriverOwnedShipmentQueryScopes / buildClientOwnedShipmentQueryScopes)
+ * — the union of their matches is the caller's own owned-shipment set,
+ * used only as input to buildDriverClientNotificationQueryScopes below.
+ * Deliberately unlimited (no `.limit()`) — this must return every owned
+ * shipment id, however many there are (the earlier truncation bug this PR
+ * fixes was exactly this kind of silent cap); the cost is proportional to
+ * the calling driver/client's own shipment count, never the size of the
+ * whole collection, which is the actual scalability property this
+ * replaces a full scan with.
+ */
+async function fetchOwnedShipmentIds(scopes: PageFilter[]): Promise<string[]> {
+  if (scopes.length === 0) return [];
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryOwnedShipmentIds(scopes);
+  }
+  try {
+    const results = await Promise.all(
+      scopes.map(async (f) => {
+        const q: FirebaseFirestore.Query = db!.collection("shipments").where(f.field, f.op as any, f.value);
+        const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore shipment-ownership query timed out");
+        return snapshot.docs.map((d) => d.id);
+      })
+    );
+    return Array.from(new Set(results.flat()));
+  } catch (error) {
+    console.warn("Firestore shipment-ownership query failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryOwnedShipmentIds(scopes);
+  }
+}
+
+function memoryOwnedShipmentIds(scopes: PageFilter[]): string[] {
+  const mStore = getMemoryStore();
+  const items = (mStore.shipments || []) as any[];
+  const matchedIds = new Set<string>();
+  for (const f of scopes) {
+    for (const item of applyMemoryFilters(items, [f])) matchedIds.add(item.id);
+  }
+  return Array.from(matchedIds);
+}
+
+/**
+ * PR #99 review fix: excludeUserId / chat-channel-visibility / admin-
+ * preference filtering still runs on an already-fetched page (each is a
+ * per-notification rule too fine-grained to express as a Firestore
+ * `where`, e.g. "this admin's saved preferences" isn't a field on the
+ * notification at all) — so a filtered page can come back with fewer than
+ * `limit` eligible items even when more exist further back. This
+ * continues fetching additional bounded pages, re-applying the same
+ * rules, until either the response holds `limit` eligible items or the
+ * underlying data is genuinely exhausted (`hasMore: false`).
+ * NOTIFICATIONS_MAX_TOPUP_ROUNDS is a hard, unconditional bound — even in
+ * the pathological case where almost every fetched row gets filtered out
+ * (e.g. an admin who has disabled nearly every category), this can never
+ * loop more than a fixed, small number of extra round-trips; it returns
+ * whatever it collected so far rather than looping indefinitely.
+ */
+const NOTIFICATIONS_MAX_TOPUP_ROUNDS = 6;
+
+async function fetchFilledNotificationsPage(
+  scopes: PageFilter[][],
+  initialCursor: PageCursor | null,
+  limit: number,
+  applyRoleRules: (items: any[]) => Promise<any[]>
+): Promise<DescendingPageResult> {
+  let cursor = initialCursor;
+  let collected: any[] = [];
+  let rawHasMore = false;
+  let rawNextCursor: string | null = null;
+  for (let round = 0; round < NOTIFICATIONS_MAX_TOPUP_ROUNDS; round++) {
+    const page = scopes.length > 0 ? await fetchNotificationsPage(scopes, cursor, limit) : { items: [], nextCursor: null, hasMore: false };
+    const filtered = await applyRoleRules(page.items);
+    collected = collected.concat(filtered);
+    rawHasMore = page.hasMore;
+    rawNextCursor = page.nextCursor;
+    cursor = page.nextCursor ? decodePageCursor(page.nextCursor) : null;
+    if (collected.length >= limit || !page.hasMore || !cursor) break;
+  }
+  return finalizeFilledDescendingPage(collected, limit, rawHasMore, rawNextCursor, (i) => i.timestamp, (i) => i.id);
+}
+
+async function fetchFilledNotificationsSince(
+  scopes: PageFilter[][],
+  cursor: PageCursor | null,
+  limit: number,
+  applyRoleRules: (items: any[]) => Promise<any[]>
+): Promise<AscendingSinceResult> {
+  let currentCursor = cursor;
+  let collected: any[] = [];
+  let rawHasMore = false;
+  for (let round = 0; round < NOTIFICATIONS_MAX_TOPUP_ROUNDS; round++) {
+    const page = scopes.length > 0 ? await fetchNotificationsSince(scopes, currentCursor, limit) : { items: [] as any[], hasMore: false };
+    const filtered = await applyRoleRules(page.items);
+    collected = collected.concat(filtered);
+    rawHasMore = page.hasMore;
+    const lastRaw = page.items[page.items.length - 1];
+    if (collected.length >= limit || !page.hasMore || !lastRaw) break;
+    currentCursor = { ts: lastRaw.timestamp, id: lastRaw.id };
+  }
+  return finalizeFilledSincePage(collected, limit, rawHasMore);
 }
 
 // BUG-15: shipment number/id generation used to read the shipments
@@ -2784,6 +2897,10 @@ async function startServer() {
         chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : 0,
         numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : 0,
         additionalDrivers: data.additionalDrivers || [],
+        // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
+        // kept in sync with additionalDrivers on every write — see
+        // deriveAdditionalDriverIds (src/lib/driverVisibility.ts) for why.
+        additionalDriverIds: deriveAdditionalDriverIds(data.additionalDrivers),
         additionalContainers: data.additionalContainers || [],
         
         // Broker details for land shipments
@@ -3212,6 +3329,13 @@ async function startServer() {
         chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : original.chargeableWeight,
         numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : original.numberOfPackages,
         additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers,
+        // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
+        // re-derived on every update (from whichever value additionalDrivers
+        // above just resolved to) so this stays in sync even on an update
+        // that doesn't touch additionalDrivers itself.
+        additionalDriverIds: deriveAdditionalDriverIds(
+          data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers
+        ),
         additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : original.additionalContainers,
         
         // Broker details mapping for land shipments
@@ -3549,18 +3673,24 @@ async function startServer() {
       const limitParam = parseInt(req.query.limit as string, 10);
       const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 200 ? limitParam : DEFAULT_PAGE_SIZE;
 
+      // PR #99 review fix: a malformed *supplied* cursor/since value now
+      // 400s instead of silently resetting to the first page — see
+      // parseCursorParam's own header comment (src/lib/pagination.ts). A
+      // missing param is still perfectly valid (fetch from the start).
+      const cursorParam = parseCursorParam(req.query.cursor);
+      if (!cursorParam.ok) return res.status(400).json({ error: "Malformed cursor." });
+      const sinceParam = parseCursorParam(req.query.since);
+      if (!sinceParam.ok) return res.status(400).json({ error: "Malformed since parameter." });
+
       // Live-poll "catch up" mode: only rows newer than the caller's own
-      // last-known cursor, never a full re-fetch of the thread. A
-      // missing/malformed `since` decodes to null, which is the same as
-      // "no cursor yet" (fetch from the start) rather than an error.
+      // last-known cursor, never a full re-fetch of the thread.
       if (typeof req.query.since === "string") {
-        const sincePage = await queryAscendingSince("chatMessages", filters, decodePageCursor(req.query.since), limit);
+        const sincePage = await queryAscendingSince("chatMessages", filters, sinceParam.cursor, limit);
         const items = sincePage.items.map((m) => ({ ...m, status: m.status || "sent" }));
         return res.json({ items, hasMore: sincePage.hasMore });
       }
 
-      const cursor = decodePageCursor(req.query.cursor);
-      const page = await queryDescendingPage("chatMessages", filters, cursor, limit);
+      const page = await queryDescendingPage("chatMessages", filters, cursorParam.cursor, limit);
       // page.items come back newest-first (matching the query's own
       // orderBy direction) — reversed to oldest-first here so the
       // response shape every chat surface renders is unchanged: a page of
@@ -5431,44 +5561,44 @@ async function startServer() {
   // 13. System Notifications
   app.get("/api/notifications", requireAuth, async (req, res) => {
     try {
-      // Phase 4 (Firestore scalability audit): query-scoped instead of
-      // fetching the entire notifications collection on every call.
+      // PR #99 review fix: a malformed *supplied* cursor/since value now
+      // 400s instead of silently resetting to page one — see
+      // parseCursorParam's own header comment. A missing param is still
+      // perfectly valid (defaults to the first page / no catch-up point).
+      const cursorParam = parseCursorParam(req.query.cursor);
+      if (!cursorParam.ok) return res.status(400).json({ error: "Malformed cursor." });
+      const sinceParam = parseCursorParam(req.query.since);
+      if (!sinceParam.ok) return res.status(400).json({ error: "Malformed since parameter." });
+
+      // Phase 4 (Firestore scalability audit) + PR #99 review fix:
+      // query-scoped instead of fetching the entire notifications
+      // collection on every call, AND the shipment-ownership lookup
+      // itself is now a real Firestore query (buildDriverOwnedShipmentQueryScopes /
+      // buildClientOwnedShipmentQueryScopes + fetchOwnedShipmentIds) —
+      // no longer a full `shipments` (or, for clients, `clients`) scan.
       // buildDriverClientNotificationQueryScopes turns the same
       // own-shipment-OR-direct-recipient rule isNotificationForDriver used
       // to apply after the fact into the actual Firestore query scopes —
       // see its own header comment (src/lib/notificationAccess.ts) for why
-      // this is 1-2 independent queries merged in Node rather than one
-      // combined query, and the documented 30-shipment `in`-filter cap.
-      // The shipment-membership lookup itself (which shipments does this
-      // driver/client own) is unchanged — still a full `shipments` read;
-      // Orders/Shipments is priority 3, deferred (see PR description).
+      // this is independent queries merged in Node rather than one
+      // combined query, and how it now CHUNKS (never truncates) any
+      // number of owned shipment ids past Firestore's 30-value `in` cap.
       let scopes: PageFilter[][] = [[]]; // admin default: no filter, sees everything
       if (req.session!.role === "driver") {
         const driverId = req.session!.id;
-        const shipCol = collection(db, "shipments");
-        const shipSnap = await getDocs(shipCol);
-        const myShipmentIds = Array.from(new Set(
-          shipSnap.docs
-            .map(d => d.data() as Shipment)
-            .filter(s => s.assignedDriverId === driverId || (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId)))
-            .map(s => s.id)
-        ));
+        const myShipmentIds = await fetchOwnedShipmentIds(buildDriverOwnedShipmentQueryScopes(driverId));
         scopes = buildDriverClientNotificationQueryScopes(driverId, myShipmentIds).map(scope => [
           { field: scope.field, op: scope.op, value: scope.value } as PageFilter,
         ]);
       } else if (req.session!.role === "client") {
-        const clientsCol = collection(db, "clients");
-        const clientsSnap = await getDocs(clientsCol);
-        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        if (myClient) {
-          const shipCol = collection(db, "shipments");
-          const shipSnap = await getDocs(shipCol);
-          const myShipmentIds = Array.from(new Set(
-            shipSnap.docs
-              .map(d => d.data() as Shipment)
-              .filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName))
-              .map(s => s.id)
-          ));
+        // The client's own record is looked up by its own verified
+        // session id — a single document read, not a scan of every
+        // client, since a client session's id IS its own clients/{id}
+        // document id (see POST /api/login's client branch).
+        const clientDoc = await getDoc(doc(db, "clients", req.session!.id));
+        if (clientDoc.exists()) {
+          const myClient = clientDoc.data() as Client;
+          const myShipmentIds = await fetchOwnedShipmentIds(buildClientOwnedShipmentQueryScopes(myClient.companyName));
           scopes = buildDriverClientNotificationQueryScopes(req.session!.id, myShipmentIds).map(scope => [
             { field: scope.field, op: scope.op, value: scope.value } as PageFilter,
           ]);
@@ -5480,38 +5610,42 @@ async function startServer() {
       const limitParam = parseInt(req.query.limit as string, 10);
       const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 200 ? limitParam : DEFAULT_PAGE_SIZE;
 
+      // Resolved once per request (not once per applyRoleRules call) —
+      // the top-up loop below can invoke applyRoleRules several times for
+      // one request, and an admin's own preferences never change
+      // mid-request.
+      let adminPreferences: ReturnType<typeof resolveAdminNotificationPreferences> | null = null;
+      if (req.session!.role === "admin") {
+        const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
+        adminPreferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
+      }
+
       // applyRoleRules re-applies exactly the same excludeUserId/
       // channel-visibility/admin-preference rules the old full-scan
       // version did — unchanged logic, just run against an already-scoped
-      // page instead of the whole collection.
+      // page instead of the whole collection. PR #99 review fix: the
+      // caller (fetchFilledNotificationsPage/Since) now tops up with
+      // additional bounded fetches when this filters a page below the
+      // requested limit, instead of silently returning a short page.
       const applyRoleRules = async (items: any[]): Promise<any[]> => {
         let list = items.filter(n => n.excludeUserId !== req.session!.id);
         if (req.session!.role === "driver") {
           list = list.filter(n => isChatNotificationVisibleToRole(n.type, "driver", n.channel));
         } else if (req.session!.role === "client") {
           list = list.filter(n => isChatNotificationVisibleToRole(n.type, "client", n.channel));
-        } else if (req.session!.role === "admin") {
-          const prefDoc = await getDoc(doc(db, "adminNotificationPreferences", req.session!.id));
-          const preferences = resolveAdminNotificationPreferences(prefDoc.exists() ? prefDoc.data() : undefined);
-          list = list.filter(n => shouldDeliverNotificationToAdmin(preferences, n.type, n.channel));
+        } else if (req.session!.role === "admin" && adminPreferences) {
+          list = list.filter(n => shouldDeliverNotificationToAdmin(adminPreferences, n.type, n.channel));
         }
         return list;
       };
 
       if (typeof req.query.since === "string") {
-        const sincePage = scopes.length > 0
-          ? await fetchNotificationsSince(scopes, decodePageCursor(req.query.since), limit)
-          : { items: [] as any[], hasMore: false };
-        const items = await applyRoleRules(sincePage.items);
-        return res.json({ items, hasMore: sincePage.hasMore });
+        const sincePage = await fetchFilledNotificationsSince(scopes, sinceParam.cursor, limit, applyRoleRules);
+        return res.json({ items: sincePage.items, hasMore: sincePage.hasMore });
       }
 
-      const cursor = decodePageCursor(req.query.cursor);
-      const page = scopes.length > 0
-        ? await fetchNotificationsPage(scopes, cursor, limit)
-        : { items: [] as any[], nextCursor: null as string | null, hasMore: false };
-      const items = await applyRoleRules(page.items);
-      res.json({ items, nextCursor: page.nextCursor, hasMore: page.hasMore });
+      const page = await fetchFilledNotificationsPage(scopes, cursorParam.cursor, limit, applyRoleRules);
+      res.json({ items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to get notifications" });

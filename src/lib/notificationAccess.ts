@@ -127,25 +127,27 @@ export function canMarkNotificationRead(
  * path in server.ts, so both are guaranteed to scope notifications the
  * same way by construction.
  *
- * Firestore's `in` operator caps at 30 values, so `shipmentIds` is
- * truncated to the first 30 here. This can only ever *narrow* — never
- * broaden — what a driver/client sees: a driver/client with more than 30
- * shipments simply won't see notifications for shipments past the first
- * 30 in this list, the same fail-safe direction as every other access
- * check in this file. Fixing that fully requires paginating the
- * shipment-ownership lookup itself (Orders/Shipments, deferred — see
- * docs/FOLLOW_UP_ROADMAP.md).
+ * Firestore's `in` operator caps at 30 values per query — never truncated
+ * here; `ownedShipmentIds` is instead split into chunks of at most 30,
+ * one `in` scope per chunk, so a driver/client with any number of owned
+ * shipments (31, 500, or more) still gets a scope covering every one of
+ * them. server.ts runs one query per scope and merges/deduplicates the
+ * results (see fetchNotificationsPage/fetchNotificationsSince) — more
+ * scopes means more parallel queries for a driver/client with many
+ * shipments, which is the accepted, documented cost of never dropping
+ * data, not a correctness compromise.
  *
- * Returns one or two independent query scopes rather than one combined
- * query: Firestore has no native way to OR an `in` filter on one field
- * with an `==` filter on a different field while also ordering/paginating
- * the result, short of a composite `Filter.or(...)` whose required index
- * shape can't be verified without deploying against a live project (out
- * of scope for this task — indexes are committed, not deployed). Two
- * plain, independently-indexed queries merged in server.ts is the
- * conservative, verifiable choice; `recipientUserId`-only notifications
- * are a rare, one-time-per-lifecycle-event case (e.g. "Driver Approved"),
- * so the extra query is cheap, not a second full scan.
+ * Returns independent query scopes rather than one combined query:
+ * Firestore has no native way to OR an `in` filter on one field with an
+ * `==` filter on a different field (or another `in` filter on the same
+ * field, across chunks) while also ordering/paginating the result, short
+ * of a composite `Filter.or(...)` whose required index shape can't be
+ * verified without deploying against a live project (out of scope for
+ * this task — indexes are committed, not deployed). Plain,
+ * independently-indexed queries merged in server.ts is the conservative,
+ * verifiable choice; `recipientUserId`-only notifications are a rare,
+ * one-time-per-lifecycle-event case (e.g. "Driver Approved"), so that
+ * extra query is cheap, not a second full scan.
  */
 export interface NotificationQueryScope {
   field: "shipmentId" | "recipientUserId";
@@ -153,14 +155,28 @@ export interface NotificationQueryScope {
   value: string[] | string;
 }
 
+/** Firestore's hard cap on the number of values in a single `in` filter. */
+export const FIRESTORE_IN_QUERY_MAX_SIZE = 30;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
 export function buildDriverClientNotificationQueryScopes(
   sessionId: string,
   ownedShipmentIds: string[]
 ): NotificationQueryScope[] {
   const scopes: NotificationQueryScope[] = [];
-  const cappedShipmentIds = ownedShipmentIds.slice(0, 30);
-  if (cappedShipmentIds.length > 0) {
-    scopes.push({ field: "shipmentId", op: "in", value: cappedShipmentIds });
+  // Deduplicated first — a shipment id appearing twice in the caller's
+  // ownership list (e.g. matched by more than one query) must never
+  // silently double a chunk or push a scope count past what's needed.
+  const uniqueShipmentIds = Array.from(new Set(ownedShipmentIds));
+  for (const shipmentIdChunk of chunk(uniqueShipmentIds, FIRESTORE_IN_QUERY_MAX_SIZE)) {
+    scopes.push({ field: "shipmentId", op: "in", value: shipmentIdChunk });
   }
   scopes.push({ field: "recipientUserId", op: "==", value: sessionId });
   return scopes;

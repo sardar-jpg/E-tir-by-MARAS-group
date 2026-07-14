@@ -97,6 +97,18 @@ export interface Shipment {
   // Sea & Air properties
   freightType?: 'land' | 'sea' | 'air';
   additionalDrivers?: Array<{ driverId: string; driverName: string; truckNumber: string; agreedAmount?: number }>;
+  // Phase 4 follow-up (Firestore scalability audit, PR #99 review): a flat
+  // derived array of just `additionalDrivers[].driverId`, kept in sync by
+  // the server on every create/update (see deriveAdditionalDriverIds,
+  // src/lib/driverVisibility.ts) — additionalDrivers itself remains the
+  // single source of truth for the full driver records; this field exists
+  // solely so "is this driver an additional driver on this shipment" is a
+  // Firestore `array-contains` query (server.ts's ownership lookup for
+  // GET /api/notifications) instead of loading every shipment to check in
+  // Node. Absent on any shipment that hasn't been created/updated since
+  // this field was introduced — see the same function's header comment
+  // for the documented legacy-record fallback/migration plan.
+  additionalDriverIds?: string[];
   additionalContainers?: string[];
   // Sea precise
   shippingLine?: string;
