@@ -69,6 +69,7 @@ import {
   paginateAscendingSince,
   hasUnsatisfiableFilter,
   applyMemoryFilters,
+  countDistinctAcrossScopes,
   finalizeFilledDescendingPage,
   finalizeFilledSincePage,
   type PageCursor,
@@ -76,7 +77,7 @@ import {
 } from "./src/lib/pagination";
 import { resolveAdminNotificationPreferences, validateNotificationPreferencesUpdate, shouldDeliverNotificationToAdmin, filterAdminRecipientsByPreferences, type NotificationPreferenceCategory } from "./src/lib/notificationPreferences";
 import { canDeletePushToken, selectPushTokensForAccountDeletion } from "./src/lib/pushTokenAccess";
-import { buildSecureShareView, resolveUniqueShareTokenMatch } from "./src/lib/publicShareView";
+import { buildSecureShareView, resolveShareTokenLookup, type ShareTokenLookupResult } from "./src/lib/publicShareView";
 import { isMissingIndexError } from "./src/lib/firestoreErrors";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
@@ -169,6 +170,34 @@ function respondIfServiceUnavailable(err: unknown, res: express.Response): boole
     return true;
   }
   return false;
+}
+
+/**
+ * Blocking-issue fix (security/correctness review): shared response
+ * logic for all three public `/api/share/:token*` routes. A `conflict`
+ * lookup (multiple shipments share the same token — see
+ * resolveShareTokenLookup, src/lib/publicShareView.ts) always 409s with
+ * a generic message and NEVER reaches the caller's own response logic
+ * with shipment data — this is the one and only place that maps
+ * findShipmentByShareToken's result to an HTTP response, so no route can
+ * accidentally skip the fail-closed check. `not_found` and "found but
+ * not currently shared" both 404 identically (unchanged from before this
+ * fix — a caller with an inactive/never-existed token can't distinguish
+ * the two, which is intentional: confirming "this token used to exist"
+ * to an anonymous caller is its own small information leak). Returns the
+ * shipment (caller proceeds) or `null` (response already sent, caller
+ * must return immediately).
+ */
+function resolveActiveSharedShipment(lookup: ShareTokenLookupResult, res: express.Response): Shipment | null {
+  if (lookup.status === "conflict") {
+    res.status(409).json({ error: "This shared tracking link is temporarily unavailable. Please contact support." });
+    return null;
+  }
+  if (lookup.status === "not_found" || !lookup.shipment.isLinkShared) {
+    res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
+    return null;
+  }
+  return lookup.shipment;
 }
 
 
@@ -988,6 +1017,27 @@ export interface ShipmentStatsResult {
  * loaded records, clearly labeled as such in the UI — acceptable because
  * a single driver/client's OWN shipment count is realistically far
  * smaller than the whole system's, unlike admin's.
+ *
+ * Blocking-issue fix: `total` is an EXACT deduplicated count across
+ * `scopes`, never a sum of independent `count()` results. Summing was
+ * wrong whenever an item matched more than one scope at once (a driver
+ * who is simultaneously the primary AND an additional driver on the
+ * exact same shipment) — a data anomaly, but the total must never get it
+ * wrong regardless of how it arose. A real `.count()` aggregate can't
+ * dedupe across two separate queries by construction, so for any role
+ * with more than one scope (today: only driver — assignedDriverId ==,
+ * additionalDriverIds array-contains) this fetches ids only per scope
+ * (`.select()`, no field data) and dedupes with a Set
+ * (countDistinctShipmentsAcrossScopes below) — bounded to the caller's
+ * own scope size, not the whole collection, same cost shape as
+ * fetchOwnedShipmentIds elsewhere in this file. A single-scope role
+ * (admin's empty scope, client's one companyName scope) has no
+ * double-count to guard against, so it keeps using the cheaper `.count()`
+ * aggregate directly. Both paths implement the exact same dedup
+ * algorithm as the pure, unit-tested countDistinctAcrossScopes
+ * (src/lib/pagination.ts) — that function's tests (including the
+ * required "matches both scopes → counts once" case) stand in for this
+ * real-Firestore path's correctness too.
  */
 async function fetchShipmentStats(scopes: PageFilter[][], includeStatusGroups: boolean): Promise<ShipmentStatsResult> {
   if (useMemoryFallback) {
@@ -996,13 +1046,9 @@ async function fetchShipmentStats(scopes: PageFilter[][], includeStatusGroups: b
   }
   try {
     const effectiveScopes = scopes.length > 0 ? scopes : [[]];
-    const scopeCounts = await Promise.all(effectiveScopes.map((filters) => countShipmentsForScope(filters)));
-    // Summed, not deduplicated across scopes — see this function's own
-    // header comment: only affects the rare case of a driver who is
-    // simultaneously the primary AND an additional driver on the exact
-    // same shipment (a data anomaly, not a normal state), and only for
-    // this display-only total, never for permissions.
-    const total = scopeCounts.reduce((a, b) => a + b, 0);
+    const total = effectiveScopes.length > 1
+      ? await countDistinctShipmentsAcrossScopes(effectiveScopes)
+      : await countShipmentsForScope(effectiveScopes[0]);
     if (!includeStatusGroups) return { total };
     const groupCounts = await Promise.all(
       SHIPMENT_STATUS_GROUPS.map((g) => countShipmentsForScope([{ field: "status", op: "in", value: g.statuses }]))
@@ -1034,21 +1080,37 @@ async function countShipmentsForScope(filters: PageFilter[]): Promise<number> {
   return snapshot.data().count;
 }
 
+/**
+ * Exact dedup across multiple independent scopes — see fetchShipmentStats'
+ * own header comment for why this exists instead of summing count()
+ * results. `.select()` with no field paths asks Firestore for document
+ * ids only, not field data — this is bounded to the caller's own scope
+ * size (e.g. one driver's own shipments), never the whole collection.
+ */
+async function countDistinctShipmentsAcrossScopes(scopes: PageFilter[][]): Promise<number> {
+  const idLists = await Promise.all(scopes.map((filters) => fetchShipmentIdsForScope(filters)));
+  return new Set(idLists.flat()).size;
+}
+
+async function fetchShipmentIdsForScope(filters: PageFilter[]): Promise<string[]> {
+  if (hasUnsatisfiableFilter(filters)) return [];
+  let q: FirebaseFirestore.Query = db!.collection("shipments");
+  for (const f of filters) {
+    q = q.where(f.field, f.op as any, f.value);
+  }
+  const snapshot = await withTimeout(q.select().get(), 5000, "Firestore shipment-id dedup query timed out");
+  return snapshot.docs.map((d) => d.id);
+}
+
 function memoryShipmentStats(scopes: PageFilter[][], includeStatusGroups: boolean): ShipmentStatsResult {
   const mStore = getMemoryStore();
   const items = (mStore.shipments || []) as any[];
   const effectiveScopes = scopes.length > 0 ? scopes : [[]];
-  // Memory fallback naturally dedupes across scopes via the Set (more
-  // accurate than the real-Firestore summed-counts path above for the
-  // rare driver double-match edge case) — an intentional, harmless
-  // real-vs-memory asymmetry for a display-only total, not a correctness
-  // requirement either mode needs to match exactly.
-  const matchedIds = new Set<string>();
-  for (const filters of effectiveScopes) {
-    for (const item of applyMemoryFilters(items, filters)) matchedIds.add(item.id);
-  }
-  const total = matchedIds.size;
+  const total = countDistinctAcrossScopes(items, effectiveScopes, (i) => i.id);
   if (!includeStatusGroups) return { total };
+  const matchedIds = new Set(
+    effectiveScopes.flatMap((filters) => applyMemoryFilters(items, filters).map((i) => i.id))
+  );
   const scopedItems = items.filter((i) => matchedIds.has(i.id));
   const byStatusGroup: Record<string, number> = {};
   for (const group of SHIPMENT_STATUS_GROUPS) {
@@ -1069,21 +1131,25 @@ function memoryShipmentStats(scopes: PageFilter[][], includeStatusGroups: boolea
  * collision risk — but this is NOT bounded to `.limit(1)`. Firestore has
  * no unique-constraint mechanism on a plain document field, and
  * isLegacyShareToken's own existence (below) proves this app once
- * assigned predictable, non-crypto-random tokens to older shipments —
- * a duplicate is a real, if rare, possibility for legacy/migrated data
- * (blocking-issue fix: "do not expose the wrong shipment if duplicate
- * tokens exist"). Fetching a small bounded page (5, not 1) and resolving
- * through resolveUniqueShareTokenMatch (src/lib/publicShareView.ts) means
- * a duplicate is detected, logged loudly for operator follow-up, and
- * resolved the SAME way on every request/server instance — never
- * "whichever one Firestore's undefined internal ordering returns first,"
- * which could otherwise show different visitors different shipments for
- * the exact same link. A malformed/unknown token simply matches zero
- * documents, same as the old `.find()` returning `undefined`; the
- * `isLinkShared` check callers already perform is unchanged.
+ * assigned predictable, non-crypto-random tokens to older shipments — a
+ * duplicate is a real, if rare, possibility for legacy/migrated data.
+ *
+ * Blocking-issue fix (security/correctness review): a duplicate token
+ * FAILS CLOSED. Fetching a small bounded page (5, not 1) and resolving
+ * through resolveShareTokenLookup (src/lib/publicShareView.ts) returns a
+ * `conflict` result when more than one shipment matches — the caller
+ * (each of the three public routes below) turns that into a 409 and
+ * NEVER serves either candidate's data. Logged loudly
+ * (`[data-integrity]`) for operator follow-up. This is deliberately NOT
+ * "pick a deterministic one and serve it" (an earlier version of this
+ * fix did, by lowest document id) — an ambiguous token cannot prove
+ * which shipment its holder is entitled to see, so guessing one is a
+ * data exposure risk, not a UX nicety to preserve. A malformed/unknown
+ * token simply matches zero documents (`not_found`), same as the old
+ * `.find()` returning `undefined`.
  */
-async function findShipmentByShareToken(token: string): Promise<Shipment | null> {
-  if (!token) return null;
+async function findShipmentByShareToken(token: string): Promise<ShareTokenLookupResult> {
+  if (!token) return { status: "not_found" };
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return memoryFindShipmentByShareToken(token);
@@ -1091,12 +1157,11 @@ async function findShipmentByShareToken(token: string): Promise<Shipment | null>
   try {
     const q: FirebaseFirestore.Query = db!.collection("shipments").where("shareToken", "==", token).limit(5);
     const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore share-token lookup timed out");
-    if (snapshot.empty) return null;
     const matches = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }) as Shipment);
     if (matches.length > 1) {
-      console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — resolving deterministically to the lowest document id. This indicates a legacy/migrated record and should be investigated; see resolveUniqueShareTokenMatch's header comment.`);
+      console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — failing closed (409), serving neither. This indicates a legacy/migrated record and should be investigated; see resolveShareTokenLookup's header comment.`);
     }
-    return resolveUniqueShareTokenMatch(matches);
+    return resolveShareTokenLookup(matches);
   } catch (error) {
     if (isMissingIndexError(error)) {
       // where("shareToken","==",...) with no orderBy is a single-field
@@ -1118,14 +1183,14 @@ async function findShipmentByShareToken(token: string): Promise<Shipment | null>
   }
 }
 
-function memoryFindShipmentByShareToken(token: string): Shipment | null {
+function memoryFindShipmentByShareToken(token: string): ShareTokenLookupResult {
   const mStore = getMemoryStore();
   const items = (mStore.shipments || []) as Shipment[];
   const matches = items.filter((s) => s.shareToken === token);
   if (matches.length > 1) {
-    console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — resolving deterministically to the lowest document id.`);
+    console.error(`[data-integrity] Duplicate shareToken detected across ${matches.length} shipments (ids: ${matches.map((m) => m.id).join(", ")}) — failing closed (409), serving neither.`);
   }
-  return resolveUniqueShareTokenMatch(matches);
+  return resolveShareTokenLookup(matches);
 }
 
 /**
@@ -4509,11 +4574,9 @@ async function startServer() {
   // 11. Public Shared Link lookups
   app.get("/api/share/:token", async (req, res) => {
     try {
-      const shipment = await findShipmentByShareToken(req.params.token);
-
-      if (!shipment || !shipment.isLinkShared) {
-        return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
-      }
+      const lookup = await findShipmentByShareToken(req.params.token);
+      const shipment = resolveActiveSharedShipment(lookup, res);
+      if (!shipment) return;
 
       res.json(buildSecureShareView(shipment));
     } catch (err) {
@@ -4542,11 +4605,9 @@ async function startServer() {
    */
   app.get("/api/share/:token/documents/:docId", async (req, res) => {
     try {
-      const shipment = await findShipmentByShareToken(req.params.token);
-
-      if (!shipment || !shipment.isLinkShared) {
-        return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
-      }
+      const lookup = await findShipmentByShareToken(req.params.token);
+      const shipment = resolveActiveSharedShipment(lookup, res);
+      if (!shipment) return;
 
       const docItem = shipment.documents.find(d => d.id === req.params.docId);
       if (!docItem || !isDocumentVisibleForShare(docItem, shipment)) {
@@ -4586,11 +4647,9 @@ async function startServer() {
         return res.status(400).json({ error: "A valid email address is required" });
       }
 
-      const shipment = await findShipmentByShareToken(req.params.token);
-
-      if (!shipment || !shipment.isLinkShared) {
-        return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
-      }
+      const lookup = await findShipmentByShareToken(req.params.token);
+      const shipment = resolveActiveSharedShipment(lookup, res);
+      if (!shipment) return;
 
       const cleanEmail = email.trim().toLowerCase();
       const customerEmails = Array.isArray(shipment.customerEmails) ? [...shipment.customerEmails] : [];

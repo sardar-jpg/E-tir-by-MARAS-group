@@ -271,6 +271,35 @@ export function applyMemoryFilters<T extends Record<string, any>>(items: T[], fi
   );
 }
 
+/**
+ * Blocking-issue fix: an exact, deduplicated count of items matching ANY
+ * of several independent scopes (OR-via-independent-queries — e.g. a
+ * driver's assignedDriverId == OR additionalDriverIds array-contains).
+ * Summing each scope's own count independently — the old
+ * GET /api/shipments/stats behavior — double-counts any item that
+ * matches MORE than one scope simultaneously (a data anomaly for a
+ * driver being both the primary AND an additional driver on the exact
+ * same shipment, but one this count must never get wrong regardless of
+ * how it arose). Deduplicating by id via a Set is what makes this exact:
+ * an item counted under two different scopes still contributes exactly
+ * one to the final total.
+ *
+ * Mirrors the real-Firestore path (server.ts's
+ * countDistinctShipmentsAcrossScopes — fetches ids only per scope via
+ * `.select()`, then dedupes the SAME way with a Set) exactly, so this
+ * pure function's correctness stands in for both: any test proving the
+ * dedup-by-id algorithm is correct here proves it for the real query
+ * path too, since both do "collect matched ids per scope into one Set,
+ * return its size."
+ */
+export function countDistinctAcrossScopes<T extends Record<string, any>>(items: T[], scopes: PageFilter[][], getId: (item: T) => string): number {
+  const matchedIds = new Set<string>();
+  for (const filters of scopes) {
+    for (const item of applyMemoryFilters(items, filters)) matchedIds.add(getId(item));
+  }
+  return matchedIds.size;
+}
+
 export interface FilledPageResult<T> {
   items: T[];
   nextCursor: string | null;

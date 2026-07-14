@@ -6,6 +6,7 @@ import {
   paginateDescending,
   paginateAscendingSince,
   applyMemoryFilters,
+  countDistinctAcrossScopes,
   hasUnsatisfiableFilter,
   finalizeFilledDescendingPage,
   finalizeFilledSincePage,
@@ -356,6 +357,66 @@ describe("applyMemoryFilters — array-contains (PR #99 review: shipment ownersh
     const byAdditional = applyMemoryFilters(shipments, [{ field: "additionalDriverIds", op: "array-contains", value: "driver-1" }]);
     const unionIds = new Set([...byAssigned.map((s) => s.id), ...byAdditional.map((s) => s.id)]);
     expect(Array.from(unionIds).sort()).toEqual(["s1", "s2"]); // driver-1 owns s1 (assigned) and s2 (additional)
+  });
+});
+
+describe("countDistinctAcrossScopes — blocking-issue fix: exact dedup, never double-counted", () => {
+  const getId = (s: { id: string }) => s.id;
+  const driverScopes = (driverId: string): PageFilter[][] => [
+    [{ field: "assignedDriverId", op: "==", value: driverId }],
+    [{ field: "additionalDriverIds", op: "array-contains", value: driverId }],
+  ];
+
+  it("REQUIRED CASE: a shipment matching BOTH assignedDriverId and additionalDriverIds for the same driver counts exactly once, not twice", () => {
+    // The data anomaly this fix exists for: driver-1 is simultaneously
+    // the primary assigned driver AND listed as an additional driver on
+    // the exact same shipment.
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: ["driver-1"] },
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(1);
+  });
+
+  it("a driver's normal (non-anomalous) shipments still sum correctly across the two independent scopes", () => {
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: [] },
+      { id: "s2", assignedDriverId: "driver-9", additionalDriverIds: ["driver-1"] },
+      { id: "s3", assignedDriverId: "driver-9", additionalDriverIds: [] }, // not driver-1's at all
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(2); // s1 (assigned) + s2 (additional), s3 excluded
+  });
+
+  it("a single-scope role (client: companyName ==) is unaffected — same result as a plain filter+count", () => {
+    const shipments = [
+      { id: "s1", companyName: "Acme" },
+      { id: "s2", companyName: "Acme" },
+      { id: "s3", companyName: "Other Co" },
+    ];
+    const total = countDistinctAcrossScopes(shipments, [[{ field: "companyName", op: "==", value: "Acme" }]], getId);
+    expect(total).toBe(2);
+  });
+
+  it("admin's no-filter scope ([[]]) counts every item exactly once", () => {
+    const shipments = [{ id: "s1" }, { id: "s2" }, { id: "s3" }];
+    const total = countDistinctAcrossScopes(shipments, [[]], getId);
+    expect(total).toBe(3);
+  });
+
+  it("returns 0 for an empty items array or a scope with zero matches", () => {
+    expect(countDistinctAcrossScopes([], driverScopes("driver-1"), getId)).toBe(0);
+    expect(countDistinctAcrossScopes([{ id: "s1", assignedDriverId: "driver-9" }], driverScopes("driver-1"), getId)).toBe(0);
+  });
+
+  it("three-way overlap (a shipment matching multiple scopes among several) still counts once per distinct id", () => {
+    const shipments = [
+      { id: "s1", assignedDriverId: "driver-1", additionalDriverIds: ["driver-1"] }, // matches both scopes
+      { id: "s2", assignedDriverId: "driver-1", additionalDriverIds: [] }, // matches only assigned
+      { id: "s3", assignedDriverId: "driver-9", additionalDriverIds: ["driver-1"] }, // matches only additional
+    ];
+    const total = countDistinctAcrossScopes(shipments, driverScopes("driver-1"), getId);
+    expect(total).toBe(3); // s1, s2, s3 — each a distinct id, s1's double-match doesn't inflate the count
   });
 });
 
