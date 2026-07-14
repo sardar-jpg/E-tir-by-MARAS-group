@@ -21,6 +21,7 @@
  */
 import type { Driver, Shipment } from "../types";
 import { stripPassword, stripFirebaseUid } from "./sanitize";
+import type { PageFilter } from "./pagination";
 
 export type SanitizedDriver = Omit<Driver, "password" | "firebaseUid">;
 
@@ -140,4 +141,63 @@ export function scopeDriverListForSession(
   // client
   const ids = assignedDriverIds(relevantShipments);
   return allDrivers.filter((d) => ids.has(d.id)).map(toClientSafeDriver);
+}
+
+/**
+ * Phase 4 follow-up (Firestore scalability audit, PR #99 review).
+ *
+ * Derives Shipment.additionalDriverIds — a flat, deduplicated array of
+ * just the driver ids from additionalDrivers — from the request payload
+ * server.ts writes on every shipment create/update. additionalDrivers
+ * (the full `{driverId, driverName, truckNumber, agreedAmount}` records)
+ * remains the single source of truth; this is purely a query-optimized
+ * denormalization so "is this driver an additional driver on this
+ * shipment" can be a Firestore `array-contains` query (used by GET
+ * /api/notifications' ownership lookup) instead of loading every
+ * shipment to check in Node — `array-contains` needs a flat array of
+ * primitives, not an array of objects, since it matches on exact element
+ * value, not "an object in this array has field X".
+ *
+ * Migration note (documented, not silently hidden): a shipment written
+ * before this field existed has no additionalDriverIds at all, so it
+ * won't match an `array-contains` query for a driver who is ONLY listed
+ * as one of its additional drivers (not the primary assignedDriverId,
+ * which was always a plain queryable field and has no such gap). Two
+ * ways this heals:
+ *  1. Automatically, the next time that shipment is created/updated
+ *     through the normal write path (this function runs again).
+ *  2. `scripts/backfill-additional-driver-ids.ts` — a one-time,
+ *     explicitly-run backfill for shipments that are never otherwise
+ *     updated. Not run automatically by this codebase or by any CI job;
+ *     an operator runs it manually against production when ready.
+ */
+export function deriveAdditionalDriverIds(
+  additionalDrivers: Array<{ driverId?: string }> | undefined
+): string[] {
+  const ids = new Set<string>();
+  for (const ad of additionalDrivers || []) {
+    if (ad && typeof ad.driverId === "string" && ad.driverId.length > 0) {
+      ids.add(ad.driverId);
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * Phase 4 follow-up (Firestore scalability audit, PR #99 review).
+ *
+ * The query-level replacement for GET /api/notifications' old
+ * "read every shipment, keep the ones where assignedDriverId matches or
+ * additionalDrivers contains me" Node-side filter. Two independent scopes
+ * (assignedDriverId is a plain, always-populated field with no legacy
+ * gap; additionalDriverIds is the derived array above — see its own
+ * legacy-record note) — server.ts runs one query per scope and unions the
+ * matched shipment ids, the same OR-via-independent-queries pattern
+ * buildDriverClientNotificationQueryScopes already uses.
+ */
+export function buildDriverOwnedShipmentQueryScopes(driverId: string): PageFilter[] {
+  return [
+    { field: "assignedDriverId", op: "==", value: driverId },
+    { field: "additionalDriverIds", op: "array-contains", value: driverId },
+  ];
 }

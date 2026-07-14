@@ -8,6 +8,7 @@ import {
   matchesClientLoginIdentifier,
   hasDuplicateClientUsername,
   isShipmentVisibleToClientCompany,
+  buildClientOwnedShipmentQueryScopes,
   resolveClientAccountDeleteAuthorization,
   isClientAccountActive,
   resolveStaffParentCompanyName,
@@ -352,6 +353,18 @@ describe("isShipmentVisibleToClientCompany", () => {
   it("a shipment with no companyName is never visible to any client", () => {
     expect(isShipmentVisibleToClientCompany(undefined, "Acme Freight")).toBe(false);
     expect(isShipmentVisibleToClientCompany("", "Acme Freight")).toBe(false);
+  });
+});
+
+describe("buildClientOwnedShipmentQueryScopes — Phase 4 follow-up (Firestore scalability audit, PR #99 review)", () => {
+  it("returns a companyName equality scope matching isShipmentVisibleToClientCompany's own exact-match rule", () => {
+    const scopes = buildClientOwnedShipmentQueryScopes("Acme Freight");
+    expect(scopes).toEqual([{ field: "companyName", op: "==", value: "Acme Freight" }]);
+  });
+
+  it("returns no scopes at all for an undefined/empty company name — never a broadening wildcard query", () => {
+    expect(buildClientOwnedShipmentQueryScopes(undefined)).toEqual([]);
+    expect(buildClientOwnedShipmentQueryScopes("")).toEqual([]);
   });
 });
 

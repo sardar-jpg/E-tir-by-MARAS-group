@@ -1310,7 +1310,8 @@ MARAS Group etir Center`;
       }
 
       if (resNotifs.ok) {
-        const nData: AppNotification[] = await safeJson(resNotifs);
+        const notifPage = await safeJson(resNotifs);
+        const nData: AppNotification[] = Array.isArray(notifPage) ? notifPage : notifPage.items;
         setNotifications(nData);
 
         if (isFirstLoadRef.current) {

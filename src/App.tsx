@@ -21,8 +21,9 @@ import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
 import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
-import { canSubmitChatMessage, planAttachmentSendForShipment } from "./lib/chatComposerState";
+import { canSubmitChatMessage, planAttachmentSendForShipment, mergeNewerChatMessages } from "./lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
+import { encodePageCursor } from "./lib/pagination";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -555,6 +556,10 @@ export default function App() {
   // chat dropdown or a chat notification).
   const [chatChannel, setChatChannel] = useState<ChatChannel>('driver_admin');
   const [chatMessages, setChatMessages] = useState<any[]>([]);
+  // Phase 4 (Firestore scalability audit): newest-seen cursor for this
+  // drawer's since-based poll — see the fetchChat effect below. Reset to
+  // null whenever the effect re-runs for a new shipment/channel.
+  const chatNewestCursorRef = useRef<string | null>(null);
   const [chatMessageText, setChatMessageText] = useState("");
   const [activeDetailsId, setActiveDetailsId] = useState<string | null>(null);
 
@@ -711,15 +716,34 @@ export default function App() {
     // for the PREVIOUS shipment/channel could resolve after the new one is
     // selected and overwrite chatMessages with the wrong thread's data.
     let cancelled = false;
+    chatNewestCursorRef.current = null;
     if (chatShipment) {
+      // Phase 4 (Firestore scalability audit): the first fetch of a
+      // shipment/channel selection loads the latest page; every poll tick
+      // after that uses `?since=` so this drawer no longer re-fetches (and
+      // the server no longer re-queries) the whole thread every 3s — only
+      // messages newer than the last one already shown. See
+      // DriverApplication.tsx's matching poll for the same pattern and its
+      // read-receipt-staleness trade-off note (this drawer has the same
+      // one: a status-only update on an already-loaded message is picked
+      // up on the next full reopen, not mid-poll).
       const fetchChat = async () => {
         try {
-          const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}`);
+          const cursor = chatNewestCursorRef.current;
+          const url = cursor
+            ? `/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}&since=${encodeURIComponent(cursor)}`
+            : `/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}`;
+          const res = await apiFetch(url);
           if (cancelled) return;
           if (res.ok) {
-            const data = await res.json();
+            const parsed = await res.json();
             if (cancelled) return;
-            setChatMessages(data);
+            const data: any[] = Array.isArray(parsed) ? parsed : parsed.items;
+            setChatMessages((prev) => (cursor ? mergeNewerChatMessages(prev, data) : data));
+            const newest = data[data.length - 1];
+            if (newest) {
+              chatNewestCursorRef.current = encodePageCursor({ ts: newest.timestamp, id: newest.id });
+            }
 
             // feature/admin-mobile-ui correction pass: `status` is no
             // longer per-admin truth (another admin reading first already

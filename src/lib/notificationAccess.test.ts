@@ -4,6 +4,7 @@ import {
   isNotificationReadForUser,
   addReaderToNotification,
   canMarkNotificationRead,
+  buildDriverClientNotificationQueryScopes,
 } from "./notificationAccess";
 
 describe("isNotificationForDriver — Notification Phase 1", () => {
@@ -301,5 +302,86 @@ describe("Full per-role read migration — Admin, Client, Driver (Notification P
     expect(isNotificationReadForUser(legacyNotif, "admin@maras.iq")).toBe(false);
     expect(isNotificationReadForUser(legacyNotif, "client-1")).toBe(false);
     expect(isNotificationReadForUser(legacyNotif, "driver-1")).toBe(false);
+  });
+});
+
+describe("buildDriverClientNotificationQueryScopes — Phase 4 (Firestore scalability audit)", () => {
+  it("returns a shipmentId-in scope and a recipientUserId scope when the caller owns shipments", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("driver-1", ["ship-A", "ship-B"]);
+    expect(scopes).toEqual([
+      { field: "shipmentId", op: "in", value: ["ship-A", "ship-B"] },
+      { field: "recipientUserId", op: "==", value: "driver-1" },
+    ]);
+  });
+
+  it("still returns the direct-recipient scope even with zero owned shipments — a brand-new driver isn't left with no scopes at all", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("driver-new", []);
+    expect(scopes).toEqual([{ field: "recipientUserId", op: "==", value: "driver-new" }]);
+  });
+
+  it("the recipientUserId scope always uses the caller's own session id, never a shipment id or anything else", () => {
+    const scopes = buildDriverClientNotificationQueryScopes("client-42", ["ship-X"]);
+    const recipientScope = scopes.find((s) => s.field === "recipientUserId");
+    expect(recipientScope).toEqual({ field: "recipientUserId", op: "==", value: "client-42" });
+  });
+
+  // PR #99 review: the original implementation silently `.slice(0, 30)`d
+  // ownedShipmentIds, dropping every shipment past the 30th — a driver or
+  // client with more than 30 shipments would simply stop receiving
+  // notifications for the rest. Fixed to chunk into as many `in` scopes
+  // as needed (never discarding an id) — every size below is exercised
+  // explicitly, including well past Firestore's 30-value single-query cap.
+  describe("chunking — never discards an owned shipment id, at any scale", () => {
+    const shipmentScopes = (n: number) => {
+      const ids = Array.from({ length: n }, (_, i) => `ship-${i}`);
+      return buildDriverClientNotificationQueryScopes("driver-1", ids).filter((s) => s.field === "shipmentId");
+    };
+    const allShipmentIdsIn = (scopes: ReturnType<typeof shipmentScopes>) =>
+      scopes.flatMap((s) => s.value as string[]);
+
+    it("0 shipments — no shipmentId scope at all, only the recipient scope", () => {
+      expect(shipmentScopes(0)).toEqual([]);
+    });
+
+    it("1 shipment — a single scope with exactly that one id", () => {
+      const scopes = shipmentScopes(1);
+      expect(scopes).toEqual([{ field: "shipmentId", op: "in", value: ["ship-0"] }]);
+    });
+
+    it("30 shipments — exactly one scope, at the cap, with no truncation", () => {
+      const scopes = shipmentScopes(30);
+      expect(scopes.length).toBe(1);
+      expect((scopes[0].value as string[]).length).toBe(30);
+      expect(allShipmentIdsIn(scopes)).toEqual(Array.from({ length: 30 }, (_, i) => `ship-${i}`));
+    });
+
+    it("31 shipments — two scopes, every id present, none dropped", () => {
+      const scopes = shipmentScopes(31);
+      expect(scopes.length).toBe(2);
+      expect(scopes.every((s) => (s.value as string[]).length <= 30)).toBe(true);
+      expect(allShipmentIdsIn(scopes).sort()).toEqual(Array.from({ length: 31 }, (_, i) => `ship-${i}`).sort());
+    });
+
+    it("60 shipments — exactly two full scopes, every id present", () => {
+      const scopes = shipmentScopes(60);
+      expect(scopes.length).toBe(2);
+      expect(scopes.every((s) => (s.value as string[]).length === 30)).toBe(true);
+      expect(allShipmentIdsIn(scopes).sort()).toEqual(Array.from({ length: 60 }, (_, i) => `ship-${i}`).sort());
+    });
+
+    it("500 shipments — chunks correctly, every id present, no scope exceeds the Firestore `in` cap", () => {
+      const scopes = shipmentScopes(500);
+      expect(scopes.length).toBe(Math.ceil(500 / 30));
+      expect(scopes.every((s) => (s.value as string[]).length <= 30)).toBe(true);
+      const allIds = allShipmentIdsIn(scopes);
+      expect(new Set(allIds).size).toBe(500); // no duplicates
+      expect(allIds.sort()).toEqual(Array.from({ length: 500 }, (_, i) => `ship-${i}`).sort());
+    });
+
+    it("duplicate ids in the input are deduplicated before chunking, not double-counted", () => {
+      const scopes = buildDriverClientNotificationQueryScopes("driver-1", ["ship-A", "ship-A", "ship-B"])
+        .filter((s) => s.field === "shipmentId");
+      expect(allShipmentIdsIn(scopes).sort()).toEqual(["ship-A", "ship-B"]);
+    });
   });
 });

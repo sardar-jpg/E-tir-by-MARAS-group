@@ -16,8 +16,9 @@ import { resolveDriverAgreedAmount, resolveDriverTruckNumber, FREIGHT_TYPE_LABEL
 import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationForDriver, isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
-import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment } from "../lib/chatComposerState";
+import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment, mergeNewerChatMessages, prependOlderChatMessages } from "../lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
+import { encodePageCursor } from "../lib/pagination";
 import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
@@ -139,6 +140,21 @@ export default function DriverApplication({
   // already switched to a different one and overwrite chatMessages with
   // the wrong thread's data.
   const activeShipmentIdRef = React.useRef<string | null>(null);
+  // Phase 4 (Firestore scalability audit): the encoded cursor of the
+  // newest chat message this tab has already seen for the active
+  // shipment/tab session — null means "no page fetched yet, do a full
+  // initial fetch." Reset to null on every shipment/tab switch (see the
+  // fast chat-only poll effect below) so re-entering chat always starts
+  // with a full latest-page fetch, never a stale cursor from a different
+  // shipment's thread.
+  const newestChatCursorRef = React.useRef<string | null>(null);
+  // Phase 4: cursor/availability for "Load older messages" — set from the
+  // initial (non-`since`) page's own `nextCursor`/`hasMore`, consumed by
+  // loadOlderChatMessages below. Reset alongside newestChatCursorRef on
+  // every shipment/tab switch.
+  const olderChatCursorRef = React.useRef<string | null>(null);
+  const [hasOlderChatMessages, setHasOlderChatMessages] = useState(false);
+  const [isLoadingOlderChat, setIsLoadingOlderChat] = useState(false);
   const gpsCooldownRef = React.useRef<number>(0);
   // In-flight guard for POST /api/notifications/:id/read — the 12s poll
   // (fetchData below) can re-run while a previous mark-as-read request for
@@ -631,7 +647,8 @@ export default function DriverApplication({
         const requestedShipmentId = activeShipment.id;
         const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
         if (resChat.ok) {
-          const msgs: ChatMessage[] = await safeJson(resChat);
+          const chatPage = await safeJson(resChat);
+          const msgs: ChatMessage[] = Array.isArray(chatPage) ? chatPage : chatPage.items;
 
           // fix/chat-safety-reliability-phase1: this request was for
           // requestedShipmentId — if the driver has since switched to a
@@ -665,8 +682,9 @@ export default function DriverApplication({
       // Fetch notifications
       const resNotifs = await apiFetch("/api/notifications");
       if (resNotifs.ok) {
-        const rawList: AppNotification[] = await safeJson(resNotifs);
-        
+        const notifPage = await safeJson(resNotifs);
+        const rawList: AppNotification[] = Array.isArray(notifPage) ? notifPage : notifPage.items;
+
         // Filter list strictly to this driver's shipments, plus anything
         // addressed directly to this driver regardless of shipment (e.g.
         // "Driver Approved" — see AppNotification.recipientUserId). The
@@ -726,24 +744,59 @@ export default function DriverApplication({
   }, [selectedDriverId, activeShipment?.id]);
 
   // Fast chat-only polling when active tab is chat to support snappy read receipts and messaging updates
+  //
+  // Phase 4 (Firestore scalability audit): the initial fetch on
+  // shipment/tab entry loads the latest DEFAULT_PAGE_SIZE page (server
+  // default: 50) via GET .../chat; every poll tick after that uses
+  // `?since=<newest-known cursor>` so a driver sitting on an active chat
+  // thread no longer re-fetches (and the server no longer re-queries) the
+  // whole thread every 3.5s — only messages newer than the last one this
+  // tab has already seen. Read-receipt (status: 'seen') changes on
+  // already-loaded messages are picked up on the next full reload of the
+  // thread (shipment switch, tab re-entry) rather than mid-poll — a
+  // deliberate, documented trade-off (display-freshness only, never a
+  // data-visibility or correctness issue) of moving off a full-thread
+  // re-fetch every poll; see this PR's description.
   useEffect(() => {
     let interval: any;
+    newestChatCursorRef.current = null;
+    olderChatCursorRef.current = null;
+    setHasOlderChatMessages(false);
     if (activeShipment && activeTab === 'chat') {
       const requestedShipmentId = activeShipment.id;
       const fetchChatOnly = async () => {
         try {
-          const resChat = await apiFetch(`/api/shipments/${requestedShipmentId}/chat`);
+          const cursor = newestChatCursorRef.current;
+          const url = cursor
+            ? `/api/shipments/${requestedShipmentId}/chat?since=${encodeURIComponent(cursor)}`
+            : `/api/shipments/${requestedShipmentId}/chat`;
+          const resChat = await apiFetch(url);
           if (resChat.ok) {
             const txt = await resChat.text();
             if (txt.trim() && !txt.trim().startsWith("<")) {
-              const msgs: ChatMessage[] = JSON.parse(txt);
+              const parsed = JSON.parse(txt);
+              const msgs: ChatMessage[] = Array.isArray(parsed) ? parsed : parsed.items;
 
               // fix/chat-safety-reliability-phase1: guard against this
               // response landing after the driver has already switched to
               // a different shipment or left the chat tab.
               if (isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) return;
 
-              setChatMessages(msgs);
+              setChatMessages((prev) => (cursor ? mergeNewerChatMessages(prev, msgs) : msgs));
+              const newest = msgs[msgs.length - 1];
+              if (newest) {
+                newestChatCursorRef.current = encodePageCursor({ ts: newest.timestamp, id: newest.id });
+              }
+              // Only the very first (non-`since`) fetch of a shipment/tab
+              // session carries older-history pagination info — a `since`
+              // delta response has neither field (see the server route),
+              // so this only ever runs once per session, which is exactly
+              // right: "load older" always continues from where the
+              // initial page left off, never from a delta tick.
+              if (!cursor && !Array.isArray(parsed)) {
+                olderChatCursorRef.current = parsed.nextCursor ?? null;
+                setHasOlderChatMessages(Boolean(parsed.hasMore));
+              }
               // Keep knownChatMessageIdsRef in sync while this faster poll
               // owns chat updates — fetchData's own (slower) chat fetch is
               // skipped whenever activeTab === 'chat' (see above), and
@@ -772,6 +825,34 @@ export default function DriverApplication({
     }
     return () => clearInterval(interval);
   }, [activeShipment?.id, activeTab]);
+
+  // Phase 4 (Firestore scalability audit): explicit "Load older messages"
+  // — fetches the next older page via the cursor the initial page handed
+  // back and prepends it, never re-fetches (or re-renders) the messages
+  // already on screen. isStaleChatPollResponse guards the same
+  // shipment-switch-mid-flight race as the poll loops above.
+  const loadOlderChatMessages = async () => {
+    if (!activeShipment || !olderChatCursorRef.current || isLoadingOlderChat) return;
+    const requestedShipmentId = activeShipment.id;
+    const cursor = olderChatCursorRef.current;
+    setIsLoadingOlderChat(true);
+    try {
+      const res = await apiFetch(`/api/shipments/${requestedShipmentId}/chat?cursor=${encodeURIComponent(cursor)}`);
+      if (res.ok) {
+        const page = await res.json();
+        if (!isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) {
+          const older: ChatMessage[] = Array.isArray(page) ? page : page.items;
+          setChatMessages((prev) => prependOlderChatMessages(prev, older));
+          olderChatCursorRef.current = Array.isArray(page) ? null : page.nextCursor ?? null;
+          setHasOlderChatMessages(Array.isArray(page) ? false : Boolean(page.hasMore));
+        }
+      }
+    } catch (err) {
+      console.warn("Load older chat messages failed:", err);
+    } finally {
+      setIsLoadingOlderChat(false);
+    }
+  };
 
   // Synchronize edit profile drafts when simulated driver or driver catalog changes
   useEffect(() => {
@@ -2004,6 +2085,18 @@ export default function DriverApplication({
                         artificially limiting this below its natural
                         flex-1 share of that space. */}
                     <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto p-2 my-1 space-y-3">
+                      {hasOlderChatMessages && !chatSearchQuery.trim() && (
+                        <div className="flex justify-center pb-2">
+                          <button
+                            type="button"
+                            onClick={loadOlderChatMessages}
+                            disabled={isLoadingOlderChat}
+                            className="text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white bg-slate-900 border border-slate-800 rounded-full px-3 py-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            {isLoadingOlderChat ? '…' : (lang === 'tr' ? 'Eski Mesajları Yükle' : (lang === 'ar' ? 'تحميل الرسائل الأقدم' : 'Load older messages'))}
+                          </button>
+                        </div>
+                      )}
                       {visibleChatMessages
                         .map((msg, index) => {
                           const isMe = msg.sender === 'driver';

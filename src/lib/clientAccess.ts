@@ -35,6 +35,7 @@
  */
 import type { Client } from "../types";
 import { isSuperAdmin } from "./adminAccess";
+import type { PageFilter } from "./pagination";
 
 /** True if this Client record is a Client Staff (customer-employee) account rather than the company's own owner account. */
 export function isClientStaffAccount(client: Pick<Client, "isEmployee">): boolean {
@@ -212,6 +213,25 @@ export function isShipmentVisibleToClientCompany(
   clientCompanyName: string | undefined
 ): boolean {
   return !!shipmentCompanyName && shipmentCompanyName === clientCompanyName;
+}
+
+/**
+ * Phase 4 follow-up (Firestore scalability audit, PR #99 review).
+ *
+ * The query-level replacement for GET /api/notifications' old
+ * "read every shipment, keep the ones whose companyName matches" Node-side
+ * filter — a direct `where("companyName", "==", clientCompanyName)`,
+ * matching isShipmentVisibleToClientCompany's own exact-string-equality
+ * rule exactly (no case/whitespace normalization is applied by either —
+ * this deliberately preserves that existing behavior rather than
+ * introducing a new, looser matching rule that could change who sees
+ * what). companyName has always been a plain, required field on every
+ * shipment — there is no legacy-record gap here the way there is for
+ * Shipment.additionalDriverIds.
+ */
+export function buildClientOwnedShipmentQueryScopes(clientCompanyName: string | undefined): PageFilter[] {
+  if (!clientCompanyName) return [];
+  return [{ field: "companyName", op: "==", value: clientCompanyName }];
 }
 
 /**
