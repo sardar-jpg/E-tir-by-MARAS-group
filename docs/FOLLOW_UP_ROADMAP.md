@@ -76,7 +76,11 @@ boundary note below)
   single company shipment as the owner; a delete-company attempt against
   the real client id returns `403 "Client Staff accounts can only be
   removed by MARAS Admin."` — confirms `canClientSelfDeleteAccount` is
-  enforced server-side, not just hidden in the UI.
+  enforced server-side, not just hidden in the UI. **Superseded by PRs
+  #87/#88**: Client Staff self-delete is now allowed, identical to Owner
+  (`resolveClientAccountDeleteAuthorization` replaced
+  `canClientSelfDeleteAccount`) — this entry is kept as-is as the accurate
+  record of PR #85's own point-in-time verification, not current behavior.
 - **Public tracking** (`GET /api/share/:token`, no auth): response
   contains only `buildSecureShareView`'s fields — no
   `loadingContactNumber`/`deliveryContactNumber`/`internalNotes`/
@@ -599,10 +603,11 @@ no-op from the client's perspective.
   driver's own primary-shipment amount, existing intended behavior);
   `publicShareView.ts`'s `buildSecureShareView` contains no cost, margin,
   or internal-notes fields at all.
-- **Client Staff separation.** `canClientSelfDeleteAccount`
-  (`src/lib/clientAccess.ts`) blocks a Client Staff session from deleting
-  its own company account server-side; company-level management is
-  admin-only by construction.
+- **Client Staff separation.** As of PRs #87/#88, `resolveClientAccountDeleteAuthorization`
+  (`src/lib/clientAccess.ts`) lets a Client Staff session delete its own
+  account the same way the Owner can — deleting *another* Client account
+  (Owner or Staff) is Super-Admin-only. There is no separate "company"
+  delete operation at all; every delete is exactly one Client document.
 - **Push tokens.** `canDeletePushToken` strictly matches both the caller's
   own `userId` and `role` — no cross-user or admin-override path.
 - **Activity-log `actor` field.** `POST /api/logs` accepts a free-text

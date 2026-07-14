@@ -31,7 +31,7 @@ describe("computePersistenceReadiness", () => {
 
   it("flags demo seeding enabled in production", () => {
     const result = computePersistenceReadiness(
-      { NODE_ENV: "production", SEED_DEMO_DATA: "true", SERVER_FIREBASE_EMAIL: "a@b.com", SERVER_FIREBASE_PASSWORD: "x" },
+      { NODE_ENV: "production", SEED_DEMO_DATA: "true", GOOGLE_APPLICATION_CREDENTIALS: "/secure/key.json" },
       true
     );
     expect(result.warnings.some(w => w.includes("SEED_DEMO_DATA"))).toBe(true);
@@ -39,7 +39,7 @@ describe("computePersistenceReadiness", () => {
 
   it("flags strict persistence disabled in production", () => {
     const result = computePersistenceReadiness(
-      { NODE_ENV: "production", STRICT_PERSISTENCE: "false", SERVER_FIREBASE_EMAIL: "a@b.com", SERVER_FIREBASE_PASSWORD: "x" },
+      { NODE_ENV: "production", STRICT_PERSISTENCE: "false", GOOGLE_APPLICATION_CREDENTIALS: "/secure/key.json" },
       true
     );
     expect(result.warnings.some(w => w.includes("STRICT_PERSISTENCE"))).toBe(true);
@@ -51,20 +51,31 @@ describe("computePersistenceReadiness", () => {
     expect(result.warnings.some(w => w.includes("no Firebase configuration"))).toBe(true);
   });
 
-  it("flags Firebase config present but server credentials missing in production", () => {
-    const result = computePersistenceReadiness({ NODE_ENV: "production" }, true);
-    expect(result.configuredMode).toBe("memory-fallback");
-    expect(result.warnings.some(w => w.includes("SERVER_FIREBASE_EMAIL"))).toBe(true);
+  it("detects the ADC environment hint via GOOGLE_APPLICATION_CREDENTIALS", () => {
+    expect(computePersistenceReadiness({ GOOGLE_APPLICATION_CREDENTIALS: "/path/to/key.json" }, true).adcEnvHintPresent).toBe(true);
   });
 
-  it("produces no warnings when production is fully configured", () => {
+  it("detects the ADC environment hint via Cloud Run's K_SERVICE", () => {
+    expect(computePersistenceReadiness({ K_SERVICE: "e-tir-by-maras-v2" }, true).adcEnvHintPresent).toBe(true);
+  });
+
+  it("does not claim an ADC hint when neither env var is present", () => {
+    expect(computePersistenceReadiness({}, true).adcEnvHintPresent).toBe(false);
+  });
+
+  it("warns in production when Firebase is configured but no ADC hint is present", () => {
+    const result = computePersistenceReadiness({ NODE_ENV: "production" }, true);
+    expect(result.configuredMode).toBe("firestore");
+    expect(result.warnings.some(w => w.includes("ADC environment hint"))).toBe(true);
+  });
+
+  it("produces no warnings when production is fully configured with an ADC hint", () => {
     const result = computePersistenceReadiness(
       {
         NODE_ENV: "production",
         STRICT_PERSISTENCE: undefined,
         SEED_DEMO_DATA: undefined,
-        SERVER_FIREBASE_EMAIL: "server@etir-by-maras-group.firebaseapp.com",
-        SERVER_FIREBASE_PASSWORD: "x",
+        K_SERVICE: "e-tir-by-maras-v2",
       },
       true
     );
@@ -72,12 +83,19 @@ describe("computePersistenceReadiness", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it("does not warn about a missing ADC hint outside production (local dev has no static hint by design)", () => {
+    const result = computePersistenceReadiness({ NODE_ENV: "development" }, true);
+    expect(result.warnings).toEqual([]);
+  });
+
   it("never includes raw secret values in its output — only booleans and static strings", () => {
-    const secretPassword = "s3cr3t-super-secret-password-value";
+    const secretKeyPath = "/very/secret/path/to/service-account-key.json";
     const result = computePersistenceReadiness(
-      { NODE_ENV: "production", SERVER_FIREBASE_EMAIL: "a@b.com", SERVER_FIREBASE_PASSWORD: secretPassword },
+      { NODE_ENV: "production", GOOGLE_APPLICATION_CREDENTIALS: secretKeyPath },
       true
     );
-    expect(JSON.stringify(result)).not.toContain(secretPassword);
+    // The path itself is not a secret value (it's a filesystem path, not a
+    // credential), but this still confirms nothing beyond presence is echoed.
+    expect(JSON.stringify(result)).not.toContain(secretKeyPath);
   });
 });

@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithCredential, User } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithCredential, reauthenticateWithPopup, reauthenticateWithCredential, User } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 import { Capacitor } from "@capacitor/core";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
@@ -149,6 +149,42 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 
 export const getAccessToken = async (): Promise<string | null> => {
   return cachedAccessToken;
+};
+
+/**
+ * Reauthenticates the currently-signed-in Firebase user via the same
+ * Google mechanism they're already signed in with — used exclusively by
+ * the Driver "Delete My Account" flow (DriverApplication.tsx) when
+ * `auth.currentUser.delete()` fails with `auth/requires-recent-login`.
+ * Firebase requires a *recent* sign-in before it will let a client delete
+ * its own Auth user; this re-proves that recent sign-in without signing
+ * the user out or disturbing `auth.currentUser`, so the subsequent delete
+ * retry can succeed. Deliberately not a new login entry point — it never
+ * renders a button and only ever runs as a background step inside an
+ * already-triggered deletion, reusing the exact same provider/scopes/
+ * native-bridge logic as googleSignIn() above.
+ */
+export const reauthenticateDriverWithGoogle = async (): Promise<void> => {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error("No signed-in Firebase user to reauthenticate.");
+  }
+
+  if (isNative) {
+    const result = await FirebaseAuthentication.signInWithGoogle({
+      scopes: GOOGLE_SCOPES,
+    });
+    const idToken = result.credential?.idToken;
+    const accessToken = result.credential?.accessToken;
+    if (!idToken || !accessToken) {
+      throw new Error("Native Google reauthentication did not return valid credentials.");
+    }
+    const jsCredential = GoogleAuthProvider.credential(idToken, accessToken);
+    await reauthenticateWithCredential(user, jsCredential);
+    return;
+  }
+
+  await reauthenticateWithPopup(user, provider);
 };
 
 export const logoutGoogle = async () => {
