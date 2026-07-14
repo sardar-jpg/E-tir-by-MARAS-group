@@ -51,6 +51,7 @@ import {
 import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
 import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession, deriveAdditionalDriverIds, buildDriverOwnedShipmentQueryScopes } from "./src/lib/driverVisibility";
+import { resolveShipmentListQueryScopes } from "./src/lib/shipmentListAccess";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
 import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
@@ -694,18 +695,18 @@ interface AscendingSinceResult {
   hasMore: boolean;
 }
 
-function memoryDescendingPage(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number): DescendingPageResult {
+function memoryDescendingPage(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number, tsField: string = "timestamp"): DescendingPageResult {
   const mStore = getMemoryStore();
   const items = (mStore[colName as keyof typeof mStore] as any[]) || [];
   const filtered = applyMemoryFilters(items, filters);
-  return paginateDescending(filtered, (i) => i.timestamp, (i) => i.id, { cursor, limit });
+  return paginateDescending(filtered, (i) => i[tsField], (i) => i.id, { cursor, limit });
 }
 
-function memoryAscendingSince(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number): AscendingSinceResult {
+function memoryAscendingSince(colName: string, filters: PageFilter[], cursor: PageCursor | null, limit: number, tsField: string = "timestamp"): AscendingSinceResult {
   const mStore = getMemoryStore();
   const items = (mStore[colName as keyof typeof mStore] as any[]) || [];
   const filtered = applyMemoryFilters(items, filters);
-  return paginateAscendingSince(filtered, (i) => i.timestamp, (i) => i.id, cursor, limit);
+  return paginateAscendingSince(filtered, (i) => i[tsField], (i) => i.id, cursor, limit);
 }
 
 /**
@@ -713,24 +714,34 @@ function memoryAscendingSince(colName: string, filters: PageFilter[], cursor: Pa
  * where/orderBy/limit/startAfter, never a full-collection fetch. Fetches
  * `limit + 1` so `hasMore` is known from this one query instead of a
  * second round-trip; the (possible) 51st row is trimmed before returning.
+ *
+ * `tsField` (Phase 2A, shipments pagination): chat/notifications only ever
+ * order by "timestamp" (their only meaningful clock, defaulted below so
+ * those call sites are unchanged). Shipments are a mutable record, not an
+ * append-only log, and need two different clocks for two different
+ * questions — "newest created" (createdAt, used here for "load older") vs.
+ * "most recently changed" (updatedAt, used by queryAscendingSince's since-
+ * mode below) — see fetchShipmentsPage/fetchShipmentsSince for how each is
+ * used.
  */
 async function queryDescendingPage(
   colName: string,
   filters: PageFilter[],
   cursor: PageCursor | null,
-  limit: number = DEFAULT_PAGE_SIZE
+  limit: number = DEFAULT_PAGE_SIZE,
+  tsField: string = "timestamp"
 ): Promise<DescendingPageResult> {
   if (hasUnsatisfiableFilter(filters)) return { items: [], nextCursor: null, hasMore: false };
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return memoryDescendingPage(colName, filters, cursor, limit);
+    return memoryDescendingPage(colName, filters, cursor, limit, tsField);
   }
   try {
     let q: FirebaseFirestore.Query = db!.collection(colName);
     for (const f of filters) {
       q = q.where(f.field, f.op as any, f.value);
     }
-    q = q.orderBy("timestamp", "desc").orderBy(FieldPath.documentId(), "desc");
+    q = q.orderBy(tsField, "desc").orderBy(FieldPath.documentId(), "desc");
     if (cursor) q = q.startAfter(cursor.ts, cursor.id);
     q = q.limit(limit + 1);
     const snapshot = await withTimeout(q.get(), 5000, "Firestore paginated query timed out");
@@ -738,39 +749,41 @@ async function queryDescendingPage(
     const hasMore = docs.length > limit;
     const page = docs.slice(0, limit);
     const last = page[page.length - 1];
-    const nextCursor = hasMore && last ? encodePageCursor({ ts: last.timestamp, id: last.id }) : null;
+    const nextCursor = hasMore && last ? encodePageCursor({ ts: last[tsField], id: last.id }) : null;
     return { items: page, nextCursor, hasMore };
   } catch (error) {
     console.warn("Firestore paginated query failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return memoryDescendingPage(colName, filters, cursor, limit);
+    return memoryDescendingPage(colName, filters, cursor, limit, tsField);
   }
 }
 
 /**
  * "Newer than cursor" catch-up query used by live polling, ascending
  * order. `limit` is a safety cap on a single burst, not a page-size
- * contract — see paginateAscendingSince's own header comment.
+ * contract — see paginateAscendingSince's own header comment. `tsField` —
+ * see queryDescendingPage's header comment above.
  */
 async function queryAscendingSince(
   colName: string,
   filters: PageFilter[],
   cursor: PageCursor | null,
-  limit: number = DEFAULT_PAGE_SIZE
+  limit: number = DEFAULT_PAGE_SIZE,
+  tsField: string = "timestamp"
 ): Promise<AscendingSinceResult> {
   if (hasUnsatisfiableFilter(filters)) return { items: [], hasMore: false };
   if (useMemoryFallback) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return memoryAscendingSince(colName, filters, cursor, limit);
+    return memoryAscendingSince(colName, filters, cursor, limit, tsField);
   }
   try {
     let q: FirebaseFirestore.Query = db!.collection(colName);
     for (const f of filters) {
       q = q.where(f.field, f.op as any, f.value);
     }
-    q = q.orderBy("timestamp", "asc").orderBy(FieldPath.documentId(), "asc");
+    q = q.orderBy(tsField, "asc").orderBy(FieldPath.documentId(), "asc");
     if (cursor) q = q.startAfter(cursor.ts, cursor.id);
     q = q.limit(limit + 1);
     const snapshot = await withTimeout(q.get(), 5000, "Firestore since-query timed out");
@@ -782,7 +795,7 @@ async function queryAscendingSince(
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return memoryAscendingSince(colName, filters, cursor, limit);
+    return memoryAscendingSince(colName, filters, cursor, limit, tsField);
   }
 }
 
@@ -824,6 +837,119 @@ async function fetchNotificationsSince(
   const combined = Array.from(merged.values());
   const result = paginateAscendingSince(combined, (i) => i.timestamp, (i) => i.id, cursor, limit);
   return { items: result.items, hasMore: result.hasMore || pages.some((p) => p.hasMore) };
+}
+
+/**
+ * Phase 2A (Firestore scalability audit, shipments/orders).
+ *
+ * Same independent-scopes-merged-in-Node fan-in shape as
+ * fetchNotificationsPage above, applied to the `shipments` collection
+ * itself instead of to a derived ownership-id lookup. `scopes` is:
+ *  - `[[]]` for admin (no filter — sees every shipment, matching the
+ *    existing "Admins see everything" GET /api/shipments behavior this
+ *    replaces),
+ *  - `buildDriverOwnedShipmentQueryScopes(driverId)` for a driver, each
+ *    wrapped in its own single-filter scope (assignedDriverId ==, OR
+ *    additionalDriverIds array-contains — same OR-via-independent-queries
+ *    pattern as the notification ownership lookup, and the same
+ *    legacy-record caveat: see driverVisibility.ts's own header comment),
+ *  - `buildClientOwnedShipmentQueryScopes(companyName)` for a client.
+ *
+ * Ordered by `createdAt` (not `updatedAt`) — "latest 50 / load older"
+ * pagination is a "when was this shipment created" question, matching the
+ * existing `list.sort((a,b) => b.createdAt - a.createdAt)` this replaces.
+ * See fetchShipmentsSince below for why polling uses a different field.
+ */
+async function fetchShipmentsPage(
+  scopes: PageFilter[][],
+  cursor: PageCursor | null,
+  limit: number
+): Promise<DescendingPageResult> {
+  const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+  const pages = await Promise.all(effectiveScopes.map((filters) => queryDescendingPage("shipments", filters, cursor, limit, "createdAt")));
+  const merged = new Map<string, any>();
+  for (const p of pages) for (const item of p.items) merged.set(item.id, item);
+  const combined = Array.from(merged.values());
+  const result = paginateDescending(combined, (i) => i.createdAt, (i) => i.id, { cursor, limit });
+  const combinedHasMore = result.hasMore || pages.some((p) => p.hasMore);
+  const last = result.items[result.items.length - 1];
+  const nextCursor = combinedHasMore && last ? encodePageCursor({ ts: last.createdAt, id: last.id }) : null;
+  return { items: result.items, nextCursor, hasMore: combinedHasMore };
+}
+
+/**
+ * Phase 2A (Firestore scalability audit, shipments/orders).
+ *
+ * The live-poll "catch up" equivalent of fetchShipmentsPage — deliberately
+ * ordered by `updatedAt`, not `createdAt`: a poll needs to know "what
+ * changed since I last looked" (a new shipment created OR an existing
+ * one's status/details edited), not just "what's new." Every write path
+ * that mutates a Shipment's own fields (creation, PUT /api/shipments/:id,
+ * PUT /api/shipments/:id/status) already bumps `updatedAt`; a
+ * newly-created shipment's `updatedAt` starts out equal to its
+ * `createdAt`, so creation is naturally caught by this too. Known,
+ * documented limitation carried over unchanged from this PR's own scope
+ * boundary: Document Center / chat-linked mutations (upload, visibility
+ * toggle, share-link config) are explicitly out of scope for this PR (see
+ * its description) and do not bump `updatedAt` — a shipment whose only
+ * change since the caller's last poll was a new document upload will not
+ * appear in a `since` response until it's next `fetchShipmentsPage`'d (the
+ * next full/initial load), the same "surfaces on next full reload, not
+ * mid-poll" tradeoff PR #99 already documented for chat read-receipts.
+ */
+async function fetchShipmentsSince(
+  scopes: PageFilter[][],
+  cursor: PageCursor | null,
+  limit: number
+): Promise<AscendingSinceResult> {
+  const effectiveScopes = scopes.length > 0 ? scopes : [[]];
+  const pages = await Promise.all(effectiveScopes.map((filters) => queryAscendingSince("shipments", filters, cursor, limit, "updatedAt")));
+  const merged = new Map<string, any>();
+  for (const p of pages) for (const item of p.items) merged.set(item.id, item);
+  const combined = Array.from(merged.values());
+  const result = paginateAscendingSince(combined, (i) => i.updatedAt, (i) => i.id, cursor, limit);
+  return { items: result.items, hasMore: result.hasMore || pages.some((p) => p.hasMore) };
+}
+
+/**
+ * Phase 2A (Firestore scalability audit, shipments/orders).
+ *
+ * The three public `/api/share/:token*` routes (tracking view, document
+ * proxy, subscribe) each used to read the ENTIRE `shipments` collection
+ * just to find the one document whose `shareToken` matches — the same
+ * "full scan to find one row" shape already fixed elsewhere in this PR.
+ * `shareToken` has always been a plain, unique, always-populated field
+ * (generateShareToken() at shipment-creation time — see POST
+ * /api/shipments), so this is a single real `where("shareToken","==",...)
+ * .limit(1)` query, not a scan. A malformed/unknown token simply matches
+ * zero documents, same as the old `.find()` returning `undefined`; the
+ * `isLinkShared` check callers already perform is unchanged.
+ */
+async function findShipmentByShareToken(token: string): Promise<Shipment | null> {
+  if (!token) return null;
+  if (useMemoryFallback) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryFindShipmentByShareToken(token);
+  }
+  try {
+    const q: FirebaseFirestore.Query = db!.collection("shipments").where("shareToken", "==", token).limit(1);
+    const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore share-token lookup timed out");
+    if (snapshot.empty) return null;
+    const d = snapshot.docs[0];
+    return { id: d.id, ...(d.data() as any) } as Shipment;
+  } catch (error) {
+    console.warn("Firestore share-token lookup failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return memoryFindShipmentByShareToken(token);
+  }
+}
+
+function memoryFindShipmentByShareToken(token: string): Shipment | null {
+  const mStore = getMemoryStore();
+  const items = (mStore.shipments || []) as Shipment[];
+  return items.find((s) => s.shareToken === token) || null;
 }
 
 /**
@@ -2752,6 +2878,17 @@ async function startServer() {
   // API Endpoints
 
   // 1. Get Shipments (from Firestore)
+  //
+  // Phase 2A (Firestore scalability audit, shipments/orders): scoped,
+  // cursor-paginated Firestore queries instead of reading the entire
+  // `shipments` collection on every call (see docs/FOLLOW_UP_ROADMAP.md's
+  // "Full-collection-scan read pattern" entry, and PR #99's own PR
+  // description for the priority-3 "deferred" item this closes). Same
+  // response shape and query-param contract as GET /api/notifications and
+  // GET /api/shipments/:id/chat: `{ items, nextCursor, hasMore }` in page
+  // mode, `{ items, hasMore }` in `since` (live-poll) mode. A malformed
+  // *supplied* cursor/since 400s; a missing one is valid (see
+  // parseCursorParam's own header comment, src/lib/pagination.ts).
   app.get("/api/shipments", requireAuth, async (req, res) => {
     try {
       // BUG-08: accounts admins don't get the operational shipment registry —
@@ -2760,30 +2897,56 @@ async function startServer() {
       if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
         return res.status(403).json({ error: "Accounts-role admins cannot view the shipment registry." });
       }
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      let list = snapshot.docs.map(doc => doc.data() as Shipment);
-      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      const cursorParam = parseCursorParam(req.query.cursor);
+      if (!cursorParam.ok) return res.status(400).json({ error: "Malformed cursor." });
+      const sinceParam = parseCursorParam(req.query.since);
+      if (!sinceParam.ok) return res.status(400).json({ error: "Malformed since parameter." });
+
+      const limitParam = parseInt(req.query.limit as string, 10);
+      const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 200 ? limitParam : DEFAULT_PAGE_SIZE;
 
       // Scope results to the session's own role — never trust a
       // client-supplied driverId/clientId to decide what's returned.
-      if (req.session!.role === "driver") {
-        const driverId = req.session!.id;
-        const filtered = list.filter(s =>
-          s.assignedDriverId === driverId ||
-          (s.additionalDrivers && s.additionalDrivers.some((ad: any) => ad.driverId === driverId))
-        );
-        return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
-      }
+      // resolveShipmentListQueryScopes (src/lib/shipmentListAccess.ts)
+      // turns "assigned/additional-driver shipments" / "own company's
+      // shipments" into real, indexed Firestore query scopes — no longer
+      // a full-collection Node-side filter — and is unit tested directly.
+      let clientCompanyName: string | null = null;
       if (req.session!.role === "client") {
-        const clientsCol = collection(db, "clients");
-        const clientsSnap = await getDocs(clientsCol);
-        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
-        const filtered = myClient ? list.filter(s => isShipmentVisibleToClientCompany(s.companyName, myClient.companyName)) : [];
-        return res.json(filtered.map(s => buildShipmentViewForRole(s, req.session!)));
+        // Direct document lookup by the client session's own id — same
+        // fix as GET /api/notifications' client branch (PR #99 review):
+        // a client session's id already IS its own clients/{id} document
+        // id, so this was never a full `clients` collection scan away
+        // from being a single-document read.
+        const clientDoc = await getDoc(doc(db, "clients", req.session!.id));
+        clientCompanyName = clientDoc.exists() ? (clientDoc.data() as Client).companyName || null : null;
       }
-      // Admins see everything.
-      res.json(list);
+      const { scopes, isEmpty } = resolveShipmentListQueryScopes(
+        { role: req.session!.role, id: req.session!.id },
+        clientCompanyName
+      );
+
+      // A client session whose own record is missing/companyName-less has
+      // nothing to scope a query to — matches the old behavior's
+      // `myClient ? ... : []` empty-result fallback exactly, without
+      // firing a query with an empty scope (which fetchShipmentsPage/Since
+      // would otherwise treat as "no filter at all," i.e. everything).
+      if (isEmpty) {
+        if (typeof req.query.since === "string") return res.json({ items: [], hasMore: false });
+        return res.json({ items: [], nextCursor: null, hasMore: false });
+      }
+
+      const applyRoleView = (items: any[]): any[] =>
+        req.session!.role === "admin" ? items : items.map((s) => buildShipmentViewForRole(s as Shipment, req.session!));
+
+      if (typeof req.query.since === "string") {
+        const sincePage = await fetchShipmentsSince(scopes, sinceParam.cursor, limit);
+        return res.json({ items: applyRoleView(sincePage.items), hasMore: sincePage.hasMore });
+      }
+
+      const page = await fetchShipmentsPage(scopes, cursorParam.cursor, limit);
+      res.json({ items: applyRoleView(page.items), nextCursor: page.nextCursor, hasMore: page.hasMore });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to fetch shipments" });
@@ -2974,9 +3137,14 @@ async function startServer() {
           (shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
         if (!owns) return res.status(403).json({ error: "You do not have access to this shipment." });
       } else if (req.session!.role === "client") {
-        const clientsCol = collection(db, "clients");
-        const clientsSnap = await getDocs(clientsCol);
-        const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
+        // Phase 2A (Firestore scalability audit): direct document lookup
+        // by the client session's own id, replacing a full `clients`
+        // collection scan just to find this one record — same fix as GET
+        // /api/shipments and GET /api/notifications' client branches (a
+        // client session's id already IS its own clients/{id} document
+        // id; see those routes' own comments).
+        const clientDoc = await getDoc(doc(db, "clients", req.session!.id));
+        const myClient = clientDoc.exists() ? (clientDoc.data() as Client) : null;
         if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
           return res.status(403).json({ error: "You do not have access to this shipment." });
         }
@@ -4127,10 +4295,7 @@ async function startServer() {
   // 11. Public Shared Link lookups
   app.get("/api/share/:token", async (req, res) => {
     try {
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as Shipment);
-      const shipment = list.find(s => s.shareToken === req.params.token);
+      const shipment = await findShipmentByShareToken(req.params.token);
 
       if (!shipment || !shipment.isLinkShared) {
         return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
@@ -4162,10 +4327,7 @@ async function startServer() {
    */
   app.get("/api/share/:token/documents/:docId", async (req, res) => {
     try {
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as Shipment);
-      const shipment = list.find(s => s.shareToken === req.params.token);
+      const shipment = await findShipmentByShareToken(req.params.token);
 
       if (!shipment || !shipment.isLinkShared) {
         return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });
@@ -4208,10 +4370,7 @@ async function startServer() {
         return res.status(400).json({ error: "A valid email address is required" });
       }
 
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      const list = snapshot.docs.map(doc => doc.data() as Shipment);
-      const shipment = list.find(s => s.shareToken === req.params.token);
+      const shipment = await findShipmentByShareToken(req.params.token);
 
       if (!shipment || !shipment.isLinkShared) {
         return res.status(404).json({ error: "Shared shipment path is inactive or invalid." });

@@ -15,6 +15,7 @@ import { validateUpload } from "../lib/uploadValidation";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage } from "../lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
+import { fetchAllShipmentPages } from "../lib/shipmentPagination";
 
 // Local multilingual dictionary
 const t = {
@@ -398,19 +399,29 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-      // Fetch core logistics datasets using apiFetch
-      const resShipments = await apiFetch("/api/shipments");
+      // Fetch core logistics datasets using apiFetch.
+      //
+      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
+      // cursor-paginated and already scoped server-side to this client's
+      // own company (buildClientOwnedShipmentQueryScopes, server.ts) —
+      // fetchAllShipmentPages pages through to exhaustion (in practice a
+      // single page for one company's shipment count) so `allShipments`
+      // below keeps meaning "every shipment this client can see," same as
+      // before, just via bounded requests instead of one unbounded one.
       const resDrivers = await apiFetch("/api/drivers");
 
       let allShipments: Shipment[] = [];
       let allDrivers: Driver[] = [];
 
-      if (resShipments.ok) {
-        const text = await resShipments.text();
-        if (!text.trim().startsWith("<")) {
-          allShipments = JSON.parse(text);
-        }
-      }
+      allShipments = await fetchAllShipmentPages(async (cursor) => {
+        const url = `/api/shipments?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const res = await apiFetch(url);
+        if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
+        const text = await res.text();
+        if (text.trim().startsWith("<")) return { items: [], nextCursor: null, hasMore: false };
+        const data = JSON.parse(text);
+        return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
+      });
 
       if (resDrivers.ok) {
         const text = await resDrivers.text();

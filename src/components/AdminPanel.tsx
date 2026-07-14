@@ -18,6 +18,8 @@ import {
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { encodePageCursor } from "../lib/pagination";
+import { fetchAllShipmentPages, mergeShipmentsSince } from "../lib/shipmentPagination";
 import {
   Plus, Search, Filter, ShieldCheck, Share2, MessageSquare,
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
@@ -817,6 +819,10 @@ export default function AdminPanel({
   const [activeToasts, setActiveToasts] = useState<{ id: string; notif: AppNotification }[]>([]);
   const knownNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const isFirstLoadRef = React.useRef(true);
+  // Phase 2A (Firestore scalability audit): the shipments-only 60s poll's
+  // own `since` position — seeded from the latest full load (fetchData)
+  // and advanced after each successful delta poll. See pollShipments below.
+  const shipmentsSinceCursorRef = React.useRef<string | null>(null);
   
   // Gmail Console States
   const [gmailTo, setGmailTo] = useState("");
@@ -1256,9 +1262,27 @@ MARAS Group etir Center`;
       // request entirely for an admin type the server already 403s (accounts
       // admins can't view the shipment/driver registry, adminAccess.ts)
       // instead of firing it and discarding a 403.
-      let resShipments: Response | null = null;
+      //
+      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
+      // cursor-paginated (bounded ≤200/page) instead of one unbounded
+      // read — fetchAllShipmentPages pages through to exhaustion so this
+      // dashboard's aggregates/search (computed below from the full
+      // `shipments` state) keep seeing the complete accessible scope,
+      // exactly as before, just via N bounded requests instead of one
+      // unbounded one.
+      let shipmentsData: Shipment[] | null = null;
       if (canViewShipmentRegistry(resolvedAdminTypeForSWR)) {
-        resShipments = await apiFetch("/api/shipments");
+        shipmentsData = await fetchAllShipmentPages(async (cursor) => {
+          const url = `/api/shipments?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+          const res = await apiFetch(url);
+          if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
+          const text = await res.text();
+          if (text.trim().startsWith("<")) {
+            throw new Error("Received HTML instead of JSON. The backend server might still be initializing.");
+          }
+          const data = JSON.parse(text);
+          return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
+        });
       }
       let resDrivers: Response | null = null;
       if (canViewDriverRoster(resolvedAdminTypeForSWR)) {
@@ -1297,7 +1321,19 @@ MARAS Group etir Center`;
         return JSON.parse(text);
       };
 
-      if (resShipments && resShipments.ok) setShipments(await safeJson(resShipments));
+      if (shipmentsData) {
+        setShipments(shipmentsData);
+        // Re-seed the delta-poll cursor from this full load's newest
+        // `updatedAt` — every subsequent pollShipments tick asks for only
+        // what changed after this point instead of re-fetching everything.
+        const newestUpdated = shipmentsData.reduce<Shipment | null>(
+          (latest, s) => (!latest || s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest),
+          null
+        );
+        shipmentsSinceCursorRef.current = newestUpdated
+          ? encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id })
+          : null;
+      }
       if (resDrivers && resDrivers.ok) setDrivers(await safeJson(resDrivers));
       if (resClients.ok) setClients(await safeJson(resClients));
       if (resVendors.ok) setVendors(await safeJson(resVendors));
@@ -1417,21 +1453,42 @@ MARAS Group etir Center`;
   }, []);
 
   // Global polling mechanism to periodically refresh the shipment list data from the backend every 60 seconds
+  //
+  // Phase 2A (Firestore scalability audit): delta (`since`) poll instead of
+  // a full re-fetch every tick — only shipments that are new or whose own
+  // fields changed since the last tick come back, merged into the existing
+  // `shipments` state by id (mergeShipmentsSince, shipmentPagination.ts).
+  // Known, documented limitation carried over from server.ts's own note:
+  // a shipment whose ONLY change was a document upload / share-link config
+  // update (both out of scope for this PR) won't appear here until the
+  // next full fetchData() load (the 12s SWR cycle above already provides
+  // that within ~15s in practice) — not a silent data-loss risk, just a
+  // bounded staleness window for that one specific case.
   useEffect(() => {
     const pollShipments = async () => {
       try {
         if (typeof window !== "undefined" && !navigator.onLine) return;
         // Accounts admins can't view the shipment registry (adminAccess.ts,
-        // same as fetchData's resShipments above) — skip rather than poll
+        // same as fetchData's shipmentsData above) — skip rather than poll
         // into a guaranteed 403 every 60s.
         if (!canViewShipmentRegistry(adminType || 'super')) return;
-        const resShipments = await apiFetch("/api/shipments");
+        // Not yet seeded by an initial fetchData load (e.g. this tick fired
+        // before the first load resolved) — skip this tick rather than
+        // fire a since-from-nowhere request; the next tick will have it.
+        const cursor = shipmentsSinceCursorRef.current;
+        if (!cursor) return;
+        const resShipments = await apiFetch(`/api/shipments?since=${encodeURIComponent(cursor)}`);
         if (resShipments.ok) {
           const text = await resShipments.text();
           if (!text.trim().startsWith("<")) {
             const data = JSON.parse(text);
-            setShipments(data);
-            console.log("[Global Polling] Periodically refreshed shipment list data (60s timer).");
+            const items: Shipment[] = data.items || [];
+            if (items.length > 0) {
+              setShipments(prev => mergeShipmentsSince(prev, items));
+              const newestUpdated = items.reduce<Shipment>((latest, s) => (s.updatedAt > latest.updatedAt || (s.updatedAt === latest.updatedAt && s.id > latest.id) ? s : latest), items[0]);
+              shipmentsSinceCursorRef.current = encodePageCursor({ ts: newestUpdated.updatedAt, id: newestUpdated.id });
+            }
+            console.log(`[Global Polling] Periodically refreshed shipment list data (60s timer, ${items.length} changed).`);
           }
         }
       } catch (err) {

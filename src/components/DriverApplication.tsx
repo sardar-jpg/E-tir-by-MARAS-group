@@ -19,6 +19,7 @@ import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment, mergeNewerChatMessages, prependOlderChatMessages } from "../lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 import { encodePageCursor } from "../lib/pagination";
+import { fetchAllShipmentPages } from "../lib/shipmentPagination";
 import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
@@ -612,22 +613,36 @@ export default function DriverApplication({
         setDrivers(driversList);
       }
 
+      // Phase 2A (Firestore scalability audit): GET /api/shipments is now
+      // cursor-paginated and scoped server-side to this driver's own
+      // assigned/additional-driver shipments (buildDriverOwnedShipmentQueryScopes,
+      // server.ts) — the `driverId` query param below was already ignored
+      // by the server (scoping always came from the verified session, not
+      // a client-supplied id) and is left in place only for backward-
+      // compatible URL logging/debugging, not because the server reads it.
+      // fetchAllShipmentPages pages through to exhaustion (in practice a
+      // single page for one driver's own shipment count) so
+      // `activeShipmentsList` below keeps meaning "every shipment this
+      // driver can see," unchanged.
       let activeShipmentsList: Shipment[] = [];
-      const resShipments = await apiFetch(`/api/shipments?driverId=${selectedDriverId}`);
-      if (resShipments.ok) {
-        const list = await safeJson(resShipments);
-        activeShipmentsList = list;
-        setShipments(list);
-        
-        // update active shipment details dynamically if it is loaded
-        if (activeShipment) {
-          const fresh = list.find((s: Shipment) => s.id === activeShipment.id);
-          if (fresh) {
-            setActiveShipment(fresh);
-            const isCompleted = fresh.status === 'Delivered' || fresh.status === 'Arrived' || fresh.status === 'Closed' || fresh.status === 'Completed';
-            if (isCompleted) {
-              setGpsAvailable(null);
-            }
+      const list = await fetchAllShipmentPages(async (cursor) => {
+        const url = `/api/shipments?driverId=${selectedDriverId}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const res = await apiFetch(url);
+        if (!res.ok) return { items: [], nextCursor: null, hasMore: false };
+        const data = await safeJson(res);
+        return { items: data.items || [], nextCursor: data.nextCursor ?? null, hasMore: !!data.hasMore };
+      });
+      activeShipmentsList = list;
+      setShipments(list);
+
+      // update active shipment details dynamically if it is loaded
+      if (activeShipment) {
+        const fresh = list.find((s: Shipment) => s.id === activeShipment.id);
+        if (fresh) {
+          setActiveShipment(fresh);
+          const isCompleted = fresh.status === 'Delivered' || fresh.status === 'Arrived' || fresh.status === 'Closed' || fresh.status === 'Completed';
+          if (isCompleted) {
+            setGpsAvailable(null);
           }
         }
       }
