@@ -4,6 +4,7 @@ import {
   filterCostStatementRows,
   resolveCostStatementDisplay,
   resolveStatementShipmentContext,
+  resolveCostStatementShipmentNumber,
 } from "./costStatementRegistryView";
 import type { CostStatement, Shipment } from "../types";
 
@@ -210,5 +211,29 @@ describe("resolveStatementShipmentContext", () => {
     const context = resolveStatementShipmentContext(statement, [makeShipment({ agreedAmount: 5000, truckNumber: "12 QRS 789" })]);
     expect(context.agreedAmount).toBe(5000);
     expect(context.truckNumber).toBe("12 QRS 789");
+  });
+});
+
+describe("resolveCostStatementShipmentNumber", () => {
+  it("Accounting Phase A regression: cost statements retain the correct (authoritative) shipmentNumber, ignoring a mismatched client-supplied value", () => {
+    const shipment = makeShipment({ shipmentNumber: "MAR-2026-1001" });
+    expect(resolveCostStatementShipmentNumber(shipment, "MAR-2026-9999")).toBe("MAR-2026-1001");
+  });
+
+  it("Accounting Phase A regression: client requests cannot override the server-side shipmentNumber when a shipment record exists", () => {
+    const shipment = makeShipment({ shipmentNumber: "MAR-2026-1001" });
+    // Even an attempt to inject something other than the canonical format
+    // is ignored outright whenever the authoritative shipment exists.
+    expect(resolveCostStatementShipmentNumber(shipment, "eTIR-000184")).toBe("MAR-2026-1001");
+    expect(resolveCostStatementShipmentNumber(shipment, "")).toBe("MAR-2026-1001");
+    expect(resolveCostStatementShipmentNumber(shipment, undefined)).toBe("MAR-2026-1001");
+  });
+
+  it("falls back to the client-supplied value only when no authoritative shipment record exists at all", () => {
+    expect(resolveCostStatementShipmentNumber(undefined, "MAR-2026-1001")).toBe("MAR-2026-1001");
+  });
+
+  it("falls back to an empty string when neither the shipment nor the client supplied a value", () => {
+    expect(resolveCostStatementShipmentNumber(undefined, undefined)).toBe("");
   });
 });

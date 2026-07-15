@@ -112,7 +112,7 @@ import {
   InMemorySequenceCounter,
   ShipmentSequenceCounterDoc,
 } from "./src/lib/shipmentNumbering";
-import { formatOrderNumber } from "./src/lib/orderNumbering";
+import { resolveCostStatementShipmentNumber } from "./src/lib/costStatementRegistryView";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
@@ -296,12 +296,6 @@ let memoryStore: {
   // rather than seeded here, since its initial value depends on how many
   // shipments are already in memoryStore.shipments at first use.
   shipmentSequenceCounter: InMemorySequenceCounter | null;
-  // Accounting Phase A: same lazy-counter pattern as shipmentSequenceCounter
-  // above, but for the independent eTIR order-number sequence (see
-  // getOrderSequenceCounterMemory/allocateNextOrderSequence,
-  // src/lib/orderNumbering.ts) — a separate counter so shipment numbering
-  // and order numbering can never collide or interfere with each other.
-  orderSequenceCounter: InMemorySequenceCounter | null;
 } | null = null;
 
 function getMemoryStore() {
@@ -321,8 +315,7 @@ function getMemoryStore() {
       adminChatUnread: [],
       accountDeletionAudit: [],
       test: [{ id: "connection", status: "ok" }],
-      shipmentSequenceCounter: null,
-      orderSequenceCounter: null
+      shipmentSequenceCounter: null
     };
 
     if (DEMO_ACCOUNTS) {
@@ -1665,74 +1658,7 @@ async function allocateNextShipmentSequence(): Promise<number> {
     return getShipmentSequenceCounterMemory().next();
   }
 }
-
-// Accounting Phase A — Canonical Order Reference: allocates the eTIR
-// order-number sequence exactly the same concurrency-safe way BUG-15 fixed
-// shipment numbering above (Firestore transaction on its own counter doc,
-// or the single-threaded InMemorySequenceCounter under the memory
-// fallback) — deliberately its own independent counter
-// (`counters/orders`, bootstrapped from the current shipment count) so it
-// can never collide or interfere with the pre-existing shipment-number
-// sequence. See src/lib/orderNumbering.ts for the format function and the
-// rationale for reusing nextSequenceFromCounterDoc/InMemorySequenceCounter
-// (both already generic, not shipment-specific) instead of duplicating
-// them.
-function getOrderSequenceCounterMemory(): InMemorySequenceCounter {
-  const mStore = getMemoryStore();
-  if (!mStore.orderSequenceCounter) {
-    // Bootstraps from however many shipments already exist, so an
-    // eventual backfill of legacy shipments (POST
-    // /api/admin/backfill-order-numbers) and newly created shipments can
-    // never be handed the same order number.
-    mStore.orderSequenceCounter = new InMemorySequenceCounter(mStore.shipments.length);
-  }
-  return mStore.orderSequenceCounter;
-}
-
-async function allocateNextOrderSequence(): Promise<number> {
-  if (useMemoryFallback || !db) {
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return getOrderSequenceCounterMemory().next();
-  }
-
-  const counterRef = db.collection("counters").doc("orders");
-  try {
-    // Same one-time bootstrap approach as allocateNextShipmentSequence:
-    // only read when the counter doc doesn't exist yet, and only to seed
-    // it past however many shipments already exist (so a later backfill
-    // of legacy shipments and any newly created shipment can never
-    // collide) — the counter doc itself is authoritative from then on.
-    let bootstrapCount = 0;
-    const existingCounter = await withTimeout<any>(counterRef.get(), 5000, "Firestore getDoc timed out");
-    if (!existingCounter.exists) {
-      const existingShipments = await withTimeout<any>(
-        db.collection("shipments").get(),
-        5000,
-        "Firestore getDocs timed out"
-      );
-      bootstrapCount = existingShipments.size;
-    }
-
-    return await withTimeout(
-      db.runTransaction(async (tx: any) => {
-        const snap = await tx.get(counterRef);
-        const data = snap.exists ? (snap.data() as ShipmentSequenceCounterDoc) : undefined;
-        const { current, next } = nextSequenceFromCounterDoc(data, bootstrapCount);
-        tx.set(counterRef, next, { merge: true });
-        return current;
-      }),
-      5000,
-      "Firestore transaction timed out"
-    );
-  } catch (error) {
-    console.warn("Firestore order sequence transaction failed or timed out. Switching to robust Memory Fallback.", error);
-    useMemoryFallback = true;
-    scheduleFirestoreRecovery(30_000);
-    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
-    return getOrderSequenceCounterMemory().next();
-  }
-}
-import {
+import { 
   Shipment,
   Driver,
   ChatMessage,
@@ -3652,13 +3578,6 @@ async function startServer() {
       const shipmentNumber = formatShipmentNumber(year, count);
       const id = formatShipmentId(count);
 
-      // Accounting Phase A — Canonical Order Reference: allocated from its
-      // own independent sequence (see allocateNextOrderSequence above),
-      // never derived from the client payload — auto-generated, unique,
-      // and immutable from the moment the shipment is created.
-      const orderSequence = await allocateNextOrderSequence();
-      const orderNumber = formatOrderNumber(orderSequence);
-
       // Load drivers to find assignee
       const driversCol = collection(db, "drivers");
       const driversSnap = await getDocs(driversCol);
@@ -3699,7 +3618,6 @@ async function startServer() {
       const newShipment: Shipment = {
         id,
         shipmentNumber,
-        orderNumber,
         companyName: data.companyName || "",
         loadingCountry: data.loadingCountry || "",
         loadingCity: data.loadingCity || "",
@@ -7215,7 +7133,12 @@ async function startServer() {
 
       const finalStatement: CostStatement = {
         shipmentId,
-        shipmentNumber: data.shipmentNumber || "",
+        // Accounting Phase A — Single Shipment Reference Hardening: sourced
+        // from the authoritative shipment record whenever it exists, not
+        // the client payload — see resolveCostStatementShipmentNumber
+        // (costStatementRegistryView.ts) for the full dependency-audit
+        // finding this fixes.
+        shipmentNumber: resolveCostStatementShipmentNumber(sData, data.shipmentNumber),
         companyName: data.companyName || "",
         shipmentType: data.shipmentType || "land",
         date: data.date || new Date().toISOString().split('T')[0],
@@ -7262,44 +7185,6 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update cost statement" });
-    }
-  });
-
-  // Accounting Phase A — Canonical Order Reference: one-time, idempotent
-  // backfill for shipments created before `orderNumber` existed. Super-admin
-  // only — this is an operational data-migration action, not a routine
-  // accounting task (matches requireSuperAdmin's existing use elsewhere).
-  // Safe to run more than once: only shipments actually missing
-  // orderNumber are touched on any given run, and each one is allocated
-  // exactly one freshly issued, never-reused sequence value from the same
-  // allocateNextOrderSequence used for new shipments — a legacy shipment
-  // backfilled here can never collide with one created before, during, or
-  // after this endpoint runs. Not invoked anywhere in this codebase yet;
-  // intended to be run once, deliberately, against a real environment by
-  // whoever operates it.
-  app.post("/api/admin/backfill-order-numbers", requireSuperAdmin, async (req, res) => {
-    try {
-      const col = collection(db, "shipments");
-      const snapshot = await getDocs(col);
-      const allShipments = snapshot.docs.map(doc => doc.data() as Shipment);
-
-      const missing = allShipments.filter(s => !s.orderNumber);
-      let backfilled = 0;
-      for (const shipment of missing) {
-        const orderSequence = await allocateNextOrderSequence();
-        const orderNumber = formatOrderNumber(orderSequence);
-        await updateDoc(doc(db, "shipments", shipment.id), { orderNumber });
-        backfilled += 1;
-      }
-
-      res.json({
-        totalShipments: allShipments.length,
-        alreadyHadOrderNumber: allShipments.length - missing.length,
-        backfilled
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to backfill order numbers" });
     }
   });
 
