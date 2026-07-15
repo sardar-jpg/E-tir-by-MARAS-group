@@ -7117,12 +7117,24 @@ async function startServer() {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
       
+      // Accounting Phase A — Single Shipment Reference Hardening: a Cost
+      // Statement must never be created unless it is linked to a real,
+      // existing shipment — in EVERY persistence mode, not just when
+      // Firestore is reachable. Previously this only 404'd when
+      // `!useMemoryFallback`, so under the memory fallback a nonexistent
+      // shipmentId was silently allowed through and shipmentNumber then
+      // fell back to whatever the client submitted — an orphan financial
+      // record carrying a manually-invented shipment reference, and
+      // different behavior depending on persistence mode. No such
+      // fallback exists anywhere below now: the shipment is confirmed to
+      // exist first, unconditionally, and every reference to it comes
+      // only from that authoritative record.
       const sRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sRef);
-      if (!sDoc.exists() && !useMemoryFallback) {
+      if (!sDoc.exists()) {
         return res.status(404).json({ error: "Shipment not found" });
       }
-      const sData = sDoc.exists() ? (sDoc.data() as Shipment) : undefined;
+      const shipment = sDoc.data() as Shipment;
 
       const items = data.items || [];
       const totalCost = items.reduce((sum, item) => sum + (Number(item.totalAmount) || 0), 0);
@@ -7132,7 +7144,10 @@ async function startServer() {
 
       const finalStatement: CostStatement = {
         shipmentId,
-        shipmentNumber: data.shipmentNumber || "",
+        // The one business reference (MAR-YYYY-####), always the real
+        // shipment's own value — never data.shipmentNumber. A submitted
+        // shipmentNumber in the request body is always ignored.
+        shipmentNumber: shipment.shipmentNumber,
         companyName: data.companyName || "",
         shipmentType: data.shipmentType || "land",
         date: data.date || new Date().toISOString().split('T')[0],
@@ -7146,13 +7161,13 @@ async function startServer() {
         createdAt: data.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         // Accounts-safe snapshot (PR #60): sourced from the authoritative
-        // shipment record (not the client payload) whenever it exists, so
-        // accounts admins reading this statement later — without shipment-
-        // registry access — see a value that actually matches the
-        // shipment. See the CostStatement.agreedAmount/truckNumber comment
-        // in src/types.ts.
-        agreedAmount: sData?.agreedAmount ?? data.agreedAmount,
-        truckNumber: sData?.truckNumber || data.truckNumber || ""
+        // shipment record (now always present — see the unconditional
+        // existence check above), so accounts admins reading this
+        // statement later — without shipment-registry access — see a
+        // value that actually matches the shipment. See the
+        // CostStatement.agreedAmount/truckNumber comment in src/types.ts.
+        agreedAmount: shipment.agreedAmount,
+        truckNumber: shipment.truckNumber
       };
       
       const dRef = doc(db, "costStatements", shipmentId);
