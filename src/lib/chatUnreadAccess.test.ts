@@ -5,8 +5,15 @@ import {
   appendAdminReader,
   formatUnreadBadge,
   selectUnreadMessagesForAdmin,
+  buildAdminChatUnreadRecordId,
+  resolveUnreadFanoutRecipientIds,
+  planUnreadFanout,
+  selectUnreadMessagesFromRecords,
+  buildUnreadClearFilters,
+  type AdminChatUnreadRecord,
 } from "./chatUnreadAccess";
 import { applyMemoryFilters, paginateDescending, walkAllDescendingPages, type PageCursor, type DescendingPageFetchResult } from "./pagination";
+import type { ChatMessage } from "../types";
 
 describe("isMessageFromOtherAdmin", () => {
   it("is always true for driver/client messages", () => {
@@ -186,6 +193,212 @@ describe("selectUnreadMessagesForAdmin + walkAllDescendingPages integration — 
     const shipmentIds = new Set(result.map((m) => m.shipmentId));
     expect(shipmentIds.has("ship-1")).toBe(true);
     expect(shipmentIds.has("ship-2")).toBe(true);
+  });
+});
+
+function chatMessage(overrides: Partial<ChatMessage> & Pick<ChatMessage, "id" | "shipmentId" | "sender">): ChatMessage {
+  return {
+    senderName: "Test",
+    type: "text",
+    text: "hi",
+    timestamp: "2026-01-01T00:00:00Z",
+    status: "sent",
+    ...overrides,
+  };
+}
+
+describe("buildAdminChatUnreadRecordId", () => {
+  it("is deterministic for the same (adminId, messageId) pair", () => {
+    expect(buildAdminChatUnreadRecordId("admin-a", "msg-1")).toBe(buildAdminChatUnreadRecordId("admin-a", "msg-1"));
+  });
+
+  it("differs for different admins or different messages", () => {
+    expect(buildAdminChatUnreadRecordId("admin-a", "msg-1")).not.toBe(buildAdminChatUnreadRecordId("admin-b", "msg-1"));
+    expect(buildAdminChatUnreadRecordId("admin-a", "msg-1")).not.toBe(buildAdminChatUnreadRecordId("admin-a", "msg-2"));
+  });
+});
+
+describe("resolveUnreadFanoutRecipientIds (chat-unread scalability follow-up — write-time fan-out)", () => {
+  it("driver/client messages create unread state for every eligible admin", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", channel: "driver_admin" });
+    expect(resolveUnreadFanoutRecipientIds(["admin-a", "admin-b"], message).sort()).toEqual(["admin-a", "admin-b"]);
+  });
+
+  it("an admin never gets fanned out their own message", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "admin", senderId: "admin-a", channel: "internal_staff" });
+    expect(resolveUnreadFanoutRecipientIds(["admin-a", "admin-b"], message)).toEqual(["admin-b"]);
+  });
+
+  it("another admin's message fans out to every OTHER eligible admin, not just one", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "admin", senderId: "admin-a", channel: "internal_staff" });
+    expect(resolveUnreadFanoutRecipientIds(["admin-a", "admin-b", "admin-c"], message).sort()).toEqual(["admin-b", "admin-c"]);
+  });
+
+  it("a legacy admin message with no senderId fans out to nobody (conservative, matches isMessageFromOtherAdmin)", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "admin", channel: "internal_staff" });
+    expect(resolveUnreadFanoutRecipientIds(["admin-a", "admin-b"], message)).toEqual([]);
+  });
+
+  it("deduplicates a caller-supplied admin roster with a repeated id", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver" });
+    expect(resolveUnreadFanoutRecipientIds(["admin-a", "admin-a", "admin-b"], message).sort()).toEqual(["admin-a", "admin-b"]);
+  });
+});
+
+describe("planUnreadFanout", () => {
+  it("builds one full record per recipient, embedding the exact message snapshot", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", channel: "driver_admin", text: "hello" });
+    const records = planUnreadFanout(["admin-a", "admin-b"], message, "2026-01-02T00:00:00Z");
+
+    expect(records).toHaveLength(2);
+    expect(records.map((r) => r.id).sort()).toEqual([
+      buildAdminChatUnreadRecordId("admin-a", "m1"),
+      buildAdminChatUnreadRecordId("admin-b", "m1"),
+    ].sort());
+    const forA = records.find((r) => r.adminId === "admin-a")!;
+    expect(forA.messageId).toBe("m1");
+    expect(forA.shipmentId).toBe("ship-A");
+    expect(forA.channel).toBe("driver_admin");
+    expect(forA.timestamp).toBe(message.timestamp);
+    expect(forA.createdAt).toBe("2026-01-02T00:00:00Z");
+    expect(forA.message).toEqual(message);
+  });
+
+  it("is idempotent: planning the same message twice yields the same record ids (a retry is a same-content overwrite, never a duplicate)", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver" });
+    const first = planUnreadFanout(["admin-a", "admin-b"], message, "2026-01-02T00:00:00Z");
+    const second = planUnreadFanout(["admin-a", "admin-b"], message, "2026-01-02T00:00:00Z");
+    expect(second.map((r) => r.id).sort()).toEqual(first.map((r) => r.id).sort());
+  });
+
+  it("produces zero records for a legacy senderId-less admin message (nobody eligible)", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "admin", channel: "internal_staff" });
+    expect(planUnreadFanout(["admin-a", "admin-b"], message, "2026-01-02T00:00:00Z")).toEqual([]);
+  });
+});
+
+describe("selectUnreadMessagesFromRecords (GET /api/chat/unread's response shaping)", () => {
+  function record(overrides: Partial<AdminChatUnreadRecord> & Pick<AdminChatUnreadRecord, "id" | "adminId" | "message">): AdminChatUnreadRecord {
+    return {
+      messageId: overrides.message.id,
+      shipmentId: overrides.message.shipmentId,
+      channel: overrides.message.channel,
+      timestamp: overrides.message.timestamp,
+      createdAt: overrides.message.timestamp,
+      ...overrides,
+    };
+  }
+
+  it("unwraps this admin's records into their embedded ChatMessage snapshots", () => {
+    const m1 = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver" });
+    const records = [record({ id: buildAdminChatUnreadRecordId("admin-a", "m1"), adminId: "admin-a", message: m1 })];
+    expect(selectUnreadMessagesFromRecords(records, "admin-a")).toEqual([m1]);
+  });
+
+  it("Admin A reading a message does not affect Admin B's still-unread record for the same message (per-admin, no cross-admin leakage)", () => {
+    const m1 = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver" });
+    // Admin A already called /chat/seen for this message — its record was
+    // deleted server-side, so only Admin B's record still exists.
+    const records = [record({ id: buildAdminChatUnreadRecordId("admin-b", "m1"), adminId: "admin-b", message: m1 })];
+
+    expect(selectUnreadMessagesFromRecords(records, "admin-a")).toEqual([]);
+    expect(selectUnreadMessagesFromRecords(records, "admin-b")).toEqual([m1]);
+  });
+
+  it("defense in depth: never returns a record whose adminId does not match the viewer, even if one slips into the candidate list", () => {
+    const m1 = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver" });
+    const records = [record({ id: buildAdminChatUnreadRecordId("admin-b", "m1"), adminId: "admin-b", message: m1 })];
+    expect(selectUnreadMessagesFromRecords(records, "admin-a")).toEqual([]);
+  });
+
+  it("defense in depth: excludes a record for the viewer's own message even if one somehow exists", () => {
+    const ownMessage = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "admin", senderId: "admin-a", channel: "internal_staff" });
+    const records = [record({ id: buildAdminChatUnreadRecordId("admin-a", "m1"), adminId: "admin-a", message: ownMessage })];
+    expect(selectUnreadMessagesFromRecords(records, "admin-a")).toEqual([]);
+  });
+});
+
+describe("buildUnreadClearFilters (POST /chat/seen's adminChatUnread scope — no cross-admin/shipment/channel leakage)", () => {
+  it("scopes to this admin + shipment only when no channel restriction applies", () => {
+    expect(buildUnreadClearFilters("admin-a", "ship-A", null)).toEqual([
+      { field: "adminId", op: "==", value: "admin-a" },
+      { field: "shipmentId", op: "==", value: "ship-A" },
+    ]);
+  });
+
+  it("adds the channel restriction when one applies", () => {
+    expect(buildUnreadClearFilters("admin-a", "ship-A", "driver_admin")).toEqual([
+      { field: "adminId", op: "==", value: "admin-a" },
+      { field: "shipmentId", op: "==", value: "ship-A" },
+      { field: "channel", op: "==", value: "driver_admin" },
+    ]);
+  });
+
+  it("combined with applyMemoryFilters, clears only this admin's records in the exact shipment+channel scope — never another admin's, shipment's, or channel's", () => {
+    const m1 = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", channel: "driver_admin" });
+    const records: AdminChatUnreadRecord[] = [
+      { id: "r1", adminId: "admin-a", messageId: "m1", shipmentId: "ship-A", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp },
+      { id: "r2", adminId: "admin-b", messageId: "m1", shipmentId: "ship-A", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // wrong admin
+      { id: "r3", adminId: "admin-a", messageId: "m2", shipmentId: "ship-B", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // wrong shipment
+      { id: "r4", adminId: "admin-a", messageId: "m3", shipmentId: "ship-A", channel: "client_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // wrong channel
+    ];
+    const filters = buildUnreadClearFilters("admin-a", "ship-A", "driver_admin");
+    expect(applyMemoryFilters(records, filters).map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("with no channel restriction, still never crosses into another admin or shipment", () => {
+    const m1 = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", channel: "driver_admin" });
+    const records: AdminChatUnreadRecord[] = [
+      { id: "r1", adminId: "admin-a", messageId: "m1", shipmentId: "ship-A", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp },
+      { id: "r2", adminId: "admin-a", messageId: "m2", shipmentId: "ship-A", channel: "client_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // same admin+shipment, different channel — still cleared
+      { id: "r3", adminId: "admin-b", messageId: "m1", shipmentId: "ship-A", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // wrong admin
+      { id: "r4", adminId: "admin-a", messageId: "m3", shipmentId: "ship-B", channel: "driver_admin", timestamp: m1.timestamp, message: m1, createdAt: m1.timestamp }, // wrong shipment
+    ];
+    const filters = buildUnreadClearFilters("admin-a", "ship-A", null);
+    expect(applyMemoryFilters(records, filters).map((r) => r.id).sort()).toEqual(["r1", "r2"]);
+  });
+});
+
+describe("adminChatUnread end-to-end scenario (write fan-out -> seen deletion -> read), memory-fallback parity", () => {
+  function toRecords(message: ChatMessage, recipientAdminIds: string[]): AdminChatUnreadRecord[] {
+    return planUnreadFanout(recipientAdminIds, message, message.timestamp);
+  }
+
+  it("Admin A reads a message; Admin B still sees it unread", () => {
+    const message = chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", channel: "driver_admin" });
+    let store = toRecords(message, ["admin-a", "admin-b"]);
+
+    // Admin A calls /chat/seen for ship-A/driver_admin — its own records in that scope are deleted.
+    const clearFilters = buildUnreadClearFilters("admin-a", "ship-A", "driver_admin");
+    const toDelete = new Set(applyMemoryFilters(store, clearFilters).map((r) => r.id));
+    store = store.filter((r) => !toDelete.has(r.id));
+
+    expect(selectUnreadMessagesFromRecords(store.filter((r) => r.adminId === "admin-a"), "admin-a")).toEqual([]);
+    expect(selectUnreadMessagesFromRecords(store.filter((r) => r.adminId === "admin-b"), "admin-b")).toEqual([message]);
+  });
+
+  it("cursor pagination (chunked walk) never skips or duplicates one admin's unread records, matching a single-page fetch", async () => {
+    const messages = [
+      chatMessage({ id: "m1", shipmentId: "ship-A", sender: "driver", timestamp: "2026-01-01T00:00:00Z" }),
+      chatMessage({ id: "m2", shipmentId: "ship-B", sender: "client", timestamp: "2026-01-01T00:05:00Z" }),
+      chatMessage({ id: "m3", shipmentId: "ship-A", sender: "admin", senderId: "admin-b", channel: "internal_staff", timestamp: "2026-01-01T00:10:00Z" }),
+    ];
+    const records = messages.flatMap((m) => toRecords(m, ["admin-a", "admin-b"]));
+    const forAdminA = applyMemoryFilters(records, [{ field: "adminId", op: "==", value: "admin-a" }]);
+
+    function makeFetcher(items: AdminChatUnreadRecord[], pageLimit: number) {
+      return async (cursor: PageCursor | null): Promise<DescendingPageFetchResult<AdminChatUnreadRecord>> => {
+        const page = paginateDescending(items, (i) => i.timestamp, (i) => i.id, { cursor, limit: pageLimit });
+        return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
+      };
+    }
+
+    const viaOnePage = await walkAllDescendingPages(makeFetcher(forAdminA, 50));
+    const viaChunkedWalk = await walkAllDescendingPages(makeFetcher(forAdminA, 1));
+
+    expect(viaChunkedWalk).toHaveLength(viaOnePage.length);
+    expect(new Set(viaChunkedWalk.map((r) => r.id))).toEqual(new Set(viaOnePage.map((r) => r.id)));
+    expect(selectUnreadMessagesFromRecords(viaOnePage, "admin-a").map((m) => m.id).sort()).toEqual(["m1", "m2", "m3"]);
   });
 });
 
