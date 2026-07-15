@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "production": "etir-by-maras-group",
+    "default": "etir-by-maras-group"
+  }
+}
