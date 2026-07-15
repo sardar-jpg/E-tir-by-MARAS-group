@@ -45,6 +45,7 @@ import {
   shouldNotifyChatParty,
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
+  isValidChatRole,
   shouldSaveChatFileAsShipmentDocument
 } from "./src/lib/chatVisibility";
 import { validateChatSendPayload } from "./src/lib/chatMessageValidation";
@@ -4181,8 +4182,8 @@ async function startServer() {
     try {
       const shipmentId = req.params.id;
       const { viewer, channel: requestedChannel } = req.body; // viewer: 'admin' | 'driver' | 'client'
-      if (!viewer) {
-        return res.status(400).json({ error: "Viewer is required ('admin' or 'driver')" });
+      if (!isValidChatRole(viewer)) {
+        return res.status(400).json({ error: "Viewer is required and must be 'admin', 'driver', or 'client'" });
       }
       if (requestedChannel === "internal_staff" && !canAccessInternalStaffChannel(req.session!.role)) {
         return res.status(403).json({ error: "You do not have permission to access this channel." });

@@ -29,6 +29,20 @@ import type { ChatChannel } from "../types";
 
 export type ChatRole = "admin" | "driver" | "client";
 
+const CHAT_ROLES: readonly ChatRole[] = ["admin", "driver", "client"];
+
+/**
+ * Server-side guard for any endpoint that accepts a client-supplied
+ * `viewer`/role value (currently POST /api/shipments/:id/chat/seen). An
+ * unrecognized value must never reach planSeenWrites: its `sender !==
+ * viewer` write rule would then treat *every* message as unseen by that
+ * bogus viewer and mark them all seen, so this has to reject before any
+ * Firestore read/write — not just coerce or default the value.
+ */
+export function isValidChatRole(value: unknown): value is ChatRole {
+  return typeof value === "string" && (CHAT_ROLES as readonly string[]).includes(value);
+}
+
 /**
  * Server-side GET filter for /api/shipments/:id/chat. `requestedChannel`
  * is only honored for admins (query param), never for driver/client —

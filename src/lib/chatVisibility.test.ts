@@ -8,6 +8,7 @@ import {
   isChatNotificationVisibleToRole,
   canAccessInternalStaffChannel,
   shouldSaveChatFileAsShipmentDocument,
+  isValidChatRole,
 } from "./chatVisibility";
 import type { ChatChannel } from "../types";
 
@@ -202,6 +203,28 @@ describe("canAccessInternalStaffChannel", () => {
     expect(canAccessInternalStaffChannel("admin")).toBe(true);
     expect(canAccessInternalStaffChannel("driver")).toBe(false);
     expect(canAccessInternalStaffChannel("client")).toBe(false);
+  });
+});
+
+describe("isValidChatRole", () => {
+  it("accepts each of the three real chat roles", () => {
+    expect(isValidChatRole("admin")).toBe(true);
+    expect(isValidChatRole("driver")).toBe(true);
+    expect(isValidChatRole("client")).toBe(true);
+  });
+
+  it("rejects an unrecognized role string", () => {
+    expect(isValidChatRole("superadmin")).toBe(false);
+    expect(isValidChatRole("Admin")).toBe(false); // case-sensitive — not the same value planSeenWrites compares against
+    expect(isValidChatRole("")).toBe(false);
+  });
+
+  it("rejects missing/malformed values without throwing", () => {
+    expect(isValidChatRole(undefined)).toBe(false);
+    expect(isValidChatRole(null)).toBe(false);
+    expect(isValidChatRole(123)).toBe(false);
+    expect(isValidChatRole({})).toBe(false);
+    expect(isValidChatRole(["admin"])).toBe(false);
   });
 });
 
