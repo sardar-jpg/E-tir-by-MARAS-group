@@ -21,6 +21,7 @@ import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, comput
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { deleteFirebaseIdentityWithRetry, driverAccountDeletionCopy, normalizeDriverAccountDeletionServerSignal, resolveDriverAccountDeletionOutcome, type DriverAccountDeletionState } from "../lib/driverAccountDeletion";
+import { accountDeletionCopy } from "../lib/accountDeletion";
 import { useIsMobile } from "../hooks/useIsMobile";
 import DriverBottomNav from "./driver/DriverBottomNav";
 import NotificationBell from "./driver/NotificationBell";
@@ -412,6 +413,19 @@ export default function DriverApplication({
   // no live Firebase session to retry with itself. Only ever set from a
   // server response — never fabricated client-side.
   const [pendingFirebaseDeletionToken, setPendingFirebaseDeletionToken] = useState<string | null>(null);
+  // Apple Guideline 5.1.1(v) consolidation: DELETE /api/account requires
+  // the caller's current password for any account that has one on file —
+  // a Google Sign-In driver (auth.currentUser truthy) never set a local
+  // password at all, so the field is only shown/required for username/
+  // password drivers. This step's own failure states (wrong/missing
+  // password, rate limited, service unavailable) are tracked separately
+  // from driverDeletionState above, which continues to only describe the
+  // Firebase-identity step exactly as before — this new step always runs
+  // first and never touches that state machine.
+  const [driverDeleteCurrentPassword, setDriverDeleteCurrentPassword] = useState("");
+  const [driverDeletePasswordStepError, setDriverDeletePasswordStepError] = useState<
+    null | "missing" | "incorrect" | "rate_limited" | "service_unavailable" | "generic"
+  >(null);
 
   const applyDriverDeletionOutcome = (
     outcome: ReturnType<typeof resolveDriverAccountDeletionOutcome>,
@@ -459,20 +473,32 @@ export default function DriverApplication({
     if (!understandDriverDelete) return;
     if (isDeletingDriverAccount) return; // in-flight guard — no double-submit
     setIsDeletingDriverAccount(true);
-    const targetId = loggedInDriverId || selectedDriverId;
+    setDriverDeletePasswordStepError(null);
     try {
       let serverBody: unknown = {};
       if (!backendDriverRecordDeleted) {
-        const response = await apiFetch(`/api/drivers/${targetId}`, {
-          method: "DELETE"
+        // Apple Guideline 5.1.1(v) consolidation: DELETE /api/account
+        // derives the target from the verified session — never a
+        // client-supplied id — so this always deletes the caller's own
+        // driver account, whatever targetId used to be passed as.
+        const response = await apiFetch("/api/account", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currentPassword: driverDeleteCurrentPassword }),
         });
         if (!response.ok) {
-          setDriverDeletionState("backend_failure");
-          triggerToast(driverAccountDeletionCopy(lang).backendFailure);
+          if (response.status === 400) setDriverDeletePasswordStepError("missing");
+          else if (response.status === 401) setDriverDeletePasswordStepError("incorrect");
+          else if (response.status === 429) setDriverDeletePasswordStepError("rate_limited");
+          else if (response.status === 503) setDriverDeletePasswordStepError("service_unavailable");
+          else setDriverDeletePasswordStepError("generic");
           return;
         }
         serverBody = await response.json().catch(() => ({}));
         setBackendDriverRecordDeleted(true);
+        // Never keep a submitted password in memory longer than the one
+        // request that needed it.
+        setDriverDeleteCurrentPassword("");
       }
 
       const server = normalizeDriverAccountDeletionServerSignal(serverBody);
@@ -492,8 +518,13 @@ export default function DriverApplication({
       // confirmed done — an exception past that point is a Firebase-identity
       // problem, not a backend one, so it must not be mislabeled as "your
       // account was not deleted".
-      setDriverDeletionState(backendDriverRecordDeleted ? "firebase_identity_deletion_failed" : "backend_failure");
-      triggerToast("❌ Purge action failed. Check connection.");
+      if (backendDriverRecordDeleted) {
+        setDriverDeletionState("firebase_identity_deletion_failed");
+        triggerToast(driverAccountDeletionCopy(lang).firebaseIdentityDeletionFailed);
+      } else {
+        setDriverDeletePasswordStepError("generic");
+        triggerToast(accountDeletionCopy(lang).networkFailureError);
+      }
     } finally {
       setIsDeletingDriverAccount(false);
     }
@@ -2754,6 +2785,8 @@ export default function DriverApplication({
                           setUnderstandDriverDelete(false);
                           setDriverDeletionState("idle");
                           setBackendDriverRecordDeleted(false);
+                          setDriverDeletePasswordStepError(null);
+                          setDriverDeleteCurrentPassword("");
                         }}
                         className="w-full py-3 bg-red-950/15 hover:bg-red-950/35 border border-red-900/40 hover:border-red-500/40 text-red-400 font-extrabold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer"
                       >
@@ -2775,8 +2808,41 @@ export default function DriverApplication({
                                   ? "هذا الإجراء نهائي ولا يمكن التراجع عنه. سيتم مسح تفويض الشاحنة وتاريخ السفر بالكامل من النظم."
                                   : "This cannot be undone. Your active manifests, historical trips, and fleet registry authorization will be permanently wiped.")}
                             </p>
+                            <p className="text-[9.5px] text-slate-500 leading-tight mt-1.5 pt-1.5 border-t border-slate-900">
+                              {accountDeletionCopy(lang).privacyNotice}
+                            </p>
                           </div>
                         </div>
+
+                        {!auth.currentUser && !backendDriverRecordDeleted && (
+                          <div className="space-y-1">
+                            <label className="text-[9px] text-slate-500 block text-left font-black tracking-wider uppercase font-mono">
+                              {accountDeletionCopy(lang).passwordLabel}
+                            </label>
+                            <input
+                              type="password"
+                              autoComplete="current-password"
+                              value={driverDeleteCurrentPassword}
+                              onChange={(e) => setDriverDeleteCurrentPassword(e.target.value)}
+                              placeholder={accountDeletionCopy(lang).passwordPlaceholder}
+                              className="w-full p-2.5 bg-slate-900 border border-slate-800 text-xs text-slate-100 rounded-xl outline-none font-mono focus:border-red-500 transition-all text-left"
+                            />
+                          </div>
+                        )}
+
+                        {driverDeletePasswordStepError && (
+                          <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-2.5 text-[9.5px] text-red-300 leading-tight text-left">
+                            {driverDeletePasswordStepError === "missing"
+                              ? accountDeletionCopy(lang).missingPasswordError
+                              : driverDeletePasswordStepError === "incorrect"
+                              ? accountDeletionCopy(lang).incorrectPasswordError
+                              : driverDeletePasswordStepError === "rate_limited"
+                              ? accountDeletionCopy(lang).rateLimitedError
+                              : driverDeletePasswordStepError === "service_unavailable"
+                              ? accountDeletionCopy(lang).serviceUnavailableError
+                              : accountDeletionCopy(lang).genericFailureError}
+                          </div>
+                        )}
 
                         <label className="flex items-start gap-2.5 cursor-pointer text-[10.5px] font-bold text-slate-400 hover:text-white">
                           <input

@@ -55,6 +55,13 @@ import { resolveShipmentListQueryScopes } from "./src/lib/shipmentListAccess";
 import { SHIPMENT_STATUS_GROUPS, zeroedShipmentStatusGroupCounts } from "./src/lib/shipmentStatusGroups";
 import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
 import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
+import {
+  isSelfDeletableRole,
+  resolveAccountCollectionName,
+  resolveAccountDeletionLookupOutcome,
+  checkPasswordConfirmation,
+  type SelfDeletableRole,
+} from "./src/lib/accountDeletion";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
@@ -261,6 +268,12 @@ let memoryStore: {
   // writes to needs an entry here, or a memory-fallback write to it
   // silently no-ops.
   adminChatUnread: AdminChatUnreadRecord[];
+  // Apple Guideline 5.1.1(v) account-deletion follow-up: one document per
+  // driver (id `driver_<driverId>`) whose Firebase Auth identity deletion
+  // is still unresolved after DELETE /api/account's own attempt — see
+  // that route's own comments. Same PR #44 lesson as pushTokens below:
+  // needs an entry here or a memory-fallback write to it silently no-ops.
+  accountDeletionAudit: any[];
   // PR #44: was missing from this store entirely — every read/write
   // against the "pushTokens" collection (register, delete, and the
   // admin-token lookup pushNotification does before sending) resolved
@@ -299,6 +312,7 @@ function getMemoryStore() {
       pushTokens: [],
       adminNotificationPreferences: [],
       adminChatUnread: [],
+      accountDeletionAudit: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -3271,6 +3285,51 @@ async function startServer() {
     }
   }, LOGIN_ATTEMPT_WINDOW_MS);
 
+  // Apple Guideline 5.1.1(v) — DELETE /api/account's own sensitive-action
+  // rate limiter, same Map-based sliding-window pattern as
+  // checkLoginRateLimit above (same single-instance-only caveat — see its
+  // header comment). Keyed by the AUTHENTICATED session id, not a
+  // client-supplied username: unlike login, the caller here already holds
+  // a valid session, so this exists specifically to bound how many
+  // `currentPassword` guesses a stolen/leaked bearer token can make
+  // against the real account's password before the destructive delete can
+  // ever proceed — not to rate-limit login attempts, which
+  // checkLoginRateLimit already covers separately.
+  const ACCOUNT_DELETION_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  const ACCOUNT_DELETION_MAX_ATTEMPTS = 5;
+  const accountDeletionAttempts = new Map<string, { count: number; windowStart: number }>();
+
+  function checkAccountDeletionRateLimit(sessionId: string): { allowed: boolean; retryAfterSeconds?: number } {
+    const now = Date.now();
+    const entry = accountDeletionAttempts.get(sessionId);
+
+    if (!entry || now - entry.windowStart > ACCOUNT_DELETION_ATTEMPT_WINDOW_MS) {
+      accountDeletionAttempts.set(sessionId, { count: 1, windowStart: now });
+      return { allowed: true };
+    }
+
+    if (entry.count >= ACCOUNT_DELETION_MAX_ATTEMPTS) {
+      const retryAfterSeconds = Math.ceil((ACCOUNT_DELETION_ATTEMPT_WINDOW_MS - (now - entry.windowStart)) / 1000);
+      return { allowed: false, retryAfterSeconds };
+    }
+
+    entry.count += 1;
+    return { allowed: true };
+  }
+
+  function clearAccountDeletionRateLimit(sessionId: string): void {
+    accountDeletionAttempts.delete(sessionId);
+  }
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of accountDeletionAttempts.entries()) {
+      if (now - entry.windowStart > ACCOUNT_DELETION_ATTEMPT_WINDOW_MS) {
+        accountDeletionAttempts.delete(key);
+      }
+    }
+  }, ACCOUNT_DELETION_ATTEMPT_WINDOW_MS);
+
   /**
    * For any endpoint shaped /api/shipments/:id/... — verifies the session
    * is either an admin, or a driver/client who actually owns that specific
@@ -5776,6 +5835,21 @@ async function startServer() {
         }
       }
 
+      // Review follow-up: keep DELETE /api/account's own unresolved-
+      // identity audit record (accountDeletionAudit/driver_<id>, only
+      // ever relevant when THAT endpoint originally issued this token) in
+      // sync — this is the one place that resolves it, since a later
+      // idempotent retry of DELETE /api/account has no other way to learn
+      // this identity is now actually gone. Best-effort: this endpoint's
+      // own success/failure response above is unaffected either way.
+      if (firebaseAuthDeleted) {
+        try {
+          await deleteDoc(doc(db, "accountDeletionAudit", `driver_${payload.driverId}`));
+        } catch (auditCleanupErr) {
+          console.warn("[POST /api/drivers/finish-firebase-deletion] Could not clear resolved Firebase-identity audit record (non-fatal):", auditCleanupErr);
+        }
+      }
+
       res.json({
         success: true,
         driverRecordDeleted: true,
@@ -5822,6 +5896,342 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to delete client" });
+    }
+  });
+
+  /**
+   * Apple Guideline 5.1.1(v) — the one consolidated, self-service account
+   * deletion endpoint for every role that can create/own an account in
+   * this app (driver, client/customer, staff/admin). Identity and role
+   * come ONLY from the verified session (req.session!.id / .role) — there
+   * is no :id route param and no body field is ever consulted to choose
+   * the delete target, so this can never be used to delete another
+   * account, regardless of what a caller puts in the request body.
+   *
+   * This is deliberately separate from — and does not change — DELETE
+   * /api/drivers/:id, DELETE /api/clients/:id, and DELETE /api/admins/:id,
+   * which remain the admin-management paths for removing SOMEONE ELSE's
+   * account from a roster. Reuses those routes' own already-tested
+   * building blocks instead of duplicating them: selectPushTokensForAccountDeletion
+   * (pushTokenAccess.ts) for push-token cleanup, and — for drivers only —
+   * planServerFirebaseIdentityDeletion/hasVerifiedFirebaseUid/
+   * isFirebaseUserNotFoundError/signPendingFirebaseIdentityDeletionToken
+   * (driverAccountDeletion.ts / auth.ts) for the exact same Firebase Auth
+   * identity cleanup + retry-token flow DELETE /api/drivers/:id already
+   * uses — see that route's own comments for the full rationale, in
+   * particular why the Firestore delete always happens before attempting
+   * the Firebase Auth identity delete.
+   *
+   * Ordering, top to bottom, and why:
+   *  1. Reject unknown/unsupported roles outright (defense in depth —
+   *     requireAuth already guarantees SOME valid role, but only
+   *     driver/client/admin are self-deletable here).
+   *  2. Pre-delete lookup. Any failure OTHER than "document doesn't
+   *     exist" (a genuine read error, not a clean not-found) aborts with
+   *     503 rather than guessing — proceeding without being able to
+   *     verify owner-protection or the stored password would be exactly
+   *     the kind of security check this endpoint exists to enforce, so a
+   *     flaky read must never be treated as "safe to proceed."
+   *  3. Owner-protection (resolveAccountDeletionLookupOutcome) —
+   *     evaluated BEFORE the "already deleted" idempotency shortcut,
+   *     specifically because the env-configured root owner has no
+   *     Firestore `admins` document at all (see accountDeletion.ts's own
+   *     header comment): checking idempotency first would let that
+   *     account's delete call report false success while doing nothing.
+   *  4. Idempotent-retry shortcut: a record that's already gone (and
+   *     isn't the protected owner) is reported as success without
+   *     re-attempting anything destructive — a retried/duplicate call is
+   *     always safe.
+   *  5. Rate limit, then password confirmation (checkPasswordConfirmation
+   *     — a no-op for a Google-only driver with no stored password at
+   *     all; that account's "recent authentication" proof is the
+   *     existing client-side Firebase reauthentication flow instead).
+   *  6. The actual destructive work: delete the profile record, then
+   *     best-effort (never fatal to the overall request) push-token and
+   *     (admin only) notification-preference cleanup, then — driver only
+   *     — the Firebase Auth identity.
+   *
+   * What is deliberately NOT touched: shipments, cost statements, invoices,
+   * activity logs, and any other operational/accounting record. Those
+   * already never embed this account's login credentials (password, email,
+   * phone) — only an operational label (e.g. a shipment's cached
+   * assignedDriverName, or its companyName) that remains meaningful and
+   * necessary for the surviving business record (other staff at the same
+   * client company continue operating against the same shipment history;
+   * a completed shipment's accounting trail must still show who
+   * transported it) once this account's own login is gone. Mutating those
+   * documents on every account deletion would itself be the kind of
+   * broad, hard-to-verify, cross-document write this task's own review
+   * guidance warns against — retaining them completely unmodified is the
+   * conservative, explicitly-permitted choice ("may be retained... where
+   * required by law or legitimate business obligations").
+   *
+   * Known architecture limitation — session invalidation: this app's
+   * session tokens (signSessionToken/verifySessionToken, src/lib/auth.ts)
+   * are stateless, signed JWTs with no server-side revocation store —
+   * attachSession/requireAuth verify a token's signature and `expiresAt`
+   * only, never checking that the underlying account record still
+   * exists. There is deliberately no new revocation-list feature added
+   * here to close that gap: it would be a shared-authentication-
+   * infrastructure change touching every route in this file, well beyond
+   * this endpoint's own scope, and risks its own regressions. What DOES
+   * happen instead: (1) the profile record this token's role/id resolves
+   * to is genuinely gone, so every OTHER route that re-reads it (most
+   * do, e.g. requireShipmentAccess) fails naturally once the token is
+   * reused; (2) the client-side flow (DriverApplication.tsx,
+   * ClientDashboard.tsx, AdminPanel.tsx) clears its locally stored token
+   * and signs out immediately on success; (3) the token's own bounded
+   * SESSION_TTL_MS is a hard upper limit on how long ANY leaked/reused
+   * token — deleted account or not — remains cryptographically valid at
+   * all. A deleted account's token is therefore inert in practice well
+   * before natural expiry, not hard-invalidated the instant this request
+   * returns.
+   */
+  app.delete("/api/account", requireAuth, async (req, res) => {
+    try {
+      const session = req.session!;
+      if (!isSelfDeletableRole(session.role)) {
+        return res.status(403).json({ error: "This account type cannot be deleted through the app." });
+      }
+      const role: SelfDeletableRole = session.role;
+      const collectionName = resolveAccountCollectionName(role);
+      const docRef = doc(db, collectionName, session.id);
+
+      let existingSnap: Awaited<ReturnType<typeof getDoc>>;
+      try {
+        existingSnap = await getDoc(docRef);
+      } catch (lookupErr) {
+        if (lookupErr instanceof ServiceUnavailableError) throw lookupErr;
+        console.error("[DELETE /api/account] Could not verify account record before deletion:", lookupErr);
+        throw new ServiceUnavailableError("Could not verify your account. Please try again.");
+      }
+
+      const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+      const recordExists = existingSnap.exists();
+      const existingRecord = recordExists ? (existingSnap.data() as any) : null;
+
+      const lookupOutcome = resolveAccountDeletionLookupOutcome({
+        role,
+        sessionId: session.id,
+        recordExists,
+        existingRecord,
+        ownerEmail,
+      });
+
+      if (lookupOutcome.ownerProtected) {
+        return res.status(403).json({
+          error: "This account is the platform's sole owner identity and cannot be deleted through the app. Every other account type can be deleted here in full.",
+          ownerProtected: true,
+        });
+      }
+
+      // Best-effort push-token cleanup — shared by both the idempotent
+      // "already deleted" path below and the real-deletion path further
+      // down, since a prior call could have deleted the profile record
+      // but failed partway through this step.
+      const cleanupPushTokens = async () => {
+        try {
+          const tokensSnap = await getDocs(collection(db, "pushTokens"));
+          const tokenRecords = tokensSnap.docs.map(t => ({ id: t.id, ...(t.data() as any) }));
+          const tokenIdsToDelete = selectPushTokensForAccountDeletion(tokenRecords, { id: session.id, role });
+          await Promise.all(tokenIdsToDelete.map(tokenId => deleteDoc(doc(db, "pushTokens", tokenId))));
+        } catch (tokenCleanupErr) {
+          console.warn("[DELETE /api/account] Push-token cleanup failed (non-fatal):", tokenCleanupErr);
+        }
+      };
+
+      // Review follow-up: admin-only, so also shared between both paths
+      // below for the same reason as cleanupPushTokens — a prior call
+      // could have deleted the admins/ profile record via THIS route (or
+      // via the separate admin-management DELETE /api/admins/:id, which
+      // never cleans this up at all) without this step ever completing.
+      const cleanupAdminNotificationPreferences = async () => {
+        if (role !== "admin") return;
+        try {
+          await deleteDoc(doc(db, "adminNotificationPreferences", session.id));
+        } catch (prefCleanupErr) {
+          console.warn("[DELETE /api/account] Notification-preference cleanup failed (non-fatal):", prefCleanupErr);
+        }
+      };
+
+      // Review follow-up: durable record of an UNRESOLVED driver Firebase
+      // Auth identity deletion — see the write site below for the full
+      // rationale. Doc id is role-prefixed defensively (only ever written
+      // for role: "driver", but keeps this collection's key scheme
+      // unambiguous if a future role ever needed the same tracking).
+      const firebaseDeletionAuditRef = doc(db, "accountDeletionAudit", `driver_${session.id}`);
+
+      if (lookupOutcome.alreadyDeleted) {
+        await cleanupPushTokens();
+        await cleanupAdminNotificationPreferences();
+
+        let hadFirebaseIdentity = false;
+        let firebaseAuthDeleted = true;
+        let pendingFirebaseDeletionToken: string | undefined;
+
+        if (role === "driver") {
+          // Review follow-up (critical): the Firestore driver record is
+          // already gone on this idempotent-retry path, so there is no
+          // `firebaseUid` field left to re-derive an answer from — without
+          // this audit lookup, this branch used to unconditionally claim
+          // `firebaseAuthDeleted: true`, which is only actually true for
+          // the common case (the first call's Firebase step also
+          // succeeded). If that first call's Firebase step instead failed
+          // or was never attempted (adminAuth down, a transient
+          // deleteUser() error) and the client then lost its
+          // pendingFirebaseDeletionToken (app killed/restarted) before
+          // ever retrying via POST /api/drivers/finish-firebase-deletion,
+          // a naive retry of THIS endpoint would falsely report the
+          // Firebase Auth identity as deleted — exactly the "surviving
+          // Auth identity reported as complete deletion" failure this
+          // whole feature exists to prevent. The audit doc (written below,
+          // only when unresolved) is this endpoint's only way to answer
+          // honestly here; its absence is real proof of "nothing left
+          // unresolved," not just an assumption.
+          try {
+            const auditSnap = await getDoc(firebaseDeletionAuditRef);
+            if (auditSnap.exists()) {
+              const audit = auditSnap.data() as { firebaseUid?: string };
+              hadFirebaseIdentity = true;
+              firebaseAuthDeleted = false;
+              if (audit.firebaseUid) {
+                const now = Date.now();
+                pendingFirebaseDeletionToken = signPendingFirebaseIdentityDeletionToken({
+                  driverId: session.id,
+                  firebaseUid: audit.firebaseUid,
+                  issuedAt: now,
+                  expiresAt: now + PENDING_FIREBASE_DELETION_TOKEN_TTL_MS,
+                });
+              }
+            }
+          } catch (auditLookupErr) {
+            if (auditLookupErr instanceof ServiceUnavailableError) throw auditLookupErr;
+            // Conservative: an unreadable audit record must never be
+            // treated as "confirmed nothing left to do" — same principle
+            // as planServerFirebaseIdentityDeletion's own driverLookupFailed
+            // handling.
+            console.warn("[DELETE /api/account] Could not verify prior Firebase-identity deletion audit (assuming unresolved):", auditLookupErr);
+            hadFirebaseIdentity = true;
+            firebaseAuthDeleted = false;
+          }
+        }
+
+        return res.json({
+          success: true,
+          accountRecordDeleted: true,
+          hadFirebaseIdentity,
+          firebaseAuthDeleted,
+          ...(pendingFirebaseDeletionToken ? { pendingFirebaseDeletionToken } : {}),
+        });
+      }
+
+      const rateLimit = checkAccountDeletionRateLimit(session.id);
+      if (!rateLimit.allowed) {
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds || 0));
+        return res.status(429).json({
+          error: `Too many attempts. Please try again in ${Math.ceil((rateLimit.retryAfterSeconds || 0) / 60)} minute(s).`,
+        });
+      }
+
+      const passwordCheck = checkPasswordConfirmation(role, existingRecord, req.body?.currentPassword, verifyPassword);
+      if (!passwordCheck.ok) {
+        if (passwordCheck.status === 400) {
+          return res.status(400).json({ error: "Your current password is required to delete your account." });
+        }
+        return res.status(401).json({ error: "Current password is incorrect." });
+      }
+      clearAccountDeletionRateLimit(session.id);
+
+      await deleteDoc(docRef);
+      await cleanupPushTokens();
+      await cleanupAdminNotificationPreferences();
+
+      let hadFirebaseIdentity = false;
+      let firebaseAuthDeleted = true;
+      let pendingFirebaseDeletionToken: string | undefined;
+
+      if (role === "driver") {
+        // Same planning/attempt logic as DELETE /api/drivers/:id — see
+        // that route's own comments. driverLookupFailed is always false
+        // here because a failed pre-delete lookup already aborted this
+        // request with 503 above, before reaching this point.
+        const plan = planServerFirebaseIdentityDeletion({
+          driverLookupFailed: false,
+          driver: existingRecord,
+          adminAuthAvailable: !!adminAuth,
+        });
+        hadFirebaseIdentity = plan.hadFirebaseIdentity;
+
+        if (!plan.hadFirebaseIdentity) {
+          firebaseAuthDeleted = true;
+        } else if (plan.shouldAttemptDeletion) {
+          firebaseAuthDeleted = true;
+          try {
+            await adminAuth!.deleteUser(existingRecord.firebaseUid);
+          } catch (fbErr: any) {
+            if (isFirebaseUserNotFoundError(fbErr?.code)) {
+              // Already gone — nothing left to do.
+            } else {
+              firebaseAuthDeleted = false;
+              console.error("[DELETE /api/account] Firebase Auth user deletion failed unexpectedly:", fbErr);
+            }
+          }
+        } else {
+          firebaseAuthDeleted = false;
+        }
+
+        if (!firebaseAuthDeleted && existingRecord?.firebaseUid) {
+          const now = Date.now();
+          pendingFirebaseDeletionToken = signPendingFirebaseIdentityDeletionToken({
+            driverId: session.id,
+            firebaseUid: existingRecord.firebaseUid,
+            issuedAt: now,
+            expiresAt: now + PENDING_FIREBASE_DELETION_TOKEN_TTL_MS,
+          });
+          // Durably record the unresolved state — see the idempotent-retry
+          // branch above for why this is what makes a later retry honest
+          // instead of falsely claiming success. Best-effort: if this
+          // write itself fails, the caller still gets today's real
+          // pendingFirebaseDeletionToken above and can finish via
+          // POST /api/drivers/finish-firebase-deletion immediately: only a
+          // LATER retry of this endpoint (after losing that token) would
+          // be affected, an already-degraded edge case.
+          try {
+            await setDoc(firebaseDeletionAuditRef, {
+              id: `driver_${session.id}`,
+              driverId: session.id,
+              firebaseUid: existingRecord.firebaseUid,
+              hadFirebaseIdentity: true,
+              firebaseAuthDeleted: false,
+              updatedAt: new Date().toISOString(),
+            });
+          } catch (auditWriteErr) {
+            console.warn("[DELETE /api/account] Could not persist unresolved-Firebase-identity audit record (non-fatal):", auditWriteErr);
+          }
+        } else if (firebaseAuthDeleted) {
+          // Fully resolved (or there was never an identity to begin with)
+          // — clear any stale audit record a PREVIOUS failed attempt may
+          // have left behind, so a future idempotent retry doesn't
+          // needlessly report this as still-unresolved.
+          try {
+            await deleteDoc(firebaseDeletionAuditRef);
+          } catch (auditCleanupErr) {
+            console.warn("[DELETE /api/account] Could not clear resolved Firebase-identity audit record (non-fatal):", auditCleanupErr);
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        accountRecordDeleted: true,
+        hadFirebaseIdentity,
+        firebaseAuthDeleted,
+        ...(pendingFirebaseDeletionToken ? { pendingFirebaseDeletionToken } : {}),
+      });
+    } catch (err) {
+      console.error(err);
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to delete account." });
     }
   });
 

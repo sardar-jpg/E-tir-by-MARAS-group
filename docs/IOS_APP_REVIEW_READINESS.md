@@ -369,18 +369,32 @@ Recommended reviewer coverage for this PR's submission:
   handed a live customer's data.
 - **Driver** — reuse the existing `applereviewer` pattern: dedicated,
   pre-approved, with a sample job assigned before submitting, every time.
-- **Admin** — the existing `sardar@maras.iq` super-admin account is
-  reasonable to keep using for review (Apple reviewers don't attempt
-  destructive actions), but if there's ever a concern about handing out
-  full super-admin credentials, create a dedicated `operation`-type admin
-  reviewer account instead (`src/lib/adminAccess.ts` — `operation` gets
-  Shipment Registry/Driver Alliance/GPS/Clients-Vendors but not
-  Accounts/Audit Logs/Team, which is plenty to demonstrate the app).
-- **Client Staff** — not necessary for review; Client Staff is
-  functionally identical to Client Owner from a reviewer's perspective
-  (same dashboard, same restrictions minus account self-deletion — see
-  `docs/PRODUCTION_DEPLOYMENT_CHECKLIST.md` §7). Only add if a reviewer
-  question specifically asks about it.
+- **Admin — DO NOT hand out `sardar@maras.iq` for review anymore.**
+  Superseded by the Apple Guideline 5.1.1(v) account-deletion fix
+  (`fix/apple-account-deletion-compliance`): `sardar@maras.iq` is the
+  platform's one env-configured owner identity, and
+  `isProtectedOwnerAccount`/`DELETE /api/account` deliberately refuse to
+  let it complete self-deletion (there is no other owner to hand the
+  platform to — see that PR's description for the full reasoning). The
+  old assumption above ("Apple reviewers don't attempt destructive
+  actions") no longer holds: 5.1.1(v) review explicitly involves
+  attempting in-app account deletion, and a reviewer who tries it on
+  `sardar@maras.iq` will hit a 403 with no way to complete it — exactly
+  the kind of outcome that can trigger this same rejection again. Create
+  a dedicated `operation`-type admin reviewer account instead
+  (`src/lib/adminAccess.ts` — `operation` gets Shipment Registry/Driver
+  Alliance/GPS/Clients-Vendors but not Accounts/Audit Logs/Team, plenty
+  to demonstrate the app) — every admin account created through the
+  app's own "Create Admin" flow is a normal, non-owner account and can
+  complete `DELETE /api/account` in full. Re-create this reviewer account
+  before each submission that needs one, since the reviewer may actually
+  delete it while testing.
+- **Client Staff** — same dashboard as Client Owner, and (as of the same
+  account-deletion PR) the SAME self-deletion capability too — Client
+  Staff and Client Owner are both session role `"client"` and
+  `DELETE /api/account` treats them identically. Not necessary to
+  dedicate separate reviewer coverage to; only add if a reviewer question
+  specifically asks about it.
 
 **Resolved (PR #85 follow-up):** the owner confirmed the dedicated Client
 reviewer account described above already exists in the real production

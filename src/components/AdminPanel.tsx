@@ -32,6 +32,7 @@ import type { ChatCenterFocus } from "./admin/ChatCenter";
 import PasswordInput from "./PasswordInput";
 import { apiFetch, safeGetItem, safeSetItem } from "../lib/api";
 import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics, canViewGpsTracking, canViewDriverRoster, canViewShipmentRegistry } from "../lib/adminAccess";
+import { accountDeletionCopy } from "../lib/accountDeletion";
 import { getAssignableDrivers, getCoreDriverSelectOptions } from "../lib/driverAccess";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
@@ -420,26 +421,55 @@ export default function AdminPanel({
   const [showAdminSelfDeleteConfirm, setShowAdminSelfDeleteConfirm] = useState(false);
   const [understandAdminSelfDelete, setUnderstandAdminSelfDelete] = useState(false);
   const [isDeletingAdminSelfAccount, setIsDeletingAdminSelfAccount] = useState(false);
+  // Apple Guideline 5.1.1(v) consolidation: calls DELETE /api/account (not
+  // DELETE /api/admins/me directly) — every non-owner admin has a stored
+  // password (POST /api/admins/change-password is the only way to set
+  // one, so every admin created through "Create Admin" has one from
+  // creation), which that endpoint now requires and verifies before
+  // proceeding. The env-configured owner is still shown this exact same
+  // control and confirmation flow — never hidden — but the SERVER, not
+  // the client, is what refuses to complete it, with a clear, honest,
+  // localized reason (ownerProtectedError below) rather than a dead-end
+  // "not available" message with no delete control ever reachable at all.
+  const [adminDeleteCurrentPassword, setAdminDeleteCurrentPassword] = useState("");
+  const [adminDeleteError, setAdminDeleteError] = useState<
+    null | "missing" | "incorrect" | "rate_limited" | "service_unavailable" | "owner_protected" | "generic" | "network"
+  >(null);
 
   const handleDeleteAdminSelfAccount = async () => {
     if (!understandAdminSelfDelete) return;
+    if (isDeletingAdminSelfAccount) return; // in-flight guard — no double-submit
     setIsDeletingAdminSelfAccount(true);
+    setAdminDeleteError(null);
     try {
-      const response = await apiFetch("/api/admins/me", { method: "DELETE" });
+      const response = await apiFetch("/api/account", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: adminDeleteCurrentPassword }),
+      });
       if (response.ok) {
-        triggerToast("🗑️ Your admin account was completely deleted.");
+        setAdminDeleteCurrentPassword("");
+        triggerToast(accountDeletionCopy(lang).successMessage);
+        setShowAdminSelfDeleteConfirm(false);
         setTimeout(() => {
-          if (typeof window !== "undefined") {
-            localStorage.removeItem("etir_session");
-            window.location.reload();
-          }
-        }, 1500);
+          if (onLogout) onLogout();
+        }, 1200);
+      } else if (response.status === 400) {
+        setAdminDeleteError("missing");
+      } else if (response.status === 401) {
+        setAdminDeleteError("incorrect");
+      } else if (response.status === 403) {
+        setAdminDeleteError("owner_protected");
+      } else if (response.status === 429) {
+        setAdminDeleteError("rate_limited");
+      } else if (response.status === 503) {
+        setAdminDeleteError("service_unavailable");
       } else {
-        triggerToast("❌ Failed to delete your admin account. Try again.");
+        setAdminDeleteError("generic");
       }
     } catch (err) {
       console.error(err);
-      triggerToast("❌ Could not reach the server. Please try again.");
+      setAdminDeleteError("network");
     } finally {
       setIsDeletingAdminSelfAccount(false);
     }
@@ -5266,39 +5296,61 @@ MARAS Group etir Center`;
                   </button>
                 </form>
               </div>
-
-              {/* Delete Account */}
-              <div className="bg-red-50/50 border border-red-100 rounded-xl p-5">
-                <h3 className="text-sm font-bold text-red-700 mb-1">
-                  {lang === 'tr' ? 'Hesabımı Sil' : (lang === 'ar' ? 'حذف حسابي' : 'Delete My Account')}
-                </h3>
-                <p className="text-slate-500 text-xs mb-3">
-                  {lang === 'tr'
-                    ? 'Bu, yönetici hesabınızı kalıcı olarak silecektir. Bu işlem geri alınamaz.'
-                    : (lang === 'ar'
-                      ? 'سيؤدي هذا إلى حذف حساب المسؤول الخاص بك نهائياً. لا يمكن التراجع عن هذا الإجراء.'
-                      : 'This will permanently delete your own admin account. This action cannot be undone.')
-                  }
-                </p>
-                <button
-                  onClick={() => setShowAdminSelfDeleteConfirm(true)}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
-                >
-                  {lang === 'tr' ? 'Hesabımı Tamamen Sil' : (lang === 'ar' ? 'حذف حسابي نهائياً' : 'Permanently Delete My Account')}
-                </button>
-              </div>
             </>
           ) : (
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
               <p className="text-slate-400 text-xs italic">
                 {lang === 'tr'
-                  ? 'Süper yönetici şifresi ve hesabı bu uygulama üzerinden değiştirilemez veya silinemez, çünkü bu hesap uygulama içinden oluşturulmamıştır.'
+                  ? 'Süper yönetici şifresi bu uygulama üzerinden değiştirilemez, çünkü ortam değişkenleri üzerinden yapılandırılmıştır.'
                   : (lang === 'ar'
-                    ? 'لا يمكن تغيير كلمة مرور المسؤول الأعلى أو حذف حسابه عبر هذا التطبيق، لأن هذا الحساب لم يتم إنشاؤه من خلال التطبيق.'
-                    : 'The super-admin password and account cannot be changed or deleted through the app, since this account was not created through it.')}
+                    ? 'لا يمكن تغيير كلمة مرور المسؤول الأعلى عبر هذا التطبيق، لأنها مُهيأة عبر متغيرات البيئة.'
+                    : 'The super-admin password cannot be changed through the app, since it is configured via environment variables.')}
               </p>
             </div>
           )}
+
+          {/* Delete Account — Apple Guideline 5.1.1(v): shown to EVERY
+              admin type, including the env-configured owner. Hiding this
+              control entirely for a "super" session (the previous
+              behavior) is exactly what Apple's review flagged: if a
+              reviewer's demo/test account happens to be adminType
+              'super' (see DEMO_ACCOUNTS, server.ts — local/demo seeding
+              gives both seeded admin accounts adminType 'super'), a
+              hidden button reads as "this app has no in-app deletion,"
+              regardless of what a different account type could do. The
+              control and full two-step confirmation are always reachable
+              here; only the actual deletion outcome differs — a normal
+              admin's completes, the sole owner's is refused by the
+              SERVER with a clear, honest, localized reason
+              (accountDeletionCopy(lang).ownerProtectedError below), never
+              silently or by omission. */}
+          <div className="bg-red-50/50 border border-red-100 rounded-xl p-5">
+            <h3 className="text-sm font-bold text-red-700 mb-1">
+              {accountDeletionCopy(lang).sectionTitle}
+            </h3>
+            <p className="text-slate-500 text-xs mb-1">
+              {lang === 'tr'
+                ? 'Bu, yönetici hesabınızı kalıcı olarak silecektir. Bu işlem geri alınamaz.'
+                : (lang === 'ar'
+                  ? 'سيؤدي هذا إلى حذف حساب المسؤول الخاص بك نهائياً. لا يمكن التراجع عن هذا الإجراء.'
+                  : 'This will permanently delete your own admin account. This action cannot be undone.')
+              }
+            </p>
+            <p className="text-slate-400 text-[11px] mb-3">
+              {accountDeletionCopy(lang).privacyNotice}
+            </p>
+            <button
+              onClick={() => {
+                setShowAdminSelfDeleteConfirm(true);
+                setUnderstandAdminSelfDelete(false);
+                setAdminDeleteError(null);
+                setAdminDeleteCurrentPassword("");
+              }}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition cursor-pointer border-0"
+            >
+              {lang === 'tr' ? 'Hesabımı Tamamen Sil' : (lang === 'ar' ? 'حذف حسابي نهائياً' : 'Permanently Delete My Account')}
+            </button>
+          </div>
 
           {/* Admin Self-Delete Confirmation Modal */}
           {showAdminSelfDeleteConfirm && (
@@ -5319,10 +5371,44 @@ MARAS Group etir Center`;
                           ? "سيؤدي هذا الإجراء إلى حذف حساب المسؤول الخاص بك والوصول إلى لوحة التحكم بشكل نهائي. لا يمكن التراجع عن هذا الإجراء."
                           : "This will permanently delete your admin account and dashboard access. This action cannot be undone.")}
                     </p>
+                    <p className="text-[11px] text-slate-500 leading-relaxed mt-1.5">
+                      {accountDeletionCopy(lang).privacyNotice}
+                    </p>
                   </div>
                 </div>
 
+                {adminDeleteError && (
+                  <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-3 text-xs text-red-300 leading-relaxed">
+                    {adminDeleteError === "missing"
+                      ? accountDeletionCopy(lang).missingPasswordError
+                      : adminDeleteError === "incorrect"
+                      ? accountDeletionCopy(lang).incorrectPasswordError
+                      : adminDeleteError === "owner_protected"
+                      ? accountDeletionCopy(lang).ownerProtectedError
+                      : adminDeleteError === "rate_limited"
+                      ? accountDeletionCopy(lang).rateLimitedError
+                      : adminDeleteError === "service_unavailable"
+                      ? accountDeletionCopy(lang).serviceUnavailableError
+                      : adminDeleteError === "network"
+                      ? accountDeletionCopy(lang).networkFailureError
+                      : accountDeletionCopy(lang).genericFailureError}
+                  </div>
+                )}
+
                 <div className="bg-slate-950 p-4 rounded-2xl border border-slate-900 space-y-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-300 block">
+                      {accountDeletionCopy(lang).passwordLabel}
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={adminDeleteCurrentPassword}
+                      onChange={(e) => setAdminDeleteCurrentPassword(e.target.value)}
+                      placeholder={accountDeletionCopy(lang).passwordPlaceholder}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 text-xs focus:ring-1 focus:ring-red-500 focus:border-red-500 outline-none"
+                    />
+                  </div>
                   <label className="flex items-start gap-3 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white">
                     <input
                       type="checkbox"
@@ -5359,7 +5445,7 @@ MARAS Group etir Center`;
                     {isDeletingAdminSelfAccount ? (
                       <>
                         <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
-                        <span>{lang === 'tr' ? "Siliniyor..." : "Deleting..."}</span>
+                        <span>{accountDeletionCopy(lang).deletingLabel}</span>
                       </>
                     ) : (
                       <span>{lang === 'tr' ? "Kalıcı Olarak Sil" : (lang === 'ar' ? "حذف نهائياً" : "Permanently Delete")}</span>
