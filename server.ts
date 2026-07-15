@@ -83,8 +83,15 @@ import { isMissingIndexError } from "./src/lib/firestoreErrors";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
 import { validateUpload } from "./src/lib/uploadValidation";
 import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
-import { selectUnreadMessagesForAdmin } from "./src/lib/chatUnreadAccess";
-import { buildSeenScopeFilters, planSeenWrites } from "./src/lib/chatSeenPlan";
+import {
+  selectUnreadMessagesForAdmin,
+  planUnreadFanout,
+  selectUnreadMessagesFromRecords,
+  buildAdminChatUnreadRecordId,
+  buildUnreadClearFilters,
+  type AdminChatUnreadRecord,
+} from "./src/lib/chatUnreadAccess";
+import { buildSeenScopeFilters, planSeenWrites, type SeenWrite } from "./src/lib/chatSeenPlan";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -247,6 +254,13 @@ let memoryStore: {
   vendors: Vendor[];
   admins: any[];
   costStatements: CostStatement[];
+  // Chat-unread scalability follow-up: one document per (adminId,
+  // messageId) pair currently unread for that admin — see
+  // src/lib/chatUnreadAccess.ts's header comment for the full design.
+  // Same PR #44 lesson as pushTokens above: every collection this server
+  // writes to needs an entry here, or a memory-fallback write to it
+  // silently no-ops.
+  adminChatUnread: AdminChatUnreadRecord[];
   // PR #44: was missing from this store entirely — every read/write
   // against the "pushTokens" collection (register, delete, and the
   // admin-token lookup pushNotification does before sending) resolved
@@ -284,6 +298,7 @@ function getMemoryStore() {
       costStatements: [],
       pushTokens: [],
       adminNotificationPreferences: [],
+      adminChatUnread: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -354,6 +369,48 @@ function getMemoryStore() {
       console.log(`  Driver       -> username: ${DEMO_ACCOUNTS.driver.username}   password: ${DEMO_ACCOUNTS.driver.password}`);
       console.log(`  Client       -> username: ${DEMO_ACCOUNTS.client.username}   password: ${DEMO_ACCOUNTS.client.password}`);
       console.log(`  Client Staff -> username: ${DEMO_ACCOUNTS.clientStaff.username}   password: ${DEMO_ACCOUNTS.clientStaff.password}\n`);
+    }
+
+    // Chat-unread scalability follow-up: adminChatUnread only gets
+    // populated going forward, by the live "send message" fan-out
+    // (planUnreadFanout) — it is never seeded directly the way
+    // chatMessages is above. Without this, a fresh SEED_DEMO_DATA=true
+    // local run would show zero unread badges for the seed conversations
+    // (initialChatMessages) even though the OLD full-scan endpoint always
+    // surfaced them, a visible local-dev behavior regression. This
+    // recomputes exactly what that old scan would have found, using
+    // whatever admin ids actually got seeded above (empty when
+    // DEMO_ACCOUNTS is unset — nobody could log in as admin to observe
+    // this anyway in that case) — the in-memory equivalent of running
+    // scripts/backfill-admin-chat-unread.ts once against this seed data.
+    if (SEED_DEMO_DATA) {
+      // Same two identity sources resolveAllAdminIds() uses for live
+      // fan-out (memoryStore.admins, plus SUPER_ADMIN_EMAIL — an
+      // env-configured root account that intentionally has no document in
+      // `admins`/memoryStore.admins at all). DEMO_ACCOUNTS.owner is a
+      // *local-only alias* specifically so the real owner can log into the
+      // memory fallback without SUPER_ADMIN_EMAIL being set at all (see its
+      // own comment above), so this rarely fires in practice — included
+      // anyway so seed-time recipient resolution never silently diverges
+      // from resolveAllAdminIds() in the one local setup where both are set.
+      const seedAdminIds = memoryStore.admins.map((a: any) => a.id as string);
+      const superAdminEmail = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+      if (superAdminEmail) seedAdminIds.push(superAdminEmail);
+      const nowIso = new Date().toISOString();
+      for (const adminId of Array.from(new Set(seedAdminIds))) {
+        for (const msg of selectUnreadMessagesForAdmin(memoryStore.chatMessages, adminId)) {
+          memoryStore.adminChatUnread.push({
+            id: buildAdminChatUnreadRecordId(adminId, msg.id),
+            adminId,
+            messageId: msg.id,
+            shipmentId: msg.shipmentId,
+            channel: msg.channel,
+            timestamp: msg.timestamp,
+            message: msg,
+            createdAt: nowIso,
+          });
+        }
+      }
     }
   }
   return memoryStore;
@@ -896,6 +953,190 @@ async function fetchAllMatchingDescending(
   pageLimit: number = 200
 ): Promise<any[]> {
   return walkAllDescendingPages((cursor) => queryDescendingPage(colName, filters, cursor, pageLimit));
+}
+
+// Chat-unread scalability follow-up: the full admin roster a new chat
+// message's unread fan-out (planUnreadFanout, chatUnreadAccess.ts) is
+// resolved against. Two identity sources, matching every login path in
+// this file (see the super-admin branches of POST /api/login and
+// POST /api/auth/verify-session above): the `admins` Firestore collection
+// (every sub-admin), plus SUPER_ADMIN_EMAIL (an env-configured root
+// account that intentionally has NO document in `admins` at all — see
+// resolveChatSenderIdentity's own super-admin branch). Missing either
+// source here would mean that admin never gets an adminChatUnread record
+// for anyone else's message, i.e. their unread badge would silently stay
+// empty forever.
+async function resolveAllAdminIds(): Promise<string[]> {
+  const adminsSnap = await getDocs(collection(db, "admins"));
+  const ids = adminsSnap.docs.map((d) => d.id);
+  // No `.trim()` here — must match the exact normalization every login/
+  // session path uses for `req.session.id` (POST /api/login,
+  // POST /api/auth/verify-session: `.toLowerCase()` only). A mismatch
+  // would mean the super admin's session id never equality-matches the
+  // id this function hands to planUnreadFanout/isMessageFromOtherAdmin,
+  // silently breaking their own unread badge whenever SUPER_ADMIN_EMAIL
+  // has incidental whitespace.
+  const superAdminEmail = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+  if (superAdminEmail) ids.push(superAdminEmail);
+  return Array.from(new Set(ids));
+}
+
+/** Firestore's hard cap on operations in a single WriteBatch. */
+const FIRESTORE_BATCH_MAX_OPS = 500;
+// Leaves headroom under FIRESTORE_BATCH_MAX_OPS for a safety margin.
+// Shared by every chunked-batch helper below (commitChatMessageWithUnreadFanout,
+// commitSeenWritesAndUnreadClears) — this app's real admin roster / one
+// shipment's conversation size are both a small business team's worth
+// (nowhere near this), so in practice every call runs exactly one batch;
+// chunking only exists so a future, much larger roster/thread degrades to
+// "N sequential atomic batches" instead of a hard Firestore error.
+const FIRESTORE_BATCH_CHUNK_SIZE = FIRESTORE_BATCH_MAX_OPS - 50;
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * Chat-unread scalability follow-up: writes a newly-created chat message
+ * together with every admin's adminChatUnread fan-out record for it,
+ * atomically. This is the one write path where "partial failure" would
+ * silently lose unread state — a message that saves successfully but
+ * whose fan-out only half-completes would leave some eligible admins with
+ * no unread record for a message they've never actually read. Real
+ * Firestore: a single WriteBatch (the common case — see
+ * FIRESTORE_BATCH_CHUNK_SIZE's own comment on why this app's realistic
+ * admin roster never exceeds one) commits the message doc and every
+ * unread record together, so it either fully applies or fully fails —
+ * nothing in it is ever partially written. Only past
+ * FIRESTORE_BATCH_CHUNK_SIZE recipients does this become several
+ * SEQUENTIAL batches, each independently atomic but NOT atomic as a
+ * whole across chunks — if an earlier chunk already committed to real
+ * Firestore and a later one then fails, the catch block below must never
+ * re-write that already-committed chunk into the memory-fallback store
+ * (that would silently orphan it there once Firestore recovers, since
+ * the memory store and Firestore are never reconciled). `committedChunks`
+ * tracks exactly how many chunks (message doc included, in chunk 0)
+ * durably landed in Firestore before the failure, so only the genuine
+ * remainder is retried via memory fallback. `cleanUndefined` is applied
+ * per-doc here because a raw WriteBatch bypasses the setDoc() wrapper
+ * that normally does this (this Admin SDK instance is not configured
+ * with ignoreUndefinedProperties, so an undefined field value would
+ * otherwise throw). Memory fallback (from the very first call, i.e.
+ * `useMemoryFallback` already true): Node's single-threaded event loop
+ * means these synchronous array pushes (via the existing setDoc wrapper)
+ * have no interleaving window a real partial-batch failure could occur
+ * in, so no separate atomicity primitive is needed there.
+ */
+async function commitChatMessageWithUnreadFanout(message: ChatMessage, unreadRecords: AdminChatUnreadRecord[]): Promise<void> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    await setDoc(doc(db, "chatMessages", message.id), message);
+    for (const record of unreadRecords) {
+      await setDoc(doc(db, "adminChatUnread", record.id), record);
+    }
+    return;
+  }
+
+  const recordChunks = chunkArray(unreadRecords, FIRESTORE_BATCH_CHUNK_SIZE);
+  const batchesNeeded = recordChunks.length > 0 ? recordChunks : [[] as AdminChatUnreadRecord[]];
+  let committedChunks = 0;
+  try {
+    for (; committedChunks < batchesNeeded.length; committedChunks++) {
+      const batch = db.batch();
+      if (committedChunks === 0) batch.set(db.collection("chatMessages").doc(message.id), cleanUndefined(message));
+      for (const record of batchesNeeded[committedChunks]) {
+        batch.set(db.collection("adminChatUnread").doc(record.id), cleanUndefined(record));
+      }
+      await withTimeout(batch.commit(), 5000, "Firestore chat message + unread fan-out batch timed out");
+    }
+  } catch (error) {
+    console.warn("Firestore chat message + unread fan-out batch failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    // committedChunks is the index of the FAILED chunk (the loop above
+    // never reaches the increment for it) — chunks before it already
+    // committed to real Firestore and must not be duplicated into memory;
+    // only the failed chunk onward is genuinely missing and needs retry.
+    const messageAlreadyCommitted = committedChunks > 0;
+    if (!messageAlreadyCommitted) {
+      await setDoc(doc(db, "chatMessages", message.id), message);
+    }
+    for (const record of batchesNeeded.slice(committedChunks).flat()) {
+      await setDoc(doc(db, "adminChatUnread", record.id), record);
+    }
+  }
+}
+
+type SeenBatchOp =
+  | { kind: "write"; id: string; data: ChatMessage }
+  | { kind: "clear"; id: string };
+
+/** Applies one SeenBatchOp through the existing setDoc/deleteDoc wrappers — used for memory fallback, both from the start and mid-retry after a real-Firestore batch failure. */
+async function applySeenBatchOpMemory(op: SeenBatchOp): Promise<void> {
+  if (op.kind === "write") {
+    await setDoc(doc(db, "chatMessages", op.id), op.data);
+  } else {
+    await deleteDoc(doc(db, "adminChatUnread", op.id));
+  }
+}
+
+/**
+ * Chat-unread scalability follow-up: POST /api/shipments/:id/chat/seen's
+ * two effects — the legacy chatMessages `readByAdminIds`/`status` writes
+ * (planSeenWrites, chatSeenPlan.ts) and deleting this admin's now-read
+ * adminChatUnread records (buildUnreadClearFilters) — used to be two
+ * independent, non-atomic operations (unread-clear first, legacy write
+ * second). That let a legacy-write failure return 500 to the caller
+ * AFTER the adminChatUnread records were already durably deleted: the
+ * badge would correctly clear, but the audit-trail field would silently
+ * fall out of sync with it, exactly the "dual-write drift" this
+ * collection's own header comment says to avoid. Combining both into one
+ * atomic WriteBatch (real Firestore) makes them succeed or fail together
+ * — same chunking/partial-failure handling as
+ * commitChatMessageWithUnreadFanout above (see its own header comment for
+ * the full reasoning, identical here): `committedChunks` ensures a
+ * chunk that already landed in Firestore is never re-applied to the
+ * memory-fallback store.
+ */
+async function commitSeenWritesAndUnreadClears(writes: SeenWrite[], unreadRecordIdsToClear: string[]): Promise<void> {
+  const ops: SeenBatchOp[] = [
+    ...writes.map((w): SeenBatchOp => ({ kind: "write", id: w.id, data: w.data })),
+    ...unreadRecordIdsToClear.map((id): SeenBatchOp => ({ kind: "clear", id })),
+  ];
+  if (ops.length === 0) return;
+
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    for (const op of ops) await applySeenBatchOpMemory(op);
+    return;
+  }
+
+  const opChunks = chunkArray(ops, FIRESTORE_BATCH_CHUNK_SIZE);
+  let committedChunks = 0;
+  try {
+    for (; committedChunks < opChunks.length; committedChunks++) {
+      const batch = db.batch();
+      for (const op of opChunks[committedChunks]) {
+        if (op.kind === "write") {
+          batch.set(db.collection("chatMessages").doc(op.id), cleanUndefined(op.data));
+        } else {
+          batch.delete(db.collection("adminChatUnread").doc(op.id));
+        }
+      }
+      await withTimeout(batch.commit(), 5000, "Firestore seen-writes + unread-clear batch timed out");
+    }
+  } catch (error) {
+    console.warn("Firestore seen-writes + unread-clear batch failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    for (const op of opChunks.slice(committedChunks).flat()) {
+      await applySeenBatchOpMemory(op);
+    }
+  }
 }
 
 /**
@@ -2322,6 +2563,44 @@ async function seedDatabaseIfEmpty() {
         } catch (subErr) {
           console.error(`Failed to write chat message ${c.id}:`, subErr);
         }
+      }
+
+      // Chat-unread scalability follow-up: without this, every admin's
+      // unread badge would show 0 for these freshly-seeded conversations
+      // (the same regression getMemoryStore()'s equivalent SEED_DEMO_DATA
+      // block above exists to prevent, here for the real-Firestore
+      // seeding path — this is effectively a one-time, inline run of
+      // scripts/backfill-admin-chat-unread.ts scoped to exactly the
+      // messages just seeded). Uses whatever real admins already exist in
+      // this Firestore project at seed time (resolveAllAdminIds) — this
+      // demo seeder never creates admin accounts itself.
+      try {
+        const adminIds = await resolveAllAdminIds();
+        const nowIso = new Date().toISOString();
+        const unreadRecords = adminIds.flatMap((adminId) =>
+          selectUnreadMessagesForAdmin(initialChatMessages, adminId).map((msg) => ({
+            id: buildAdminChatUnreadRecordId(adminId, msg.id),
+            adminId,
+            messageId: msg.id,
+            shipmentId: msg.shipmentId,
+            channel: msg.channel,
+            timestamp: msg.timestamp,
+            message: msg,
+            createdAt: nowIso,
+          }))
+        );
+        if (unreadRecords.length > 0) {
+          console.log(`Seeding ${unreadRecords.length} adminChatUnread record(s) for the just-seeded chat messages...`);
+          for (const recordChunk of chunkArray(unreadRecords, FIRESTORE_BATCH_CHUNK_SIZE)) {
+            const batch = db.batch();
+            for (const record of recordChunk) {
+              batch.set(db.collection("adminChatUnread").doc(record.id), cleanUndefined(record));
+            }
+            await batch.commit();
+          }
+        }
+      } catch (unreadSeedErr) {
+        console.error("Error seeding adminChatUnread for seeded chat messages: ", unreadSeedErr);
       }
     } else {
       console.log("ChatMessages collection already seeded.");
@@ -4220,13 +4499,32 @@ async function startServer() {
       const filters = buildSeenScopeFilters(shipmentId, channelFilter);
       const candidates = await fetchAllMatchingDescending("chatMessages", filters);
       const writes = planSeenWrites(candidates as ChatMessage[], { viewer, channelFilter, shipmentId, viewerAdminId });
-      const batchWrites = writes.map((w) => setDoc(doc(db, "chatMessages", w.id), w.data));
 
-      if (batchWrites.length > 0) {
-        await Promise.all(batchWrites);
+      // Chat-unread scalability follow-up: a deleted adminChatUnread record
+      // IS "read" — no separate flag to flip. Scoped to this exact
+      // adminId+shipmentId(+channel) triple, the same scope buildSeenScopeFilters
+      // already computed above for the legacy chatMessages write, so this
+      // can never clear a different admin's, shipment's, or channel's
+      // unread state. Only relevant when this call resolved a per-admin
+      // viewerAdminId above (driver/client "seen" calls never touch
+      // per-admin state at all — see viewerAdminId's own comment).
+      // Deletion (not a re-derived write) is what makes a retried/duplicate
+      // "seen" call idempotent: deleting an already-gone doc is a no-op.
+      let unreadRecordIdsToClear: string[] = [];
+      if (viewerAdminId) {
+        const unreadClearFilters = buildUnreadClearFilters(viewerAdminId, shipmentId, channelFilter);
+        const unreadRecordsToClear = await fetchAllMatchingDescending("adminChatUnread", unreadClearFilters);
+        unreadRecordIdsToClear = unreadRecordsToClear.map((r: any) => r.id as string);
       }
 
-      res.json({ success: true, updatedCount: batchWrites.length });
+      // Combined into one atomic operation (commitSeenWritesAndUnreadClears)
+      // so the legacy chatMessages writes and the adminChatUnread deletes
+      // above can never partially apply — see that function's own header
+      // comment for why a failure here must never let the two drift out
+      // of sync with each other.
+      await commitSeenWritesAndUnreadClears(writes, unreadRecordIdsToClear);
+
+      res.json({ success: true, updatedCount: writes.length, unreadClearedCount: unreadRecordIdsToClear.length });
     } catch (err) {
       console.error(err);
       if (respondIfServiceUnavailable(err, res)) return;
@@ -4346,6 +4644,17 @@ async function startServer() {
       }
 
       const sDocRef = doc(db, "shipments", shipmentId);
+      // Chat-unread scalability follow-up: resolveAllAdminIds() (the admin
+      // roster planUnreadFanout needs below) is independent of the
+      // shipment lookup — started here so both reads run concurrently
+      // instead of adding a second full round-trip to every message send.
+      // The `.catch(() => {})` only silences Node's "unhandled rejection"
+      // warning for the (rare) 404-shipment path below, which returns
+      // before ever awaiting the real `allAdminIdsPromise` reference — it
+      // does not swallow the rejection for that later `await`, which still
+      // throws normally into this route's own try/catch.
+      const allAdminIdsPromise = resolveAllAdminIds();
+      allAdminIdsPromise.catch(() => {});
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) {
         return res.status(404).json({ error: "Shipment not found" });
@@ -4376,7 +4685,15 @@ async function startServer() {
       if (fileName !== undefined) newMessage.fileName = fileName;
       if (fileCategory !== undefined) newMessage.fileCategory = fileCategory;
 
-      await setDoc(doc(db, "chatMessages", newMessage.id), newMessage);
+      // Chat-unread scalability follow-up: fans this message out to a
+      // maintained adminChatUnread record for every eligible admin
+      // (planUnreadFanout, chatUnreadAccess.ts) in the same atomic write as
+      // the message itself — see commitChatMessageWithUnreadFanout's own
+      // header comment for why this can't be two independent writes.
+      const allAdminIds = await allAdminIdsPromise;
+      const unreadFanoutCreatedAt = new Date().toISOString();
+      const unreadRecords = planUnreadFanout(allAdminIds, newMessage, unreadFanoutCreatedAt);
+      await commitChatMessageWithUnreadFanout(newMessage, unreadRecords);
 
       // Save file inside shipment documents
       if (type === "file" && fileUrl && shouldSaveChatFileAsShipmentDocument(channel, sender)) {
@@ -4463,6 +4780,17 @@ async function startServer() {
       res.status(201).json(newMessage);
     } catch (err) {
       console.error(err);
+      // Pre-existing gap, now more likely to actually trigger: this route
+      // previously only did one write (setDoc) that could throw
+      // ServiceUnavailableError under STRICT_PERSISTENCE; it now also does
+      // an admin-roster read (resolveAllAdminIds) and an atomic batch write
+      // (commitChatMessageWithUnreadFanout) that can throw the same way.
+      // Every sibling chat route (.../chat/seen, GET /api/chat/unread)
+      // already returns the retryable 503 via this same helper — this
+      // route was the one place in the chat surface that still 500'd a
+      // Firestore outage instead, breaking client retry/backoff logic that
+      // keys off 503.
+      if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to post chat message" });
     }
   });
@@ -6490,25 +6818,21 @@ async function startServer() {
       // every admin's messages share that same sender value).
       const viewerAdminId = req.session!.id;
 
-      // Phase 4 follow-up (Firestore scalability audit): this used to be
-      // one unbounded getDocs(collection(db, "chatMessages")) read of
-      // every message ever written, on every call (an admin dashboard
-      // polls this every ~12s). "Unread for this specific admin" has no
-      // Firestore-queryable shape here — readByAdminIds is an array field
-      // and Firestore has no "array does not contain" operator, so there
-      // is no equality/range where-clause that scopes this the way
-      // shipmentId scopes /chat/seen above. fetchAllMatchingDescending
-      // still walks to exhaustion in the worst case, but every read is now
-      // a small, ordered, timeout-protected, indexed page
-      // (.orderBy("timestamp","desc").limit(n).startAfter(cursor) — a bare
-      // sort with no where clause, which Firestore indexes automatically;
-      // no new firestore.indexes.json entry is required for this query
-      // shape) instead of one unbounded whole-collection materialization.
-      // A true O(this admin's unread set) query would need a maintained
-      // per-admin unread structure (schema/write-path change) — tracked as
-      // a deferred follow-up, not attempted here (see docs/FOLLOW_UP_ROADMAP.md).
-      const candidates = await fetchAllMatchingDescending("chatMessages", []);
-      const unreadMsgs = selectUnreadMessagesForAdmin(candidates as ChatMessage[], viewerAdminId);
+      // Chat-unread scalability follow-up: this used to walk every
+      // chatMessages document ever written (paginated, but still
+      // O(all messages) — see git history for the prior comment here),
+      // because "unread for this specific admin" had no Firestore-queryable
+      // shape against chatMessages itself (readByAdminIds is an array
+      // field; Firestore has no "array does not contain" operator). It now
+      // queries the maintained adminChatUnread collection
+      // (chatUnreadAccess.ts's own header comment has the full design) with
+      // a real `adminId == this admin` filter — O(this admin's unread set),
+      // not O(every message ever sent) — via the same bounded,
+      // timeout-protected, indexed-page walk fetchAllMatchingDescending
+      // already gives every other exhaustive-fetch call site in this file.
+      const filters: PageFilter[] = [{ field: "adminId", op: "==", value: viewerAdminId }];
+      const records = await fetchAllMatchingDescending("adminChatUnread", filters);
+      const unreadMsgs = selectUnreadMessagesFromRecords(records as AdminChatUnreadRecord[], viewerAdminId);
 
       res.json(unreadMsgs);
     } catch (err: any) {
