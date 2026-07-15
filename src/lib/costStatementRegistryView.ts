@@ -173,28 +173,3 @@ export function resolveStatementShipmentContext(
     cargoDescription: shipment?.cargoDescription,
   };
 }
-
-/**
- * Accounting Phase A — Single Shipment Reference Hardening: MAR-YYYY-####
- * `shipmentNumber` is the one business reference every financial record
- * (cost statements today; invoices/payments/receipts/credit-debit notes in
- * later phases) must carry — so it has to come from the authoritative
- * shipment record whenever one exists, exactly like the existing
- * `agreedAmount`/`truckNumber` snapshot pattern in
- * resolveStatementShipmentContext above. Dependency audit finding: POST
- * /api/cost-statements/:shipmentId (server.ts) previously took
- * `shipmentNumber` straight from the request body with no such check —
- * unlike `agreedAmount`/`truckNumber` two lines below it in that same
- * object literal — so a caller could silently store (and, via
- * `finalStatement.shipmentNumber`, even have reflected into the
- * activity-log entry for that very change) a `shipmentNumber` that didn't
- * match the real shipment. The client-supplied value is only ever a
- * fallback for the one case where no shipment record exists at all
- * (matches the same tolerance `agreedAmount`/`truckNumber` already have).
- */
-export function resolveCostStatementShipmentNumber(
-  shipment: Pick<Shipment, "shipmentNumber"> | undefined,
-  clientSuppliedShipmentNumber: string | undefined
-): string {
-  return shipment?.shipmentNumber || clientSuppliedShipmentNumber || "";
-}
