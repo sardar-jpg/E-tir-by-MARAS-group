@@ -64,6 +64,20 @@ export interface LocationUpdate {
 export interface Shipment {
   id: string;
   shipmentNumber: string;
+  /**
+   * Accounting Phase A — Canonical Order Reference: the single,
+   * auto-generated, immutable eTIR-###### business reference
+   * (formatOrderNumber, src/lib/orderNumbering.ts) that every financial
+   * document (cost statements, and — in later phases — invoices,
+   * payments, receipts, credit/debit notes) will link to. Server-generated
+   * only, at shipment creation (server.ts's POST /api/shipments) — never
+   * accepted from the client and never editable afterward. Optional
+   * because shipments created before this field existed have none until
+   * the one-time backfill (POST /api/admin/backfill-order-numbers) runs
+   * for them. Coexists with shipmentNumber (MAR-YYYY-####), which this
+   * phase leaves completely unchanged.
+   */
+  orderNumber?: string;
   companyName: string; // Admin only
   loadingCountry: string;
   loadingCity: string;
