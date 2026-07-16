@@ -1,4 +1,4 @@
-import { Briefcase, MapPin, MapPinOff, Loader2 } from "lucide-react";
+import { Briefcase, ChevronRight, Megaphone, MapPin, MapPinOff, Loader2 } from "lucide-react";
 import type { Language, Shipment } from "../../types";
 import DriverActiveJobCard from "./DriverActiveJobCard";
 import DriverNextAction from "./DriverNextAction";
@@ -21,6 +21,7 @@ const LABELS: Record<Language, {
   gpsOff: string;
   gpsChecking: string;
   gpsIdle: string;
+  offersBanner: (n: number) => string;
 }> = {
   en: {
     greeting: (n) => `Hello, ${n}`,
@@ -33,6 +34,7 @@ const LABELS: Record<Language, {
     gpsOff: "Location unavailable — check GPS permission",
     gpsChecking: "Checking your location…",
     gpsIdle: "Location sharing starts with your next job",
+    offersBanner: (n) => (n === 1 ? "1 new transport offer — tap to answer" : `${n} new transport offers — tap to answer`),
   },
   tr: {
     greeting: (n) => `Merhaba, ${n}`,
@@ -45,6 +47,7 @@ const LABELS: Record<Language, {
     gpsOff: "Konum alınamıyor — GPS iznini kontrol edin",
     gpsChecking: "Konumunuz kontrol ediliyor…",
     gpsIdle: "Konum paylaşımı bir sonraki seferle başlar",
+    offersBanner: (n) => `${n} yeni taşıma teklifi — cevaplamak için dokunun`,
   },
   ar: {
     greeting: (n) => `مرحباً، ${n}`,
@@ -57,6 +60,7 @@ const LABELS: Record<Language, {
     gpsOff: "تعذر تحديد الموقع — تحقق من إذن GPS",
     gpsChecking: "جارٍ التحقق من موقعك…",
     gpsIdle: "تبدأ مشاركة الموقع مع مهمتك القادمة",
+    offersBanner: (n) => `${n} عرض نقل جديد — اضغط للرد`,
   },
 };
 
@@ -76,6 +80,9 @@ interface DriverHomeScreenProps {
   onOpenChat: (shipment: Shipment) => void;
   onOpenDetails: (shipment: Shipment) => void;
   onViewJobs: () => void;
+  /** Driver Alliance Phase 1: offers awaiting this driver's answer. */
+  pendingOffersCount: number;
+  onOpenOffers: () => void;
 }
 
 export default function DriverHomeScreen({
@@ -92,6 +99,8 @@ export default function DriverHomeScreen({
   onOpenChat,
   onOpenDetails,
   onViewJobs,
+  pendingOffersCount,
+  onOpenOffers,
 }: DriverHomeScreenProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const firstName = driverName ? driverName.split(" ")[0] : "";
@@ -118,6 +127,23 @@ export default function DriverHomeScreen({
         <GpsIcon className={`w-4 h-4 shrink-0 ${gpsAvailable === null && isReportingLocation ? "animate-spin" : ""}`} />
         <span>{gps.text}</span>
       </div>
+
+      {/* Driver Alliance Phase 1: pending transport offers — one tap to
+          answer. Rendered above the job so a new offer is never missed,
+          without adding a navigation tab. */}
+      {pendingOffersCount > 0 && (
+        <button
+          type="button"
+          onClick={onOpenOffers}
+          className="w-full flex items-center gap-3 px-3.5 min-h-[56px] rounded-2xl bg-orange-500/10 border border-orange-500/40 text-start transition-all cursor-pointer active:scale-[0.99]"
+        >
+          <span className="w-10 h-10 rounded-xl bg-orange-500 text-white flex items-center justify-center shrink-0 light-preserve">
+            <Megaphone className="w-5 h-5" />
+          </span>
+          <span className="flex-1 text-sm font-bold text-orange-400 leading-snug">{t.offersBanner(pendingOffersCount)}</span>
+          <ChevronRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
+        </button>
+      )}
 
       {activeJob ? (
         <div className="space-y-3">
