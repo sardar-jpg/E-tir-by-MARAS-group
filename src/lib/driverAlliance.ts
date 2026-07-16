@@ -147,11 +147,19 @@ export function computeBusyDriverIds(
 
 export type DriverAvailability = "available" | "busy" | "inactive";
 
+/**
+ * Inactive wins over Busy: a driver switched off (by Operations via
+ * allianceInactive, or by the driver themselves via the app's
+ * "Available for Offers" switch — availableForOffers === false) never
+ * appears available regardless of workload. availableForOffers is the
+ * one alliance field the DRIVER controls; absent means available, the
+ * same legacy-friendly convention as isDriverApproved.
+ */
 export function resolveDriverAvailability(
-  driver: Pick<Driver, "id" | "allianceInactive">,
+  driver: Pick<Driver, "id" | "allianceInactive" | "availableForOffers">,
   busyDriverIds: Set<string>
 ): DriverAvailability {
-  if (driver.allianceInactive) return "inactive";
+  if (driver.allianceInactive || driver.availableForOffers === false) return "inactive";
   if (busyDriverIds.has(driver.id)) return "busy";
   return "available";
 }
@@ -161,8 +169,9 @@ export function resolveDriverAvailability(
 /**
  * Automatic driver matching for a broadcast: matching directional route,
  * matching truck type, Available status. Drivers with an Active Job,
- * alliance-inactive drivers, and unapproved (pending/rejected) drivers
- * are never invited.
+ * alliance-inactive drivers, drivers who switched OFF "Available for
+ * Offers" in the app, and unapproved (pending/rejected) drivers are
+ * never invited.
  */
 export function matchDriversForOffer(
   drivers: Driver[],
@@ -176,6 +185,7 @@ export function matchDriversForOffer(
       // driver and counts as approved; pending/rejected never match.
       isDriverApproved(d) &&
       !d.allianceInactive &&
+      d.availableForOffers !== false &&
       !busyDriverIds.has(d.id) &&
       (d.truckType || "") === offer.truckType &&
       routesMatchOffer(d.workingRoutes, offer.pickupCountry, offer.deliveryCountry)
@@ -186,6 +196,12 @@ export function matchDriversForOffer(
 
 export const MAX_OFFER_TEXT_LENGTH = 500;
 export const MAX_QUOTE_PRICE_USD = 1_000_000;
+
+/** Quick-pick expiry windows Operations chooses from (hours). */
+export const OFFER_EXPIRY_HOURS_OPTIONS = [2, 12, 24] as const;
+export const MAX_OFFER_EXPIRY_HOURS = 72;
+export const OFFER_FREIGHT_TYPES = ["land", "sea", "air"] as const;
+export const MAX_OFFER_DISTANCE_KM = 50_000;
 
 export interface OfferInputResult {
   ok: boolean;
@@ -200,6 +216,9 @@ export interface OfferInputResult {
     | "cargoDescription"
     | "expectedLoadingDate"
     | "notes"
+    | "freightType"
+    | "distanceKm"
+    | "expiresInHours"
     | "referenceShipmentId"
     | "currency"
   >;
@@ -222,6 +241,7 @@ export function validateAllianceOfferInput(body: any): OfferInputResult {
   const expectedLoadingDate = text(body?.expectedLoadingDate);
   const notes = text(body?.notes);
   const referenceShipmentId = text(body?.referenceShipmentId);
+  const freightTypeRaw = text(body?.freightType).toLowerCase();
 
   if (body?.currency !== undefined && body.currency !== "USD") {
     return { ok: false, error: "Driver Alliance offers are USD only." };
@@ -231,6 +251,27 @@ export function validateAllianceOfferInput(body: any): OfferInputResult {
   if (!TRUCK_TYPES.some((t) => t.id === truckType)) return { ok: false, error: "A valid truck type is required." };
   if (!cargoDescription) return { ok: false, error: "Cargo description is required." };
   if (!expectedLoadingDate) return { ok: false, error: "Expected loading date is required." };
+  if (freightTypeRaw && !OFFER_FREIGHT_TYPES.includes(freightTypeRaw as any)) {
+    return { ok: false, error: "Freight type must be land, sea, or air." };
+  }
+  const expiresInHoursRaw = body?.expiresInHours;
+  const expiresInHours =
+    typeof expiresInHoursRaw === "number"
+      ? expiresInHoursRaw
+      : typeof expiresInHoursRaw === "string" && expiresInHoursRaw.trim() !== ""
+      ? Number(expiresInHoursRaw)
+      : NaN;
+  if (!Number.isInteger(expiresInHours) || expiresInHours < 1 || expiresInHours > MAX_OFFER_EXPIRY_HOURS) {
+    return { ok: false, error: `An offer expiry between 1 and ${MAX_OFFER_EXPIRY_HOURS} hours is required (e.g. 2, 12, or 24).` };
+  }
+  let distanceKm: number | undefined;
+  if (body?.distanceKm !== undefined && body.distanceKm !== null && body.distanceKm !== "") {
+    const d = typeof body.distanceKm === "number" ? body.distanceKm : Number(body.distanceKm);
+    if (!Number.isFinite(d) || d <= 0 || d > MAX_OFFER_DISTANCE_KM) {
+      return { ok: false, error: "Distance must be a positive number of kilometers." };
+    }
+    distanceKm = Math.round(d);
+  }
   for (const [label, value] of [
     ["Pickup country", pickupCountry],
     ["Pickup city", pickupCity],
@@ -255,10 +296,41 @@ export function validateAllianceOfferInput(body: any): OfferInputResult {
       cargoDescription,
       expectedLoadingDate,
       notes: notes || undefined,
+      freightType: freightTypeRaw || "land",
+      distanceKm,
+      expiresInHours,
       referenceShipmentId: referenceShipmentId || undefined,
       currency: "USD",
     },
   };
+}
+
+// ── Expiry ──────────────────────────────────────────────────────────
+
+/** The absolute expiry instant: the window starts at BROADCAST time. */
+export function computeOfferExpiresAt(broadcastAtIso: string, expiresInHours: number): string {
+  return new Date(new Date(broadcastAtIso).getTime() + expiresInHours * 3_600_000).toISOString();
+}
+
+/** Whether the quotation window has closed on a live (broadcast) offer. */
+export function isOfferExpired(
+  offer: Pick<AllianceOffer, "status" | "expiresAt">,
+  nowIso: string = new Date().toISOString()
+): boolean {
+  return offer.status === "broadcast" && !!offer.expiresAt && offer.expiresAt <= nowIso;
+}
+
+/**
+ * The status callers should DISPLAY and gate driver answers on. Expiry
+ * is derived, never stored (no scheduler, no migration): a stored
+ * 'broadcast' offer past its expiresAt resolves to 'expired'. Terminal
+ * stored statuses (winner_selected / cancelled) always win.
+ */
+export function resolveOfferStatus(
+  offer: Pick<AllianceOffer, "status" | "expiresAt">,
+  nowIso: string = new Date().toISOString()
+): AllianceOfferStatus {
+  return isOfferExpired(offer, nowIso) ? "expired" : offer.status;
 }
 
 export interface QuotePriceResult {
@@ -319,10 +391,48 @@ export function allianceResponseId(offerId: string, driverId: string): string {
   return `${offerId}_${driverId}`;
 }
 
+// ── Admin review helpers ────────────────────────────────────────────
+
+/**
+ * Review ordering for the admin quotations table: quoted responses
+ * first, LOWEST price first; everything else after, in invitation
+ * order. Never mutates the input.
+ */
+export function sortResponsesForReview(responses: AllianceOfferResponse[]): AllianceOfferResponse[] {
+  return [...responses].sort((a, b) => {
+    const aQuoted = a.status === "quoted" && typeof a.priceUsd === "number";
+    const bQuoted = b.status === "quoted" && typeof b.priceUsd === "number";
+    if (aQuoted && bQuoted) return a.priceUsd! - b.priceUsd!;
+    if (aQuoted !== bQuoted) return aQuoted ? -1 : 1;
+    return (a.invitedAt || "").localeCompare(b.invitedAt || "");
+  });
+}
+
+export interface OfferResponseSummary {
+  invited: number;
+  waiting: number;
+  quoted: number;
+  rejected: number;
+  closed: number;
+}
+
+/** Per-offer counts for the admin "Offer Requests" list (Waiting = invited/viewed, still no answer). */
+export function summarizeResponses(responses: Array<Pick<AllianceOfferResponse, "status">>): OfferResponseSummary {
+  const summary: OfferResponseSummary = { invited: responses.length, waiting: 0, quoted: 0, rejected: 0, closed: 0 };
+  for (const r of responses) {
+    if (r.status === "invited" || r.status === "viewed") summary.waiting += 1;
+    else if (r.status === "quoted") summary.quoted += 1;
+    else if (r.status === "rejected") summary.rejected += 1;
+    else if (r.status === "closed") summary.closed += 1;
+  }
+  return summary;
+}
+
 // ── Driver-facing sanitized view ────────────────────────────────────
 
 export interface DriverOfferView {
   id: string;
+  /** RESOLVED status — a past-expiry broadcast offer reads 'expired' here. */
   status: AllianceOfferStatus;
   pickupCountry: string;
   pickupCity: string;
@@ -332,6 +442,9 @@ export interface DriverOfferView {
   cargoDescription: string;
   expectedLoadingDate: string;
   notes?: string;
+  freightType?: string;
+  distanceKm?: number;
+  expiresAt?: string;
   currency: "USD";
   broadcastAt?: string;
   /** This driver's OWN response only. */
@@ -339,6 +452,7 @@ export interface DriverOfferView {
     status: AllianceOfferResponse["status"];
     priceUsd?: number;
     note?: string;
+    rejectReason?: string;
     respondedAt?: string;
   };
   /** True only for the winning driver's own view. */
@@ -350,12 +464,18 @@ export interface DriverOfferView {
  * their OWN response. Never other drivers' identities/prices/notes,
  * never invitedDriverIds, never the internal reference shipment, never
  * who won (beyond "you won" for the winner themselves), and never the
- * creating admin's identity.
+ * creating admin's identity. A response closed because Operations
+ * selected someone else surfaces only as myResponse.status === "closed"
+ * — the winner's identity stays hidden.
  */
-export function buildDriverOfferView(offer: AllianceOffer, ownResponse: AllianceOfferResponse): DriverOfferView {
+export function buildDriverOfferView(
+  offer: AllianceOffer,
+  ownResponse: AllianceOfferResponse,
+  nowIso: string = new Date().toISOString()
+): DriverOfferView {
   return {
     id: offer.id,
-    status: offer.status,
+    status: resolveOfferStatus(offer, nowIso),
     pickupCountry: offer.pickupCountry,
     pickupCity: offer.pickupCity,
     deliveryCountry: offer.deliveryCountry,
@@ -364,12 +484,16 @@ export function buildDriverOfferView(offer: AllianceOffer, ownResponse: Alliance
     cargoDescription: offer.cargoDescription,
     expectedLoadingDate: offer.expectedLoadingDate,
     notes: offer.notes,
+    freightType: offer.freightType,
+    distanceKm: offer.distanceKm,
+    expiresAt: offer.expiresAt,
     currency: "USD",
     broadcastAt: offer.broadcastAt,
     myResponse: {
       status: ownResponse.status,
       priceUsd: ownResponse.priceUsd,
       note: ownResponse.note,
+      rejectReason: ownResponse.rejectReason,
       respondedAt: ownResponse.respondedAt,
     },
     isWinner: offer.status === "winner_selected" && offer.winnerDriverId === ownResponse.driverId,

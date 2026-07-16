@@ -1903,6 +1903,10 @@ import {
   canSubmitResponse,
   allianceResponseId,
   buildDriverOfferView,
+  computeOfferExpiresAt,
+  isOfferExpired,
+  resolveOfferStatus,
+  summarizeResponses,
 } from "./src/lib/driverAlliance";
 
 // Augment Express's Request type so handlers can read req.session
@@ -7662,16 +7666,21 @@ async function startServer() {
       if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update driver profiles." });
       }
-      const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl, workingRoutes, allianceInactive } = req.body;
+      const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl, workingRoutes, allianceInactive, availableForOffers } = req.body;
 
       // Driver Alliance Phase 1: working routes and the alliance
       // Inactive switch are ADMIN-managed fields. A driver session
       // writing them is rejected outright (never silently ignored) —
       // matching happens server-side off these fields, so letting a
       // driver edit their own routes would let them steer which offers
-      // they receive.
+      // they receive. availableForOffers is deliberately NOT in this
+      // guard: it is the driver's OWN "Available for Offers" switch (the
+      // own-profile check above already scopes it to their own record).
       if (req.session!.role === "driver" && (workingRoutes !== undefined || allianceInactive !== undefined)) {
         return res.status(403).json({ error: "Working routes and availability status are managed by MARAS Operations." });
+      }
+      if (availableForOffers !== undefined && typeof availableForOffers !== "boolean") {
+        return res.status(400).json({ error: "availableForOffers must be true or false." });
       }
       let sanitizedRoutes: DriverRoute[] | undefined;
       if (workingRoutes !== undefined) {
@@ -7720,6 +7729,7 @@ async function startServer() {
       if (avatarUrl !== undefined) updatedDriver.avatarUrl = avatarUrl;
       if (sanitizedRoutes !== undefined) updatedDriver.workingRoutes = sanitizedRoutes;
       if (allianceInactive !== undefined) updatedDriver.allianceInactive = allianceInactive === true;
+      if (availableForOffers !== undefined) updatedDriver.availableForOffers = availableForOffers;
 
       await setDoc(dRef, updatedDriver);
 
@@ -7865,6 +7875,7 @@ async function startServer() {
       if (!input.ok || !input.offer) {
         return res.status(400).json({ error: input.error });
       }
+      let referenceShipmentNumber: string | undefined;
       if (input.offer.referenceShipmentId) {
         const shipSnap = await getDoc(doc(db, "shipments", input.offer.referenceShipmentId));
         if (!shipSnap.exists()) {
@@ -7874,12 +7885,14 @@ async function startServer() {
         if (ship.assignedDriverId) {
           return res.status(400).json({ error: "The reference shipment already has an assigned driver." });
         }
+        referenceShipmentNumber = ship.shipmentNumber;
       }
       const nowIso = new Date().toISOString();
       const offer: AllianceOffer = {
         id: `aoffer-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
         status: "draft",
         ...input.offer,
+        referenceShipmentNumber,
         createdById: req.session!.id,
         createdByName: allianceActorName(req),
         createdAt: nowIso,
@@ -7913,7 +7926,26 @@ async function startServer() {
       }
       if (req.session!.role === "admin" && (req.session!.adminType === "super" || req.session!.adminType === "operation")) {
         const snap = await getDocs(collection(db, "allianceOffers"));
-        const offers = snap.docs.map((d: any) => d.data() as AllianceOffer);
+        // One grouped read of ALL responses so each list row can show
+        // its Waiting/Quoted/Rejected counts without N queries.
+        const respSnap = await getDocs(collection(db, "allianceOfferResponses"));
+        const responsesByOffer = new Map<string, AllianceOfferResponse[]>();
+        for (const rDoc of respSnap.docs) {
+          const r = rDoc.data() as AllianceOfferResponse;
+          const list = responsesByOffer.get(r.offerId) || [];
+          list.push(r);
+          responsesByOffer.set(r.offerId, list);
+        }
+        // Expiry is derived at read time (no scheduler): a broadcast
+        // offer past expiresAt is reported as "expired".
+        const offers = snap.docs.map((d: any) => {
+          const o = d.data() as AllianceOffer;
+          return {
+            ...o,
+            status: resolveOfferStatus(o),
+            responseSummary: summarizeResponses(responsesByOffer.get(o.id) || []),
+          };
+        });
         offers.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
         return res.json({ items: offers.slice(0, 200) });
       }
@@ -7941,7 +7973,7 @@ async function startServer() {
       if (req.session!.role === "admin" && (req.session!.adminType === "super" || req.session!.adminType === "operation")) {
         const responses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
         responses.sort((a, b) => (a.invitedAt || "").localeCompare(b.invitedAt || ""));
-        return res.json({ offer, responses });
+        return res.json({ offer: { ...offer, status: resolveOfferStatus(offer) }, responses });
       }
       return res.status(403).json({ error: "You do not have permission to view Driver Alliance offers." });
     } catch (err) {
@@ -7972,6 +8004,9 @@ async function startServer() {
         ...offer,
         status: "broadcast",
         broadcastAt: nowIso,
+        // The quotation window opens now: expiry counts from broadcast,
+        // not creation (a draft can sit for days without burning time).
+        expiresAt: computeOfferExpiresAt(nowIso, offer.expiresInHours || 24),
         updatedAt: nowIso,
         invitedDriverIds: matched.map((d) => d.id),
       };
@@ -8056,18 +8091,27 @@ async function startServer() {
       if (!canDriverRespondToOffer(offer.status)) {
         return res.status(409).json({ code: "OFFER_NOT_OPEN", error: "This offer is no longer open for answers." });
       }
+      // Expiration: once the quotation window closes, no more answers —
+      // enforced here regardless of what the driver's UI showed.
+      if (isOfferExpired(offer)) {
+        return res.status(409).json({ code: "OFFER_EXPIRED", error: "This offer has expired. Quotations can no longer be submitted." });
+      }
 
       const action = req.body?.action;
       const nowIso = new Date().toISOString();
       let priceUsd: number | undefined;
       let note: string | undefined;
+      let rejectReason: string | undefined;
       if (action === "quote") {
         const price = validateQuotePriceUsd(req.body?.priceUsd, req.body?.currency);
         if (!price.ok) return res.status(400).json({ error: price.error });
         priceUsd = price.priceUsd;
         note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 500) : undefined;
         if (note === "") note = undefined;
-      } else if (action !== "reject") {
+      } else if (action === "reject") {
+        rejectReason = typeof req.body?.rejectReason === "string" ? req.body.rejectReason.trim().slice(0, 500) : undefined;
+        if (rejectReason === "") rejectReason = undefined;
+      } else {
         return res.status(400).json({ error: "action must be either \"quote\" or \"reject\"." });
       }
 
@@ -8076,6 +8120,7 @@ async function startServer() {
         status: action === "quote" ? "quoted" : "rejected",
         priceUsd,
         note,
+        rejectReason,
         respondedAt: nowIso,
         viewedAt: current.viewedAt || nowIso,
       }));
@@ -8101,9 +8146,9 @@ async function startServer() {
           "Alliance Offer Rejected",
           "İttifak Teklifi Reddedildi",
           "تم رفض عرض التحالف",
-          `${updated.driverName} declined the offer ${offer.pickupCity} → ${offer.deliveryCity}.`,
-          `${updated.driverName}, ${offer.pickupCity} → ${offer.deliveryCity} teklifini reddetti.`,
-          `رفض ${updated.driverName} عرض النقل ${offer.pickupCity} → ${offer.deliveryCity}.`,
+          `${updated.driverName} declined the offer ${offer.pickupCity} → ${offer.deliveryCity}.${rejectReason ? ` Reason: ${rejectReason}` : ""}`,
+          `${updated.driverName}, ${offer.pickupCity} → ${offer.deliveryCity} teklifini reddetti.${rejectReason ? ` Neden: ${rejectReason}` : ""}`,
+          `رفض ${updated.driverName} عرض النقل ${offer.pickupCity} → ${offer.deliveryCity}.${rejectReason ? ` السبب: ${rejectReason}` : ""}`,
           driverId
         );
       }
@@ -8220,9 +8265,39 @@ async function startServer() {
         status: "winner_selected",
         winnerDriverId: driverId,
         winnerShipmentId: shipmentId,
+        winnerShipmentNumber: shipmentNumber,
+        // closedAt marks the moment every other quotation was closed
+        // (see the loop below) — selection and closing are one action.
+        closedAt: nowIso,
         updatedAt: nowIso,
       };
       await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(updatedOffer));
+
+      // Close every other quotation: non-winning drivers who hadn't
+      // already rejected get their response marked "closed" and the
+      // fixed courtesy message. The winner's identity and price are
+      // never included.
+      const allResponses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
+      for (const other of allResponses) {
+        if (other.driverId === driverId || other.status === "rejected" || other.status === "closed") continue;
+        await setDoc(
+          doc(db, "allianceOfferResponses", other.id),
+          cleanUndefined({ ...other, status: "closed" as const })
+        );
+        await pushNotification(
+          "", "",
+          "alliance_update",
+          "Transport Offer Closed",
+          "Taşıma Teklifi Kapandı",
+          "تم إغلاق عرض النقل",
+          "Another driver has been selected. Thank you for your quotation.",
+          "Başka bir sürücü seçildi. Fiyat teklifiniz için teşekkür ederiz.",
+          "تم اختيار سائق آخر. شكراً لك على تقديم سعرك.",
+          undefined,
+          undefined,
+          other.driverId
+        );
+      }
 
       await pushNotification(
         shipmentId,

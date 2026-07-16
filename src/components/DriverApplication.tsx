@@ -1115,7 +1115,9 @@ export default function DriverApplication({
       const res = await apiFetch(`/api/alliance/offers/${offerId}/respond`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(action === "quote" ? { action, priceUsd, note, currency: "USD" } : { action }),
+        // For a rejection the screen's one optional text field is the
+        // reject reason, not a quote note.
+        body: JSON.stringify(action === "quote" ? { action, priceUsd, note, currency: "USD" } : { action, rejectReason: note }),
       });
       const body: any = await res.json().catch(() => ({}));
       if (res.ok) {

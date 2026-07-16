@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Camera, Check, Edit2, Globe, Loader2, LogOut, Moon, Phone, Shield,
-  ShieldAlert, Sun, Trash2, Truck, User, X,
+  Camera, Check, Edit2, Globe, Loader2, LogOut, Megaphone, Moon, Phone,
+  Shield, ShieldAlert, Sun, Trash2, Truck, User, X,
 } from "lucide-react";
 import type { Driver, Language } from "../../types";
 import { TRUCK_TYPES } from "../../types";
@@ -51,6 +51,11 @@ const LABELS: Record<Language, {
   photoUpdated: string;
   changePhoto: string;
   settings: string;
+  offersToggle: string;
+  offersOn: string;
+  offersOff: string;
+  offersOnMsg: string;
+  offersOffMsg: string;
   language: string;
   appearance: string;
   lightMode: string;
@@ -82,6 +87,11 @@ const LABELS: Record<Language, {
     photoUpdated: "Profile photo updated.",
     changePhoto: "Change photo",
     settings: "Settings",
+    offersToggle: "Available for Offers",
+    offersOn: "On — you receive transport offers",
+    offersOff: "Off — no transport offers",
+    offersOnMsg: "You will now receive transport offers.",
+    offersOffMsg: "You will no longer receive transport offers.",
     language: "Language",
     appearance: "Appearance",
     lightMode: "Light — for daylight",
@@ -113,6 +123,11 @@ const LABELS: Record<Language, {
     photoUpdated: "Profil fotoğrafı güncellendi.",
     changePhoto: "Fotoğrafı değiştir",
     settings: "Ayarlar",
+    offersToggle: "Tekliflere Açık",
+    offersOn: "Açık — taşıma teklifleri alırsınız",
+    offersOff: "Kapalı — taşıma teklifi gelmez",
+    offersOnMsg: "Artık taşıma teklifleri alacaksınız.",
+    offersOffMsg: "Artık taşıma teklifi almayacaksınız.",
     language: "Dil",
     appearance: "Görünüm",
     lightMode: "Açık — gün ışığı için",
@@ -144,6 +159,11 @@ const LABELS: Record<Language, {
     photoUpdated: "تم تحديث الصورة الشخصية.",
     changePhoto: "تغيير الصورة",
     settings: "الإعدادات",
+    offersToggle: "متاح لعروض النقل",
+    offersOn: "مفعّل — تصلك عروض النقل",
+    offersOff: "متوقف — لا تصلك عروض النقل",
+    offersOnMsg: "ستصلك عروض النقل من الآن.",
+    offersOffMsg: "لن تصلك عروض النقل بعد الآن.",
     language: "اللغة",
     appearance: "المظهر",
     lightMode: "فاتح — لضوء النهار",
@@ -293,6 +313,39 @@ export default function DriverAccountScreen({
       onToast("❌ Photo upload failed. Please try again.");
     } finally {
       setIsUploadingAvatar(false);
+    }
+  };
+
+  // ── "Available for Offers" (Driver Quote Requests) ──
+  // The one alliance field the DRIVER controls: switched off, they stop
+  // receiving quotation requests entirely (matching is server-side).
+  // Absent counts as available, so legacy profiles stay opted in.
+  const [isSavingOffers, setIsSavingOffers] = useState(false);
+  const offersEnabled = driver?.availableForOffers !== false;
+
+  const handleToggleAvailableForOffers = async () => {
+    if (isSavingOffers) return;
+    setIsSavingOffers(true);
+    try {
+      const res = await apiFetch(`/api/drivers/${driverId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ availableForOffers: !offersEnabled }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onDriverUpdated(updated);
+        onToast(!offersEnabled ? t.offersOnMsg : t.offersOffMsg);
+      } else {
+        let msg = "Failed to update. Please try again.";
+        try { msg = (await res.json())?.error || msg; } catch {}
+        onToast(`❌ ${msg}`);
+      }
+    } catch (err) {
+      console.error(err);
+      onToast("❌ Could not reach the server. Please check your connection and try again.");
+    } finally {
+      setIsSavingOffers(false);
     }
   };
 
@@ -591,6 +644,35 @@ export default function DriverAccountScreen({
       {/* ── Settings ── */}
       <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">
         <h3 className="text-sm font-bold text-slate-200 text-start">{t.settings}</h3>
+
+        {/* Available for Offers */}
+        <button
+          type="button"
+          onClick={handleToggleAvailableForOffers}
+          disabled={isSavingOffers}
+          aria-pressed={offersEnabled}
+          className={`w-full flex items-center gap-3 min-h-[52px] px-3.5 border rounded-2xl text-start transition-colors cursor-pointer disabled:opacity-60 ${
+            offersEnabled ? "bg-orange-500/10 border-orange-500/40" : "bg-slate-950 border-slate-800"
+          }`}
+        >
+          <Megaphone className={`w-5 h-5 shrink-0 ${offersEnabled ? "text-orange-400" : "text-slate-500"}`} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-bold text-slate-200">{t.offersToggle}</span>
+            <span className={`block text-xs ${offersEnabled ? "text-orange-400/90" : "text-slate-500"}`}>
+              {offersEnabled ? t.offersOn : t.offersOff}
+            </span>
+          </span>
+          {isSavingOffers ? (
+            <Loader2 className="w-5 h-5 animate-spin text-slate-400 shrink-0" />
+          ) : (
+            <span
+              className={`shrink-0 w-11 h-6 rounded-full relative transition-colors ${offersEnabled ? "bg-orange-500 light-preserve" : "bg-slate-700"}`}
+              aria-hidden="true"
+            >
+              <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${offersEnabled ? "end-0.5" : "start-0.5"}`} />
+            </span>
+          )}
+        </button>
 
         {/* Language */}
         <div className="text-start space-y-2">

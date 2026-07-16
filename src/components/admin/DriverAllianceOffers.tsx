@@ -5,6 +5,15 @@ import {
 import type { AllianceOffer, AllianceOfferResponse } from "../../types";
 import { TRUCK_TYPES } from "../../types";
 import { apiFetch } from "../../lib/api";
+import {
+  OFFER_EXPIRY_HOURS_OPTIONS,
+  sortResponsesForReview,
+  summarizeResponses,
+  type OfferResponseSummary,
+} from "../../lib/driverAlliance";
+
+/** Admin list rows arrive with per-offer response counts precomputed server-side. */
+type OfferListItem = AllianceOffer & { responseSummary?: OfferResponseSummary };
 
 /**
  * Driver Alliance Phase 1 — Transport Offers panel inside the EXISTING
@@ -28,8 +37,11 @@ const EMPTY_FORM = {
   deliveryCountry: "",
   deliveryCity: "",
   truckType: TRUCK_TYPES[0].id,
+  freightType: "land",
   cargoDescription: "",
   expectedLoadingDate: "",
+  distanceKm: "",
+  expiresInHours: "24",
   notes: "",
   referenceShipmentId: "",
 };
@@ -39,6 +51,7 @@ const OFFER_STATUS_STYLE: Record<AllianceOffer["status"], string> = {
   broadcast: "bg-sky-50 text-sky-700 border-sky-200",
   winner_selected: "bg-emerald-50 text-emerald-700 border-emerald-200",
   cancelled: "bg-red-50 text-red-600 border-red-200",
+  expired: "bg-amber-50 text-amber-700 border-amber-200",
 };
 
 const OFFER_STATUS_LABEL: Record<AllianceOffer["status"], string> = {
@@ -46,6 +59,7 @@ const OFFER_STATUS_LABEL: Record<AllianceOffer["status"], string> = {
   broadcast: "Waiting for prices",
   winner_selected: "Winner selected",
   cancelled: "Cancelled",
+  expired: "Expired",
 };
 
 const RESPONSE_STATUS_LABEL: Record<AllianceOfferResponse["status"], string> = {
@@ -53,10 +67,13 @@ const RESPONSE_STATUS_LABEL: Record<AllianceOfferResponse["status"], string> = {
   viewed: "Viewed",
   quoted: "Quoted",
   rejected: "Rejected",
+  closed: "Closed",
 };
 
+const FREIGHT_TYPE_LABEL: Record<string, string> = { land: "Land", sea: "Sea", air: "Air" };
+
 export default function DriverAllianceOffers({ adminName, onChanged }: DriverAllianceOffersProps) {
-  const [offers, setOffers] = useState<AllianceOffer[]>([]);
+  const [offers, setOffers] = useState<OfferListItem[]>([]);
   const [selected, setSelected] = useState<{ offer: AllianceOffer; responses: AllianceOfferResponse[] } | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -129,6 +146,8 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...form,
+          expiresInHours: Number(form.expiresInHours),
+          distanceKm: form.distanceKm.trim() ? Number(form.distanceKm) : undefined,
           referenceShipmentId: form.referenceShipmentId.trim() || undefined,
           notes: form.notes.trim() || undefined,
           currency: "USD",
@@ -203,8 +222,19 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
               {TRUCK_TYPES.map((t) => <option key={t.id} value={t.id}>{t.en}</option>)}
             </select>
             <input required type="date" className={input} value={form.expectedLoadingDate} onChange={(e) => setForm({ ...form, expectedLoadingDate: e.target.value })} title="Expected Loading Date" />
+            <select className={input + " cursor-pointer"} value={form.freightType} onChange={(e) => setForm({ ...form, freightType: e.target.value })} title="Freight Type">
+              <option value="land">Land Freight</option>
+              <option value="sea">Sea Freight</option>
+              <option value="air">Air Freight</option>
+            </select>
+            <select className={input + " cursor-pointer"} value={form.expiresInHours} onChange={(e) => setForm({ ...form, expiresInHours: e.target.value })} title="Offer Expiry">
+              {OFFER_EXPIRY_HOURS_OPTIONS.map((h) => (
+                <option key={h} value={String(h)}>Expires in {h} hours</option>
+              ))}
+            </select>
           </div>
           <input required className={input} placeholder="Cargo Description *" value={form.cargoDescription} onChange={(e) => setForm({ ...form, cargoDescription: e.target.value })} />
+          <input type="number" min={1} className={input} placeholder="Distance in km (optional)" value={form.distanceKm} onChange={(e) => setForm({ ...form, distanceKm: e.target.value })} />
           <input className={input} placeholder="Notes (optional)" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
           <input className={input} placeholder="Reference Shipment ID (optional — winner will be assigned to it)" value={form.referenceShipmentId} onChange={(e) => setForm({ ...form, referenceShipmentId: e.target.value })} />
           <div className="flex items-center justify-between">
@@ -236,10 +266,17 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
                 <ArrowRight className="w-3.5 h-3.5 text-orange-500 shrink-0" />
                 <span className="truncate">{o.deliveryCity}, {o.deliveryCountry}</span>
               </span>
-              <span className="flex items-center gap-2 text-[11px] shrink-0">
+              <span className="flex items-center gap-2 text-[11px] shrink-0 flex-wrap">
+                {(o.referenceShipmentNumber || o.winnerShipmentNumber) && (
+                  <span className="font-mono font-bold text-slate-600">{o.winnerShipmentNumber || o.referenceShipmentNumber}</span>
+                )}
                 <span className="text-slate-500 font-medium">{TRUCK_TYPES.find((t) => t.id === o.truckType)?.en || o.truckType}</span>
                 <span className="text-slate-400">{o.expectedLoadingDate}</span>
-                {o.status === "broadcast" && <span className="text-slate-500">{o.invitedDriverIds.length} invited</span>}
+                {o.status !== "draft" && o.responseSummary && (
+                  <span className="text-slate-500">
+                    {o.responseSummary.invited} invited · {o.responseSummary.waiting} waiting · {o.responseSummary.quoted} quoted · {o.responseSummary.rejected} rejected
+                  </span>
+                )}
                 <span className={`px-2 py-0.5 rounded-full border font-bold ${OFFER_STATUS_STYLE[o.status]}`}>{OFFER_STATUS_LABEL[o.status]}</span>
               </span>
             </button>
@@ -254,8 +291,17 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
             <div className="text-sm font-bold text-slate-900">
               {selected.offer.pickupCity}, {selected.offer.pickupCountry} → {selected.offer.deliveryCity}, {selected.offer.deliveryCountry}
               <span className="block text-xs font-medium text-slate-500 mt-0.5">
-                {selected.offer.cargoDescription} · {TRUCK_TYPES.find((t) => t.id === selected.offer.truckType)?.en || selected.offer.truckType} · Loading {selected.offer.expectedLoadingDate}
+                {selected.offer.cargoDescription} · {FREIGHT_TYPE_LABEL[selected.offer.freightType || "land"] || "Land"} · {TRUCK_TYPES.find((t) => t.id === selected.offer.truckType)?.en || selected.offer.truckType} · Loading {selected.offer.expectedLoadingDate}
+                {typeof selected.offer.distanceKm === "number" ? ` · ${selected.offer.distanceKm.toLocaleString()} km` : ""}
+                {selected.offer.referenceShipmentNumber ? ` · Shipment ${selected.offer.referenceShipmentNumber}` : ""}
                 {selected.offer.notes ? ` · ${selected.offer.notes}` : ""}
+              </span>
+              <span className="block text-xs font-medium text-slate-500 mt-0.5">
+                {selected.offer.status === "expired"
+                  ? `Expired ${selected.offer.expiresAt ? new Date(selected.offer.expiresAt).toLocaleString() : ""} — quotations are closed, but you can still select a winner below.`
+                  : selected.offer.expiresAt
+                  ? `Quotations close ${new Date(selected.offer.expiresAt).toLocaleString()}`
+                  : `Expiry: ${selected.offer.expiresInHours || 24} hours after broadcast`}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -269,7 +315,7 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
                   <Megaphone className="w-3.5 h-3.5" /> Broadcast
                 </button>
               )}
-              {(selected.offer.status === "draft" || selected.offer.status === "broadcast") && (
+              {(selected.offer.status === "draft" || selected.offer.status === "broadcast" || selected.offer.status === "expired") && (
                 <button
                   type="button"
                   disabled={isBusy}
@@ -288,9 +334,24 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
           {selected.offer.status === "winner_selected" && (
             <div className="px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-semibold text-emerald-700 flex items-center gap-1.5">
               <Trophy className="w-3.5 h-3.5" />
-              Winner selected — shipment {selected.offer.winnerShipmentId} was assigned through the normal shipment workflow.
+              Winner selected — shipment {selected.offer.winnerShipmentNumber || selected.offer.winnerShipmentId} was assigned through the normal shipment workflow. All other quotations were closed.
             </div>
           )}
+
+          {/* Response counts */}
+          {selected.responses.length > 0 && (() => {
+            const s = summarizeResponses(selected.responses);
+            return (
+              <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-bold">
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-600">{s.invited} invited</span>
+                <span className="px-2 py-0.5 rounded-full bg-sky-50 border border-sky-200 text-sky-700">{s.waiting} waiting</span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">{s.quoted} quoted</span>
+                <span className="px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-600">{s.rejected} rejected</span>
+                {s.closed > 0 && <span className="px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-500">{s.closed} closed</span>}
+                <span className="text-slate-400 font-medium ms-1">Quotations sorted lowest price first</span>
+              </div>
+            );
+          })()}
 
           {/* Invited drivers table */}
           {selected.responses.length === 0 ? (
@@ -311,7 +372,7 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
                   </tr>
                 </thead>
                 <tbody>
-                  {selected.responses.map((r) => (
+                  {sortResponsesForReview(selected.responses).map((r) => (
                     <tr key={r.id} className="border-b border-slate-100">
                       <td className="py-2 pr-2 font-semibold text-slate-800">
                         {r.driverName}
@@ -331,9 +392,11 @@ export default function DriverAllianceOffers({ adminName, onChanged }: DriverAll
                       <td className="py-2 pr-2 text-slate-500">
                         {r.respondedAt ? new Date(r.respondedAt).toLocaleString() : "—"}
                       </td>
-                      <td className="py-2 pr-2 text-slate-600 max-w-[220px] truncate" title={r.note || ""}>{r.note || "—"}</td>
+                      <td className="py-2 pr-2 text-slate-600 max-w-[220px] truncate" title={r.note || r.rejectReason || ""}>
+                        {r.note || (r.rejectReason ? `Reject reason: ${r.rejectReason}` : "—")}
+                      </td>
                       <td className="py-2 text-right">
-                        {selected.offer.status === "broadcast" && r.status === "quoted" && (
+                        {(selected.offer.status === "broadcast" || selected.offer.status === "expired") && r.status === "quoted" && (
                           <button
                             type="button"
                             disabled={isBusy}

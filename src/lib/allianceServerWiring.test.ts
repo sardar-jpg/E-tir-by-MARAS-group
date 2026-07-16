@@ -55,6 +55,15 @@ describe("permissions — Super/Operations only, server-side", () => {
     expect(route).toContain("managed by MARAS Operations");
     expect(route).toContain("sanitizeWorkingRoutes(workingRoutes)");
   });
+
+  it("the driver's own 'Available for Offers' switch IS writable by a driver session (boolean-validated, own record only)", () => {
+    const route = region('app.put("/api/drivers/:id", requireAuth', 6000);
+    // Deliberately OUTSIDE the admin-only guard above.
+    expect(route).toContain('typeof availableForOffers !== "boolean"');
+    expect(route).toContain("updatedDriver.availableForOffers = availableForOffers;");
+    // Own-record scoping is the route's first check.
+    expect(route).toContain("You can only update your own profile.");
+  });
 });
 
 describe("one-active-job rule — claim on every assignment path, release at the real terminal points", () => {
@@ -106,6 +115,31 @@ describe("broadcast matching — the server derives eligibility itself", () => {
     expect(broadcast).toContain("matchDriversForOffer(drivers, offer, busyDriverIds)");
     expect(broadcast).toContain("canBroadcastOffer(offer.status)");
   });
+
+  it("the quotation window opens at broadcast: expiresAt is stamped from the offer's chosen hours", () => {
+    const broadcast = region('app.post("/api/alliance/offers/:id/broadcast"', 4000);
+    expect(broadcast).toContain("computeOfferExpiresAt(nowIso, offer.expiresInHours || 24)");
+  });
+});
+
+describe("expiration — no more quotations after the window closes", () => {
+  it("respond rejects an expired offer with 409 OFFER_EXPIRED, server-side", () => {
+    const respond = region('app.post("/api/alliance/offers/:id/respond"', 2000);
+    expect(respond).toContain("isOfferExpired(offer)");
+    expect(respond).toContain('"OFFER_EXPIRED"');
+  });
+
+  it("reads report the RESOLVED status (a past-expiry broadcast offer is served as expired) — derived at read time, no scheduler", () => {
+    const list = region('app.get("/api/alliance/offers", requireAuth', 3500);
+    expect(list).toContain("resolveOfferStatus(o)");
+    const detail = region('app.get("/api/alliance/offers/:id", requireAuth', 2500);
+    expect(detail).toContain("resolveOfferStatus(offer)");
+  });
+
+  it("the admin list carries per-offer Waiting/Quoted/Rejected counts from one grouped read", () => {
+    const list = region('app.get("/api/alliance/offers", requireAuth', 3500);
+    expect(list).toContain("summarizeResponses(responsesByOffer.get(o.id) || [])");
+  });
 });
 
 describe("USD-only and answer validation — server-side", () => {
@@ -129,6 +163,22 @@ describe("USD-only and answer validation — server-side", () => {
     expect(winner).toContain("canSelectWinner(offer.status)");
     expect(winner).toContain('response.status !== "quoted"');
     expect(winner).toContain('status: "winner_selected"');
+  });
+
+  it("selecting the winner closes every other open quotation (status closed + the fixed courtesy message), never touching rejected answers", () => {
+    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
+    expect(winner).toContain('other.driverId === driverId || other.status === "rejected" || other.status === "closed"');
+    expect(winner).toContain('status: "closed" as const');
+    expect(winner).toContain("Another driver has been selected. Thank you for your quotation.");
+    expect(winner).toContain("closedAt: nowIso");
+    expect(winner).toContain("winnerShipmentNumber: shipmentNumber");
+  });
+
+  it("a rejection stores the driver's optional reason (bounded), and it reaches the admin notification", () => {
+    const respond = region('app.post("/api/alliance/offers/:id/respond"', 4500);
+    expect(respond).toContain('req.body?.rejectReason === "string" ? req.body.rejectReason.trim().slice(0, 500)');
+    expect(respond).toContain("rejectReason,");
+    expect(respond).toContain("Reason: ${rejectReason}");
   });
 });
 
@@ -197,8 +247,9 @@ describe("storage & workflow reuse", () => {
     expect(post).toContain("await createShipmentRecord(req.body);");
   });
 
-  it("Phase 2 hook: the offer document reserves closedAt for closing remaining offers later (no data migration needed)", () => {
+  it("closedAt marks the moment the non-winning quotations were closed (winner selection writes it)", () => {
     const types = readFileSync(join(__dirname, "..", "types.ts"), "utf-8");
     expect(types).toContain("closedAt?: string;");
+    expect(region('app.post("/api/alliance/offers/:id/select-winner"', 7000)).toContain("closedAt: nowIso");
   });
 });

@@ -19,7 +19,13 @@ import {
   canSubmitResponse,
   allianceResponseId,
   buildDriverOfferView,
+  computeOfferExpiresAt,
+  isOfferExpired,
+  resolveOfferStatus,
+  sortResponsesForReview,
+  summarizeResponses,
   MAX_ROUTES_PER_DRIVER,
+  MAX_OFFER_EXPIRY_HOURS,
 } from "./driverAlliance";
 
 function driver(id: string, overrides: Partial<Driver> = {}): Driver {
@@ -53,6 +59,7 @@ const BASE_OFFER_BODY = {
   truckType: "reefer",
   cargoDescription: "Frozen food",
   expectedLoadingDate: "2026-08-01",
+  expiresInHours: 24,
 };
 
 describe("routes — structured, directional, de-duplicated", () => {
@@ -139,6 +146,13 @@ describe("availability — one active job, freight-mode terminal points", () => 
     expect(resolveDriverAvailability({ id: "d1" }, busy)).toBe("busy");
     expect(resolveDriverAvailability({ id: "d2" }, busy)).toBe("available");
   });
+
+  it("a driver who switched OFF 'Available for Offers' reads inactive; absent means available (legacy profiles)", () => {
+    const busy = new Set<string>();
+    expect(resolveDriverAvailability({ id: "d1", availableForOffers: false }, busy)).toBe("inactive");
+    expect(resolveDriverAvailability({ id: "d1", availableForOffers: true }, busy)).toBe("available");
+    expect(resolveDriverAvailability({ id: "d1" }, busy)).toBe("available");
+  });
 });
 
 describe("automatic matching — route + truck type + availability", () => {
@@ -151,6 +165,7 @@ describe("automatic matching — route + truck type + availability", () => {
       driver("wrong-route", { workingRoutes: [{ id: "r", from: "Iraq", to: "Turkey", active: true }] }),
       driver("no-routes", { workingRoutes: [] }),
       driver("inactive", { allianceInactive: true }),
+      driver("offers-off", { availableForOffers: false }),
       driver("pending", { status: "pending" }),
       driver("rejected", { status: "rejected" }),
       driver("busy"),
@@ -191,6 +206,29 @@ describe("offer input validation — USD ONLY", () => {
       expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, [missing]: "" }).ok).toBe(false);
     }
     expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, truckType: "hovercraft" }).ok).toBe(false);
+  });
+
+  it("requires a whole-hour expiry between 1 and the cap (2 / 12 / 24 are the quick picks)", () => {
+    for (const expiresInHours of [2, 12, 24]) {
+      const result = validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours });
+      expect(result.ok).toBe(true);
+      expect(result.offer?.expiresInHours).toBe(expiresInHours);
+    }
+    // Numeric strings from a form are fine too.
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours: "12" }).offer?.expiresInHours).toBe(12);
+    for (const bad of [undefined, 0, -2, 1.5, MAX_OFFER_EXPIRY_HOURS + 1, "soon", ""]) {
+      expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours: bad }).ok).toBe(false);
+    }
+  });
+
+  it("freight type defaults to land and only land/sea/air are accepted; distance must be a positive km number", () => {
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY }).offer?.freightType).toBe("land");
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, freightType: "Sea" }).offer?.freightType).toBe("sea");
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, freightType: "rail" }).ok).toBe(false);
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: 1240.6 }).offer?.distanceKm).toBe(1241);
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: -5 }).ok).toBe(false);
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: "far" }).ok).toBe(false);
+    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY }).offer?.distanceKm).toBeUndefined();
   });
 
   it("quote prices: USD only, positive, finite, capped, 2-decimal rounded", () => {
@@ -239,15 +277,79 @@ describe("offer/response state transitions", () => {
     expect(canCancelOffer("cancelled")).toBe(false);
   });
 
-  it("one answer per driver: quoted/rejected responses can never be resubmitted", () => {
+  it("one answer per driver: quoted/rejected/closed responses can never be resubmitted", () => {
     expect(canSubmitResponse("invited")).toBe(true);
     expect(canSubmitResponse("viewed")).toBe(true);
     expect(canSubmitResponse("quoted")).toBe(false);
     expect(canSubmitResponse("rejected")).toBe(false);
+    expect(canSubmitResponse("closed")).toBe(false);
   });
 
   it("response id is the (offerId, driverId) natural key — one doc per driver per offer", () => {
     expect(allianceResponseId("offer-1", "driver-9")).toBe("offer-1_driver-9");
+  });
+});
+
+describe("expiration — the quotation window is derived, never scheduled", () => {
+  const broadcastAt = "2026-07-16T10:00:00.000Z";
+
+  it("computeOfferExpiresAt counts the chosen hours from BROADCAST time", () => {
+    expect(computeOfferExpiresAt(broadcastAt, 2)).toBe("2026-07-16T12:00:00.000Z");
+    expect(computeOfferExpiresAt(broadcastAt, 24)).toBe("2026-07-17T10:00:00.000Z");
+  });
+
+  it("a broadcast offer past expiresAt resolves to expired; before it stays broadcast", () => {
+    const offer = { status: "broadcast" as const, expiresAt: "2026-07-16T12:00:00.000Z" };
+    expect(isOfferExpired(offer, "2026-07-16T11:59:59.000Z")).toBe(false);
+    expect(isOfferExpired(offer, "2026-07-16T12:00:00.000Z")).toBe(true);
+    expect(resolveOfferStatus(offer, "2026-07-16T13:00:00.000Z")).toBe("expired");
+    expect(resolveOfferStatus(offer, "2026-07-16T11:00:00.000Z")).toBe("broadcast");
+  });
+
+  it("terminal stored statuses always win over expiry, and a draft (never broadcast) never expires", () => {
+    expect(resolveOfferStatus({ status: "winner_selected", expiresAt: "2020-01-01T00:00:00.000Z" }, "2026-01-01T00:00:00.000Z")).toBe("winner_selected");
+    expect(resolveOfferStatus({ status: "cancelled", expiresAt: "2020-01-01T00:00:00.000Z" }, "2026-01-01T00:00:00.000Z")).toBe("cancelled");
+    expect(resolveOfferStatus({ status: "draft", expiresAt: undefined }, "2026-01-01T00:00:00.000Z")).toBe("draft");
+  });
+
+  it("drivers cannot answer an expired offer (resolved status is no longer broadcast)", () => {
+    const offer = { status: "broadcast" as const, expiresAt: "2026-07-16T12:00:00.000Z" };
+    expect(canDriverRespondToOffer(resolveOfferStatus(offer, "2026-07-16T13:00:00.000Z"))).toBe(false);
+  });
+});
+
+describe("admin review helpers — counts and lowest-price-first ordering", () => {
+  const resp = (id: string, status: AllianceOfferResponse["status"], priceUsd?: number, invitedAt = "t1"): AllianceOfferResponse => ({
+    id: `o1_${id}`,
+    offerId: "o1",
+    driverId: id,
+    driverName: `Driver ${id}`,
+    status,
+    priceUsd,
+    invitedAt,
+  });
+
+  it("sortResponsesForReview puts quoted responses first, LOWEST price first, everyone else after in invitation order", () => {
+    const sorted = sortResponsesForReview([
+      resp("waiting", "invited", undefined, "t1"),
+      resp("high", "quoted", 5200),
+      resp("rejected", "rejected", undefined, "t0"),
+      resp("low", "quoted", 3800),
+      resp("mid", "quoted", 4100),
+    ]);
+    expect(sorted.map((r) => r.driverId)).toEqual(["low", "mid", "high", "rejected", "waiting"]);
+  });
+
+  it("summarizeResponses: Waiting = invited/viewed with no answer yet", () => {
+    expect(
+      summarizeResponses([
+        resp("a", "invited"),
+        resp("b", "viewed"),
+        resp("c", "quoted", 4000),
+        resp("d", "rejected"),
+        resp("e", "closed"),
+      ])
+    ).toEqual({ invited: 5, waiting: 2, quoted: 1, rejected: 1, closed: 1 });
   });
 });
 
@@ -263,7 +365,10 @@ describe("driver-facing offer view — privacy", () => {
     cargoDescription: "Frozen food",
     expectedLoadingDate: "2026-08-01",
     notes: "call first",
+    expiresInHours: 24,
+    expiresAt: "2026-07-17T10:00:00.000Z",
     referenceShipmentId: "shipment-77",
+    referenceShipmentNumber: "MAR-2026-0077",
     currency: "USD",
     createdById: "admin-1",
     createdByName: "Ops Admin",
@@ -295,10 +400,30 @@ describe("driver-facing offer view — privacy", () => {
     expect(view.createdById).toBeUndefined();
     expect(view.createdByName).toBeUndefined();
     expect(JSON.stringify(view)).not.toContain("shipment-77");
+    expect(JSON.stringify(view)).not.toContain("MAR-2026-0077");
   });
 
   it("tells the winner they won, and only the winner", () => {
     expect(buildDriverOfferView(offer, response).isWinner).toBe(false);
     expect(buildDriverOfferView(offer, { ...response, driverId: "d1" }).isWinner).toBe(true);
+  });
+
+  it("shows the RESOLVED status: an out-of-time broadcast offer reads expired to the driver", () => {
+    const live: AllianceOffer = { ...offer, status: "broadcast", winnerDriverId: undefined, winnerShipmentId: undefined };
+    expect(buildDriverOfferView(live, response, "2026-07-18T00:00:00.000Z").status).toBe("expired");
+    expect(buildDriverOfferView(live, response, "2026-07-16T00:00:00.000Z").status).toBe("broadcast");
+  });
+
+  it("carries the driver's own reject reason and closed state, and the freight/distance/expiry facts", () => {
+    const view = buildDriverOfferView(
+      { ...offer, freightType: "land", distanceKm: 1240 },
+      { ...response, status: "closed", rejectReason: undefined }
+    );
+    expect(view.myResponse.status).toBe("closed");
+    expect(view.freightType).toBe("land");
+    expect(view.distanceKm).toBe(1240);
+    expect(view.expiresAt).toBe("2026-07-17T10:00:00.000Z");
+    const rejectedView = buildDriverOfferView(offer, { ...response, status: "rejected", priceUsd: undefined, rejectReason: "truck in service" });
+    expect(rejectedView.myResponse.rejectReason).toBe("truck in service");
   });
 });

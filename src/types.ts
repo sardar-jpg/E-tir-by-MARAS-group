@@ -193,6 +193,15 @@ export interface Driver {
    * still be marked alliance-inactive. Absent = active.
    */
   allianceInactive?: boolean;
+  /**
+   * Driver Quote Requests: the driver's OWN "Available for Offers"
+   * switch, editable from the driver app's Account screen (the one
+   * alliance field a driver session may write). Absent/true = available;
+   * false = the driver receives no quotation requests. Independent of
+   * `allianceInactive` (the Operations-side switch) — matching requires
+   * BOTH to be off.
+   */
+  availableForOffers?: boolean;
   latitude?: number;
   longitude?: number;
   lastUpdated?: string;
@@ -466,7 +475,15 @@ export type AllianceOfferStatus =
   /** Operations picked one winning driver; a shipment was assigned/created. */
   | 'winner_selected'
   /** Cancelled by Operations before a winner was selected. */
-  | 'cancelled';
+  | 'cancelled'
+  /**
+   * The quotation window closed (expiresAt passed) with no winner yet.
+   * DERIVED, never stored: documents keep 'broadcast' and the API
+   * resolves it via resolveOfferStatus at read time, so no scheduler is
+   * needed and Operations can still review quotes and select a winner
+   * after expiry — only new driver answers are blocked.
+   */
+  | 'expired';
 
 export interface AllianceOffer {
   id: string;
@@ -480,6 +497,18 @@ export interface AllianceOffer {
   cargoDescription: string;
   expectedLoadingDate: string;
   notes?: string;
+  /** Freight mode shown to drivers and used for the created shipment ('land' | 'sea' | 'air'; default land). */
+  freightType?: string;
+  /** Optional route distance in km, shown to drivers when available. */
+  distanceKm?: number;
+  /**
+   * Quotation window length, chosen by Operations at creation (e.g. 2,
+   * 12, 24 hours). The countdown starts at BROADCAST, not creation —
+   * expiresAt below is stamped then.
+   */
+  expiresInHours: number;
+  /** Absolute expiry instant (broadcastAt + expiresInHours), set at broadcast. */
+  expiresAt?: string;
   /**
    * Optional existing shipment this offer is sourcing a driver for. When
    * set, winner selection assigns THAT shipment; when absent, winner
@@ -487,6 +516,8 @@ export interface AllianceOffer {
    * POST /api/shipments uses.
    */
   referenceShipmentId?: string;
+  /** The reference shipment's human number, captured at creation for the admin list. */
+  referenceShipmentNumber?: string;
   /** Phase 1 is deliberately USD-only. The server rejects anything else. */
   currency: 'USD';
   createdById: string;
@@ -498,15 +529,23 @@ export interface AllianceOffer {
   invitedDriverIds: string[];
   winnerDriverId?: string;
   winnerShipmentId?: string;
+  /** The assigned/created shipment's human number, for the admin list. */
+  winnerShipmentNumber?: string;
   /**
-   * Reserved for Phase 2 ("close remaining offers"): set when Operations
-   * later closes out the offer's non-winning responses. Nothing writes
-   * this in Phase 1 — it exists so Phase 2 needs no data migration.
+   * Set at winner selection, when every other (non-rejected) quotation
+   * is closed and its driver is told "Another driver has been selected.
+   * Thank you for your quotation."
    */
   closedAt?: string;
 }
 
-export type AllianceResponseStatus = 'invited' | 'viewed' | 'quoted' | 'rejected';
+export type AllianceResponseStatus =
+  | 'invited'
+  | 'viewed'
+  | 'quoted'
+  | 'rejected'
+  /** Closed by the system because Operations selected another driver. */
+  | 'closed';
 
 /**
  * One invited driver's participation in one offer. Document id is always
@@ -523,6 +562,8 @@ export interface AllianceOfferResponse {
   /** USD only; validated server-side (positive, finite, capped). */
   priceUsd?: number;
   note?: string;
+  /** Optional free-text reason the driver gave when rejecting. */
+  rejectReason?: string;
   invitedAt: string;
   viewedAt?: string;
   respondedAt?: string;
