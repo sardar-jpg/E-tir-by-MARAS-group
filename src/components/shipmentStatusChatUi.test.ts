@@ -32,26 +32,29 @@ describe("DriverApplication.tsx", () => {
     expect(SOURCE).toContain("const isShipmentChatClosed = activeShipment ? isShipmentClosed(activeShipment.status, activeShipment.freightType) : false;");
   });
 
-  it("the status-update form derives its next status from getDriverSubmittableNextStatus, and is locked (not just hidden) when there is none", () => {
-    expect(SOURCE).toContain("const driverNextStatus = getDriverSubmittableNextStatus(activeShipment.status, activeShipment.freightType);");
-    expect(SOURCE).toContain("if (!driverNextStatus) {");
+  // feature/driver-app-comprehensive-redesign: the status-update control
+  // moved from an inline form into DriverNextAction.tsx (a single primary
+  // button for the one legal next status). These pins moved with it — the
+  // protections themselves are unchanged.
+  it("the driver status control (DriverNextAction) derives its one action from getDriverNextAction and renders a locked/completed state when there is none", () => {
+    const NEXT_ACTION = read("driver/DriverNextAction.tsx");
+    expect(NEXT_ACTION).toContain("const action = getDriverNextAction(shipment.status, shipment.freightType);");
+    expect(NEXT_ACTION).toContain("if (!action) {");
   });
 
-  it("the status select shows only driverNextStatus as its sole, disabled option — never a free-form list", () => {
-    const selectIndex = SOURCE.indexOf("<select\n                          value={driverNextStatus}");
-    expect(selectIndex).toBeGreaterThan(-1);
-    const selectEnd = SOURCE.indexOf("</select>", selectIndex);
-    const selectBlock = SOURCE.slice(selectIndex, selectEnd);
-    expect(selectBlock).toContain("disabled");
-    // Exactly one <option>, not a `.map` over a hardcoded array.
-    expect((selectBlock.match(/<option/g) || []).length).toBe(1);
+  it("the driver status control offers a single forward action — never a select/dropdown a driver could pick a skipped/backward/closing status from", () => {
+    const NEXT_ACTION = read("driver/DriverNextAction.tsx");
+    expect(NEXT_ACTION).not.toContain("<select");
+    expect(NEXT_ACTION).not.toContain("<option");
+    // getDriverNextAction is itself backed by getDriverSubmittableNextStatus
+    // (driverJobFlow.ts) — pinned there by driverJobFlow.test.ts.
   });
 
-  it("handleStatusUpdate submits the freshly-derived next status (not a possibly-stale piece of state) and refreshes on a 409 rejection without auto-retrying", () => {
-    const fnStart = SOURCE.indexOf("const handleStatusUpdate = async (e: React.FormEvent) => {");
+  it("handleSubmitNextStatus submits the freshly-derived next status (not a possibly-stale piece of state) and refreshes on a 409 rejection without auto-retrying", () => {
+    const fnStart = SOURCE.indexOf("const handleSubmitNextStatus = async (shipment: Shipment) => {");
     expect(fnStart).toBeGreaterThan(-1);
-    const fnRegion = SOURCE.slice(fnStart, fnStart + 2200);
-    expect(fnRegion).toContain("getDriverSubmittableNextStatus(activeShipment.status, activeShipment.freightType)");
+    const fnRegion = SOURCE.slice(fnStart, fnStart + 2400);
+    expect(fnRegion).toContain("getDriverSubmittableNextStatus(shipment.status, shipment.freightType)");
     expect(fnRegion).toContain('status: nextStatus,');
     expect(fnRegion).toContain('body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION"');
     expect(fnRegion).toContain("fetchData();");
