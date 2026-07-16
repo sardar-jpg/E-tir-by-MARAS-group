@@ -112,6 +112,13 @@ import {
   InMemorySequenceCounter,
   ShipmentSequenceCounterDoc,
 } from "./src/lib/shipmentNumbering";
+import {
+  INITIAL_SHIPMENT_REVISION,
+  parseExpectedRevision,
+  checkShipmentRevision,
+  ShipmentRevisionConflictError,
+  applyRevisionedShipmentUpdateMemory,
+} from "./src/lib/shipmentRevision";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
@@ -1657,7 +1664,78 @@ async function allocateNextShipmentSequence(): Promise<number> {
     return getShipmentSequenceCounterMemory().next();
   }
 }
-import { 
+
+// Shipment-update lost-update race fix (stability audit). in-memory
+// equivalent of the Firestore transaction below, used only when Firestore
+// is unavailable and STRICT_PERSISTENCE is off — see
+// applyRevisionedShipmentUpdateMemory (shipmentRevision.ts) for the actual
+// (unit-tested) logic and its atomicity reasoning; this just supplies the
+// live memory-store array reference.
+function applyShipmentRevisionedUpdateMemory(
+  shipmentId: string,
+  expectedRevision: number,
+  buildUpdated: (current: Shipment, nextRevision: number) => Shipment
+): Shipment {
+  return applyRevisionedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, expectedRevision, buildUpdated);
+}
+
+// Shipment-update lost-update race fix (stability audit). Compares the
+// client's expectedRevision against the shipment document's actual current
+// revision and performs the update, atomically, inside a single Firestore
+// transaction — exactly one of two concurrent calls starting from the same
+// expectedRevision can ever commit; the other sees ShipmentRevisionConflictError,
+// with no document modification. `buildUpdated` must be a pure, synchronous
+// function of (the transaction's own freshly-read current document, the
+// revision to store) — it must not perform any I/O (no fetches, no other
+// Firestore reads/writes, no notifications), since anything in the
+// transaction callback may run more than once if Firestore internally
+// retries it. Callers run notifications/audit logging only after this
+// resolves successfully — never inside buildUpdated, and never on conflict.
+async function applyShipmentRevisionedUpdate(
+  shipmentId: string,
+  expectedRevision: number,
+  buildUpdated: (current: Shipment, nextRevision: number) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyShipmentRevisionedUpdateMemory(shipmentId, expectedRevision, buildUpdated);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const { ok, currentRevision, nextRevision } = checkShipmentRevision(current.revision, expectedRevision);
+        if (!ok) {
+          throw new ShipmentRevisionConflictError(currentRevision, current);
+        }
+        const updated = buildUpdated(current, nextRevision);
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    // A genuine version conflict is an expected application outcome, not an
+    // infrastructure failure — it must reach the route as-is so it 409s
+    // with no notifications/audit side effects, never fall through to the
+    // memory-fallback retry below (which could silently apply a stale
+    // client's write against different, unrelated in-memory data).
+    if (error instanceof ShipmentRevisionConflictError) throw error;
+    console.warn("Firestore shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyShipmentRevisionedUpdateMemory(shipmentId, expectedRevision, buildUpdated);
+  }
+}
+import {
   Shipment,
   Driver,
   ChatMessage,
@@ -3639,6 +3717,9 @@ async function startServer() {
         timeline: [initialTimeline],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        // Shipment-update lost-update race fix: new shipments always begin
+        // at revision 1 (see resolveStoredRevision, shipmentRevision.ts).
+        revision: INITIAL_SHIPMENT_REVISION,
         isLinkShared: false,
         shareToken: generateShareToken(),
         shareIncludeDocuments: true,
@@ -3976,14 +4057,28 @@ async function startServer() {
   // 4. Update Shipment Profile
   app.put("/api/shipments/:id", requireFullAdmin, async (req, res) => {
     try {
+      const data = req.body;
+
+      // Shipment-update lost-update race fix (stability audit): the client
+      // must always submit the revision it actually read — never a value it
+      // computes itself — or the request is rejected outright. Concurrency
+      // protection is never optional here; there is no legacy bypass.
+      const expectedRevision = parseExpectedRevision(data.expectedRevision);
+      if (expectedRevision === null) {
+        return res.status(400).json({ error: "A valid expectedRevision is required to save shipment changes." });
+      }
+
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) {
         return res.status(404).json({ error: "Shipment not found" });
       }
 
-      const original = sDoc.data() as Shipment;
-      const data = req.body;
+      // Pre-transaction snapshot, used only for the validation checks below.
+      // Reassigned after a successful commit (see below) to the
+      // transaction's own authoritative read, since that — not this early
+      // read — is what the write actually applied on top of.
+      let original = sDoc.data() as Shipment;
 
       const oldDriverId = original.assignedDriverId;
       const newDriverId = data.assignedDriverId;
@@ -4020,6 +4115,180 @@ async function startServer() {
         }
       }
 
+      const assignedDriverName = driverObj ? driverObj.name : "Unassigned";
+
+      const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
+        'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
+        'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
+        'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
+        'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
+        'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
+        'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
+        'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
+        'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
+        'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
+        'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
+        'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
+
+        'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
+        'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إfراج الحاوية" },
+        'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
+        'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
+        'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
+        'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
+        'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
+        'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
+
+        'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
+        'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
+        'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
+        'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
+      };
+
+      // Shipment-update lost-update race fix: this merge is a pure,
+      // synchronous function of (the Firestore transaction's own
+      // freshly-read current document, the revision to store) — no I/O of
+      // any kind, since Firestore may run it more than once if the
+      // transaction is internally retried. `current` is captured into
+      // capturedCurrent so the notification/audit logic after the
+      // transaction (which must never run inside the transaction itself)
+      // can diff against the exact snapshot the write actually applied on
+      // top of.
+      let capturedCurrent: Shipment | null = null;
+      // True only when the "first assignment" New -> Assigned bump below
+      // actually fires — distinct from "is the final status Assigned",
+      // since an explicit data.status: "Assigned" in the same request
+      // reaches finalStatus first and would make that comparison true even
+      // when this specific bump never ran (matching the pre-fix code's
+      // exact timing: its equivalent check also ran against the
+      // already-data.status-merged value, before the bump).
+      let assignmentBumpApplied = false;
+      function buildUpdatedShipment(current: Shipment, nextRevision: number): Shipment {
+        capturedCurrent = current;
+
+        let finalStatus = data.status !== undefined ? data.status : current.status;
+        const timelineCopy = [...(current.timeline || [])];
+
+        if (data.status !== undefined && data.status !== current.status) {
+          const labels = labelMap[data.status as string] || { en: data.status, tr: data.status, ar: data.status };
+          timelineCopy.push({
+            timestamp: new Date().toISOString(),
+            status: data.status,
+            labelEn: labels.en,
+            labelTr: labels.tr,
+            labelAr: labels.ar,
+            detailsEn: `Status updated manually to ${labels.en} via Operations Panel.`,
+            detailsTr: `Durum Operasyon Paneli üzerinden manuel olarak ${labels.tr} olarak güncellendi.`,
+            detailsAr: `تم تحديث الحالة يدوياً إلى ${labels.ar} عبر لوحة العمليات.`
+          });
+        }
+
+        const updated: Shipment = {
+          ...current,
+          status: finalStatus,
+          timeline: timelineCopy,
+          companyName: data.companyName !== undefined ? data.companyName : current.companyName,
+          loadingCountry: data.loadingCountry !== undefined ? data.loadingCountry : current.loadingCountry,
+          loadingCity: data.loadingCity !== undefined ? data.loadingCity : current.loadingCity,
+          loadingAddress: data.loadingAddress !== undefined ? data.loadingAddress : current.loadingAddress,
+          loadingContactNumber: data.loadingContactNumber !== undefined ? data.loadingContactNumber : current.loadingContactNumber,
+          deliveryCountry: data.deliveryCountry !== undefined ? data.deliveryCountry : current.deliveryCountry,
+          deliveryCity: data.deliveryCity !== undefined ? data.deliveryCity : current.deliveryCity,
+          deliveryAddress: data.deliveryAddress !== undefined ? data.deliveryAddress : current.deliveryAddress,
+          deliveryContactNumber: data.deliveryContactNumber !== undefined ? data.deliveryContactNumber : current.deliveryContactNumber,
+          cargoDescription: data.cargoDescription !== undefined ? data.cargoDescription : current.cargoDescription,
+          cargoWeight: data.cargoWeight !== undefined ? Number(data.cargoWeight) : current.cargoWeight,
+          truckNumber: driverObj ? driverObj.truckNumber : (data.truckNumber !== undefined ? data.truckNumber : current.truckNumber),
+          assignedDriverId: newDriverId !== undefined ? newDriverId : current.assignedDriverId,
+          assignedDriverName: newDriverId !== undefined ? assignedDriverName : current.assignedDriverName,
+          agreedAmount: data.agreedAmount !== undefined ? Number(data.agreedAmount) : current.agreedAmount,
+          currency: data.currency !== undefined ? data.currency : current.currency,
+          internalNotes: data.internalNotes !== undefined ? data.internalNotes : current.internalNotes,
+          updatedAt: new Date().toISOString(),
+          revision: nextRevision,
+
+          // Add Sea & Air properties to update payload
+          freightType: data.freightType !== undefined ? data.freightType : current.freightType,
+          shippingLine: data.shippingLine !== undefined ? data.shippingLine : current.shippingLine,
+          vesselName: data.vesselName !== undefined ? data.vesselName : current.vesselName,
+          containerNumber: data.containerNumber !== undefined ? data.containerNumber : current.containerNumber,
+          bookingNumber: data.bookingNumber !== undefined ? data.bookingNumber : current.bookingNumber,
+          billOfLadingNumber: data.billOfLadingNumber !== undefined ? data.billOfLadingNumber : current.billOfLadingNumber,
+          portOfLoading: data.portOfLoading !== undefined ? data.portOfLoading : current.portOfLoading,
+          portOfDischarge: data.portOfDischarge !== undefined ? data.portOfDischarge : current.portOfDischarge,
+          finalDestination: data.finalDestination !== undefined ? data.finalDestination : current.finalDestination,
+          etd: data.etd !== undefined ? data.etd : current.etd,
+          eta: data.eta !== undefined ? data.eta : current.eta,
+          numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : current.numberOfContainers,
+          containerType: data.containerType !== undefined ? data.containerType : current.containerType,
+          airline: data.airline !== undefined ? data.airline : current.airline,
+          flightNumber: data.flightNumber !== undefined ? data.flightNumber : current.flightNumber,
+          airWaybillNumber: data.airWaybillNumber !== undefined ? data.airWaybillNumber : current.airWaybillNumber,
+          airportOfDeparture: data.airportOfDeparture !== undefined ? data.airportOfDeparture : current.airportOfDeparture,
+          airportOfArrival: data.airportOfArrival !== undefined ? data.airportOfArrival : current.airportOfArrival,
+          grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : current.grossWeight,
+          chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : current.chargeableWeight,
+          numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : current.numberOfPackages,
+          additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : current.additionalDrivers,
+          // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
+          // re-derived on every update (from whichever value additionalDrivers
+          // above just resolved to) so this stays in sync even on an update
+          // that doesn't touch additionalDrivers itself.
+          additionalDriverIds: deriveAdditionalDriverIds(
+            data.additionalDrivers !== undefined ? data.additionalDrivers : current.additionalDrivers
+          ),
+          additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : current.additionalContainers,
+
+          // Broker details mapping for land shipments
+          destinationBrokerId: data.destinationBrokerId !== undefined ? data.destinationBrokerId : current.destinationBrokerId,
+          destinationBrokerName: data.destinationBrokerName !== undefined ? data.destinationBrokerName : current.destinationBrokerName,
+          destinationBrokerPhone: data.destinationBrokerPhone !== undefined ? data.destinationBrokerPhone : current.destinationBrokerPhone,
+          iraqBorderBrokerId: data.iraqBorderBrokerId !== undefined ? data.iraqBorderBrokerId : current.iraqBorderBrokerId,
+          iraqBorderBrokerName: data.iraqBorderBrokerName !== undefined ? data.iraqBorderBrokerName : current.iraqBorderBrokerName,
+          iraqBorderBrokerPhone: data.iraqBorderBrokerPhone !== undefined ? data.iraqBorderBrokerPhone : current.iraqBorderBrokerPhone,
+        };
+
+        // Set status to Assigned if first assigned
+        if (oldDriverId !== newDriverId && newDriverId && updated.status === "New") {
+          updated.status = "Assigned";
+          updated.timeline.push({
+            timestamp: new Date().toISOString(),
+            status: "Assigned",
+            labelEn: "Driver Assigned",
+            labelTr: "Sürücü Atandı",
+            labelAr: "تم تعيين السائق",
+            detailsEn: `Assigned to driver ${assignedDriverName} during shipment update.`,
+            detailsTr: `Sözleşme güncellemesi sırasında sürücü ${assignedDriverName} atandı.`,
+            detailsAr: `تم تعيينه للسائق  ${assignedDriverName} أثناء عملية التحديث.`
+          });
+          assignmentBumpApplied = true;
+        }
+
+        return updated;
+      }
+
+      let updatedShipment: Shipment;
+      try {
+        updatedShipment = await applyShipmentRevisionedUpdate(req.params.id, expectedRevision, buildUpdatedShipment);
+      } catch (err) {
+        if (err instanceof ShipmentRevisionConflictError) {
+          // Stale save: no document was modified, and no notification/audit
+          // side effect below ever runs for this request.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentRevision: err.currentRevision,
+            shipment: err.currentShipment,
+          });
+        }
+        throw err;
+      }
+
+      // Everything below only runs after a successful, committed write —
+      // never on validation failure, a missing shipment, a revision
+      // conflict, or a transaction/infrastructure failure.
+      original = capturedCurrent!;
+
       // Handle shift in driver statistics
       if (oldDriverId !== newDriverId) {
         if (oldDriverId) {
@@ -4036,52 +4305,7 @@ async function startServer() {
         }
       }
 
-      const assignedDriverName = driverObj ? driverObj.name : "Unassigned";
-
-      let finalStatus = data.status !== undefined ? data.status : original.status;
-      const timelineCopy = [...(original.timeline || [])];
-
       if (data.status !== undefined && data.status !== original.status) {
-        const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
-          'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
-          'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
-          'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
-          'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
-          'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
-          'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
-          'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
-          'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
-          'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
-          'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
-          'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
-
-          'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
-          'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إfراج الحاوية" },
-          'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
-          'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
-          'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
-          'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
-          'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
-          'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
-
-          'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
-          'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
-          'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
-          'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
-        };
-        const labels = labelMap[data.status as string] || { en: data.status, tr: data.status, ar: data.status };
-
-        timelineCopy.push({
-          timestamp: new Date().toISOString(),
-          status: data.status,
-          labelEn: labels.en,
-          labelTr: labels.tr,
-          labelAr: labels.ar,
-          detailsEn: `Status updated manually to ${labels.en} via Operations Panel.`,
-          detailsTr: `Durum Operasyon Paneli üzerinden manuel olarak ${labels.tr} olarak güncellendi.`,
-          detailsAr: `تم تحديث الحالة يدوياً إلى ${labels.ar} عبر لوحة العمليات.`
-        });
-
         await pushNotification(
           original.id,
           original.shipmentNumber,
@@ -4095,97 +4319,18 @@ async function startServer() {
         );
       }
 
-      const updatedShipment: Shipment = {
-        ...original,
-        status: finalStatus,
-        timeline: timelineCopy,
-        companyName: data.companyName !== undefined ? data.companyName : original.companyName,
-        loadingCountry: data.loadingCountry !== undefined ? data.loadingCountry : original.loadingCountry,
-        loadingCity: data.loadingCity !== undefined ? data.loadingCity : original.loadingCity,
-        loadingAddress: data.loadingAddress !== undefined ? data.loadingAddress : original.loadingAddress,
-        loadingContactNumber: data.loadingContactNumber !== undefined ? data.loadingContactNumber : original.loadingContactNumber,
-        deliveryCountry: data.deliveryCountry !== undefined ? data.deliveryCountry : original.deliveryCountry,
-        deliveryCity: data.deliveryCity !== undefined ? data.deliveryCity : original.deliveryCity,
-        deliveryAddress: data.deliveryAddress !== undefined ? data.deliveryAddress : original.deliveryAddress,
-        deliveryContactNumber: data.deliveryContactNumber !== undefined ? data.deliveryContactNumber : original.deliveryContactNumber,
-        cargoDescription: data.cargoDescription !== undefined ? data.cargoDescription : original.cargoDescription,
-        cargoWeight: data.cargoWeight !== undefined ? Number(data.cargoWeight) : original.cargoWeight,
-        truckNumber: driverObj ? driverObj.truckNumber : (data.truckNumber !== undefined ? data.truckNumber : original.truckNumber),
-        assignedDriverId: newDriverId !== undefined ? newDriverId : original.assignedDriverId,
-        assignedDriverName: newDriverId !== undefined ? assignedDriverName : original.assignedDriverName,
-        agreedAmount: data.agreedAmount !== undefined ? Number(data.agreedAmount) : original.agreedAmount,
-        currency: data.currency !== undefined ? data.currency : original.currency,
-        internalNotes: data.internalNotes !== undefined ? data.internalNotes : original.internalNotes,
-        updatedAt: new Date().toISOString(),
-        
-        // Add Sea & Air properties to update payload
-        freightType: data.freightType !== undefined ? data.freightType : original.freightType,
-        shippingLine: data.shippingLine !== undefined ? data.shippingLine : original.shippingLine,
-        vesselName: data.vesselName !== undefined ? data.vesselName : original.vesselName,
-        containerNumber: data.containerNumber !== undefined ? data.containerNumber : original.containerNumber,
-        bookingNumber: data.bookingNumber !== undefined ? data.bookingNumber : original.bookingNumber,
-        billOfLadingNumber: data.billOfLadingNumber !== undefined ? data.billOfLadingNumber : original.billOfLadingNumber,
-        portOfLoading: data.portOfLoading !== undefined ? data.portOfLoading : original.portOfLoading,
-        portOfDischarge: data.portOfDischarge !== undefined ? data.portOfDischarge : original.portOfDischarge,
-        finalDestination: data.finalDestination !== undefined ? data.finalDestination : original.finalDestination,
-        etd: data.etd !== undefined ? data.etd : original.etd,
-        eta: data.eta !== undefined ? data.eta : original.eta,
-        numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : original.numberOfContainers,
-        containerType: data.containerType !== undefined ? data.containerType : original.containerType,
-        airline: data.airline !== undefined ? data.airline : original.airline,
-        flightNumber: data.flightNumber !== undefined ? data.flightNumber : original.flightNumber,
-        airWaybillNumber: data.airWaybillNumber !== undefined ? data.airWaybillNumber : original.airWaybillNumber,
-        airportOfDeparture: data.airportOfDeparture !== undefined ? data.airportOfDeparture : original.airportOfDeparture,
-        airportOfArrival: data.airportOfArrival !== undefined ? data.airportOfArrival : original.airportOfArrival,
-        grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : original.grossWeight,
-        chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : original.chargeableWeight,
-        numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : original.numberOfPackages,
-        additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers,
-        // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
-        // re-derived on every update (from whichever value additionalDrivers
-        // above just resolved to) so this stays in sync even on an update
-        // that doesn't touch additionalDrivers itself.
-        additionalDriverIds: deriveAdditionalDriverIds(
-          data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers
-        ),
-        additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : original.additionalContainers,
-        
-        // Broker details mapping for land shipments
-        destinationBrokerId: data.destinationBrokerId !== undefined ? data.destinationBrokerId : original.destinationBrokerId,
-        destinationBrokerName: data.destinationBrokerName !== undefined ? data.destinationBrokerName : original.destinationBrokerName,
-        destinationBrokerPhone: data.destinationBrokerPhone !== undefined ? data.destinationBrokerPhone : original.destinationBrokerPhone,
-        iraqBorderBrokerId: data.iraqBorderBrokerId !== undefined ? data.iraqBorderBrokerId : original.iraqBorderBrokerId,
-        iraqBorderBrokerName: data.iraqBorderBrokerName !== undefined ? data.iraqBorderBrokerName : original.iraqBorderBrokerName,
-        iraqBorderBrokerPhone: data.iraqBorderBrokerPhone !== undefined ? data.iraqBorderBrokerPhone : original.iraqBorderBrokerPhone,
-      };
-
-      // Set status to Assigned if first assigned
-      if (oldDriverId !== newDriverId && newDriverId) {
-        if (updatedShipment.status === "New") {
-          updatedShipment.status = "Assigned";
-          updatedShipment.timeline.push({
-            timestamp: new Date().toISOString(),
-            status: "Assigned",
-            labelEn: "Driver Assigned",
-            labelTr: "Sürücü Atandı",
-            labelAr: "تم تعيين السائق",
-            detailsEn: `Assigned to driver ${assignedDriverName} during shipment update.`,
-            detailsTr: `Sözleşme güncellemesi sırasında sürücü ${assignedDriverName} atandı.`,
-            detailsAr: `تم تعيينه للسائق  ${assignedDriverName} أثناء عملية التحديث.`
-          });
-          
-          await pushNotification(
-            original.id,
-            original.shipmentNumber,
-            "assignment",
-            "New Assignment Assigned",
-            "Yeni Görev Atandı",
-            "تم تعيين مهمة جديدة",
-            `Shipment ${original.shipmentNumber} has been assigned to you.`,
-            `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
-            `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
-          );
-        }
+      if (assignmentBumpApplied) {
+        await pushNotification(
+          original.id,
+          original.shipmentNumber,
+          "assignment",
+          "New Assignment Assigned",
+          "Yeni Görev Atandı",
+          "تم تعيين مهمة جديدة",
+          `Shipment ${original.shipmentNumber} has been assigned to you.`,
+          `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
+          `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
+        );
       }
 
       // Notify customer watchers of configuration or status updates
@@ -4206,8 +4351,8 @@ async function startServer() {
         updatedDiffTexts.push(`Flight Number updated to ${data.flightNumber}.`);
       }
 
-      const diffMsg = updatedDiffTexts.length > 0 
-        ? updatedDiffTexts.join(" • ") 
+      const diffMsg = updatedDiffTexts.length > 0
+        ? updatedDiffTexts.join(" • ")
         : "Some shipment parameters were updated by operations office.";
 
       await notifyCustomerWatchers(
@@ -4230,8 +4375,6 @@ async function startServer() {
         `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
       );
 
-      await setDoc(sDocRef, updatedShipment);
-
       await logActivity(
         original.id,
         original.shipmentNumber,
@@ -4243,6 +4386,7 @@ async function startServer() {
 
       res.json(updatedShipment);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update shipment details" });
     }

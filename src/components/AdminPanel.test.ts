@@ -209,3 +209,123 @@ describe("Scope: no unrelated shipment-number or backend behavior touched", () =
     expect(HANDLER).toContain("airportOfDeparture");
   });
 });
+
+// fix/shipment-update-concurrency
+//
+// PUT /api/shipments/:id now requires an expectedRevision and can 409 with
+// SHIPMENT_VERSION_CONFLICT. AdminPanel must: always send the revision it
+// last read, never close the edit modal or reset the unsaved form on a
+// conflict, never auto-apply the newer server record, and never retry
+// automatically — only offer an explicit reload.
+
+const EDIT_HANDLER = extractFunctionBody(SOURCE, "const handleEditShipment = async (e: React.FormEvent) => {");
+const RELOAD_FROM_CONFLICT = extractFunctionBody(SOURCE, "const handleReloadEditingShipmentFromConflict = () => {");
+
+describe("handleEditShipment sends the expected revision it opened the form with", () => {
+  it("computes expectedRevision from editingShipment.revision, defaulting legacy (revision-less) shipments to 1", () => {
+    expect(EDIT_HANDLER).toContain("const expectedRevision = editingShipment.revision ?? 1;");
+  });
+
+  it("includes expectedRevision in the PUT body alongside the rest of the edited fields", () => {
+    expect(EDIT_HANDLER).toMatch(/body:\s*JSON\.stringify\(\{\s*\.\.\.editingShipment,\s*expectedRevision\s*\}\)/);
+  });
+
+  it("never sends a client-invented expectedRevision — the value always comes from state, not a literal/incremented constant", () => {
+    expect(EDIT_HANDLER).not.toMatch(/expectedRevision:\s*editingShipment\.revision\s*\+\s*1/);
+  });
+});
+
+describe("handleEditShipment on a 409 conflict: no close, no reset, no auto-overwrite, no retry", () => {
+  it("branches on res.status === 409 before falling through to the generic failure toast", () => {
+    const conflictIndex = EDIT_HANDLER.indexOf("if (res.status === 409) {");
+    const genericFailureIndex = EDIT_HANDLER.indexOf('let msg = "Failed to update shipment.";');
+    expect(conflictIndex).toBeGreaterThan(-1);
+    expect(genericFailureIndex).toBeGreaterThan(conflictIndex);
+  });
+
+  it("does not close the edit modal or reset the form inside the 409 branch", () => {
+    const conflictStart = EDIT_HANDLER.indexOf("if (res.status === 409) {");
+    const conflictEnd = EDIT_HANDLER.indexOf("return;", conflictStart);
+    expect(conflictEnd).toBeGreaterThan(conflictStart);
+    const conflictBlock = EDIT_HANDLER.slice(conflictStart, conflictEnd);
+    expect(conflictBlock).not.toContain("setIsEditOpen(false)");
+    expect(conflictBlock).not.toContain("setEditingShipment(null)");
+    expect(conflictBlock).not.toContain("setEditingShipment(conflictBody");
+  });
+
+  it("stores the conflict (currentRevision + current shipment) in state instead of overwriting the form automatically", () => {
+    const conflictStart = EDIT_HANDLER.indexOf("if (res.status === 409) {");
+    const conflictBlock = EDIT_HANDLER.slice(conflictStart, EDIT_HANDLER.indexOf("return;", conflictStart));
+    expect(conflictBlock).toContain("setEditConflict({");
+    expect(conflictBlock).toContain("currentRevision:");
+    expect(conflictBlock).toContain("shipment: conflictBody?.shipment");
+  });
+
+  it("does not call handleEditShipment (or apiFetch) again from within itself — no automatic retry", () => {
+    expect(EDIT_HANDLER).not.toContain("handleEditShipment(");
+    const apiFetchCalls = (EDIT_HANDLER.match(/apiFetch\(/g) || []).length;
+    expect(apiFetchCalls).toBe(1);
+  });
+
+  it("only closes the modal and resets the form on the successful (res.ok) path", () => {
+    const okStart = EDIT_HANDLER.indexOf("if (res.ok) {");
+    const okEnd = EDIT_HANDLER.indexOf("if (res.status === 409)", okStart);
+    expect(okStart).toBeGreaterThan(-1);
+    expect(okEnd).toBeGreaterThan(okStart);
+    const okBlock = EDIT_HANDLER.slice(okStart, okEnd);
+    expect(okBlock).toContain("setIsEditOpen(false)");
+    expect(okBlock).toContain("setEditingShipment(null)");
+    expect(okBlock).toContain("setEditConflict(null)");
+  });
+
+  it("preserves the existing update-success and generic-failure/network-error behavior", () => {
+    expect(EDIT_HANDLER).toContain("t('updateSuccess')");
+    expect(EDIT_HANDLER).toContain("fetchData()");
+    expect(EDIT_HANDLER).toContain("Could not reach the server");
+  });
+});
+
+describe("Conflict banner: translated message and an explicit, safe reload — never automatic", () => {
+  it("shows the conflict banner only when editConflict is set", () => {
+    expect(SOURCE).toContain("{editConflict && (");
+  });
+
+  it("the conflict message is translated in English, Turkish, and Arabic", () => {
+    const bannerIndex = SOURCE.indexOf("{editConflict && (");
+    const bannerEnd = SOURCE.indexOf(")}", bannerIndex);
+    const banner = SOURCE.slice(bannerIndex, bannerEnd);
+    expect(banner).toContain("was saved by someone else");
+    expect(banner).toContain("başka biri tarafından kaydedildi");
+    expect(banner).toContain("حفظ هذه الشحنة من قبل شخص آخر");
+    expect(banner).toContain("Reload Latest Data");
+    expect(banner).toContain("En Son Verileri Yükle");
+    expect(banner).toContain("تحميل أحدث البيانات");
+  });
+
+  it("the reload action only replaces the form when the conflict actually carried a shipment, and never re-submits", () => {
+    expect(RELOAD_FROM_CONFLICT).toContain("if (editConflict?.shipment) {");
+    expect(RELOAD_FROM_CONFLICT).toContain("setEditingShipment(editConflict.shipment);");
+    expect(RELOAD_FROM_CONFLICT).toContain("setEditConflict(null);");
+    expect(RELOAD_FROM_CONFLICT).not.toContain("apiFetch(");
+    expect(RELOAD_FROM_CONFLICT).not.toContain("handleEditShipment(");
+  });
+
+  it("the reload button is disabled if the conflict response carried no shipment to reload", () => {
+    expect(SOURCE).toMatch(/onClick=\{handleReloadEditingShipmentFromConflict\}\s*\n\s*disabled=\{!editConflict\.shipment\}/);
+  });
+});
+
+describe("Opening/closing the edit modal always clears any stale conflict banner", () => {
+  it("both edit-open call sites reset editConflict before opening the modal", () => {
+    const occurrences = (SOURCE.match(/setEditingShipment\(s\);\s*\n\s*setEditConflict\(null\);\s*\n\s*setIsEditOpen\(true\);/g) || []).length;
+    expect(occurrences).toBe(2);
+  });
+
+  it("every place the modal closes (success, header X, Discard) also clears editConflict", () => {
+    expect(SOURCE).toMatch(/setIsEditOpen\(false\);\s*\n\s*setEditingShipment\(null\);\s*\n\s*setEditConflict\(null\);/);
+    // Success path, header X, and Discard — all three close the modal and
+    // must all clear a stale conflict banner along with it.
+    const occurrences = (SOURCE.match(/setEditingShipment\(null\);\s*\n\s*setEditConflict\(null\);/g) || []).length;
+    expect(occurrences).toBe(3);
+  });
+});

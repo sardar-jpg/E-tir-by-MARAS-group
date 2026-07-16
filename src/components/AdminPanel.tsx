@@ -1179,6 +1179,11 @@ MARAS Group etir Center`;
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDriverCreateOpen, setIsDriverCreateOpen] = useState(false);
   const [editingShipment, setEditingShipment] = useState<Shipment | null>(null);
+  // Shipment-update lost-update race fix (stability audit): set when
+  // PUT /api/shipments/:id 409s because someone else saved this shipment
+  // first. Never auto-resolved — the admin must explicitly choose to
+  // reload the server's current copy (see handleReloadEditingShipmentFromConflict).
+  const [editConflict, setEditConflict] = useState<{ currentRevision: number | null; shipment: Shipment | null } | null>(null);
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
 
   // Manual Shipment Operations Panel States (primarily for Sea and Air, but general as well)
@@ -3349,25 +3354,56 @@ MARAS Group etir Center`;
     e.preventDefault();
     if (!editingShipment) return;
     try {
+      // Shipment-update lost-update race fix: submit only the revision this
+      // form was opened with — never a value computed here — so the server
+      // can detect whether someone else saved this shipment first. A
+      // shipment fetched before this field existed has no revision at all;
+      // legacy shipments are always revision 1 (matches the server's own
+      // resolveStoredRevision default).
+      const expectedRevision = editingShipment.revision ?? 1;
       const res = await apiFetch(`/api/shipments/${editingShipment.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingShipment)
+        body: JSON.stringify({ ...editingShipment, expectedRevision })
       });
       if (res.ok) {
         setIsEditOpen(false);
         setEditingShipment(null);
+        setEditConflict(null);
         triggerToast(t('updateSuccess'));
         fetchData();
-      } else {
-        let msg = "Failed to update shipment.";
-        try { msg = (await res.json())?.error || msg; } catch {}
-        triggerToast(`❌ ${msg}`);
+        return;
       }
+      if (res.status === 409) {
+        // Someone else saved this shipment first. Do not close the modal,
+        // do not reset the admin's unsaved form, and do not auto-apply the
+        // newer server record — only offer an explicit reload.
+        let conflictBody: any = null;
+        try { conflictBody = await res.json(); } catch {}
+        setEditConflict({
+          currentRevision: typeof conflictBody?.currentRevision === "number" ? conflictBody.currentRevision : null,
+          shipment: conflictBody?.shipment ?? null,
+        });
+        return;
+      }
+      let msg = "Failed to update shipment.";
+      try { msg = (await res.json())?.error || msg; } catch {}
+      triggerToast(`❌ ${msg}`);
     } catch (err) {
       console.error(err);
       triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
+  };
+
+  // Shipment-update lost-update race fix: the only way out of a 409
+  // conflict banner — replaces the admin's unsaved edits with the server's
+  // current copy (already included in the 409 response, no extra request
+  // needed). Never called automatically.
+  const handleReloadEditingShipmentFromConflict = () => {
+    if (editConflict?.shipment) {
+      setEditingShipment(editConflict.shipment);
+    }
+    setEditConflict(null);
   };
 
   // Create Driver Action
@@ -4680,6 +4716,7 @@ MARAS Group etir Center`;
               setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
               setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
               setEditingShipment(s);
+              setEditConflict(null);
               setIsEditOpen(true);
             }}
             onChat={(s) => onSelectShipmentChat(s)}
@@ -4778,13 +4815,14 @@ MARAS Group etir Center`;
                         >
                           View
                         </button>
-                        <button 
+                        <button
                           onClick={() => {
                             const portsL = getPortsForCountry(s.loadingCountry || "");
                             const portsD = getPortsForCountry(s.deliveryCountry || "");
                             setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
                             setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
                             setEditingShipment(s);
+                            setEditConflict(null);
                             setIsEditOpen(true);
                           }}
                           className="text-slate-500 hover:text-slate-900 font-bold"
@@ -8640,10 +8678,31 @@ MARAS Group etir Center`;
               <button onClick={() => {
                 setIsEditOpen(false);
                 setEditingShipment(null);
+                setEditConflict(null);
               }} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {editConflict && (
+              <div className="m-6 mb-0 p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
+                <p className="text-sm font-semibold text-amber-800">
+                  {lang === 'tr'
+                    ? "Bu sevkiyat, siz düzenlerken başka biri tarafından kaydedildi. Değişiklikleriniz kaydedilmedi."
+                    : lang === 'ar'
+                      ? "تم حفظ هذه الشحنة من قبل شخص آخر أثناء تعديلك. لم يتم حفظ تغييراتك."
+                      : "This shipment was saved by someone else while you were editing. Your changes were not saved."}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleReloadEditingShipmentFromConflict}
+                  disabled={!editConflict.shipment}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg"
+                >
+                  {lang === 'tr' ? "En Son Verileri Yükle" : lang === 'ar' ? "تحميل أحدث البيانات" : "Reload Latest Data"}
+                </button>
+              </div>
+            )}
 
             <form onSubmit={handleEditShipment} className="p-6 space-y-6 text-sm">
               <div className="space-y-4">
@@ -9467,6 +9526,7 @@ MARAS Group etir Center`;
                 <button type="button" onClick={() => {
                   setIsEditOpen(false);
                   setEditingShipment(null);
+                  setEditConflict(null);
                 }} className="px-4 py-2 bg-slate-100 text-slate-700 font-semibold rounded-lg">
                   Discard
                 </button>

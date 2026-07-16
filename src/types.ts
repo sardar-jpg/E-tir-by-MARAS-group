@@ -86,6 +86,13 @@ export interface Shipment {
   timeline: LocationUpdate[];
   createdAt: string;
   updatedAt: string;
+  // Shipment-update lost-update race fix: server-owned optimistic-concurrency
+  // counter. Absent on shipments created before this field existed — always
+  // interpreted as revision 1 (see resolveStoredRevision, shipmentRevision.ts).
+  // Every successful PUT /api/shipments/:id increments this by exactly 1; the
+  // client only ever submits the revision it last read, never a value it
+  // computes itself.
+  revision?: number;
   isLinkShared: boolean;
   shareToken: string;
   shareIncludeDocuments: boolean;
