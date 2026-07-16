@@ -552,9 +552,12 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
         </div>
 
         {/* Content — normal document flow so the page (not a nested container) scrolls,
-            and the keyboard can open without ever hiding the submit button below the fold. */}
-        <div className="relative z-10 flex-1 flex flex-col lg:justify-center px-5 sm:px-8 lg:px-12 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
-          <div className="w-full mx-auto lg:max-w-md lg:bg-slate-950/60 lg:backdrop-blur-md lg:border lg:border-slate-800 lg:rounded-3xl lg:p-10 lg:shadow-2xl">
+            and the keyboard can open without ever hiding the submit button below the fold.
+            The short verification-success state is centered on every breakpoint (nothing to
+            scroll to); login/registration stay top-anchored on mobile so a tall form is never
+            clipped, and center only from lg: up where the two-column desktop panel takes over. */}
+        <div className={`relative z-10 flex-1 flex flex-col px-5 sm:px-8 lg:px-12 pb-[max(1.5rem,env(safe-area-inset-bottom))] ${verificationEmail ? "justify-center" : "lg:justify-center"}`}>
+          <div className="w-full mx-auto sm:max-w-md lg:bg-slate-950/60 lg:backdrop-blur-md lg:border lg:border-slate-800 lg:rounded-3xl lg:p-10 lg:shadow-2xl">
 
             {/* Compact brand mark — desktop already shows the large one in the left panel */}
             <div className="lg:hidden mb-6">
