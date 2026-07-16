@@ -1169,6 +1169,12 @@ MARAS Group etir Center`;
   // fix/prevent-duplicate-shipment-creation: in-flight guard for
   // handleCreateShipment — a double-click, repeated Enter, or repeated
   // submit event must never fire more than one POST /api/shipments.
+  // isCreatingShipmentRef is the authoritative lock: it's read/written
+  // synchronously, so two submit events dispatched in the same tick (before
+  // React re-renders with the new state) still can't both pass the guard —
+  // isCreatingShipment (state) is for UI feedback only and must not be
+  // relied on for concurrency, since its update is not synchronous.
+  const isCreatingShipmentRef = React.useRef(false);
   const [isCreatingShipment, setIsCreatingShipment] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDriverCreateOpen, setIsDriverCreateOpen] = useState(false);
@@ -3272,7 +3278,8 @@ MARAS Group etir Center`;
   // Create Shipment Action
   const handleCreateShipment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isCreatingShipment) return;
+    if (isCreatingShipmentRef.current) return;
+    isCreatingShipmentRef.current = true;
     setIsCreatingShipment(true);
     try {
       // BUG-13: Sea/Air freight collect Port/Airport fields instead of a
@@ -3314,6 +3321,7 @@ MARAS Group etir Center`;
       console.error(err);
       triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     } finally {
+      isCreatingShipmentRef.current = false;
       setIsCreatingShipment(false);
     }
   };
@@ -3321,7 +3329,15 @@ MARAS Group etir Center`;
   // Cancelling/closing the Create Shipment modal without submitting must not
   // leave stale field values (or a stale freightType) sitting in state for
   // the next time the dialog is opened.
+  //
+  // fix/prevent-duplicate-shipment-creation: while a creation request is
+  // in flight, closing/cancelling must be a no-op — otherwise the admin
+  // could close the modal, reopen a fresh (reset) form, and submit again
+  // while the original POST /api/shipments is still running invisibly in
+  // the background. Guarded on the same ref as the submit lock so this
+  // can't race a same-tick close-then-reopen either.
   const closeCreateShipmentModal = () => {
+    if (isCreatingShipmentRef.current) return;
     setIsCreateOpen(false);
     setNewShipmentData(createEmptyShipmentForm());
     setUseCustomPOL(false);
@@ -7623,7 +7639,11 @@ MARAS Group etir Center`;
             
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white rounded-t-2xl">
               <h3 className="font-bold text-lg">{t('createShipment')}</h3>
-              <button onClick={closeCreateShipmentModal} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
+              <button
+                onClick={closeCreateShipmentModal}
+                disabled={isCreatingShipment}
+                className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 disabled:cursor-not-allowed rounded-lg text-slate-300"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -8586,7 +8606,12 @@ MARAS Group etir Center`;
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
-                <button type="button" onClick={closeCreateShipmentModal} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
+                <button
+                  type="button"
+                  onClick={closeCreateShipmentModal}
+                  disabled={isCreatingShipment}
+                  className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 disabled:cursor-not-allowed text-slate-700 font-semibold rounded-xl"
+                >
                   {t('cancel')}
                 </button>
                 <button
