@@ -128,3 +128,40 @@ export function applyRevisionedShipmentUpdateMemory<T extends { id: string; revi
   shipments[idx] = updated;
   return updated;
 }
+
+/**
+ * PR #111 review (Blocker 2): every route that mutates an existing shipment
+ * document — not just the human edit form PUT /api/shipments/:id above —
+ * must bump revision, or an admin's edit form opened before that mutation
+ * would still save successfully afterward without ever detecting the
+ * change (checkShipmentRevision only rejects a MISMATCHED revision; a
+ * writer that never advances it can't produce a mismatch).
+ *
+ * This is the narrow-writer counterpart to applyRevisionedShipmentUpdateMemory
+ * for callers that are NOT a human edit form holding a specific revision it
+ * read — status updates, document/chat/share appends and toggles, and
+ * similar single-field/append-only server-owned mutations. There is no
+ * expectedRevision to check (the caller never had one to submit — a driver
+ * status update, a chat attachment, a public share-link subscribe), so this
+ * always applies `mutate` and unconditionally advances the revision by
+ * exactly 1. Any admin edit form opened beforehand will still 409 on its
+ * next save, exactly as if another admin had edited the shipment directly.
+ * Same synchronous, no-`await`-between-read-and-write atomicity guarantee
+ * as applyRevisionedShipmentUpdateMemory.
+ */
+export function applyNarrowShipmentUpdateMemory<T extends { id: string; revision?: number }>(
+  shipments: T[],
+  shipmentId: string,
+  mutate: (current: T) => T
+): T {
+  const idx = shipments.findIndex((s) => s.id === shipmentId);
+  if (idx === -1) {
+    throw new Error("Shipment not found");
+  }
+  const current = shipments[idx];
+  const nextRevision = resolveStoredRevision(current.revision) + 1;
+  const mutated = mutate(current);
+  const updated = { ...mutated, revision: nextRevision };
+  shipments[idx] = updated;
+  return updated;
+}

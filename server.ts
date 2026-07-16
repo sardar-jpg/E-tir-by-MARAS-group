@@ -114,11 +114,14 @@ import {
 } from "./src/lib/shipmentNumbering";
 import {
   INITIAL_SHIPMENT_REVISION,
+  resolveStoredRevision,
   parseExpectedRevision,
   checkShipmentRevision,
   ShipmentRevisionConflictError,
   applyRevisionedShipmentUpdateMemory,
+  applyNarrowShipmentUpdateMemory,
 } from "./src/lib/shipmentRevision";
+import { runShipmentUpdateSideEffects, ShipmentSideEffectTask } from "./src/lib/shipmentUpdateSideEffects";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
@@ -1733,6 +1736,51 @@ async function applyShipmentRevisionedUpdate(
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return applyShipmentRevisionedUpdateMemory(shipmentId, expectedRevision, buildUpdated);
+  }
+}
+
+// Shipment-update lost-update race fix (stability audit, PR #111 review —
+// Blocker 2). Narrow-writer counterpart to applyShipmentRevisionedUpdate:
+// for routes where the caller is not a human edit form holding a specific
+// revision it read (status updates, document/chat/share appends and
+// toggles, public share-link subscribes), there is no expectedRevision to
+// check — but the mutation must still atomically advance the revision, or
+// an admin edit form opened before it would save later without ever
+// detecting the change. See applyNarrowShipmentUpdateMemory
+// (shipmentRevision.ts) for the full reasoning and its unit tests.
+async function applyNarrowShipmentUpdate(
+  shipmentId: string,
+  mutate: (current: Shipment) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyNarrowShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const nextRevision = resolveStoredRevision(current.revision) + 1;
+        const mutated = mutate(current);
+        const updated = { ...mutated, revision: nextRevision };
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore narrow shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyNarrowShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
   }
 }
 import {
@@ -3893,7 +3941,6 @@ async function startServer() {
   // doesn't need to re-fetch it.
   app.get("/api/shipments/:id/distance-matrix", requireShipmentAccess, async (req, res) => {
     try {
-      const sRef = doc(db, "shipments", req.params.id);
       const shipment = req.shipment as any;
       let originStr = "";
       let destinationStr = "";
@@ -3962,14 +4009,24 @@ async function startServer() {
 
         const calculatedEta = new Date(Date.now() + durationInTrafficSeconds * 1000).toISOString();
 
-        // Update shipment profile metadata with fallback estimation
+        // Update shipment profile metadata with fallback estimation.
+        // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+        // this silently caches a computed ETA/distance onto a
+        // concurrency-relevant field (eta) — previously via a bare
+        // updateDoc with no revision awareness at all, missed in the
+        // initial audit precisely because it doesn't look like the
+        // "shipment edit" surface. Now goes through the same narrow atomic
+        // helper as every other non-form writer, still best-effort (a
+        // failure here is silently logged, exactly as before, and never
+        // fails this GET request).
         try {
-          await updateDoc(sRef, {
+          await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+            ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
             lastCalculatedDistance: `${distanceKm} km`,
             lastCalculatedDuration: `${Math.round(durationInTrafficSeconds / 3600)} hrs ${Math.round((durationInTrafficSeconds % 3600) / 60)} mins`
-          });
+          }));
         } catch (dbErr) {
           console.warn("Could not save computed fallback ETA:", dbErr);
         }
@@ -3999,14 +4056,19 @@ async function startServer() {
 
         const calculatedEta = new Date(Date.now() + durInTrafficObj.value * 1000).toISOString();
 
-        // Automatically update the document ETA field in the firestore database
+        // Automatically update the document ETA field in the firestore
+        // database. Shipment-update lost-update race fix (PR #111 review —
+        // Blocker 2): same narrow atomic helper as the fallback-estimate
+        // branch above, still best-effort (a failure here is silently
+        // logged and never fails this GET request).
         try {
-          await updateDoc(sRef, {
+          await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+            ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
             lastCalculatedDistance: distObj.text,
             lastCalculatedDuration: durInTrafficObj.text
-          });
+          }));
         } catch (dbErr) {
           console.warn("Failed to auto-update Firestore shipment ETA:", dbErr);
         }
@@ -4286,54 +4348,12 @@ async function startServer() {
 
       // Everything below only runs after a successful, committed write —
       // never on validation failure, a missing shipment, a revision
-      // conflict, or a transaction/infrastructure failure.
+      // conflict, or a transaction/infrastructure failure. The shipment
+      // itself is already safely saved at this point: none of these tasks
+      // may cause this request to report a save failure (PR #111 review —
+      // see runShipmentUpdateSideEffects's own header for why).
       original = capturedCurrent!;
 
-      // Handle shift in driver statistics
-      if (oldDriverId !== newDriverId) {
-        if (oldDriverId) {
-          const odRef = doc(db, "drivers", oldDriverId);
-          const odDoc = await getDoc(odRef);
-          if (odDoc.exists()) {
-            const od = odDoc.data() as Driver;
-            od.activeShipmentsCount = Math.max(0, od.activeShipmentsCount - 1);
-            await setDoc(odRef, od);
-          }
-        }
-        if (newDriverId && driverObj) {
-          await setDoc(doc(db, "drivers", newDriverId), { ...driverObj, activeShipmentsCount: driverObj.activeShipmentsCount + 1 });
-        }
-      }
-
-      if (data.status !== undefined && data.status !== original.status) {
-        await pushNotification(
-          original.id,
-          original.shipmentNumber,
-          "status_update",
-          `Status Update: ${data.status}`,
-          `Durum Güncellemesi: ${data.status}`,
-          `تحديث الحالة: ${data.status}`,
-          `Shipment ${original.shipmentNumber} is now ${data.status}.`,
-          `Sevkiyat ${original.shipmentNumber} şu anda ${data.status} konumunda.`,
-          `الشحنة رقم ${original.shipmentNumber} الآن هي في حالة [${data.status}].`
-        );
-      }
-
-      if (assignmentBumpApplied) {
-        await pushNotification(
-          original.id,
-          original.shipmentNumber,
-          "assignment",
-          "New Assignment Assigned",
-          "Yeni Görev Atandı",
-          "تم تعيين مهمة جديدة",
-          `Shipment ${original.shipmentNumber} has been assigned to you.`,
-          `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
-          `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
-        );
-      }
-
-      // Notify customer watchers of configuration or status updates
       const updatedDiffTexts: string[] = [];
       if (data.status !== undefined && data.status !== original.status) {
         updatedDiffTexts.push(`Status is now: ${data.status}.`);
@@ -4355,34 +4375,121 @@ async function startServer() {
         ? updatedDiffTexts.join(" • ")
         : "Some shipment parameters were updated by operations office.";
 
-      await notifyCustomerWatchers(
-        updatedShipment,
-        "edit",
-        "Shipment Parameters Updated",
-        `Attention: Your shipment #${original.shipmentNumber} was updated by central operations. ${diffMsg}`
-      );
+      const sideEffectTasks: ShipmentSideEffectTask[] = [];
+
+      // Driver activeShipmentsCount is a derived, cached tally — not the
+      // authoritative record of which shipments a driver is assigned to
+      // (that's each Shipment's own assignedDriverId/additionalDrivers,
+      // already safely committed inside the transaction above). If one of
+      // these writes fails, the assignment itself is still correct; only
+      // this cached count can drift by one until a future successful
+      // update on either driver recomputes it. Known, accepted limitation —
+      // fixing it properly (a computed/query-derived count instead of a
+      // cached field) is a larger change, out of scope for this PR.
+      if (oldDriverId !== newDriverId) {
+        if (oldDriverId) {
+          sideEffectTasks.push({
+            name: "driver-stat-decrement",
+            run: async () => {
+              const odRef = doc(db, "drivers", oldDriverId);
+              const odDoc = await getDoc(odRef);
+              if (odDoc.exists()) {
+                const od = odDoc.data() as Driver;
+                od.activeShipmentsCount = Math.max(0, od.activeShipmentsCount - 1);
+                await setDoc(odRef, od);
+              }
+            },
+          });
+        }
+        if (newDriverId && driverObj) {
+          sideEffectTasks.push({
+            name: "driver-stat-increment",
+            run: async () => {
+              await setDoc(doc(db, "drivers", newDriverId), { ...driverObj, activeShipmentsCount: driverObj.activeShipmentsCount + 1 });
+            },
+          });
+        }
+      }
+
+      if (data.status !== undefined && data.status !== original.status) {
+        sideEffectTasks.push({
+          name: "status-update-notification",
+          run: () => pushNotification(
+            original.id,
+            original.shipmentNumber,
+            "status_update",
+            `Status Update: ${data.status}`,
+            `Durum Güncellemesi: ${data.status}`,
+            `تحديث الحالة: ${data.status}`,
+            `Shipment ${original.shipmentNumber} is now ${data.status}.`,
+            `Sevkiyat ${original.shipmentNumber} şu anda ${data.status} konumunda.`,
+            `الشحنة رقم ${original.shipmentNumber} الآن هي في حالة [${data.status}].`
+          ),
+        });
+      }
+
+      if (assignmentBumpApplied) {
+        sideEffectTasks.push({
+          name: "assignment-notification",
+          run: () => pushNotification(
+            original.id,
+            original.shipmentNumber,
+            "assignment",
+            "New Assignment Assigned",
+            "Yeni Görev Atandı",
+            "تم تعيين مهمة جديدة",
+            `Shipment ${original.shipmentNumber} has been assigned to you.`,
+            `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
+            `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
+          ),
+        });
+      }
+
+      sideEffectTasks.push({
+        name: "customer-watcher-notification",
+        run: () => notifyCustomerWatchers(
+          updatedShipment,
+          "edit",
+          "Shipment Parameters Updated",
+          `Attention: Your shipment #${original.shipmentNumber} was updated by central operations. ${diffMsg}`
+        ),
+      });
 
       // In-app notification for the customer application
-      await pushNotification(
-        original.id,
-        original.shipmentNumber,
-        "status_update",
-        "Shipment Updated",
-        "Sevkiyat Güncellendi",
-        "تم تحديث الشحنة",
-        `Attention: Your shipment #${original.shipmentNumber} was updated: ${diffMsg}`,
-        `Yükünüz #${original.shipmentNumber} güncellendi: ${diffMsg}`,
-        `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
-      );
+      sideEffectTasks.push({
+        name: "shipment-updated-notification",
+        run: () => pushNotification(
+          original.id,
+          original.shipmentNumber,
+          "status_update",
+          "Shipment Updated",
+          "Sevkiyat Güncellendi",
+          "تم تحديث الشحنة",
+          `Attention: Your shipment #${original.shipmentNumber} was updated: ${diffMsg}`,
+          `Yükünüz #${original.shipmentNumber} güncellendi: ${diffMsg}`,
+          `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
+        ),
+      });
 
-      await logActivity(
-        original.id,
-        original.shipmentNumber,
-        "Admin Office",
-        `Updated shipment parameters for ${original.shipmentNumber}`,
-        `${original.shipmentNumber} sevkiyat parametreleri güncellendi`,
-        `تم تحديث معايير الشحنة ${original.shipmentNumber}`
-      );
+      sideEffectTasks.push({
+        name: "audit-log",
+        run: () => logActivity(
+          original.id,
+          original.shipmentNumber,
+          "Admin Office",
+          `Updated shipment parameters for ${original.shipmentNumber}`,
+          `${original.shipmentNumber} sevkiyat parametreleri güncellendi`,
+          `تم تحديث معايير الشحنة ${original.shipmentNumber}`
+        ),
+      });
+
+      const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[shipment-update] post-commit side effect "${failure.name}" failed for shipment ${original.id} (${original.shipmentNumber}) — the shipment save itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.json(updatedShipment);
     } catch (err) {
@@ -4493,7 +4600,20 @@ async function startServer() {
         `Good day, your shipment #${item.shipmentNumber} status is now: ${status}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
       );
 
-      await setDoc(sDocRef, item);
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // atomically applies the same status/timeline/updatedAt change onto
+      // whatever the document's CURRENT authoritative state is (not the
+      // pre-read `item` above), and unconditionally advances revision —
+      // this route has no client-submitted expectedRevision to check (a
+      // driver/admin status change isn't a human edit form holding a
+      // specific revision it read), but any admin edit form opened before
+      // this status change must still 409 on its next save.
+      const updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => ({
+        ...current,
+        status: item.status,
+        timeline: item.timeline,
+        updatedAt: item.updatedAt,
+      }));
 
       await pushNotification(
         item.id,
@@ -4516,8 +4636,9 @@ async function startServer() {
         `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
       );
 
-      res.json(buildShipmentViewForRole(item, req.session!));
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update status" });
     }
@@ -4544,46 +4665,44 @@ async function startServer() {
         return res.status(404).json({ error: "Shipment not found" });
       }
 
-      const item = sDoc.data() as Shipment;
-      
-      if (!item.customerEmails) {
-        item.customerEmails = [];
-      }
-
       const cleanEmail = email.trim().toLowerCase();
-      if (!item.customerEmails.includes(cleanEmail)) {
-        item.customerEmails.push(cleanEmail);
-      }
-
-      if (!item.customerNotificationHistory) {
-        item.customerNotificationHistory = [];
-      }
-
-      // Add subscription confirmation alert entry
       const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-      item.customerNotificationHistory.push({
-        id: alertId,
-        timestamp: new Date().toISOString(),
-        type: "setup",
-        title: "Subscribed Successfully",
-        message: `Your alert subscription for shipment #${item.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
-        email: cleanEmail,
-        channel: channel || "email"
+
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // appends to whatever the document's CURRENT customerEmails/
+      // customerNotificationHistory actually are (not a pre-read snapshot),
+      // and unconditionally advances revision so any admin edit form opened
+      // before this subscribe request 409s on its next save.
+      const updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+        const customerEmails = current.customerEmails ? [...current.customerEmails] : [];
+        if (!customerEmails.includes(cleanEmail)) {
+          customerEmails.push(cleanEmail);
+        }
+        const customerNotificationHistory = current.customerNotificationHistory ? [...current.customerNotificationHistory] : [];
+        customerNotificationHistory.push({
+          id: alertId,
+          timestamp: new Date().toISOString(),
+          type: "setup",
+          title: "Subscribed Successfully",
+          message: `Your alert subscription for shipment #${current.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
+          email: cleanEmail,
+          channel: channel || "email"
+        });
+        return { ...current, customerEmails, customerNotificationHistory };
       });
 
-      await setDoc(sDocRef, item);
-
       await logActivity(
-        item.id,
-        item.shipmentNumber,
+        updatedItem.id,
+        updatedItem.shipmentNumber,
         "Customer (Tracking Subscription)",
         `Subscribed to real-time cargo updates`,
         `Canlı kargo güncellemelerine abone oldu`,
         `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
       );
 
-      res.json(buildShipmentViewForRole(item, req.session!));
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error("Error subscribing customer: ", err);
       res.status(500).json({ error: "Failed to join notification server registration scheme" });
     }
@@ -4914,8 +5033,15 @@ async function startServer() {
           isSharedExternally: resolveNewDocumentSharedExternally()
         };
 
-        shipmentItem.documents.push(newDoc);
-        await setDoc(sDocRef, shipmentItem);
+        // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+        // appends to whatever the document's CURRENT documents array
+        // actually is (not the earlier pre-read shipmentItem), and
+        // unconditionally advances revision so an admin edit form opened
+        // before this chat attachment 409s on its next save.
+        await applyNarrowShipmentUpdate(shipmentId, (current) => ({
+          ...current,
+          documents: [...current.documents, newDoc],
+        }));
 
         await logActivity(
           shipmentId,
@@ -5038,8 +5164,15 @@ async function startServer() {
         isSharedExternally: resolveNewDocumentSharedExternally(isSharedExternally)
       };
 
-      shipmentItem.documents.push(newDoc);
-      await setDoc(sDocRef, shipmentItem);
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // appends to whatever the document's CURRENT documents array actually
+      // is (not the pre-read shipmentItem), and unconditionally advances
+      // revision so an admin edit form opened before this upload 409s on
+      // its next save.
+      await applyNarrowShipmentUpdate(shipmentId, (current) => ({
+        ...current,
+        documents: [...current.documents, newDoc],
+      }));
 
       await logActivity(
         shipmentId,
@@ -5052,6 +5185,7 @@ async function startServer() {
 
       res.status(201).json(newDoc);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to upload document" });
     }
@@ -5069,10 +5203,21 @@ async function startServer() {
       if (!docItem) return res.status(404).json({ error: "Document not found" });
 
       const { isSharedExternally } = req.body;
-      docItem.isSharedExternally = isSharedExternally;
-      await setDoc(sDocRef, shipment);
-      res.json(docItem);
+
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // toggles the flag on whatever the document's CURRENT documents array
+      // actually is (not the pre-read shipment), and unconditionally
+      // advances revision so an admin edit form opened before this toggle
+      // 409s on its next save.
+      const updated = await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+        ...current,
+        documents: current.documents.map(d => d.id === req.params.docId ? { ...d, isSharedExternally } : d),
+      }));
+      const updatedDocItem = updated.documents.find(d => d.id === req.params.docId) ?? { ...docItem, isSharedExternally };
+
+      res.json(updatedDocItem);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to toggle document visibility" });
     }
@@ -5090,23 +5235,32 @@ async function startServer() {
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) return res.status(404).json({ error: "Shipment not found" });
 
-      const shipment = sDoc.data() as Shipment;
       const { isLinkShared, shareIncludeDocuments, shareIncludePhotos } = req.body;
 
-      if (isLinkShared !== undefined) shipment.isLinkShared = isLinkShared;
-      if (shareIncludeDocuments !== undefined) shipment.shareIncludeDocuments = shareIncludeDocuments;
-      if (shareIncludePhotos !== undefined) shipment.shareIncludePhotos = shareIncludePhotos;
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // applies these field changes onto whatever the document's CURRENT
+      // state actually is (not the pre-read shipment), and unconditionally
+      // advances revision so an admin edit form opened before this share
+      // change 409s on its next save.
+      const updated = await applyNarrowShipmentUpdate(req.params.id, (current) => {
+        const next: Shipment = { ...current };
+        if (isLinkShared !== undefined) next.isLinkShared = isLinkShared;
+        if (shareIncludeDocuments !== undefined) next.shareIncludeDocuments = shareIncludeDocuments;
+        if (shareIncludePhotos !== undefined) next.shareIncludePhotos = shareIncludePhotos;
 
-      // Migrate away from old guessable tokens, and ensure any shipment that
-      // is (or becomes) shared has a strong, unguessable token. This rotates
-      // legacy "token-100x" values the moment an admin touches sharing.
-      if (isLegacyShareToken(shipment.shareToken)) {
-        shipment.shareToken = generateShareToken();
-      }
+        // Migrate away from old guessable tokens, and ensure any shipment
+        // that is (or becomes) shared has a strong, unguessable token. This
+        // rotates legacy "token-100x" values the moment an admin touches
+        // sharing.
+        if (isLegacyShareToken(next.shareToken)) {
+          next.shareToken = generateShareToken();
+        }
+        return next;
+      });
 
-      await setDoc(sDocRef, shipment);
-      res.json(buildShipmentViewForRole(shipment, req.session!));
+      res.json(buildShipmentViewForRole(updated, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to configure share link settings" });
     }
@@ -5200,26 +5354,32 @@ async function startServer() {
       if (!shipment) return;
 
       const cleanEmail = email.trim().toLowerCase();
-      const customerEmails = Array.isArray(shipment.customerEmails) ? [...shipment.customerEmails] : [];
-      if (!customerEmails.includes(cleanEmail)) {
-        customerEmails.push(cleanEmail);
-      }
+      const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      const customerNotificationHistory = Array.isArray(shipment.customerNotificationHistory)
-        ? [...shipment.customerNotificationHistory]
-        : [];
-      customerNotificationHistory.push({
-        id: `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        timestamp: new Date().toISOString(),
-        type: "setup",
-        title: "Subscribed Successfully",
-        message: `Your alert subscription for shipment #${shipment.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
-        email: cleanEmail,
-        channel: "email",
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
+      // appends to whatever the document's CURRENT customerEmails/
+      // customerNotificationHistory actually are (not the pre-read
+      // shipment), and unconditionally advances revision so an admin edit
+      // form opened before this public subscribe 409s on its next save.
+      const updatedShipment = await applyNarrowShipmentUpdate(shipment.id, (current) => {
+        const customerEmails = Array.isArray(current.customerEmails) ? [...current.customerEmails] : [];
+        if (!customerEmails.includes(cleanEmail)) {
+          customerEmails.push(cleanEmail);
+        }
+        const customerNotificationHistory = Array.isArray(current.customerNotificationHistory)
+          ? [...current.customerNotificationHistory]
+          : [];
+        customerNotificationHistory.push({
+          id: alertId,
+          timestamp: new Date().toISOString(),
+          type: "setup",
+          title: "Subscribed Successfully",
+          message: `Your alert subscription for shipment #${current.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
+          email: cleanEmail,
+          channel: "email",
+        });
+        return { ...current, customerEmails, customerNotificationHistory };
       });
-
-      const updatedShipment = { ...shipment, customerEmails, customerNotificationHistory };
-      await setDoc(doc(db, "shipments", shipment.id), updatedShipment);
 
       // Return the same reduced "secure view" shape the public page already
       // expects from /api/share/:token, not the full internal record.

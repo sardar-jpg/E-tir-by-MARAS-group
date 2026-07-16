@@ -120,10 +120,10 @@ describe("PUT /api/shipments/:id route: expectedRevision is required, never opti
     expect(ROUTE).toContain("shipment: err.currentShipment");
   });
 
-  it("notifications and audit logging only run after the transaction has already resolved successfully", () => {
+  it("notifications and audit logging are only queued as post-commit side-effect tasks, built after the transaction has already resolved successfully", () => {
     const transactionCallIndex = ROUTE.indexOf("await applyShipmentRevisionedUpdate(");
-    const firstNotificationIndex = ROUTE.indexOf("await pushNotification(", transactionCallIndex);
-    const auditIndex = ROUTE.indexOf("await logActivity(", transactionCallIndex);
+    const firstNotificationIndex = ROUTE.indexOf("run: () => pushNotification(", transactionCallIndex);
+    const auditIndex = ROUTE.indexOf("run: () => logActivity(", transactionCallIndex);
     expect(firstNotificationIndex).toBeGreaterThan(transactionCallIndex);
     expect(auditIndex).toBeGreaterThan(transactionCallIndex);
   });
@@ -151,6 +151,87 @@ describe("PUT /api/shipments/:id route: expectedRevision is required, never opti
 
   it("the route now checks respondIfServiceUnavailable, so a genuine Firestore outage 503s instead of a generic 500", () => {
     expect(ROUTE).toContain("if (respondIfServiceUnavailable(err, res)) return;");
+  });
+});
+
+describe("PR #111 review — Blocker 1: a committed shipment update can never false-500 because a post-commit side effect failed", () => {
+  it("driver-stat bumps, notifications, customer-watcher updates, and audit logging are all queued as tasks and run via runShipmentUpdateSideEffects, not awaited directly in the route body", () => {
+    expect(ROUTE).toContain("const sideEffectTasks: ShipmentSideEffectTask[] = [];");
+    expect(ROUTE).toContain("const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);");
+    // None of the actual side-effect calls are awaited directly in the
+    // route body anymore — they're deferred inside a task's `run`
+    // (the driver-stat tasks still legitimately await their own setDoc,
+    // just nested inside their own run closure, not at the top level).
+    expect(ROUTE).not.toMatch(/\n\s*await pushNotification\(/);
+    expect(ROUTE).not.toMatch(/\n\s*await notifyCustomerWatchers\(/);
+    expect(ROUTE).not.toMatch(/\n\s*await logActivity\(/);
+  });
+
+  it("res.json(updatedShipment) is unconditional after the side-effect run — not inside a branch that a failure could skip", () => {
+    const runIndex = ROUTE.indexOf("const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);");
+    const resJsonIndex = ROUTE.indexOf("res.json(updatedShipment);", runIndex);
+    expect(runIndex).toBeGreaterThan(-1);
+    expect(resJsonIndex).toBeGreaterThan(runIndex);
+    // Nothing but the logging loop sits between them.
+    const between = ROUTE.slice(runIndex, resJsonIndex);
+    expect(between).not.toContain("return res.status(500)");
+    expect(between).not.toContain("throw ");
+  });
+
+  it("side-effect failures are logged with the shipment id/number and the effect name — not silently swallowed", () => {
+    const logIndex = ROUTE.indexOf("for (const failure of sideEffectFailures)");
+    expect(logIndex).toBeGreaterThan(-1);
+    // Find the end of the whole console.error(...) call, not the first
+    // "}" (which would be the closing brace of an earlier "${...}"
+    // template-literal interpolation inside the message itself).
+    const logBlockEnd = ROUTE.indexOf(");", ROUTE.indexOf("failure.error", logIndex)) + 2;
+    const logBlock = ROUTE.slice(logIndex, logBlockEnd);
+    expect(logBlock).toContain("failure.name");
+    expect(logBlock).toContain("original.id");
+    expect(logBlock).toContain("original.shipmentNumber");
+    expect(logBlock).toContain("failure.error");
+  });
+
+  it("does not re-run or retry the shipment transaction when a side effect fails — applyShipmentRevisionedUpdate is called exactly once in this route", () => {
+    const callCount = (ROUTE.match(/applyShipmentRevisionedUpdate\(req\.params\.id/g) || []).length;
+    expect(callCount).toBe(1);
+  });
+
+  it("driver activeShipmentsCount updates are documented as a derived, non-authoritative cache, not the source of truth for assignment", () => {
+    const decrementIndex = ROUTE.indexOf('name: "driver-stat-decrement"');
+    const incrementIndex = ROUTE.indexOf('name: "driver-stat-increment"');
+    expect(decrementIndex).toBeGreaterThan(-1);
+    expect(incrementIndex).toBeGreaterThan(-1);
+    // The honest-limitation comment sits just above the driver-stat tasks.
+    const commentRegion = ROUTE.slice(Math.max(0, decrementIndex - 900), decrementIndex);
+    expect(commentRegion).toContain("derived, cached tally");
+    expect(commentRegion).toContain("not the");
+    expect(commentRegion).toContain("authoritative record");
+  });
+
+  it("a revision conflict still returns 409 and builds/runs no side-effect tasks at all", () => {
+    const conflictIndex = ROUTE.indexOf("if (err instanceof ShipmentRevisionConflictError)");
+    const conflictReturnIndex = ROUTE.indexOf("return res.status(409)", conflictIndex);
+    const sideEffectTasksDeclIndex = ROUTE.indexOf("const sideEffectTasks: ShipmentSideEffectTask[] = [];");
+    expect(conflictIndex).toBeGreaterThan(-1);
+    expect(conflictReturnIndex).toBeGreaterThan(conflictIndex);
+    // The conflict branch (inside the catch around applyShipmentRevisionedUpdate)
+    // returns before the code that declares/builds sideEffectTasks is ever
+    // reached — they're sequential statements, and the conflict path exits
+    // the function via `return` well before that declaration.
+    expect(sideEffectTasksDeclIndex).toBeGreaterThan(conflictReturnIndex);
+  });
+
+  it("a genuine transaction/infrastructure failure (not a conflict) still surfaces as a failure response, not a silent success", () => {
+    // Any error that isn't a ShipmentRevisionConflictError is rethrown from
+    // the inner catch and falls through to the route's own outer catch,
+    // which maps ServiceUnavailableError to 503 and anything else to 500 —
+    // it is never swallowed into a 200.
+    expect(ROUTE).toContain("throw err;");
+    const outerCatchIndex = ROUTE.lastIndexOf("} catch (err) {");
+    const outerCatchBlock = ROUTE.slice(outerCatchIndex);
+    expect(outerCatchBlock).toContain("if (respondIfServiceUnavailable(err, res)) return;");
+    expect(outerCatchBlock).toContain('res.status(500).json({ error: "Failed to update shipment details" });');
   });
 });
 
