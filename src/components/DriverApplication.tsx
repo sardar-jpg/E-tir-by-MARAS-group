@@ -17,6 +17,7 @@ import { GPS_DEFAULT_UPDATE_INTERVAL_MS } from "../lib/gpsFreshness";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage, isStaleChatPollResponse, planAttachmentSend, isCachedAttachmentForShipment, mergeNewerChatMessages, prependOlderChatMessages } from "../lib/chatComposerState";
+import { isShipmentClosed, getDriverSubmittableNextStatus } from "../lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
@@ -198,7 +199,14 @@ export default function DriverApplication({
   
   // Active selected shipment for detail / chat inside driver app
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
-  const isShipmentFinished = activeShipment ? (activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed') : false;
+  // PR #111 review (Delivered/Closed terminal & chat rules): chat locks
+  // only at the shipment's freight-mode-appropriate closing status
+  // ("Closed" for Land, "Completed" for Sea/Air) — reaching "Delivered"
+  // must NOT close chat, since Admin/Driver still routinely exchange
+  // CMR/POD corrections, final remarks, and payment follow-up afterward.
+  // Previously this also locked at 'Delivered'/'Arrived', which is the bug
+  // this review corrects.
+  const isShipmentChatClosed = activeShipment ? isShipmentClosed(activeShipment.status, activeShipment.freightType) : false;
 
   useEffect(() => {
     activeShipmentIdRef.current = activeShipment?.id ?? null;
@@ -319,7 +327,6 @@ export default function DriverApplication({
   const statusFormRef = useRef<HTMLFormElement>(null);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [selectedStatusVal, setSelectedStatusVal] = useState<ShipmentStatus>("Accepted");
 
   // feature/chat-ui-ux-phase2: smart auto-scroll. messagesContainerRef is
   // the scrollable message list; isNearBottomChatRef tracks (via the
@@ -1336,7 +1343,14 @@ export default function DriverApplication({
         fetchData();
       } else {
         let msg = "Failed to accept assignment. Please try again.";
-        try { msg = (await res.json())?.error || msg; } catch {}
+        let body: any = null;
+        try { body = await res.json(); msg = body?.error || msg; } catch {}
+        // PR #111 review: another status change already committed since
+        // this driver last saw the shipment — refresh to the real current
+        // status rather than leaving stale local state. Never auto-retried.
+        if (res.status === 409 && body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION") {
+          fetchData();
+        }
         triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
@@ -1363,7 +1377,11 @@ export default function DriverApplication({
         fetchData();
       } else {
         let msg = "Failed to reject assignment. Please try again.";
-        try { msg = (await res.json())?.error || msg; } catch {}
+        let body: any = null;
+        try { body = await res.json(); msg = body?.error || msg; } catch {}
+        if (res.status === 409 && body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION") {
+          fetchData();
+        }
         triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
@@ -1376,12 +1394,22 @@ export default function DriverApplication({
   const handleStatusUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeShipment) return;
+    // PR #111 review (forward-only status transitions): derived fresh from
+    // activeShipment at submit time rather than trusting selectedStatusVal
+    // — the background shipment poll (fetchData's "update active shipment
+    // details dynamically" block) refreshes activeShipment without ever
+    // touching selectedStatusVal, so that state could otherwise go stale
+    // relative to the shipment's actual current status/next-status between
+    // renders. There is only ever one valid next status, so there is
+    // nothing meaningful selectedStatusVal could add here anyway.
+    const nextStatus = getDriverSubmittableNextStatus(activeShipment.status, activeShipment.freightType);
+    if (!nextStatus) return;
     try {
       const res = await apiFetch(`/api/shipments/${activeShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          status: selectedStatusVal,
+          status: nextStatus,
           remarksDesc: remarks || undefined,
           updaterName: getDriverName(),
           role: "driver"
@@ -1393,7 +1421,16 @@ export default function DriverApplication({
         fetchData();
       } else {
         let msg = "Failed to update status. Please try again.";
-        try { msg = (await res.json())?.error || msg; } catch {}
+        let body: any = null;
+        try { body = await res.json(); msg = body?.error || msg; } catch {}
+        // PR #111 review: another status change already committed since
+        // this driver last saw the shipment (a concurrent admin/driver
+        // update, or the assignment-rejection exception) — refresh to the
+        // real current status rather than leaving the form pointed at a
+        // transition that's no longer valid. Never auto-retried.
+        if (res.status === 409 && body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION") {
+          fetchData();
+        }
         triggerToast(`❌ ${msg}`);
       }
     } catch (e) {
@@ -1411,7 +1448,7 @@ export default function DriverApplication({
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeShipment) return;
-    if (!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })) return;
+    if (!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage, isLocked: isShipmentChatClosed })) return;
     setIsSendingDriverMessage(true);
 
     try {
@@ -1431,7 +1468,18 @@ export default function DriverApplication({
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
       } else {
-        triggerToast("❌ Message failed to send. Please try again.");
+        // PR #111 review (Delivered/Closed terminal & chat rules): the
+        // shipment was closed (by another session) since this driver last
+        // saw it — refresh so the composer locks to match, rather than
+        // leaving it open for a retry the server will keep rejecting.
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        if (res.status === 409 && body?.code === "SHIPMENT_CHAT_CLOSED") {
+          triggerToast("❌ This shipment is closed. Messages can no longer be sent.");
+          fetchData();
+        } else {
+          triggerToast("❌ Message failed to send. Please try again.");
+        }
       }
     } catch (err) {
       console.error(err);
@@ -1480,8 +1528,20 @@ export default function DriverApplication({
         setDriverAttachmentError('');
         fetchData();
       } else {
-        setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
-        setDriverAttachmentError('send');
+        // PR #111 review (Delivered/Closed terminal & chat rules): a
+        // closed shipment will keep rejecting this send no matter how
+        // many times it's retried — never queue it as a retryable pending
+        // attachment (which would let the driver keep re-attempting a send
+        // that can never succeed).
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        if (res.status === 409 && body?.code === "SHIPMENT_CHAT_CLOSED") {
+          triggerToast("❌ This shipment is closed. Documents can no longer be sent.");
+          fetchData();
+        } else {
+          setPendingDriverAttachment({ shipmentId, fileUrl, fileName, fileCategory });
+          setDriverAttachmentError('send');
+        }
       }
     } catch (e) {
       console.error(e);
@@ -1819,14 +1879,12 @@ export default function DriverApplication({
                   onContinueJob={() => {
                     if (homeActiveJob) {
                       setActiveShipment(homeActiveJob);
-                      setSelectedStatusVal(homeActiveJob.status);
                     }
                     setActiveTab('shipments');
                   }}
                   onChatWithAdmin={() => {
                     if (homeActiveJob) {
                       setActiveShipment(homeActiveJob);
-                      setSelectedStatusVal(homeActiveJob.status);
                     }
                     setActiveTab('chat');
                   }}
@@ -1901,7 +1959,16 @@ export default function DriverApplication({
                   <div className="space-y-3.5">
                     {shipments
                       .filter(s => {
-                        const isFinished = s.status === 'Delivered' || s.status === 'Arrived' || s.status === 'Closed' || s.status === 'Completed';
+                        // PR #111 review: a shipment with nothing left for
+                        // the driver to submit (getDriverSubmittableNextStatus
+                        // is null) — the shipment is at its terminal status,
+                        // or its only next step is the admin-only closing
+                        // transition. Previously used a hardcoded
+                        // Delivered/Arrived/Closed/Completed list, which
+                        // filtered a shipment at "Arrived" into "completed"
+                        // even though the driver still needs to mark it
+                        // Delivered.
+                        const isFinished = getDriverSubmittableNextStatus(s.status, s.freightType) === null;
                         if (shipmentsFilter === 'active') return !isFinished;
                         if (shipmentsFilter === 'completed') return isFinished;
                         return true;
@@ -1911,10 +1978,7 @@ export default function DriverApplication({
                           key={s.id}
                           shipment={s}
                           driverId={selectedDriverId}
-                          onClick={() => {
-                            setActiveShipment(s);
-                            setSelectedStatusVal(s.status);
-                          }}
+                          onClick={() => setActiveShipment(s)}
                         />
                       ))}
 
@@ -2051,8 +2115,15 @@ export default function DriverApplication({
 
                 {/* STATUS ACTIONS CONDITIONAL ROUTING */}
                 {(() => {
-                  const isShipmentFinished = activeShipment.status === 'Delivered' || activeShipment.status === 'Arrived' || activeShipment.status === 'Closed' || activeShipment.status === 'Completed';
-                  if (isShipmentFinished) {
+                  // PR #111 review (forward-only status transitions): null
+                  // means there is nothing left for a driver to submit —
+                  // either the shipment reached its terminal status, or its
+                  // only remaining step is the admin-only closing
+                  // transition (Closed/Completed). Previously this locked
+                  // the form at 'Arrived' too, which would have permanently
+                  // blocked a driver from ever submitting 'Delivered'.
+                  const driverNextStatus = getDriverSubmittableNextStatus(activeShipment.status, activeShipment.freightType);
+                  if (!driverNextStatus) {
                     return (
                       <div className="p-5 bg-slate-900 border border-slate-800 rounded-3xl text-center space-y-3 shadow-[0_4px_25px_rgba(0,0,0,0.3)] select-none">
                         <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
@@ -2100,14 +2171,20 @@ export default function DriverApplication({
 
                       <div className="space-y-1">
                         <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Shipment Status</label>
+                        {/* PR #111 review: only the immediately valid next
+                            status may ever be selected — there is exactly
+                            one, driverNextStatus, so this shows it as the
+                            sole option rather than a free-form list a
+                            driver could otherwise use to skip stages or
+                            move backward (already rejected server-side
+                            regardless, but the control should never offer
+                            an option the server will reject). */}
                         <select
-                          value={selectedStatusVal}
-                          onChange={(e) => setSelectedStatusVal(e.target.value as ShipmentStatus)}
-                          className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-slate-200 font-bold rounded-xl outline-none focus:border-amber-500 transition-all cursor-pointer"
+                          value={driverNextStatus}
+                          disabled
+                          className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-slate-200 font-bold rounded-xl outline-none cursor-not-allowed opacity-90"
                         >
-                          {['Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered'].map(st => (
-                            <option key={st} value={st} className="bg-slate-950 text-slate-200 font-bold">{st}</option>
-                          ))}
+                          <option value={driverNextStatus} className="bg-slate-950 text-slate-200 font-bold">{driverNextStatus}</option>
                         </select>
                       </div>
 
@@ -2192,7 +2269,7 @@ export default function DriverApplication({
                   <div className="flex-1 flex flex-col justify-between overflow-hidden min-h-0">
                     <div className="bg-slate-900/60 p-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
                       <div className="flex items-center gap-2">
-                        {isShipmentFinished ? (
+                        {isShipmentChatClosed ? (
                           <span className="relative flex h-2 w-2">
                             <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
                           </span>
@@ -2205,7 +2282,7 @@ export default function DriverApplication({
                         <div>
                           <h4 className="font-extrabold text-xs text-white uppercase tracking-wider font-mono">MARAS Admin Chat</h4>
                           <span className="text-[11px] text-[#f97316] font-mono font-bold">
-                            {isShipmentFinished
+                            {isShipmentChatClosed
                               ? (lang === 'tr' ? `Tamamlanan Görev #${activeShipment.shipmentNumber}` : lang === 'ar' ? `المهمة المكتملة #${activeShipment.shipmentNumber}` : `Finished Duty #${activeShipment.shipmentNumber}`)
                               : `Transit Duty #${activeShipment.shipmentNumber}`
                             }
@@ -2352,7 +2429,7 @@ export default function DriverApplication({
                         banner, with a retry action for the latter that
                         reuses the already-uploaded Storage URL rather than
                         uploading the file again. */}
-                    {!isShipmentFinished && driverAttachmentError && (
+                    {!isShipmentChatClosed && driverAttachmentError && (
                       <div className="px-3.5 pt-2.5 bg-slate-950 flex items-center justify-between gap-2 text-[10px] font-bold">
                         <span className="text-red-400">
                           {driverAttachmentError === 'upload'
@@ -2381,7 +2458,7 @@ export default function DriverApplication({
                     )}
 
                     {/* Message input */}
-                    {isShipmentFinished ? (
+                    {isShipmentChatClosed ? (
                       <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 font-mono text-[10px] select-none">
                         ⚠️ Radio connection has been closed for this completed job.
                       </div>
@@ -2432,7 +2509,7 @@ export default function DriverApplication({
                         />
                         <button
                           type="submit"
-                          disabled={!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage })}
+                          disabled={!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending: isSendingDriverMessage, isLocked: isShipmentChatClosed })}
                           aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                           className="p-3 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none select-none active:scale-95 border-0 shadow-[0_2px_10px_rgba(249,115,22,0.2)]"
                         >

@@ -15,17 +15,31 @@
 /**
  * The shared duplicate-send guard: whether a chat composer's Send action
  * may actually run right now. Used identically by ChatCenter.tsx (internal
- * staff), App.tsx (admin drawer), and DriverApplication.tsx (driver) — a
- * composer must have real content (non-whitespace text, or an attachment)
- * and must not already have a send in flight. Previously this in-flight
- * check didn't exist at all in App.tsx/DriverApplication.tsx, so a rapid
- * double-tap/double-Enter could fire two POSTs before the first resolved.
+ * staff), App.tsx (admin drawer), DriverApplication.tsx (driver), and
+ * ClientDashboard.tsx (customer) — a composer must have real content
+ * (non-whitespace text, or an attachment), must not already have a send in
+ * flight, and must not be locked. Previously this in-flight check didn't
+ * exist at all in App.tsx/DriverApplication.tsx, so a rapid double-tap/
+ * double-Enter could fire two POSTs before the first resolved.
+ *
+ * PR #111 review (Delivered/Closed terminal & chat rules): `isLocked` is
+ * the client-side mirror of the server's SHIPMENT_CHAT_CLOSED gate (POST
+ * /api/shipments/:id/chat) — true once the shipment has reached its
+ * freight-mode-appropriate closing status (see isShipmentClosed,
+ * shipmentStatusTransitions.ts). Optional and defaults to unlocked so
+ * every existing call site keeps working unchanged until it's updated to
+ * pass the shipment's own lock state. This disables the Send button; it
+ * is never the only enforcement (the server still authoritatively
+ * rejects), same "don't rely only on hiding the option in the UI"
+ * principle as every other permission check in this app.
  */
 export function canSubmitChatMessage(input: {
   text: string;
   hasAttachment: boolean;
   isSending: boolean;
+  isLocked?: boolean;
 }): boolean {
+  if (input.isLocked) return false;
   if (input.isSending) return false;
   return Boolean(input.text.trim()) || input.hasAttachment;
 }

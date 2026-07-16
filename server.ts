@@ -122,6 +122,12 @@ import {
   applyNarrowShipmentUpdateMemory,
   applyIsolatedShipmentUpdateMemory,
 } from "./src/lib/shipmentRevision";
+import {
+  isShipmentClosed,
+  isDriverAssignmentRejection,
+  validateShipmentStatusTransition,
+  ShipmentStatusTransitionError,
+} from "./src/lib/shipmentStatusTransitions";
 import { runShipmentUpdateSideEffects, ShipmentSideEffectTask } from "./src/lib/shipmentUpdateSideEffects";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
@@ -1749,6 +1755,16 @@ async function applyShipmentRevisionedUpdate(
 // an admin edit form opened before it would save later without ever
 // detecting the change. See applyNarrowShipmentUpdateMemory
 // (shipmentRevision.ts) for the full reasoning and its unit tests.
+//
+// PR #111 review (forward-only status transitions): `mutate` may also
+// throw ShipmentStatusTransitionError (the status route's transition
+// re-validation, run against this call's own fresh `current` — see that
+// route). Exactly like ShipmentRevisionConflictError below, that is an
+// expected application-level rejection, not an infrastructure failure —
+// it must reach the caller as-is, with no document modification, never
+// fall through to the memory-fallback retry (which could otherwise
+// silently re-run `mutate` a second time against different, unrelated
+// in-memory data).
 async function applyNarrowShipmentUpdate(
   shipmentId: string,
   mutate: (current: Shipment) => Shipment
@@ -1777,6 +1793,7 @@ async function applyNarrowShipmentUpdate(
       "Firestore transaction timed out"
     );
   } catch (error) {
+    if (error instanceof ShipmentStatusTransitionError) throw error;
     console.warn("Firestore narrow shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
@@ -4571,6 +4588,10 @@ async function startServer() {
   app.put("/api/shipments/:id/status", requireAuth, async (req, res) => {
     try {
       const { status, remarksDesc, updaterName, role } = req.body;
+      const requestedStatus: string = status;
+      if (typeof requestedStatus !== "string" || !requestedStatus.trim()) {
+        return res.status(400).json({ error: "status is required" });
+      }
       const shipmentId = req.params.id;
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);
@@ -4603,9 +4624,22 @@ async function startServer() {
         return res.status(403).json({ error: "Accounts-role admins cannot update shipment status." });
       }
 
-      const previousStatus = item.status;
-      item.status = status as ShipmentStatus;
-      item.updatedAt = new Date().toISOString();
+      // PR #111 review (Delivered/Closed terminal & chat rules): closing a
+      // shipment (Land's "Closed", Sea/Air's "Completed" — see
+      // getClosingStatusForFreightMode, shipmentStatusTransitions.ts) is
+      // reserved for authorized internal MARAS staff, never a driver or
+      // customer/public session, regardless of whether the client-side
+      // control happens to expose it. freightType is never changed by any
+      // route, so the pre-read `item.freightType` is safe to use here.
+      // This is a real server-side authorization gate, not just a UI
+      // omission — the same canViewShipmentRegistry check every other
+      // admin status change above already requires.
+      if (
+        isShipmentClosed(requestedStatus, item.freightType) &&
+        !(req.session!.role === "admin" && canViewShipmentRegistry(req.session!.adminType))
+      ) {
+        return res.status(403).json({ error: "Only authorized MARAS staff may close a shipment." });
+      }
 
       const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
         'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
@@ -4635,93 +4669,138 @@ async function startServer() {
         'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
       };
 
-      const labels = labelMap[status as ShipmentStatus] || labelMap['In Transit'];
+      // PR #111 review (forward-only status transitions): validated and
+      // built entirely inside applyNarrowShipmentUpdate's mutate callback,
+      // from `current` — that call's own fresh read (the Firestore
+      // transaction's live document, or the memory-fallback's live array
+      // entry) — never from the pre-read `item` above. If another status
+      // update committed between this request's initial read and now, this
+      // runs against that committed result, not stale data (requirement:
+      // "revalidate the transition inside the transaction using the
+      // transaction's current shipment"). isDriverAssignmentRejection is
+      // the one deliberate, narrowly-scoped exception to forward-only —
+      // see its own header comment (shipmentStatusTransitions.ts).
+      let updatedItem: Shipment;
+      try {
+        updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+          if (!isDriverAssignmentRejection(current.status, requestedStatus)) {
+            const transition = validateShipmentStatusTransition(current.status, requestedStatus, current.freightType);
+            if (!transition.ok) {
+              throw new ShipmentStatusTransitionError(current.status, requestedStatus, transition.allowedNextStatuses, transition.reason!);
+            }
+          }
 
-      item.timeline.push({
-        timestamp: new Date().toISOString(),
-        status: status as ShipmentStatus,
-        labelEn: labels.en,
-        labelTr: labels.tr,
-        labelAr: labels.ar,
-        detailsEn: remarksDesc || `Status updated from ${previousStatus} to ${status} by ${updaterName || 'System'}.`,
-        detailsTr: remarksDesc || `Durum ${updaterName || 'Sistem'} tarafından ${previousStatus} seviyesinden ${status} seviyesine çekildi.`,
-        detailsAr: remarksDesc || `تم تحديث الحالة من ${previousStatus} إلى ${status} بواسطة ${updaterName || 'النظام'}.`
-      });
-
-      // Handle delivery statistics
-      if (status === "Delivered") {
-        const dDocRef = doc(db, "drivers", item.assignedDriverId);
-        const dDoc = await getDoc(dDocRef);
-        if (dDoc.exists()) {
-          const driver = dDoc.data() as Driver;
-          driver.activeShipmentsCount = Math.max(0, driver.activeShipmentsCount - 1);
-          driver.completedShipmentsCount += 1;
-          await setDoc(dDocRef, driver);
+          const labels = labelMap[requestedStatus] || labelMap['In Transit'];
+          const nowIso = new Date().toISOString();
+          return {
+            ...current,
+            status: requestedStatus as ShipmentStatus,
+            timeline: [
+              ...current.timeline,
+              {
+                timestamp: nowIso,
+                status: requestedStatus as ShipmentStatus,
+                labelEn: labels.en,
+                labelTr: labels.tr,
+                labelAr: labels.ar,
+                detailsEn: remarksDesc || `Status updated from ${current.status} to ${requestedStatus} by ${updaterName || 'System'}.`,
+                detailsTr: remarksDesc || `Durum ${updaterName || 'Sistem'} tarafından ${current.status} seviyesinden ${requestedStatus} seviyesine çekildi.`,
+                detailsAr: remarksDesc || `تم تحديث الحالة من ${current.status} إلى ${requestedStatus} بواسطة ${updaterName || 'النظام'}.`
+              },
+            ],
+            updatedAt: nowIso,
+          };
+        });
+      } catch (err) {
+        if (err instanceof ShipmentStatusTransitionError) {
+          // No document modification, no notification, no audit entry —
+          // the transaction's mutate callback threw before building or
+          // writing anything.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentStatus: err.currentStatus,
+            requestedStatus: err.requestedStatus,
+            allowedNextStatuses: err.allowedNextStatuses,
+          });
         }
+        throw err;
       }
 
-      // Notify customer watchers of status update
-      await notifyCustomerWatchers(
-        item,
-        status === "Delivered" ? "delivery" : "status_update",
-        `Shipment Status Updated: ${status}`,
-        `Good day, your shipment #${item.shipmentNumber} status is now: ${status}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
-      );
+      // Everything below only runs after a successful, committed status
+      // change — never on a rejected transition (409 above), a permission
+      // denial, or a transaction/infrastructure failure. PR #111 review
+      // (post-commit response semantics): the driver-stat cache update and
+      // customer notification used to run BEFORE the commit, against the
+      // pre-read `item` — meaning they'd already have fired even for a
+      // transition later rejected as invalid. Both are now strictly
+      // post-commit and built from `updatedItem` (the committed result),
+      // alongside the notification/audit tasks already fixed here in the
+      // prior review round.
+      const sideEffectTasks: ShipmentSideEffectTask[] = [];
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2,
-      // scope confirmed by the later over-broad-policy correction): status
-      // and timeline ARE fields the human edit form's own merge
-      // (buildUpdatedShipment) can also overwrite, so this atomically
-      // applies the same status/timeline/updatedAt change onto whatever the
-      // document's CURRENT authoritative state is (not the pre-read `item`
-      // above), and unconditionally advances revision — this route has no
-      // client-submitted expectedRevision to check (a driver/admin status
-      // change isn't a human edit form holding a specific revision it
-      // read), but any admin edit form opened before this status change
-      // must still 409 on its next save.
-      const updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => ({
-        ...current,
-        status: item.status,
-        timeline: item.timeline,
-        updatedAt: item.updatedAt,
-      }));
+      if (requestedStatus === "Delivered" && updatedItem.assignedDriverId) {
+        // Driver activeShipmentsCount is a derived, cached tally — not the
+        // authoritative record (same reasoning as PUT /api/shipments/:id's
+        // own driver-stat tasks). If this fails, the status change itself
+        // is still correct; only this cached count can drift by one until
+        // a future successful update on either driver recomputes it.
+        sideEffectTasks.push({
+          name: "driver-stat-delivered-increment",
+          run: async () => {
+            const dDocRef = doc(db, "drivers", updatedItem.assignedDriverId);
+            const dDoc = await getDoc(dDocRef);
+            if (dDoc.exists()) {
+              const driver = dDoc.data() as Driver;
+              driver.activeShipmentsCount = Math.max(0, driver.activeShipmentsCount - 1);
+              driver.completedShipmentsCount += 1;
+              await setDoc(dDocRef, driver);
+            }
+          },
+        });
+      }
 
-      // PR #111 review (post-commit response semantics re-audit): the
-      // status change above is already safely committed at this point —
-      // pushNotification/logActivity failing afterward must not make this
-      // request falsely report "Failed to update status" (same reasoning
-      // as PUT /api/shipments/:id's own post-commit block; see
-      // runShipmentUpdateSideEffects's header).
-      const sideEffectFailures = await runShipmentUpdateSideEffects([
-        {
-          name: "status-update-notification",
-          run: () => pushNotification(
-            item.id,
-            item.shipmentNumber,
-            status === "Accepted" ? "acceptance" : (status === "Delivered" ? "delivery" : "status_update"),
-            `Status Update: ${status}`,
-            `Durum Güncellemesi: ${status}`,
-            `تحديث الحالة: ${status}`,
-            `Shipment ${item.shipmentNumber} is now ${status}.`,
-            `Sevkiyat ${item.shipmentNumber} şu anda ${status} konumunda.`,
-            `الشحنة رقم ${item.shipmentNumber} الآن هي في حالة [${status}].`
-          ),
-        },
-        {
-          name: "audit-log",
-          run: () => logActivity(
-            item.id,
-            item.shipmentNumber,
-            updaterName || role || "System",
-            `Changed status of ${item.shipmentNumber} to ${status}`,
-            `${item.shipmentNumber} sevkiyat durumunu ${status} olarak güncelledi`,
-            `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
-          ),
-        },
-      ]);
+      sideEffectTasks.push({
+        name: "customer-watcher-notification",
+        run: () => notifyCustomerWatchers(
+          updatedItem,
+          requestedStatus === "Delivered" ? "delivery" : "status_update",
+          `Shipment Status Updated: ${requestedStatus}`,
+          `Good day, your shipment #${updatedItem.shipmentNumber} status is now: ${requestedStatus}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
+        ),
+      });
+
+      sideEffectTasks.push({
+        name: "status-update-notification",
+        run: () => pushNotification(
+          updatedItem.id,
+          updatedItem.shipmentNumber,
+          requestedStatus === "Accepted" ? "acceptance" : (requestedStatus === "Delivered" ? "delivery" : "status_update"),
+          `Status Update: ${requestedStatus}`,
+          `Durum Güncellemesi: ${requestedStatus}`,
+          `تحديث الحالة: ${requestedStatus}`,
+          `Shipment ${updatedItem.shipmentNumber} is now ${requestedStatus}.`,
+          `Sevkiyat ${updatedItem.shipmentNumber} şu anda ${requestedStatus} konumunda.`,
+          `الشحنة رقم ${updatedItem.shipmentNumber} الآن هي في حالة [${requestedStatus}].`
+        ),
+      });
+
+      sideEffectTasks.push({
+        name: "audit-log",
+        run: () => logActivity(
+          updatedItem.id,
+          updatedItem.shipmentNumber,
+          updaterName || role || "System",
+          `Changed status of ${updatedItem.shipmentNumber} to ${requestedStatus}`,
+          `${updatedItem.shipmentNumber} sevkiyat durumunu ${requestedStatus} olarak güncelledi`,
+          `تغيير حالة الشحنة برقم ${updatedItem.shipmentNumber} إلى ${requestedStatus}`
+        ),
+      });
+
+      const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);
       for (const failure of sideEffectFailures) {
         console.error(
-          `[status-update] post-commit side effect "${failure.name}" failed for shipment ${item.id} (${item.shipmentNumber}) — the status save itself already succeeded and is not retried.`,
+          `[status-update] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the status save itself already succeeded and is not retried.`,
           failure.error
         );
       }
@@ -5089,6 +5168,26 @@ async function startServer() {
         return res.status(404).json({ error: "Shipment not found" });
       }
       const shipmentItem = sDoc.data() as Shipment;
+
+      // PR #111 review (Delivered/Closed terminal & chat rules): "Closed"
+      // (Land) / "Completed" (Sea/Air — see isShipmentClosed,
+      // shipmentStatusTransitions.ts) is the only status that locks
+      // shipment communication. Reaching "Delivered" must NOT close chat —
+      // Admin/Driver still routinely exchange CMR/POD corrections, final
+      // remarks, and payment follow-up after delivery — so this checks the
+      // freight-mode-appropriate closing status specifically, not any
+      // "finished/terminal-looking" status. Rejected before any message,
+      // unread-fanout record, or document is created, and before any
+      // notification fires — every channel (admin, driver, customer) goes
+      // through this one route, so this is the single enforcement point
+      // for all of them.
+      if (isShipmentClosed(shipmentItem.status, shipmentItem.freightType)) {
+        return res.status(409).json({
+          code: "SHIPMENT_CHAT_CLOSED",
+          error: "This shipment is closed. New messages and attachments can no longer be sent.",
+          shipmentStatus: shipmentItem.status,
+        });
+      }
 
       const newMessage: ChatMessage = {
         id: `msg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,

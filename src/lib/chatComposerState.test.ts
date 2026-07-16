@@ -34,6 +34,19 @@ describe("canSubmitChatMessage (duplicate-send guard)", () => {
   it("blocks when there is nothing to send at all", () => {
     expect(canSubmitChatMessage({ text: "", hasAttachment: false, isSending: false })).toBe(false);
   });
+
+  it("blocks a send when isLocked is true, even with valid content and nothing in flight", () => {
+    expect(canSubmitChatMessage({ text: "hello", hasAttachment: false, isSending: false, isLocked: true })).toBe(false);
+    expect(canSubmitChatMessage({ text: "", hasAttachment: true, isSending: false, isLocked: true })).toBe(false);
+  });
+
+  it("defaults to unlocked when isLocked is omitted — existing call sites keep working unchanged", () => {
+    expect(canSubmitChatMessage({ text: "hello", hasAttachment: false, isSending: false })).toBe(true);
+  });
+
+  it("isLocked: false behaves exactly like omitting it", () => {
+    expect(canSubmitChatMessage({ text: "hello", hasAttachment: false, isSending: false, isLocked: false })).toBe(true);
+  });
 });
 
 describe("isStaleChatPollResponse", () => {

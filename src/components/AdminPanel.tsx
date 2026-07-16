@@ -39,6 +39,7 @@ import { resolveStatementShipmentContext } from "../lib/costStatementRegistryVie
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge } from "../lib/chatUnreadAccess";
+import { getAllowedNextShipmentStatuses, isShipmentClosed } from "../lib/shipmentStatusTransitions";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -1187,7 +1188,6 @@ MARAS Group etir Center`;
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
 
   // Manual Shipment Operations Panel States (primarily for Sea and Air, but general as well)
-  const [manualStatus, setManualStatus] = useState<ShipmentStatus>("New");
   const [manualRemarks, setManualRemarks] = useState("");
   const [isSubmittingStatus, setIsSubmittingStatus] = useState(false);
 
@@ -1755,7 +1755,6 @@ MARAS Group etir Center`;
     if (openDetailsId) {
       const found = shipments.find(s => s.id === openDetailsId);
       if (found) {
-        setManualStatus(found.status);
         setManualRemarks("");
       }
     }
@@ -1847,13 +1846,21 @@ MARAS Group etir Center`;
   const handleManualStatusUpdate = async () => {
     const targetDetailsShipment = openDetailsId ? shipments.find(s => s.id === openDetailsId) : null;
     if (!targetDetailsShipment) return;
+    // PR #111 review (forward-only status transitions): derived fresh from
+    // targetDetailsShipment at submit time — there is only ever one valid
+    // next status, so manualStatus's own state (used only for the select's
+    // display value) isn't trusted for the actual submission, avoiding any
+    // staleness risk if the shipment list refreshes between render and
+    // submit.
+    const [nextStatus] = getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType);
+    if (!nextStatus) return;
     setIsSubmittingStatus(true);
     try {
       const res = await apiFetch(`/api/shipments/${targetDetailsShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          status: manualStatus,
+          status: nextStatus,
           remarksDesc: manualRemarks.trim() || undefined,
           updaterName: gmailUser?.email || "Admin Panel",
           role: "admin"
@@ -1864,7 +1871,16 @@ MARAS Group etir Center`;
         setManualRemarks("");
         fetchData();
       } else {
-        triggerToast("Failed to update status milestone.");
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        // PR #111 review: another status change already committed since
+        // this admin last saw the shipment — refresh to the real current
+        // status rather than leaving the form pointed at a transition
+        // that's no longer valid. Never auto-retried.
+        if (res.status === 409 && body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION") {
+          fetchData();
+        }
+        triggerToast(body?.error || "Failed to update status milestone.");
       }
     } catch (err) {
       console.error(err);
@@ -7343,23 +7359,30 @@ MARAS Group etir Center`;
                     Since Air and Maritime cargos do not utilize driver apps, you must log current status milestones directly from this panel. These status changes immediately updates client charts and alerts.
                   </p>
 
+                  {/* PR #111 review (forward-only status transitions):
+                      only the immediately valid next status may ever be
+                      selected — an admin/staff session is authorized to
+                      submit it even when it's the freight-mode's closing
+                      status (Closed/Completed), unlike the driver app. */}
+                  {(() => {
+                    const [nextTransitStatus] = getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType);
+                    return (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Select Updated Transit Status</label>
-                      <select
-                        value={manualStatus}
-                        onChange={(e) => setManualStatus(e.target.value as ShipmentStatus)}
-                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg focus:ring-1 focus:ring-orange-500 outline-none cursor-pointer"
-                      >
-                        {(targetDetailsShipment.freightType === 'sea'
-                          ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                          : targetDetailsShipment.freightType === 'air'
-                            ? ['Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                            : ['New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
-                        ).map((st) => (
-                          <option key={st} value={st} className="bg-slate-900">{st}</option>
-                        ))}
-                      </select>
+                      {nextTransitStatus ? (
+                        <select
+                          value={nextTransitStatus}
+                          disabled
+                          className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg outline-none cursor-not-allowed opacity-90"
+                        >
+                          <option value={nextTransitStatus} className="bg-slate-900">{nextTransitStatus}</option>
+                        </select>
+                      ) : (
+                        <div className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-slate-500 rounded-lg">
+                          No further status — shipment is at its terminal status.
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-1">
@@ -7373,12 +7396,14 @@ MARAS Group etir Center`;
                       />
                     </div>
                   </div>
+                    );
+                  })()}
 
                   <div className="flex justify-end pt-1">
                     <button
                       type="button"
                       onClick={handleManualStatusUpdate}
-                      disabled={isSubmittingStatus}
+                      disabled={isSubmittingStatus || !getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType)[0]}
                       className="bg-orange-600 hover:bg-orange-700 text-white font-extrabold text-xs py-2.5 px-5 rounded-lg inline-flex items-center gap-2 transition-all cursor-pointer border-0 shadow-md font-mono disabled:opacity-50"
                     >
                       {isSubmittingStatus ? (
@@ -9490,7 +9515,22 @@ MARAS Group etir Center`;
                   />
                 </div>
 
-                {/* Status selector (Admin override) */}
+                {/* Status selector (Admin override).
+                    PR #111 review (forward-only status transitions): this
+                    is the pre-existing, deliberate exceptional-correction
+                    workflow the review asked to identify and keep separate
+                    from normal forward-only progression, rather than
+                    silently restrict. It submits through the broad edit
+                    form (PUT /api/shipments/:id, requireFullAdmin —
+                    super/operation only, never accounts/driver/client),
+                    NOT through PUT /api/shipments/:id/status, so it is
+                    intentionally exempt from the forward-only sequence
+                    enforced there (validateShipmentStatusTransition,
+                    shipmentStatusTransitions.ts) — an authorized admin can
+                    still correct a status entered in error (e.g. a wrong
+                    milestone, backward correction) without that being
+                    confused with the normal driver/admin progression
+                    control. Left functionally unchanged; only now documented. */}
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-700">Status Override / Durum Güncelle</label>
                   <select

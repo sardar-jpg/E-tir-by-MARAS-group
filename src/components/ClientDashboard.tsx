@@ -14,6 +14,7 @@ import { canClientSendChatMessage } from "../lib/clientAccess";
 import { validateUpload } from "../lib/uploadValidation";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage } from "../lib/chatComposerState";
+import { isShipmentClosed } from "../lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 
 // Local multilingual dictionary
@@ -180,6 +181,12 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const [freightTypeFilter, setFreightTypeFilter] = useState<'all' | 'land' | 'sea' | 'air'>('all');
   const [selectedShipment, setSelectedShipment] = useState<Shipment | null>(null);
   const [selectedShipmentLoading, setSelectedShipmentLoading] = useState(false);
+  // PR #111 review (Delivered/Closed terminal & chat rules): this
+  // dashboard previously had no shipment-status-based chat lock at all —
+  // locks only at the freight-mode-appropriate closing status ("Closed"
+  // for Land, "Completed" for Sea/Air); reaching "Delivered" must NOT
+  // lock chat.
+  const isChatClosed = selectedShipment ? isShipmentClosed(selectedShipment.status, selectedShipment.freightType) : false;
   // Phase 2A follow-up (blocking-issue fix): GET /api/shipments/stats —
   // a real, full-scope server aggregate (not `shipments.length`) for the
   // "Total Shipments" tile below, so it stays accurate once only a page
@@ -647,7 +654,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
     // effect after a re-render, so a double-tap could still race ahead of
     // it. Matches the same guard now applied to every other chat composer
     // (ChatCenter.tsx, App.tsx, DriverApplication.tsx).
-    if (!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })) return;
+    if (!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry, isLocked: isChatClosed })) return;
     // fix/chat-safety-reliability-phase1: matches the shared server-side
     // limit (validateChatSendPayload, src/lib/chatMessageValidation.ts) —
     // the textarea's maxLength attribute already stops typing past this,
@@ -735,6 +742,15 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
           }
         }
       } else {
+        // PR #111 review (Delivered/Closed terminal & chat rules): the
+        // shipment was closed since this dashboard last loaded it — sync
+        // local status so the composer locks to match, rather than
+        // leaving it open for a retry the server will keep rejecting.
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        if (res.status === 409 && body?.code === "SHIPMENT_CHAT_CLOSED") {
+          setSelectedShipment((prev) => (prev && prev.id === shipmentId ? { ...prev, status: body.shipmentStatus } : prev));
+        }
         setInquiryStatus("error");
       }
     } catch (err) {
@@ -1351,7 +1367,12 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             code today since canClientSendChatMessage always
                             returns true, kept as a named, reviewable
                             extension point (see clientAccess.ts). */}
-                        {!canClientSendChatMessage({ isEmployee: viewOnly }) ? (
+                        {isChatClosed ? (
+                          <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
+                            <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
+                            <span>{lang === 'ar' ? "هذه الشحنة مغلقة. لم يعد بالإمكان إرسال رسائل." : lang === 'tr' ? "Bu sevkiyat kapatıldı. Artık mesaj gönderilemez." : "This shipment is closed. Messages can no longer be sent."}</span>
+                          </div>
+                        ) : !canClientSendChatMessage({ isEmployee: viewOnly }) ? (
                           <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
                             <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span>{lang === 'ar' ? "حساب المشاهدة فقط — لا يمكن إرسال الرسائل." : lang === 'tr' ? "Salt görüntüleme hesabı — mesaj gönderilemiyor." : "View-only account — sending messages is disabled."}</span>
@@ -1424,7 +1445,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                             <button
                               type="button"
                               onClick={() => handleSendInquiry(selectedShipment!.id)}
-                              disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry })}
+                              disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry, isLocked: isChatClosed })}
                               className="w-full py-3 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
                             >
                               {isUploadingFile ? (

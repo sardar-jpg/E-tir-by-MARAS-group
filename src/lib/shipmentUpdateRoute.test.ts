@@ -297,9 +297,10 @@ describe("PR #111 review — over-broad revision policy correction: writer class
   it("post-commit response semantics: status route's notification/audit calls run via runShipmentUpdateSideEffects, not bare awaits after the commit", () => {
     const commitIndex = STATUS_ROUTE.indexOf("await applyNarrowShipmentUpdate(shipmentId");
     const afterCommit = STATUS_ROUTE.slice(commitIndex);
-    expect(afterCommit).toContain("await runShipmentUpdateSideEffects([");
+    expect(afterCommit).toContain("await runShipmentUpdateSideEffects(sideEffectTasks);");
     expect(afterCommit).not.toMatch(/\n\s*await pushNotification\(/);
     expect(afterCommit).not.toMatch(/\n\s*await logActivity\(/);
+    expect(afterCommit).not.toMatch(/\n\s*await notifyCustomerWatchers\(/);
   });
 
   it("post-commit response semantics: subscribe-customer route's audit-log call runs via runShipmentUpdateSideEffects, not a bare await after the commit", () => {
