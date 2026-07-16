@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Language, Driver, TRUCK_TYPES } from "../types";
-import { Ship, Globe, User, Lock, Phone, Truck, ClipboardSignature, KeyRound, Mail, LogIn, LifeBuoy } from "lucide-react";
+import { Ship, Globe, User, Lock, Phone, Truck, ClipboardSignature, KeyRound, Mail, LogIn, LifeBuoy, CheckCircle2 } from "lucide-react";
 import { signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification } from "firebase/auth";
 import { auth, googleSignIn } from "../googleAuth";
 import { apiFetch } from "../lib/api";
@@ -24,6 +24,20 @@ const SUPPORT_EMAIL = "support@etir.app";
 // verify-session role hint (see handleLogin) — never to grant access.
 // Actual admin authorization always comes from the server session.
 const OWNER_EMAIL = "sardar@maras.iq";
+
+/** eTIR/MARAS brand icon + wordmark, sized for the compact mobile header or the large desktop panel. */
+function BrandMark({ brand, tagline, size = "sm" }: { brand: string; tagline: string; size?: "sm" | "lg" }) {
+  const isLarge = size === "lg";
+  return (
+    <div className={`flex flex-col ${isLarge ? "items-start text-start" : "items-center text-center"}`}>
+      <div className={`${isLarge ? "p-4 rounded-2xl mb-4" : "p-3 rounded-2xl mb-3"} bg-blue-600 text-white shadow-lg shadow-blue-600/20 inline-flex`}>
+        <Ship className={isLarge ? "w-9 h-9" : "w-7 h-7"} />
+      </div>
+      <h1 className={`${isLarge ? "text-3xl" : "text-xl"} font-black text-white tracking-tight`}>{brand}</h1>
+      <p className={`${isLarge ? "text-sm mt-1.5" : "text-xs mt-0.5"} font-semibold text-blue-400 uppercase tracking-wider`}>{tagline}</p>
+    </div>
+  );
+}
 
 export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPrivacy, onViewTerms }: LoginPageProps) {
   const [isRegisterMode, setIsRegisterMode] = useState(false);
@@ -86,6 +100,10 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       driverRegDesc: "Register your vehicle to accept international freight manifests.",
       googleSignIn: "Sign in with Google",
       orDivider: "or",
+      desktopHeadline: "Run your fleet with confidence.",
+      desktopBullet1: "Real-time shipment and driver visibility",
+      desktopBullet2: "Secure, role-based access for every team",
+      desktopBullet3: "Built for international freight operations",
     },
     tr: {
       brand: "eTIR by MARAS",
@@ -124,6 +142,10 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       driverRegDesc: "Uluslararası navlun belgelerini kabul etmek için aracınızı kaydedin.",
       googleSignIn: "Google ile Giriş Yap",
       orDivider: "veya",
+      desktopHeadline: "Filonuzu güvenle yönetin.",
+      desktopBullet1: "Gerçek zamanlı sevkiyat ve sürücü görünürlüğü",
+      desktopBullet2: "Her ekip için güvenli, role dayalı erişim",
+      desktopBullet3: "Uluslararası navliyat operasyonları için tasarlandı",
     },
     ar: {
       brand: "إيتير من MARAS",
@@ -162,6 +184,10 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       driverRegDesc: "سجل شاحنتك الآن للبدء في تلقي مستندات الشحن الدولية والرحلات.",
       googleSignIn: "تسجيل الدخول عبر Google",
       orDivider: "أو",
+      desktopHeadline: "أدر أسطولك بثقة.",
+      desktopBullet1: "رؤية فورية للشحنات والسائقين",
+      desktopBullet2: "وصول آمن قائم على الأدوار لكل فريق",
+      desktopBullet3: "مصمم لعمليات الشحن الدولي",
     }
   }[lang];
 
@@ -469,21 +495,49 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
     }
   };
 
-  const inputBaseClasses = "w-full h-12 ps-10 pe-4 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-sm text-slate-100 placeholder-slate-500 font-medium focus:outline-none transition-all text-start";
-  const passwordInputClasses = inputBaseClasses.replace("pe-4", "pe-10");
-  const passwordToggleClasses = "absolute end-3.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0";
+  const inputBaseClasses = "w-full h-[52px] ps-11 pe-4 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-blue-500 rounded-xl text-base text-slate-100 placeholder-slate-500 font-medium focus:outline-none transition-all text-start";
+  const passwordInputClasses = inputBaseClasses.replace("pe-4", "pe-11");
+  const passwordToggleClasses = "absolute end-3.5 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0";
+  const regFieldBase = "w-full h-12 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-sm text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start";
+  const regFieldMono = regFieldBase.replace("font-semibold", "font-mono");
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans flex flex-col justify-center items-center p-4 relative overflow-hidden" dir={isRtl ? "rtl" : "ltr"}>
-      {/* Decorative ambient blobs */}
-      <div className="absolute top-10 start-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
-      <div className="absolute bottom-10 end-10 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+    <div className="min-h-dvh w-full bg-slate-900 text-slate-100 font-sans lg:grid lg:grid-cols-2" dir={isRtl ? "rtl" : "ltr"}>
 
-      <div className="w-full max-w-[440px] z-10">
-        {/* Language switcher */}
-        <div className="flex items-center justify-end mb-4">
-          <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-lg border border-slate-800 text-xs font-bold text-slate-300">
-            <Globe className="w-3.5 h-3.5 text-slate-400" />
+      {/* Desktop/tablet-landscape brand panel — logistics identity + messaging, not just a stretched form */}
+      <div className="hidden lg:flex relative flex-col justify-between overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 border-e border-slate-800 px-12 py-14">
+        <div aria-hidden="true" className="absolute -top-24 -start-24 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div aria-hidden="true" className="absolute bottom-0 end-0 w-[28rem] h-[28rem] bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div className="relative z-10">
+          <BrandMark brand={t.brand} tagline={t.tagline} size="lg" />
+        </div>
+
+        <div className="relative z-10 max-w-md space-y-6">
+          <h2 className="text-3xl font-black text-white tracking-tight leading-tight">{t.desktopHeadline}</h2>
+          <ul className="space-y-4">
+            {[t.desktopBullet1, t.desktopBullet2, t.desktopBullet3].map((line) => (
+              <li key={line} className="flex items-start gap-3 text-sm text-slate-300 font-medium">
+                <CheckCircle2 className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <p className="relative z-10 text-[11px] text-slate-500 font-semibold uppercase tracking-wider">{t.tagline}</p>
+      </div>
+
+      {/* Auth column — full-viewport native-app surface on mobile, right-hand column on desktop */}
+      <div className="relative overflow-hidden flex flex-col min-h-dvh lg:min-h-screen">
+        {/* Decorative ambient blobs (mobile/tablet only — desktop has its own panel) */}
+        <div aria-hidden="true" className="lg:hidden absolute top-10 start-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div aria-hidden="true" className="lg:hidden absolute bottom-10 end-10 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        {/* Top bar: language switcher, safe-area aware */}
+        <div className="relative z-10 flex items-center justify-end px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-2 sm:px-8 lg:px-12 lg:pt-10">
+          <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-2 rounded-lg border border-slate-800 text-xs font-bold text-slate-300 min-h-11">
+            <Globe className="w-4 h-4 text-slate-400" />
             <select
               value={lang}
               onChange={(e) => onSetLang(e.target.value as Language)}
@@ -497,378 +551,380 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
           </div>
         </div>
 
-        {/* Main Authentication Card */}
-        <div className="w-full bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-3xl p-7 sm:p-9 shadow-2xl transition-all">
+        {/* Content — normal document flow so the page (not a nested container) scrolls,
+            and the keyboard can open without ever hiding the submit button below the fold.
+            The short verification-success state is centered on every breakpoint (nothing to
+            scroll to); login/registration stay top-anchored on mobile so a tall form is never
+            clipped, and center only from lg: up where the two-column desktop panel takes over. */}
+        <div className={`relative z-10 flex-1 flex flex-col px-5 sm:px-8 lg:px-12 pb-[max(1.5rem,env(safe-area-inset-bottom))] ${verificationEmail ? "justify-center" : "lg:justify-center"}`}>
+          <div className="w-full mx-auto sm:max-w-md lg:bg-slate-950/60 lg:backdrop-blur-md lg:border lg:border-slate-800 lg:rounded-3xl lg:p-10 lg:shadow-2xl">
 
-          {/* Brand identity */}
-          <div className="flex flex-col items-center text-center mb-7">
-            <div className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-600/20 mb-3">
-              <Ship className="w-7 h-7" />
+            {/* Compact brand mark — desktop already shows the large one in the left panel */}
+            <div className="lg:hidden mb-6">
+              <BrandMark brand={t.brand} tagline={t.tagline} size="sm" />
             </div>
-            <h1 className="text-lg font-black text-white tracking-tight">{t.brand}</h1>
-            <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mt-0.5">{t.tagline}</p>
-          </div>
 
-          {verificationEmail ? (
-            /* EMAIL VERIFICATION SCREEN */
-            <div className="space-y-6 text-center">
-              <div className="mx-auto w-16 h-16 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-full flex items-center justify-center animate-pulse">
-                <Mail className="w-8 h-8 text-blue-400" />
-              </div>
-
-              <div className="space-y-2">
-                <h3 className="text-lg font-black text-white tracking-tight">
-                  {lang === "en" ? "Registration Received" : lang === "tr" ? "Kayıt Alındı" : "تم استلام التسجيل"}
-                </h3>
-                <p className="text-xs text-slate-300 leading-relaxed font-semibold">
-                  {lang === "en"
-                    ? <>Registration received for <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is pending admin approval — you will be able to sign in once an admin approves it.</>
-                    : lang === "tr"
-                      ? <><span className="text-blue-400 font-bold">{verificationEmail}</span> için kayıt alındı. Hesabınız yönetici onayı bekliyor — bir yönetici onayladıktan sonra giriş yapabileceksiniz.</>
-                      : <>تم استلام التسجيل لـ <span className="text-blue-400 font-bold">{verificationEmail}</span>. حسابك بانتظار موافقة المسؤول — ستتمكن من تسجيل الدخول بعد الموافقة عليه.</>
-                  }
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setVerificationEmail(null);
-                  setIsRegisterMode(false);
-                }}
-                className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <KeyRound className="w-4 h-4 shrink-0" />
-                <span>{lang === "en" ? "Back to Sign In" : lang === "tr" ? "Girişe Dön" : "العودة لتسجيل الدخول"}</span>
-              </button>
-            </div>
-          ) : !isRegisterMode ? (
-            /* LOGIN FORM */
-            <div className="space-y-5">
-              <p className="text-center text-sm text-slate-400 font-medium -mt-3">{t.subtitle}</p>
-
-              {loginError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center" role="alert">
-                  {loginError}
-                </div>
-              )}
-
-              <form onSubmit={handleLogin} className="space-y-4">
-                <div className="space-y-1.5">
-                  <label htmlFor="login-identifier" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.identifierLabel}
-                  </label>
-                  <div className="relative">
-                    <User className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                    <input
-                      id="login-identifier"
-                      type="text"
-                      autoComplete="username"
-                      required
-                      placeholder={t.identifierPlaceholder}
-                      value={loginUsername}
-                      onChange={(e) => setLoginUsername(e.target.value)}
-                      className={inputBaseClasses}
-                    />
-                  </div>
+            {verificationEmail ? (
+              /* EMAIL VERIFICATION SCREEN */
+              <div className="space-y-6 text-center">
+                <div className="mx-auto w-16 h-16 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-full flex items-center justify-center animate-pulse">
+                  <Mail className="w-8 h-8 text-blue-400" />
                 </div>
 
-                <div className="space-y-1.5">
-                  <div className="flex justify-between items-center gap-2">
-                    <label htmlFor="login-password" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                      {t.passwordLabel}
-                    </label>
-                    <button
-                      type="button"
-                      onClick={handleForgotPassword}
-                      disabled={isResettingPassword}
-                      className="text-[11px] text-blue-400 hover:text-blue-300 font-bold hover:underline bg-transparent border-0 cursor-pointer p-0 disabled:opacity-60"
-                    >
-                      {isResettingPassword ? t.sendingReset : t.forgotPassword}
-                    </button>
-                  </div>
-                  <PasswordInput
-                    id="login-password"
-                    autoComplete="current-password"
-                    required
-                    placeholder="••••••••"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    inputClassName={passwordInputClasses}
-                    toggleClassName={passwordToggleClasses}
-                    leadingIcon={<Lock className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />}
-                    showLabel={t.showPassword}
-                    hideLabel={t.hidePassword}
-                  />
+                <div className="space-y-2">
+                  <h3 className="text-lg font-black text-white tracking-tight">
+                    {lang === "en" ? "Registration Received" : lang === "tr" ? "Kayıt Alındı" : "تم استلام التسجيل"}
+                  </h3>
+                  <p className="text-sm text-slate-300 leading-relaxed font-semibold">
+                    {lang === "en"
+                      ? <>Registration received for <span className="text-blue-400 font-bold">{verificationEmail}</span>. Your account is pending admin approval — you will be able to sign in once an admin approves it.</>
+                      : lang === "tr"
+                        ? <><span className="text-blue-400 font-bold">{verificationEmail}</span> için kayıt alındı. Hesabınız yönetici onayı bekliyor — bir yönetici onayladıktan sonra giriş yapabileceksiniz.</>
+                        : <>تم استلام التسجيل لـ <span className="text-blue-400 font-bold">{verificationEmail}</span>. حسابك بانتظار موافقة المسؤول — ستتمكن من تسجيل الدخول بعد الموافقة عليه.</>
+                    }
+                  </p>
                 </div>
 
                 <button
-                  type="submit"
-                  disabled={isLoggingIn}
-                  className="w-full h-12 sm:h-[52px] text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-70 shadow-blue-600/20"
+                  type="button"
+                  onClick={() => {
+                    setVerificationEmail(null);
+                    setIsRegisterMode(false);
+                  }}
+                  className="w-full h-14 bg-blue-600 hover:bg-blue-700 text-white font-bold text-base rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {isLoggingIn ? (
-                    <span>{t.signingIn}</span>
-                  ) : (
-                    <>
-                      <LogIn className="w-4 h-4 shrink-0" />
-                      <span>{t.signIn}</span>
-                    </>
-                  )}
+                  <KeyRound className="w-4 h-4 shrink-0" />
+                  <span>{lang === "en" ? "Back to Sign In" : lang === "tr" ? "Girişe Dön" : "العودة لتسجيل الدخول"}</span>
                 </button>
-              </form>
+              </div>
+            ) : !isRegisterMode ? (
+              /* LOGIN FORM */
+              <div className="space-y-5">
+                <h2 className="text-2xl lg:text-[28px] font-black text-white tracking-tight text-center lg:text-start mb-1">{t.subtitle}</h2>
 
-              {GOOGLE_LOGIN_ENABLED && (
-                <>
-                  <div className="relative flex py-1 items-center">
-                    <div className="flex-grow border-t border-slate-900"></div>
-                    <span className="flex-shrink mx-4 text-[10px] text-slate-500 font-bold uppercase tracking-wider">{t.orDivider}</span>
-                    <div className="flex-grow border-t border-slate-900"></div>
+                {loginError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center" role="alert">
+                    {loginError}
+                  </div>
+                )}
+
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label htmlFor="login-identifier" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.identifierLabel}
+                    </label>
+                    <div className="relative">
+                      <User className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input
+                        id="login-identifier"
+                        type="text"
+                        autoComplete="username"
+                        required
+                        placeholder={t.identifierPlaceholder}
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                        className={inputBaseClasses}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center gap-2">
+                      <label htmlFor="login-password" className="text-[11px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                        {t.passwordLabel}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleForgotPassword}
+                        disabled={isResettingPassword}
+                        className="text-[11px] text-blue-400 hover:text-blue-300 font-bold hover:underline bg-transparent border-0 cursor-pointer p-1 -m-1 disabled:opacity-60"
+                      >
+                        {isResettingPassword ? t.sendingReset : t.forgotPassword}
+                      </button>
+                    </div>
+                    <PasswordInput
+                      id="login-password"
+                      autoComplete="current-password"
+                      required
+                      placeholder="••••••••"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      inputClassName={passwordInputClasses}
+                      toggleClassName={passwordToggleClasses}
+                      leadingIcon={<Lock className="absolute start-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />}
+                      showLabel={t.showPassword}
+                      hideLabel={t.hidePassword}
+                    />
                   </div>
 
                   <button
-                    type="button"
-                    onClick={handleGoogleSignIn}
+                    type="submit"
                     disabled={isLoggingIn}
-                    className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full h-14 text-white font-bold text-base rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-70 shadow-blue-600/20"
                   >
-                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22c-.22-.67-.35-1.37-.35-2.07z" />
-                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
-                    </svg>
-                    <span>{t.googleSignIn}</span>
+                    {isLoggingIn ? (
+                      <span>{t.signingIn}</span>
+                    ) : (
+                      <>
+                        <LogIn className="w-5 h-5 shrink-0" />
+                        <span>{t.signIn}</span>
+                      </>
+                    )}
                   </button>
-                </>
-              )}
+                </form>
 
-              <div className="border-t border-slate-800 pt-4">
+                {GOOGLE_LOGIN_ENABLED && (
+                  <>
+                    <div className="relative flex py-1 items-center">
+                      <div className="flex-grow border-t border-slate-900"></div>
+                      <span className="flex-shrink mx-4 text-[10px] text-slate-500 font-bold uppercase tracking-wider">{t.orDivider}</span>
+                      <div className="flex-grow border-t border-slate-900"></div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleGoogleSignIn}
+                      disabled={isLoggingIn}
+                      className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22c-.22-.67-.35-1.37-.35-2.07z" />
+                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                      </svg>
+                      <span>{t.googleSignIn}</span>
+                    </button>
+                  </>
+                )}
+
+                <div className="border-t border-slate-800 pt-4">
+                  <button
+                    onClick={() => {
+                      setIsRegisterMode(true);
+                      setRegError(null);
+                    }}
+                    className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <ClipboardSignature className="w-4 h-4 text-blue-400 shrink-0" />
+                    <span>{t.registerBtn}</span>
+                  </button>
+                </div>
+
+                {/* Support + legal footer */}
+                <div className="border-t border-slate-900 pt-4 pb-2 flex flex-col items-center justify-center gap-3 text-[11px] text-slate-500">
+                  <a
+                    href={`mailto:${SUPPORT_EMAIL}`}
+                    className="flex items-center gap-1.5 hover:text-blue-400 transition-all py-1"
+                  >
+                    <LifeBuoy className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t.needHelp} <span className="font-semibold">{SUPPORT_EMAIL}</span></span>
+                  </a>
+                  <div className="flex flex-wrap justify-center gap-x-3 gap-y-2">
+                    {onViewPrivacy && (
+                      <button
+                        type="button"
+                        onClick={onViewPrivacy}
+                        className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-1 -m-1 bg-transparent border-0"
+                      >
+                        {lang === "tr" ? "Gizlilik Politikası" : lang === "ar" ? "سياسة الخصوصية" : "Privacy Policy"}
+                      </button>
+                    )}
+                    {onViewPrivacy && onViewTerms && <span className="text-slate-700">|</span>}
+                    {onViewTerms && (
+                      <button
+                        type="button"
+                        onClick={onViewTerms}
+                        className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-1 -m-1 bg-transparent border-0"
+                      >
+                        {lang === "tr" ? "Kullanım Koşulları" : lang === "ar" ? "الشروط والأحكام" : "Terms & Conditions"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* REGISTRATION FORM */
+              <div className="space-y-5">
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-white tracking-tight text-center lg:text-start">{t.driverRegHeader}</h2>
+                  <p className="text-xs text-slate-400 text-center lg:text-start">{t.driverRegDesc}</p>
+                </div>
+
+                {regError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center">
+                    {regError}
+                  </div>
+                )}
+
+                <form onSubmit={handleRegister} className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.fullName}
+                    </label>
+                    <div className="relative">
+                      <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. Mehmet Aksoy"
+                        value={regFullName}
+                        onChange={(e) => setRegFullName(e.target.value)}
+                        className={regFieldBase}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.regUsername}
+                    </label>
+                    <div className="relative">
+                      <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. mehmet_aksoy"
+                        value={regUsername}
+                        onChange={(e) => setRegUsername(e.target.value)}
+                        className={regFieldMono}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.personalEmail}
+                    </label>
+                    <div className="relative">
+                      <Mail className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        type="email"
+                        required
+                        placeholder={t.emailPlaceholder}
+                        value={regEmail}
+                        onChange={(e) => setRegEmail(e.target.value)}
+                        className={regFieldBase}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.phone}
+                    </label>
+                    <div className="relative">
+                      <Phone className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. +90 532 999 8877"
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(e.target.value)}
+                        className={regFieldBase}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.truckId}
+                    </label>
+                    <div className="relative">
+                      <Truck className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. 34-LOG-2026"
+                        value={regTruckId}
+                        onChange={(e) => setRegTruckId(e.target.value)}
+                        className={regFieldMono}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.truckType}
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={regTruckType}
+                        onChange={(e) => setRegTruckType(e.target.value)}
+                        className="w-full h-12 px-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-sm text-slate-100 font-semibold focus:outline-none text-start cursor-pointer"
+                      >
+                        {TRUCK_TYPES.map(type => (
+                          <option key={type.id} value={type.id} className="bg-slate-950 text-white">
+                            {lang === 'en' ? type.en : (lang === 'tr' ? type.tr : type.ar)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.passwordLabel}
+                    </label>
+                    <PasswordInput
+                      required
+                      placeholder="••••••••"
+                      value={regPassword}
+                      onChange={(e) => setRegPassword(e.target.value)}
+                      inputClassName="w-full h-12 ps-9 pe-9 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-sm text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
+                      toggleClassName="absolute end-3 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0"
+                      leadingIcon={<KeyRound className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />}
+                      showLabel={t.showPassword}
+                      hideLabel={t.hidePassword}
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
+                      {t.confirmPassword}
+                    </label>
+                    <PasswordInput
+                      required
+                      placeholder="••••••••"
+                      value={regConfirmPassword}
+                      onChange={(e) => setRegConfirmPassword(e.target.value)}
+                      inputClassName="w-full h-12 ps-9 pe-9 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-sm text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
+                      toggleClassName="absolute end-3 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0"
+                      leadingIcon={<KeyRound className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />}
+                      showLabel={t.showPassword}
+                      hideLabel={t.hidePassword}
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isRegistering}
+                    className="w-full h-14 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-base rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
+                  >
+                    {isRegistering ? (
+                      <span>{t.creatingAccount}</span>
+                    ) : (
+                      <>
+                        <ClipboardSignature className="w-4 h-4 shrink-0" />
+                        <span>{t.submitReg}</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+
                 <button
                   onClick={() => {
-                    setIsRegisterMode(true);
+                    setIsRegisterMode(false);
                     setRegError(null);
                   }}
-                  className="w-full h-12 bg-slate-900 hover:bg-slate-800 hover:text-white text-slate-300 font-bold text-sm rounded-xl border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full min-h-11 py-2 text-slate-400 hover:text-white font-bold text-xs bg-transparent transition-all flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <ClipboardSignature className="w-4 h-4 text-blue-400 shrink-0" />
-                  <span>{t.registerBtn}</span>
+                  <span>{isRtl ? "→" : "←"} {t.backToLogin}</span>
                 </button>
               </div>
+            )}
 
-              {/* Support + legal footer */}
-              <div className="border-t border-slate-900 pt-4 flex flex-col items-center justify-center gap-2 text-[11px] text-slate-500">
-                <a
-                  href={`mailto:${SUPPORT_EMAIL}`}
-                  className="flex items-center gap-1.5 hover:text-blue-400 transition-all"
-                >
-                  <LifeBuoy className="w-3.5 h-3.5 shrink-0" />
-                  <span>{t.needHelp} <span className="font-semibold">{SUPPORT_EMAIL}</span></span>
-                </a>
-                <div className="flex flex-wrap justify-center gap-x-3 gap-y-1">
-                  {onViewPrivacy && (
-                    <button
-                      type="button"
-                      onClick={onViewPrivacy}
-                      className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
-                    >
-                      {lang === "tr" ? "Gizlilik Politikası" : lang === "ar" ? "سياسة الخصوصية" : "Privacy Policy"}
-                    </button>
-                  )}
-                  {onViewPrivacy && onViewTerms && <span className="text-slate-700">|</span>}
-                  {onViewTerms && (
-                    <button
-                      type="button"
-                      onClick={onViewTerms}
-                      className="hover:text-blue-400 transition-all cursor-pointer underline hover:no-underline font-semibold uppercase tracking-wider outline-none p-0 bg-transparent border-0"
-                    >
-                      {lang === "tr" ? "Kullanım Koşulları" : lang === "ar" ? "الشروط والأحكام" : "Terms & Conditions"}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* REGISTRATION FORM */
-            <div className="space-y-5">
-              <div className="space-y-1 -mt-3">
-                <h2 className="text-md font-black text-white tracking-tight text-center">{t.driverRegHeader}</h2>
-                <p className="text-[11px] text-slate-400 text-center">{t.driverRegDesc}</p>
-              </div>
-
-              {regError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold rounded-xl text-center">
-                  {regError}
-                </div>
-              )}
-
-              <form onSubmit={handleRegister} className="space-y-3">
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.fullName}
-                  </label>
-                  <div className="relative">
-                    <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Mehmet Aksoy"
-                      value={regFullName}
-                      onChange={(e) => setRegFullName(e.target.value)}
-                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.regUsername}
-                  </label>
-                  <div className="relative">
-                    <User className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. mehmet_aksoy"
-                      value={regUsername}
-                      onChange={(e) => setRegUsername(e.target.value)}
-                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.personalEmail}
-                  </label>
-                  <div className="relative">
-                    <Mail className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="email"
-                      required
-                      placeholder={t.emailPlaceholder}
-                      value={regEmail}
-                      onChange={(e) => setRegEmail(e.target.value)}
-                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.phone}
-                  </label>
-                  <div className="relative">
-                    <Phone className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. +90 532 999 8877"
-                      value={regPhone}
-                      onChange={(e) => setRegPhone(e.target.value)}
-                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none text-start"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.truckId}
-                  </label>
-                  <div className="relative">
-                    <Truck className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. 34-LOG-2026"
-                      value={regTruckId}
-                      onChange={(e) => setRegTruckId(e.target.value)}
-                      className="w-full h-11 ps-9 pe-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.truckType}
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={regTruckType}
-                      onChange={(e) => setRegTruckType(e.target.value)}
-                      className="w-full h-11 px-3 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 font-semibold focus:outline-none text-start cursor-pointer"
-                    >
-                      {TRUCK_TYPES.map(type => (
-                        <option key={type.id} value={type.id} className="bg-slate-950 text-white">
-                          {lang === 'en' ? type.en : (lang === 'tr' ? type.tr : type.ar)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.passwordLabel}
-                  </label>
-                  <PasswordInput
-                    required
-                    placeholder="••••••••"
-                    value={regPassword}
-                    onChange={(e) => setRegPassword(e.target.value)}
-                    inputClassName="w-full h-11 ps-9 pe-9 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
-                    toggleClassName="absolute end-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0"
-                    leadingIcon={<KeyRound className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />}
-                    showLabel={t.showPassword}
-                    hideLabel={t.hidePassword}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block text-start">
-                    {t.confirmPassword}
-                  </label>
-                  <PasswordInput
-                    required
-                    placeholder="••••••••"
-                    value={regConfirmPassword}
-                    onChange={(e) => setRegConfirmPassword(e.target.value)}
-                    inputClassName="w-full h-11 ps-9 pe-9 bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none text-start"
-                    toggleClassName="absolute end-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer bg-transparent border-0 p-0"
-                    leadingIcon={<KeyRound className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />}
-                    showLabel={t.showPassword}
-                    hideLabel={t.hidePassword}
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isRegistering}
-                  className="w-full h-12 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
-                >
-                  {isRegistering ? (
-                    <span>{t.creatingAccount}</span>
-                  ) : (
-                    <>
-                      <ClipboardSignature className="w-4 h-4 shrink-0" />
-                      <span>{t.submitReg}</span>
-                    </>
-                  )}
-                </button>
-              </form>
-
-              <button
-                onClick={() => {
-                  setIsRegisterMode(false);
-                  setRegError(null);
-                }}
-                className="w-full py-2 text-slate-400 hover:text-white font-bold text-xs bg-transparent transition-all flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <span>{isRtl ? "→" : "←"} {t.backToLogin}</span>
-              </button>
-            </div>
-          )}
-
+          </div>
         </div>
       </div>
     </div>
