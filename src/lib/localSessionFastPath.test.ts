@@ -124,3 +124,90 @@ describe("isValidLocalSessionFastPath — everything else still waits for Fireba
     ).toBe(false);
   });
 });
+
+describe("isValidLocalSessionFastPath — defensive lastActive timestamp handling", () => {
+  it("does not bypass for a NaN lastActive", () => {
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-nan", lastActive: NaN },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+
+  it("does not bypass for a +Infinity lastActive", () => {
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-inf", lastActive: Infinity },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+
+  it("does not bypass for a -Infinity lastActive", () => {
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-ninf", lastActive: -Infinity },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+
+  it("does not bypass for a far-future lastActive (clock forward by days)", () => {
+    const sevenDaysAhead = NOW + 7 * 24 * 60 * 60 * 1000;
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-future", lastActive: sevenDaysAhead },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+
+  it("bypasses for a lastActive slightly ahead of now, within the clock-skew tolerance", () => {
+    const twoMinutesAhead = NOW + 2 * 60 * 1000; // inside the 5-minute tolerance
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-skew", lastActive: twoMinutesAhead },
+        false,
+        NOW
+      )
+    ).toBe(true);
+  });
+
+  it("does not bypass for a lastActive just beyond the clock-skew tolerance", () => {
+    const sixMinutesAhead = NOW + 6 * 60 * 1000; // just past the 5-minute tolerance
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-skew-over", lastActive: sixMinutesAhead },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+
+  it("bypasses at exactly the 24-hour inactivity boundary", () => {
+    const exactly24hAgo = NOW - 24 * 60 * 60 * 1000;
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-boundary", lastActive: exactly24hAgo },
+        false,
+        NOW
+      )
+    ).toBe(true);
+  });
+
+  it("does not bypass just beyond the 24-hour inactivity boundary", () => {
+    const justOver24hAgo = NOW - (24 * 60 * 60 * 1000 + 1);
+    expect(
+      isValidLocalSessionFastPath(
+        { role: "admin", loginType: "local", token: "signed-token-boundary-over", lastActive: justOver24hAgo },
+        false,
+        NOW
+      )
+    ).toBe(false);
+  });
+});
