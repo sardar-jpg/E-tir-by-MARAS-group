@@ -114,13 +114,17 @@ describe("Every write to the shipments collection is a known, reviewed writer", 
     expect(countOccurrences(SOURCE, 'await setDoc(doc(db, "shipments", id), newShipment);')).toBe(1);
   });
 
-  it("exactly one route calls applyNarrowShipmentUpdate — the sole revision-incrementing operational writer (status changes)", () => {
+  it("exactly two routes call applyNarrowShipmentUpdate — the two revision-incrementing operational writers (normal status progression and the Admin Status Override correction)", () => {
     // Status/timeline are the only fields, among all narrow writers, that
     // the broad edit form's own merge (buildUpdatedShipment) can also
     // overwrite — every other former "narrow" writer was reclassified as
     // isolated by the over-broad-revision-policy correction below.
+    // PR #111 review (Admin Status Override authorization correction): the
+    // broad edit route no longer accepts a free-form status field at all
+    // (buildUpdatedShipment always starts finalStatus from current.status);
+    // the dedicated status-override route is the second, separate writer.
     const narrowCallCount = (SOURCE.match(/await applyNarrowShipmentUpdate\(/g) || []).length;
-    expect(narrowCallCount).toBe(1);
+    expect(narrowCallCount).toBe(2);
   });
 
   it("every route calling applyIsolatedShipmentUpdate is present — the complete revision-preserving isolated-writer inventory", () => {

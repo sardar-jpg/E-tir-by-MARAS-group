@@ -101,12 +101,50 @@ describe("AdminPanel.tsx — Manual Status Milestone panel", () => {
     expect(panelRegion).not.toContain(".map((st)");
   });
 
-  it("the Status Override in the broad edit form is explicitly documented as the deliberate, separate exceptional-correction workflow", () => {
-    const overrideIndex = SOURCE.indexOf("Status selector (Admin override)");
+  it("the Status Override in the broad edit form is explicitly documented as a separate, clearly-labeled administrative-correction workflow, distinct from the normal progression control", () => {
+    const overrideIndex = SOURCE.indexOf("Admin Status Correction/Override — PR #111 review");
     expect(overrideIndex).toBeGreaterThan(-1);
     const overrideRegion = SOURCE.slice(overrideIndex, overrideIndex + 900);
-    expect(overrideRegion).toContain("deliberate exceptional-correction");
     expect(overrideRegion).toContain("intentionally exempt from the forward-only sequence");
+    expect(overrideRegion).toContain("canManageShipmentStatus");
+  });
+});
+
+describe("AdminPanel.tsx — Admin Status Override widget", () => {
+  const SOURCE = read("AdminPanel.tsx");
+
+  it("handleStatusOverride submits to the dedicated status-override endpoint with a required correctionReason, never the normal /status endpoint", () => {
+    const fnStart = SOURCE.indexOf("const handleStatusOverride = async () => {");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnRegion = SOURCE.slice(fnStart, fnStart + 1400);
+    expect(fnRegion).toContain("/status-override`");
+    expect(fnRegion).toContain("if (!reason) {");
+    expect(fnRegion).toContain("correctionReason: reason,");
+  });
+
+  it("the widget is hidden (replaced by a locked message) once the shipment is already Closed/Completed — no terminal reopening in this PR", () => {
+    const widgetIndex = SOURCE.indexOf("Admin Status Correction/Override — PR #111 review");
+    const widgetRegion = SOURCE.slice(widgetIndex, widgetIndex + 3600);
+    expect(widgetRegion).toContain("isShipmentClosed(editingShipment.status, editingShipment.freightType) ? (");
+    expect(widgetRegion).toContain("is locked");
+  });
+
+  it("the override status dropdown offers every status in the shipment's own freight-mode sequence, not just the next one", () => {
+    const widgetIndex = SOURCE.indexOf("Admin Status Correction/Override — PR #111 review");
+    const widgetRegion = SOURCE.slice(widgetIndex, widgetIndex + 3600);
+    expect(widgetRegion).toContain("getStatusSequenceForFreightMode(resolveFreightMode(editingShipment.freightType)).map(st =>");
+  });
+
+  it("the submit button is disabled without a non-empty reason", () => {
+    const widgetIndex = SOURCE.indexOf("Admin Status Correction/Override — PR #111 review");
+    const widgetRegion = SOURCE.slice(widgetIndex, widgetIndex + 3600);
+    expect(widgetRegion).toContain("disabled={isSubmittingOverride || !overrideReason.trim() || !overrideTargetStatus}");
+  });
+
+  it("the override target/reason reset whenever a different shipment's edit form opens", () => {
+    expect(SOURCE).toContain("}, [editingShipment?.id]);");
+    const effectIndex = SOURCE.indexOf("setOverrideTargetStatus(editingShipment?.status ?? null);");
+    expect(effectIndex).toBeGreaterThan(-1);
   });
 });
 

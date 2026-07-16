@@ -113,6 +113,52 @@ export function getStatusSequenceForFreightMode(mode: FreightMode): ShipmentStat
   return SEQUENCE_BY_FREIGHT_MODE[mode];
 }
 
+export interface ShipmentStatusLabel {
+  en: string;
+  tr: string;
+  ar: string;
+}
+
+/**
+ * Translated display label per status — previously duplicated verbatim
+ * across three separate places in server.ts (the normal status route, the
+ * broad edit route's now-removed status-override handling, and this PR's
+ * new dedicated status-override route). Centralized here once so all three
+ * timeline/label consumers can never drift out of sync with each other.
+ */
+export const SHIPMENT_STATUS_LABELS: Record<string, ShipmentStatusLabel> = {
+  'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
+  'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
+  'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
+  'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
+  'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
+  'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
+  'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
+  'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
+  'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
+  'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
+  'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
+  // Sea status translations
+  'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
+  'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إفراج الحاوية" },
+  'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
+  'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
+  'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
+  'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
+  'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
+  'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
+  // Air status translations
+  'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
+  'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
+  'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
+  'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" },
+};
+
+/** Falls back to the "In Transit" label for a status this map somehow doesn't have an entry for — matches the pre-existing fallback behavior of the routes this was extracted from. */
+export function getShipmentStatusLabel(status: string): ShipmentStatusLabel {
+  return SHIPMENT_STATUS_LABELS[status] || SHIPMENT_STATUS_LABELS['In Transit'];
+}
+
 /**
  * Land's terminal status is "Closed"; Sea and Air have no "Closed" status
  * at all (see the sequences above) — their terminal status is "Completed".
@@ -306,4 +352,92 @@ export function getDriverSubmittableNextStatus(
  */
 export function isDriverAssignmentRejection(currentStatus: ShipmentStatus, requestedStatus: string): boolean {
   return currentStatus === "Assigned" && requestedStatus === "New";
+}
+
+/**
+ * PR #111 review (Admin Status Override authorization correction): the
+ * pre-existing admin correction workflow — an authorized operational admin
+ * (canManageShipmentStatus, adminAccess.ts) manually fixing a status
+ * entered in error, including moving it backward — deliberately does NOT
+ * go through validateShipmentStatusTransition's forward-only rule (that
+ * would defeat the whole point of a correction tool). It still must:
+ *  - only ever set a real, known status (unknown-status)
+ *  - only ever set a status that belongs to THIS shipment's own freight
+ *    workflow (wrong-freight-workflow) — a Land shipment can never be
+ *    corrected to a Sea-only status, etc.
+ *  - never reopen an already-closed/completed shipment (terminal-locked) —
+ *    "do not introduce terminal reopening now"; a separate, highly audited
+ *    Super Admin-only workflow is required for that in a future PR
+ */
+export type ShipmentStatusOverrideRejectionReason =
+  | "unknown-status"
+  | "wrong-freight-workflow"
+  | "terminal-locked";
+
+export interface ShipmentStatusOverrideResult {
+  ok: boolean;
+  reason?: ShipmentStatusOverrideRejectionReason;
+}
+
+export function validateShipmentStatusOverride(
+  currentStatus: ShipmentStatus,
+  requestedStatus: string,
+  freightType?: string | null
+): ShipmentStatusOverrideResult {
+  if (isShipmentClosed(currentStatus, freightType)) {
+    return { ok: false, reason: "terminal-locked" };
+  }
+  if (!ALL_KNOWN_STATUSES.has(requestedStatus)) {
+    return { ok: false, reason: "unknown-status" };
+  }
+  const sequence = getStatusSequenceForFreightMode(resolveFreightMode(freightType));
+  if (!sequence.includes(requestedStatus as ShipmentStatus)) {
+    return { ok: false, reason: "wrong-freight-workflow" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Thrown by server.ts's status-override transaction callback when
+ * validateShipmentStatusOverride rejects the requested correction. Same
+ * rationale/contract as ShipmentStatusTransitionError above — a distinct,
+ * expected application-level rejection, never an infrastructure failure:
+ * the route must respond with the structured rejection and run no
+ * notification/audit side effect, and the caller (applyNarrowShipmentUpdate)
+ * must rethrow it as-is rather than falling back to memory storage.
+ */
+export class ShipmentStatusOverrideError extends Error {
+  readonly code = "INVALID_SHIPMENT_STATUS_OVERRIDE";
+  readonly currentStatus: ShipmentStatus;
+  readonly requestedStatus: string;
+  readonly reason: ShipmentStatusOverrideRejectionReason;
+
+  constructor(currentStatus: ShipmentStatus, requestedStatus: string, reason: ShipmentStatusOverrideRejectionReason) {
+    super(
+      reason === "terminal-locked"
+        ? `This shipment is already ${currentStatus} and cannot be reopened.`
+        : `"${requestedStatus}" is not a valid status for this shipment's workflow.`
+    );
+    this.name = "ShipmentStatusOverrideError";
+    this.currentStatus = currentStatus;
+    this.requestedStatus = requestedStatus;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Server-side validation for the required Admin Status Override correction
+ * reason (PR #111 review, requirement 9): must be non-empty after
+ * trimming. Capped at a generous length purely as input hygiene — this is
+ * an internal audit-log field, not user-facing chat content, so there is
+ * no shared MAX_CHAT_TEXT_LENGTH-style limit to reuse.
+ */
+export const MAX_STATUS_OVERRIDE_REASON_LENGTH = 500;
+
+export function parseStatusOverrideReason(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > MAX_STATUS_OVERRIDE_REASON_LENGTH) return null;
+  return trimmed;
 }

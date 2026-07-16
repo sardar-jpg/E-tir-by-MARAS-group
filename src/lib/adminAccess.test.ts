@@ -18,6 +18,7 @@ import {
   sanitizeCreatedAdminType,
   isProtectedOwnerAccount,
   canDeleteAdminAccount,
+  canManageShipmentStatus,
 } from "./adminAccess";
 
 describe("isSuperAdmin", () => {
@@ -173,6 +174,44 @@ describe("resolveFullAdminStatus", () => {
   it("returns 200 for super/operation admins, leaving successful access unchanged", () => {
     expect(resolveFullAdminStatus({ role: "admin", adminType: "super" })).toBe(200);
     expect(resolveFullAdminStatus({ role: "admin", adminType: "operation" })).toBe(200);
+  });
+});
+
+describe("canManageShipmentStatus (PR #111 review — dedicated shipment-status write permission)", () => {
+  it("allows Super Admin", () => {
+    expect(canManageShipmentStatus({ role: "admin", adminType: "super" })).toBe(true);
+  });
+
+  it("allows Operations Admin", () => {
+    expect(canManageShipmentStatus({ role: "admin", adminType: "operation" })).toBe(true);
+  });
+
+  it("rejects Accounts Admin", () => {
+    expect(canManageShipmentStatus({ role: "admin", adminType: "accounts" })).toBe(false);
+  });
+
+  it("rejects any other/unknown admin adminType ('Viewer'-style read-only admin included)", () => {
+    expect(canManageShipmentStatus({ role: "admin", adminType: "viewer" })).toBe(false);
+    expect(canManageShipmentStatus({ role: "admin", adminType: undefined })).toBe(false);
+  });
+
+  it("rejects driver and client roles regardless of adminType", () => {
+    expect(canManageShipmentStatus({ role: "driver" })).toBe(false);
+    expect(canManageShipmentStatus({ role: "client" })).toBe(false);
+  });
+
+  it("rejects no session at all (unauthenticated/public/shared-link)", () => {
+    expect(canManageShipmentStatus(null)).toBe(false);
+    expect(canManageShipmentStatus(undefined)).toBe(false);
+  });
+
+  it("is a distinct permission from canViewShipmentRegistry, not an alias of it — a future divergence between the two must not go unnoticed", () => {
+    // Today both happen to allow exactly super/operation, but they are
+    // separate named functions on purpose (view permission vs. write/
+    // operational permission) — this pins that canManageShipmentStatus
+    // does not silently become canViewShipmentRegistry(adminType) by
+    // reference equality or accidental re-export.
+    expect(canManageShipmentStatus).not.toBe(canViewShipmentRegistry);
   });
 });
 

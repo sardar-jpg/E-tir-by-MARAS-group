@@ -62,7 +62,7 @@ import {
   checkPasswordConfirmation,
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
@@ -127,6 +127,10 @@ import {
   isDriverAssignmentRejection,
   validateShipmentStatusTransition,
   ShipmentStatusTransitionError,
+  validateShipmentStatusOverride,
+  ShipmentStatusOverrideError,
+  parseStatusOverrideReason,
+  getShipmentStatusLabel,
 } from "./src/lib/shipmentStatusTransitions";
 import { runShipmentUpdateSideEffects, ShipmentSideEffectTask } from "./src/lib/shipmentUpdateSideEffects";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
@@ -1756,12 +1760,14 @@ async function applyShipmentRevisionedUpdate(
 // detecting the change. See applyNarrowShipmentUpdateMemory
 // (shipmentRevision.ts) for the full reasoning and its unit tests.
 //
-// PR #111 review (forward-only status transitions): `mutate` may also
-// throw ShipmentStatusTransitionError (the status route's transition
-// re-validation, run against this call's own fresh `current` — see that
-// route). Exactly like ShipmentRevisionConflictError below, that is an
-// expected application-level rejection, not an infrastructure failure —
-// it must reach the caller as-is, with no document modification, never
+// PR #111 review (forward-only status transitions / Admin Status
+// Override): `mutate` may also throw ShipmentStatusTransitionError (the
+// normal status route's transition re-validation) or
+// ShipmentStatusOverrideError (the status-override route's correction
+// validation), both run against this call's own fresh `current` — see
+// those routes. Exactly like ShipmentRevisionConflictError below, both are
+// expected application-level rejections, not an infrastructure failure —
+// they must reach the caller as-is, with no document modification, never
 // fall through to the memory-fallback retry (which could otherwise
 // silently re-run `mutate` a second time against different, unrelated
 // in-memory data).
@@ -1793,7 +1799,7 @@ async function applyNarrowShipmentUpdate(
       "Firestore transaction timed out"
     );
   } catch (error) {
-    if (error instanceof ShipmentStatusTransitionError) throw error;
+    if (error instanceof ShipmentStatusTransitionError || error instanceof ShipmentStatusOverrideError) throw error;
     console.warn("Firestore narrow shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
     useMemoryFallback = true;
     scheduleFirestoreRecovery(30_000);
@@ -4251,34 +4257,6 @@ async function startServer() {
 
       const assignedDriverName = driverObj ? driverObj.name : "Unassigned";
 
-      const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
-        'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
-        'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
-        'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
-        'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
-        'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
-        'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
-        'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
-        'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
-        'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
-        'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
-        'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
-
-        'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
-        'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إfراج الحاوية" },
-        'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
-        'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
-        'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
-        'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
-        'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
-        'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
-
-        'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
-        'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
-        'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
-        'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
-      };
-
       // Shipment-update lost-update race fix: this merge is a pure,
       // synchronous function of (the Firestore transaction's own
       // freshly-read current document, the revision to store) — no I/O of
@@ -4303,32 +4281,28 @@ async function startServer() {
       // them would only produce false conflicts, never prevent a real one.
       let capturedCurrent: Shipment | null = null;
       // True only when the "first assignment" New -> Assigned bump below
-      // actually fires — distinct from "is the final status Assigned",
-      // since an explicit data.status: "Assigned" in the same request
-      // reaches finalStatus first and would make that comparison true even
-      // when this specific bump never ran (matching the pre-fix code's
-      // exact timing: its equivalent check also ran against the
-      // already-data.status-merged value, before the bump).
+      // actually fires — distinct from "is the final status Assigned".
       let assignmentBumpApplied = false;
+      // PR #111 review (Admin Status Override authorization correction):
+      // this broad edit route no longer accepts a free-form `data.status`
+      // at all — status can only ever change via the automatic
+      // "first assignment" bump below (a side effect of assigning a
+      // driver, not a manual status edit), the forward-only normal
+      // progression endpoint (PUT /api/shipments/:id/status), or the
+      // dedicated, reason-required, freight-validated Admin Status
+      // Override endpoint (PUT /api/shipments/:id/status-override). This
+      // used to also apply whatever raw `data.status` string the client
+      // sent, with no forward-only check, no freight-workflow validation,
+      // no required reason, and no terminal-reopen lock — a complete
+      // bypass of every safety rule those two dedicated endpoints now
+      // enforce, reachable by any authorized editor of this form. `status`
+      // is simply never read from `data` anymore; finalStatus always
+      // starts from the transaction's own fresh `current.status`.
       function buildUpdatedShipment(current: Shipment, nextRevision: number): Shipment {
         capturedCurrent = current;
 
-        let finalStatus = data.status !== undefined ? data.status : current.status;
+        let finalStatus = current.status;
         const timelineCopy = [...(current.timeline || [])];
-
-        if (data.status !== undefined && data.status !== current.status) {
-          const labels = labelMap[data.status as string] || { en: data.status, tr: data.status, ar: data.status };
-          timelineCopy.push({
-            timestamp: new Date().toISOString(),
-            status: data.status,
-            labelEn: labels.en,
-            labelTr: labels.tr,
-            labelAr: labels.ar,
-            detailsEn: `Status updated manually to ${labels.en} via Operations Panel.`,
-            detailsTr: `Durum Operasyon Paneli üzerinden manuel olarak ${labels.tr} olarak güncellendi.`,
-            detailsAr: `تم تحديث الحالة يدوياً إلى ${labels.ar} عبر لوحة العمليات.`
-          });
-        }
 
         const updated: Shipment = {
           ...current,
@@ -4439,10 +4413,12 @@ async function startServer() {
       // see runShipmentUpdateSideEffects's own header for why).
       original = capturedCurrent!;
 
+      // PR #111 review (Admin Status Override authorization correction):
+      // status is no longer part of this route's update payload at all
+      // (buildUpdatedShipment ignores data.status entirely — see its own
+      // header comment) — a "Status is now: X" diff line here would
+      // describe a value that was never actually applied to the shipment.
       const updatedDiffTexts: string[] = [];
-      if (data.status !== undefined && data.status !== original.status) {
-        updatedDiffTexts.push(`Status is now: ${data.status}.`);
-      }
       if (data.eta !== undefined && data.eta !== original.eta) {
         updatedDiffTexts.push(`Estimated Time of Arrival (ETA) updated to ${data.eta}.`);
       }
@@ -4496,23 +4472,12 @@ async function startServer() {
         }
       }
 
-      if (data.status !== undefined && data.status !== original.status) {
-        sideEffectTasks.push({
-          name: "status-update-notification",
-          run: () => pushNotification(
-            original.id,
-            original.shipmentNumber,
-            "status_update",
-            `Status Update: ${data.status}`,
-            `Durum Güncellemesi: ${data.status}`,
-            `تحديث الحالة: ${data.status}`,
-            `Shipment ${original.shipmentNumber} is now ${data.status}.`,
-            `Sevkiyat ${original.shipmentNumber} şu anda ${data.status} konumunda.`,
-            `الشحنة رقم ${original.shipmentNumber} الآن هي في حالة [${data.status}].`
-          ),
-        });
-      }
-
+      // PR #111 review (Admin Status Override authorization correction): a
+      // dedicated "status-update-notification" task used to fire here too
+      // when data.status changed — removed along with buildUpdatedShipment's
+      // status handling, since this route can no longer change status at
+      // all (except the automatic assignment bump just below, which has
+      // its own dedicated "assignment-notification" task).
       if (assignmentBumpApplied) {
         sideEffectTasks.push({
           name: "assignment-notification",
@@ -4611,16 +4576,15 @@ async function startServer() {
         if (!owns) return res.status(403).json({ error: "You are not assigned to this shipment." });
       } else if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update shipment status." });
-      } else if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
-        // PR #83 (Shipment Registry review): this route used bare
-        // requireAuth with no adminType check at all, unlike every other
-        // shipment-mutating route (POST/PUT /api/shipments both use
-        // requireFullAdmin) — an accounts-type admin session could update
-        // any shipment's status directly, even though the whole Shipment
-        // Registry tab (and its only client-side call site for this route,
-        // the shipment details modal) is hidden from them. Not reachable
-        // via the UI today, but the same defense-in-depth gap shape this
-        // codebase has fixed repeatedly elsewhere (BUG-08, BUG-26, etc.).
+      } else if (req.session!.role === "admin" && !canManageShipmentStatus(req.session)) {
+        // PR #83 (Shipment Registry review), narrowed further by the PR
+        // #111 role-authorization correction: shipment status management
+        // is a dedicated write permission (canManageShipmentStatus,
+        // adminAccess.ts), not the read-only canViewShipmentRegistry this
+        // used to reuse — an accounts-type admin session could otherwise
+        // update any shipment's status directly, even though the whole
+        // Shipment Registry tab (and its only client-side call site for
+        // this route, the shipment details modal) is hidden from them.
         return res.status(403).json({ error: "Accounts-role admins cannot update shipment status." });
       }
 
@@ -4632,42 +4596,15 @@ async function startServer() {
       // control happens to expose it. freightType is never changed by any
       // route, so the pre-read `item.freightType` is safe to use here.
       // This is a real server-side authorization gate, not just a UI
-      // omission — the same canViewShipmentRegistry check every other
-      // admin status change above already requires.
+      // omission — the same canManageShipmentStatus check every other
+      // admin status change above already requires (never
+      // canViewShipmentRegistry — see that function's own header comment).
       if (
         isShipmentClosed(requestedStatus, item.freightType) &&
-        !(req.session!.role === "admin" && canViewShipmentRegistry(req.session!.adminType))
+        !(req.session!.role === "admin" && canManageShipmentStatus(req.session))
       ) {
         return res.status(403).json({ error: "Only authorized MARAS staff may close a shipment." });
       }
-
-      const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
-        'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
-        'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
-        'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
-        'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
-        'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
-        'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
-        'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
-        'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
-        'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
-        'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
-        'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
-        // Sea status translations
-        'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
-        'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إفراج الحاوية" },
-        'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
-        'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
-        'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
-        'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
-        'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
-        'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
-        // Air status translations
-        'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
-        'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
-        'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
-        'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
-      };
 
       // PR #111 review (forward-only status transitions): validated and
       // built entirely inside applyNarrowShipmentUpdate's mutate callback,
@@ -4690,7 +4627,7 @@ async function startServer() {
             }
           }
 
-          const labels = labelMap[requestedStatus] || labelMap['In Transit'];
+          const labels = getShipmentStatusLabel(requestedStatus);
           const nowIso = new Date().toISOString();
           return {
             ...current,
@@ -4810,6 +4747,149 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update status" });
+    }
+  });
+
+  // 5a. Admin Status Override — the deliberate, separate exceptional-
+  // correction workflow (PR #111 review, requirement 6: "Admin Status
+  // Override must remain separate from the normal sequential status
+  // endpoint"). Unlike PUT /api/shipments/:id/status above, this is not
+  // forward-only — an authorized operational admin may correct a status
+  // backward (or to any other valid status in the shipment's own freight
+  // workflow) when an operational mistake occurred. It replaces the old
+  // free-form `data.status` field that used to be accepted by the broad
+  // edit route (PUT /api/shipments/:id) with no freight validation, no
+  // required reason, and no terminal-reopen lock — that field is no longer
+  // read there at all (see buildUpdatedShipment's own comment); this is now
+  // the only way to correct a shipment's status outside forward-only
+  // progression.
+  app.put("/api/shipments/:id/status-override", requireAuth, async (req, res) => {
+    try {
+      const { status, correctionReason, updaterName } = req.body;
+      const requestedStatus: string = status;
+      if (typeof requestedStatus !== "string" || !requestedStatus.trim()) {
+        return res.status(400).json({ error: "status is required" });
+      }
+      const reason = parseStatusOverrideReason(correctionReason);
+      if (!reason) {
+        return res.status(400).json({ error: "A correction reason is required for a status override." });
+      }
+
+      // PR #111 review (Admin Status Override authorization correction):
+      // canManageShipmentStatus (Super Admin / Operations Admin only) —
+      // never canViewShipmentRegistry, a read permission. Driver, client,
+      // Accounts Admin, and any other admin adminType are all rejected
+      // here regardless of what a manually-crafted request sends.
+      if (!canManageShipmentStatus(req.session)) {
+        return res.status(403).json({ error: "Only authorized MARAS staff may override shipment status." });
+      }
+
+      const shipmentId = req.params.id;
+      const sDocRef = doc(db, "shipments", shipmentId);
+      const sDoc = await getDoc(sDocRef);
+      if (!sDoc.exists()) {
+        return res.status(404).json({ error: "Shipment not found" });
+      }
+
+      // PR #111 review (forward-only status transitions / Admin Status
+      // Override, requirement 10 & 7): validated and built entirely inside
+      // applyNarrowShipmentUpdate's mutate callback, from `current` — that
+      // call's own fresh read — never a pre-transaction snapshot, so
+      // concurrent history can never be lost and the terminal-lock check
+      // always runs against the real current status. Rejects unknown
+      // statuses, statuses from another freight workflow, and any attempt
+      // to reopen an already-closed/completed shipment (no reopening in
+      // this PR — see validateShipmentStatusOverride's own header comment).
+      let capturedPreviousStatus: ShipmentStatus | null = null;
+      let updatedItem: Shipment;
+      try {
+        updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+          const validation = validateShipmentStatusOverride(current.status, requestedStatus, current.freightType);
+          if (!validation.ok) {
+            throw new ShipmentStatusOverrideError(current.status, requestedStatus, validation.reason!);
+          }
+
+          capturedPreviousStatus = current.status;
+          const labels = getShipmentStatusLabel(requestedStatus);
+          const nowIso = new Date().toISOString();
+          return {
+            ...current,
+            status: requestedStatus as ShipmentStatus,
+            timeline: [
+              ...current.timeline,
+              {
+                timestamp: nowIso,
+                status: requestedStatus as ShipmentStatus,
+                labelEn: labels.en,
+                labelTr: labels.tr,
+                labelAr: labels.ar,
+                // PR #111 review (requirement 9): the correction reason is
+                // deliberately NOT included here — this timeline is
+                // returned unfiltered to driver/client views
+                // (buildShipmentViewForRole) and to the public share view
+                // (buildSecureShareView, both spread `timeline` through
+                // unredacted). Only a generic, customer/public-safe label
+                // goes here; the reason is recorded exclusively in the
+                // internal audit log below (logActivity — GET /api/logs is
+                // super-admin-only, never customer/public-reachable).
+                detailsEn: `Status corrected to ${labels.en} by administrative review.`,
+                detailsTr: `Durum, yönetimsel inceleme ile ${labels.tr} olarak düzeltildi.`,
+                detailsAr: `تم تصحيح الحالة إلى ${labels.ar} عبر مراجعة إدارية.`,
+              },
+            ],
+            updatedAt: nowIso,
+          };
+        });
+      } catch (err) {
+        if (err instanceof ShipmentStatusOverrideError) {
+          // No document modification, no notification, no audit entry —
+          // the transaction's mutate callback threw before building or
+          // writing anything.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentStatus: err.currentStatus,
+            requestedStatus: err.requestedStatus,
+            reason: err.reason,
+          });
+        }
+        throw err;
+      }
+
+      // PR #111 review (requirement 8 & 10): the audit entry is the
+      // authoritative record of this administrative correction — actor,
+      // previous status, new status, shipmentNumber, timestamp (via
+      // logActivity's own timestamp field), and the full reason text
+      // (safe here: this collection is never exposed to customer/driver/
+      // public views). Explicitly labeled "ADMINISTRATIVE CORRECTION" so
+      // it reads unambiguously as an override, not a normal progression
+      // entry, in the audit trail. Runs strictly post-commit — never on a
+      // rejected/unauthorized attempt above.
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            updatedItem.id,
+            updatedItem.shipmentNumber,
+            updaterName || req.session!.id || "Admin",
+            `ADMINISTRATIVE CORRECTION: shipment ${updatedItem.shipmentNumber} status corrected from "${capturedPreviousStatus}" to "${requestedStatus}". Reason: ${reason}`,
+            `YÖNETİMSEL DÜZELTME: ${updatedItem.shipmentNumber} numaralı sevkiyatın durumu "${capturedPreviousStatus}" konumundan "${requestedStatus}" konumuna düzeltildi. Sebep: ${reason}`,
+            `تصحيح إداري: تم تصحيح حالة الشحنة رقم ${updatedItem.shipmentNumber} من "${capturedPreviousStatus}" إلى "${requestedStatus}". السبب: ${reason}`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[status-override] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the override itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
+
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to override shipment status" });
     }
   });
 

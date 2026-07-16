@@ -129,16 +129,17 @@ describe("PUT /api/shipments/:id route: expectedRevision is required, never opti
   });
 
   it("the 'first assignment' notification fires from a flag set exactly when the New -> Assigned bump ran, not from re-deriving it after the fact", () => {
-    // A request that assigns a new driver AND separately sets data.status
-    // to "Assigned" explicitly must behave exactly as before this fix:
-    // the bump-specific "New Assignment Assigned" notification only fires
+    // PR #111 review (Admin Status Override authorization correction):
+    // this route no longer reads a free-form `data.status` at all (see
+    // buildUpdatedShipment's own header comment) — status only ever
+    // changes here via this automatic "first assignment" bump. The
+    // bump-specific "New Assignment Assigned" notification must fire only
     // when the bump itself actually changed status, not whenever the final
-    // status merely happens to equal "Assigned". Re-deriving this from
-    // original.status/updatedShipment.status after the transaction would
-    // get this wrong (both could independently be "New"/"Assigned" without
-    // the bump ever running) — assignmentBumpApplied is set inside
-    // buildUpdatedShipment at the exact moment the pre-fix code made this
-    // same decision, and used unchanged afterward.
+    // status merely happens to equal "Assigned" for some other reason.
+    // Re-deriving this from original.status/updatedShipment.status after
+    // the transaction would get this wrong — assignmentBumpApplied is set
+    // inside buildUpdatedShipment at the exact moment the bump runs, and
+    // used unchanged afterward.
     expect(ROUTE).toContain("let assignmentBumpApplied = false;");
     const bumpIfIndex = ROUTE.indexOf('if (oldDriverId !== newDriverId && newDriverId && updated.status === "New") {');
     expect(bumpIfIndex).toBeGreaterThan(-1);
@@ -332,4 +333,34 @@ describe("Scope: shipmentNumber and no second business reference", () => {
 
   // No separate second-business-reference check here — noOrderNumberRegression.test.ts
   // (src/lib/) already scans every shipped source file (including server.ts) repo-wide.
+});
+
+describe("PR #111 review (Admin Status Override authorization correction): the broad edit route no longer accepts a free-form status field", () => {
+  it("buildUpdatedShipment's finalStatus always starts from current.status, never data.status", () => {
+    const fnStart = ROUTE.indexOf("function buildUpdatedShipment(current: Shipment, nextRevision: number): Shipment {");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnRegion = ROUTE.slice(fnStart, fnStart + 400);
+    expect(fnRegion).toContain("let finalStatus = current.status;");
+    expect(fnRegion).not.toContain("data.status");
+  });
+
+  it("this route never reads data.status as a value anywhere (only explanatory comments may mention the string)", () => {
+    expect(ROUTE).not.toContain("data.status !==");
+    expect(ROUTE).not.toContain("data.status ===");
+    expect(ROUTE).not.toContain("data.status ||");
+    expect(ROUTE).not.toContain("${data.status}");
+  });
+
+  it("the automatic 'first assignment' New -> Assigned bump is preserved unchanged — it is a side effect of assigning a driver, not a manual status edit", () => {
+    expect(ROUTE).toContain('if (oldDriverId !== newDriverId && newDriverId && updated.status === "New") {');
+  });
+
+  it("the post-commit diff message and notification tasks no longer reference a status change", () => {
+    expect(ROUTE).not.toContain("updatedDiffTexts.push(`Status is now:");
+    expect(ROUTE).not.toContain('name: "status-update-notification"');
+  });
+
+  it("the assignment-notification task (driven by assignmentBumpApplied, not data.status) is still present and unaffected", () => {
+    expect(ROUTE).toContain('name: "assignment-notification"');
+  });
 });

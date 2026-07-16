@@ -12,6 +12,12 @@ import {
   validateShipmentStatusTransition,
   isDriverAssignmentRejection,
   ShipmentStatusTransitionError,
+  validateShipmentStatusOverride,
+  ShipmentStatusOverrideError,
+  parseStatusOverrideReason,
+  MAX_STATUS_OVERRIDE_REASON_LENGTH,
+  getShipmentStatusLabel,
+  SHIPMENT_STATUS_LABELS,
 } from "./shipmentStatusTransitions";
 import { applyNarrowShipmentUpdateMemory } from "./shipmentRevision";
 import type { ShipmentStatus } from "../types";
@@ -405,5 +411,120 @@ describe("Concurrency: transition validation always runs against the transaction
     const shipments: TestStatusShipment[] = [{ id: "s1", revision: 1, status: "Assigned", freightType: "land", timeline: [] }];
     const result = applyStatusTransition(shipments, "s1", "New");
     expect(result.status).toBe("New");
+  });
+});
+
+describe("validateShipmentStatusOverride — the Admin Status Override correction workflow", () => {
+  it("allows a backward correction within the shipment's own freight workflow", () => {
+    const result = validateShipmentStatusOverride("Loading", "Accepted", "land");
+    expect(result.ok).toBe(true);
+  });
+
+  it("allows a forward correction too — override is not restricted to backward moves", () => {
+    const result = validateShipmentStatusOverride("Loading", "In Transit", "land");
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an unknown status", () => {
+    const result = validateShipmentStatusOverride("Loading", "Nonexistent", "land");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("unknown-status");
+  });
+
+  it("rejects a status belonging to another freight mode's workflow (Land -> Sea-only status)", () => {
+    const result = validateShipmentStatusOverride("Loading", "Booking Confirmed", "land");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wrong-freight-workflow");
+  });
+
+  it("rejects a Sea shipment corrected to a Land-only status", () => {
+    const result = validateShipmentStatusOverride("Released", "Closed", "sea");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wrong-freight-workflow");
+  });
+
+  it("rejects an Air shipment corrected to a Sea-only status", () => {
+    const result = validateShipmentStatusOverride("Cargo Received", "Container Released", "air");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wrong-freight-workflow");
+  });
+
+  it("rejects any correction once the shipment is already terminal (Land Closed) — no reopening", () => {
+    const result = validateShipmentStatusOverride("Closed", "Delivered", "land");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("terminal-locked");
+  });
+
+  it("rejects any correction once the shipment is already terminal (Sea/Air Completed) — no reopening", () => {
+    expect(validateShipmentStatusOverride("Completed", "Delivered", "sea").reason).toBe("terminal-locked");
+    expect(validateShipmentStatusOverride("Completed", "Delivered", "air").reason).toBe("terminal-locked");
+  });
+
+  it("terminal-lock is checked before status validity — even a nonsense requestedStatus is reported as terminal-locked, not unknown-status, once already terminal", () => {
+    const result = validateShipmentStatusOverride("Closed", "Nonexistent", "land");
+    expect(result.reason).toBe("terminal-locked");
+  });
+});
+
+describe("ShipmentStatusOverrideError", () => {
+  it("carries the structured rejection shape", () => {
+    const err = new ShipmentStatusOverrideError("Loading", "Booking Confirmed", "wrong-freight-workflow");
+    expect(err.code).toBe("INVALID_SHIPMENT_STATUS_OVERRIDE");
+    expect(err.currentStatus).toBe("Loading");
+    expect(err.requestedStatus).toBe("Booking Confirmed");
+    expect(err.reason).toBe("wrong-freight-workflow");
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("gives a distinct, clear message for a terminal-locked rejection", () => {
+    const err = new ShipmentStatusOverrideError("Closed", "Delivered", "terminal-locked");
+    expect(err.message).toContain("cannot be reopened");
+  });
+});
+
+describe("parseStatusOverrideReason — required correction reason validation", () => {
+  it("accepts and trims a normal reason", () => {
+    expect(parseStatusOverrideReason("  Driver marked wrong milestone by mistake  ")).toBe("Driver marked wrong milestone by mistake");
+  });
+
+  it("rejects an empty string", () => {
+    expect(parseStatusOverrideReason("")).toBeNull();
+  });
+
+  it("rejects a whitespace-only string", () => {
+    expect(parseStatusOverrideReason("   ")).toBeNull();
+  });
+
+  it("rejects missing/non-string values", () => {
+    expect(parseStatusOverrideReason(undefined)).toBeNull();
+    expect(parseStatusOverrideReason(null)).toBeNull();
+    expect(parseStatusOverrideReason(42)).toBeNull();
+    expect(parseStatusOverrideReason({})).toBeNull();
+  });
+
+  it("rejects a reason longer than the maximum length", () => {
+    const tooLong = "a".repeat(MAX_STATUS_OVERRIDE_REASON_LENGTH + 1);
+    expect(parseStatusOverrideReason(tooLong)).toBeNull();
+  });
+
+  it("accepts a reason exactly at the maximum length", () => {
+    const atLimit = "a".repeat(MAX_STATUS_OVERRIDE_REASON_LENGTH);
+    expect(parseStatusOverrideReason(atLimit)).toBe(atLimit);
+  });
+});
+
+describe("getShipmentStatusLabel / SHIPMENT_STATUS_LABELS", () => {
+  it("has an entry for every status in every freight mode's sequence", () => {
+    for (const status of [...LAND_STATUS_SEQUENCE, ...SEA_STATUS_SEQUENCE, ...AIR_STATUS_SEQUENCE]) {
+      expect(SHIPMENT_STATUS_LABELS[status], status).toBeDefined();
+    }
+  });
+
+  it("returns the matching label for a known status", () => {
+    expect(getShipmentStatusLabel("Delivered")).toEqual({ en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" });
+  });
+
+  it("falls back to the 'In Transit' label for an unknown status", () => {
+    expect(getShipmentStatusLabel("Nonexistent")).toEqual(SHIPMENT_STATUS_LABELS['In Transit']);
   });
 });

@@ -45,12 +45,12 @@ describe("closing-status authorization: only authorized MARAS staff may close a 
     expect(STATUS_ROUTE).toContain("isShipmentClosed(requestedStatus, item.freightType)");
   });
 
-  it("rejects with 403 unless the session is an admin passing canViewShipmentRegistry", () => {
+  it("rejects with 403 unless the session is an admin passing canManageShipmentStatus (never the read-only canViewShipmentRegistry)", () => {
     const gateIndex = STATUS_ROUTE.indexOf("isShipmentClosed(requestedStatus, item.freightType)");
     const rejectIndex = STATUS_ROUTE.indexOf("res.status(403)", gateIndex);
     expect(rejectIndex).toBeGreaterThan(gateIndex);
     const gateBlock = STATUS_ROUTE.slice(gateIndex, rejectIndex);
-    expect(gateBlock).toContain('req.session!.role === "admin" && canViewShipmentRegistry(req.session!.adminType)');
+    expect(gateBlock).toContain('req.session!.role === "admin" && canManageShipmentStatus(req.session)');
   });
 
   it("this authorization check runs before the transition is validated/applied — driver/client sessions never even reach the transaction for a closing status", () => {

@@ -39,7 +39,7 @@ import { resolveStatementShipmentContext } from "../lib/costStatementRegistryVie
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge } from "../lib/chatUnreadAccess";
-import { getAllowedNextShipmentStatuses, isShipmentClosed } from "../lib/shipmentStatusTransitions";
+import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -1185,6 +1185,14 @@ MARAS Group etir Center`;
   // first. Never auto-resolved — the admin must explicitly choose to
   // reload the server's current copy (see handleReloadEditingShipmentFromConflict).
   const [editConflict, setEditConflict] = useState<{ currentRevision: number | null; shipment: Shipment | null } | null>(null);
+  // PR #111 review (Admin Status Override authorization correction): the
+  // Status Override control is now a separate, clearly-labeled action
+  // (PUT /api/shipments/:id/status-override) with its own required
+  // correction reason — deliberately independent of editingShipment/the
+  // "Apply Updates" submit, which no longer changes status at all.
+  const [overrideTargetStatus, setOverrideTargetStatus] = useState<ShipmentStatus | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [isSubmittingOverride, setIsSubmittingOverride] = useState(false);
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
 
   // Manual Shipment Operations Panel States (primarily for Sea and Air, but general as well)
@@ -1760,6 +1768,15 @@ MARAS Group etir Center`;
     }
   }, [openDetailsId, shipments]);
 
+  // PR #111 review (Admin Status Override authorization correction): reset
+  // the override widget's target/reason whenever a different shipment's
+  // edit form opens, so a leftover selection/reason from a previously
+  // edited shipment can never be submitted against this one.
+  useEffect(() => {
+    setOverrideTargetStatus(editingShipment?.status ?? null);
+    setOverrideReason("");
+  }, [editingShipment?.id]);
+
   // Close the Unread Driver Chats panel on outside click or Escape key
   useEffect(() => {
     if (!isChatDropdownOpen) return;
@@ -1887,6 +1904,51 @@ MARAS Group etir Center`;
       triggerToast("Error updating status milestone.");
     } finally {
       setIsSubmittingStatus(false);
+    }
+  };
+
+  // PR #111 review (Admin Status Override authorization correction): the
+  // dedicated, clearly-separate correction workflow — PUT
+  // /api/shipments/:id/status-override, never the normal forward-only
+  // /status endpoint. Requires a non-empty correction reason; the server
+  // independently re-validates authorization (canManageShipmentStatus),
+  // freight-workflow membership, and the terminal-reopen lock, so this
+  // handler's own client-side checks are only a fast-fail UX convenience,
+  // never the actual enforcement.
+  const handleStatusOverride = async () => {
+    if (!editingShipment || !overrideTargetStatus) return;
+    const reason = overrideReason.trim();
+    if (!reason) {
+      triggerToast("A correction reason is required to override shipment status.");
+      return;
+    }
+    setIsSubmittingOverride(true);
+    try {
+      const res = await apiFetch(`/api/shipments/${editingShipment.id}/status-override`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: overrideTargetStatus,
+          correctionReason: reason,
+          updaterName: gmailUser?.email || "Admin Panel",
+        })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setEditingShipment(updated);
+        setOverrideReason("");
+        triggerToast("Shipment status corrected successfully!");
+        fetchData();
+      } else {
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        triggerToast(body?.error || "Failed to correct shipment status.");
+      }
+    } catch (err) {
+      console.error(err);
+      triggerToast("Error correcting shipment status.");
+    } finally {
+      setIsSubmittingOverride(false);
     }
   };
 
@@ -9515,38 +9577,63 @@ MARAS Group etir Center`;
                   />
                 </div>
 
-                {/* Status selector (Admin override).
-                    PR #111 review (forward-only status transitions): this
-                    is the pre-existing, deliberate exceptional-correction
-                    workflow the review asked to identify and keep separate
-                    from normal forward-only progression, rather than
-                    silently restrict. It submits through the broad edit
-                    form (PUT /api/shipments/:id, requireFullAdmin —
-                    super/operation only, never accounts/driver/client),
-                    NOT through PUT /api/shipments/:id/status, so it is
+                {/* Admin Status Correction/Override — PR #111 review
+                    (Admin Status Override authorization correction): a
+                    separate, clearly-labeled administrative-correction
+                    action, deliberately independent of the "Apply Updates"
+                    submit below (which no longer changes status at all —
+                    see buildUpdatedShipment's own server-side comment).
+                    Submits to PUT /api/shipments/:id/status-override,
+                    NOT PUT /api/shipments/:id/status, so it is
                     intentionally exempt from the forward-only sequence
-                    enforced there (validateShipmentStatusTransition,
-                    shipmentStatusTransitions.ts) — an authorized admin can
-                    still correct a status entered in error (e.g. a wrong
-                    milestone, backward correction) without that being
-                    confused with the normal driver/admin progression
-                    control. Left functionally unchanged; only now documented. */}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-700">Status Override / Durum Güncelle</label>
-                  <select
-                    value={editingShipment.status}
-                    onChange={(e) => setEditingShipment({ ...editingShipment, status: e.target.value as ShipmentStatus })}
-                    className="w-full p-2.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-blue-900"
-                  >
-                    {(editingShipment.freightType === 'sea' 
-                      ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                      : editingShipment.freightType === 'air'
-                        ? ['Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                        : ['New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
-                    ).map(st => (
-                      <option key={st} value={st}>{st}</option>
-                    ))}
-                  </select>
+                    enforced there (validateShipmentStatusTransition) — an
+                    authorized operational admin (Super Admin / Operations
+                    Admin only — canManageShipmentStatus, enforced
+                    server-side regardless of this UI) can still correct a
+                    status entered in error, including moving it backward.
+                    Hidden entirely once the shipment is already
+                    Closed/Completed — this PR does not support reopening a
+                    terminal shipment. */}
+                <div className="space-y-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                  <label className="text-xs font-bold text-amber-900 uppercase tracking-wide">
+                    ⚠ Administrative Status Correction (not normal progression)
+                  </label>
+                  {isShipmentClosed(editingShipment.status, editingShipment.freightType) ? (
+                    <p className="text-xs text-amber-800">
+                      This shipment is {editingShipment.status} and is locked. Reopening a closed/completed shipment is not supported here.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-amber-800">
+                        Current status: <strong>{editingShipment.status}</strong>. Use this only to correct a status entered in error (including moving it backward) — this is not the normal progression control.
+                      </p>
+                      <select
+                        value={overrideTargetStatus ?? editingShipment.status}
+                        onChange={(e) => setOverrideTargetStatus(e.target.value as ShipmentStatus)}
+                        className="w-full p-2.5 border border-amber-300 bg-white rounded-lg text-xs font-bold text-blue-900"
+                      >
+                        {getStatusSequenceForFreightMode(resolveFreightMode(editingShipment.freightType)).map(st => (
+                          <option key={st} value={st}>{st}</option>
+                        ))}
+                      </select>
+                      <textarea
+                        rows={2}
+                        required
+                        value={overrideReason}
+                        onChange={(e) => setOverrideReason(e.target.value)}
+                        placeholder="Correction reason (required) — e.g. driver logged the wrong milestone by mistake"
+                        className="w-full p-2.5 border border-amber-300 bg-white rounded-lg text-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleStatusOverride}
+                        disabled={isSubmittingOverride || !overrideReason.trim() || !overrideTargetStatus}
+                        className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg transition-all"
+                      >
+                        {isSubmittingOverride ? "Correcting..." : "Apply Administrative Correction"}
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {/* Notes */}
