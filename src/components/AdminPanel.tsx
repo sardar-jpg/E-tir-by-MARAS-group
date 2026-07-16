@@ -39,6 +39,7 @@ import { resolveStatementShipmentContext } from "../lib/costStatementRegistryVie
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge } from "../lib/chatUnreadAccess";
+import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -1179,10 +1180,22 @@ MARAS Group etir Center`;
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDriverCreateOpen, setIsDriverCreateOpen] = useState(false);
   const [editingShipment, setEditingShipment] = useState<Shipment | null>(null);
+  // Shipment-update lost-update race fix (stability audit): set when
+  // PUT /api/shipments/:id 409s because someone else saved this shipment
+  // first. Never auto-resolved — the admin must explicitly choose to
+  // reload the server's current copy (see handleReloadEditingShipmentFromConflict).
+  const [editConflict, setEditConflict] = useState<{ currentRevision: number | null; shipment: Shipment | null } | null>(null);
+  // PR #111 review (Admin Status Override authorization correction): the
+  // Status Override control is now a separate, clearly-labeled action
+  // (PUT /api/shipments/:id/status-override) with its own required
+  // correction reason — deliberately independent of editingShipment/the
+  // "Apply Updates" submit, which no longer changes status at all.
+  const [overrideTargetStatus, setOverrideTargetStatus] = useState<ShipmentStatus | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [isSubmittingOverride, setIsSubmittingOverride] = useState(false);
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
 
   // Manual Shipment Operations Panel States (primarily for Sea and Air, but general as well)
-  const [manualStatus, setManualStatus] = useState<ShipmentStatus>("New");
   const [manualRemarks, setManualRemarks] = useState("");
   const [isSubmittingStatus, setIsSubmittingStatus] = useState(false);
 
@@ -1750,11 +1763,19 @@ MARAS Group etir Center`;
     if (openDetailsId) {
       const found = shipments.find(s => s.id === openDetailsId);
       if (found) {
-        setManualStatus(found.status);
         setManualRemarks("");
       }
     }
   }, [openDetailsId, shipments]);
+
+  // PR #111 review (Admin Status Override authorization correction): reset
+  // the override widget's target/reason whenever a different shipment's
+  // edit form opens, so a leftover selection/reason from a previously
+  // edited shipment can never be submitted against this one.
+  useEffect(() => {
+    setOverrideTargetStatus(editingShipment?.status ?? null);
+    setOverrideReason("");
+  }, [editingShipment?.id]);
 
   // Close the Unread Driver Chats panel on outside click or Escape key
   useEffect(() => {
@@ -1842,13 +1863,21 @@ MARAS Group etir Center`;
   const handleManualStatusUpdate = async () => {
     const targetDetailsShipment = openDetailsId ? shipments.find(s => s.id === openDetailsId) : null;
     if (!targetDetailsShipment) return;
+    // PR #111 review (forward-only status transitions): derived fresh from
+    // targetDetailsShipment at submit time — there is only ever one valid
+    // next status, so manualStatus's own state (used only for the select's
+    // display value) isn't trusted for the actual submission, avoiding any
+    // staleness risk if the shipment list refreshes between render and
+    // submit.
+    const [nextStatus] = getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType);
+    if (!nextStatus) return;
     setIsSubmittingStatus(true);
     try {
       const res = await apiFetch(`/api/shipments/${targetDetailsShipment.id}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          status: manualStatus,
+          status: nextStatus,
           remarksDesc: manualRemarks.trim() || undefined,
           updaterName: gmailUser?.email || "Admin Panel",
           role: "admin"
@@ -1859,13 +1888,67 @@ MARAS Group etir Center`;
         setManualRemarks("");
         fetchData();
       } else {
-        triggerToast("Failed to update status milestone.");
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        // PR #111 review: another status change already committed since
+        // this admin last saw the shipment — refresh to the real current
+        // status rather than leaving the form pointed at a transition
+        // that's no longer valid. Never auto-retried.
+        if (res.status === 409 && body?.code === "INVALID_SHIPMENT_STATUS_TRANSITION") {
+          fetchData();
+        }
+        triggerToast(body?.error || "Failed to update status milestone.");
       }
     } catch (err) {
       console.error(err);
       triggerToast("Error updating status milestone.");
     } finally {
       setIsSubmittingStatus(false);
+    }
+  };
+
+  // PR #111 review (Admin Status Override authorization correction): the
+  // dedicated, clearly-separate correction workflow — PUT
+  // /api/shipments/:id/status-override, never the normal forward-only
+  // /status endpoint. Requires a non-empty correction reason; the server
+  // independently re-validates authorization (canManageShipmentStatus),
+  // freight-workflow membership, and the terminal-reopen lock, so this
+  // handler's own client-side checks are only a fast-fail UX convenience,
+  // never the actual enforcement.
+  const handleStatusOverride = async () => {
+    if (!editingShipment || !overrideTargetStatus) return;
+    const reason = overrideReason.trim();
+    if (!reason) {
+      triggerToast("A correction reason is required to override shipment status.");
+      return;
+    }
+    setIsSubmittingOverride(true);
+    try {
+      const res = await apiFetch(`/api/shipments/${editingShipment.id}/status-override`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: overrideTargetStatus,
+          correctionReason: reason,
+          updaterName: gmailUser?.email || "Admin Panel",
+        })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setEditingShipment(updated);
+        setOverrideReason("");
+        triggerToast("Shipment status corrected successfully!");
+        fetchData();
+      } else {
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        triggerToast(body?.error || "Failed to correct shipment status.");
+      }
+    } catch (err) {
+      console.error(err);
+      triggerToast("Error correcting shipment status.");
+    } finally {
+      setIsSubmittingOverride(false);
     }
   };
 
@@ -3349,25 +3432,56 @@ MARAS Group etir Center`;
     e.preventDefault();
     if (!editingShipment) return;
     try {
+      // Shipment-update lost-update race fix: submit only the revision this
+      // form was opened with — never a value computed here — so the server
+      // can detect whether someone else saved this shipment first. A
+      // shipment fetched before this field existed has no revision at all;
+      // legacy shipments are always revision 1 (matches the server's own
+      // resolveStoredRevision default).
+      const expectedRevision = editingShipment.revision ?? 1;
       const res = await apiFetch(`/api/shipments/${editingShipment.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingShipment)
+        body: JSON.stringify({ ...editingShipment, expectedRevision })
       });
       if (res.ok) {
         setIsEditOpen(false);
         setEditingShipment(null);
+        setEditConflict(null);
         triggerToast(t('updateSuccess'));
         fetchData();
-      } else {
-        let msg = "Failed to update shipment.";
-        try { msg = (await res.json())?.error || msg; } catch {}
-        triggerToast(`❌ ${msg}`);
+        return;
       }
+      if (res.status === 409) {
+        // Someone else saved this shipment first. Do not close the modal,
+        // do not reset the admin's unsaved form, and do not auto-apply the
+        // newer server record — only offer an explicit reload.
+        let conflictBody: any = null;
+        try { conflictBody = await res.json(); } catch {}
+        setEditConflict({
+          currentRevision: typeof conflictBody?.currentRevision === "number" ? conflictBody.currentRevision : null,
+          shipment: conflictBody?.shipment ?? null,
+        });
+        return;
+      }
+      let msg = "Failed to update shipment.";
+      try { msg = (await res.json())?.error || msg; } catch {}
+      triggerToast(`❌ ${msg}`);
     } catch (err) {
       console.error(err);
       triggerToast("❌ Could not reach the server. Please check your connection and try again.");
     }
+  };
+
+  // Shipment-update lost-update race fix: the only way out of a 409
+  // conflict banner — replaces the admin's unsaved edits with the server's
+  // current copy (already included in the 409 response, no extra request
+  // needed). Never called automatically.
+  const handleReloadEditingShipmentFromConflict = () => {
+    if (editConflict?.shipment) {
+      setEditingShipment(editConflict.shipment);
+    }
+    setEditConflict(null);
   };
 
   // Create Driver Action
@@ -4680,6 +4794,7 @@ MARAS Group etir Center`;
               setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
               setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
               setEditingShipment(s);
+              setEditConflict(null);
               setIsEditOpen(true);
             }}
             onChat={(s) => onSelectShipmentChat(s)}
@@ -4778,13 +4893,14 @@ MARAS Group etir Center`;
                         >
                           View
                         </button>
-                        <button 
+                        <button
                           onClick={() => {
                             const portsL = getPortsForCountry(s.loadingCountry || "");
                             const portsD = getPortsForCountry(s.deliveryCountry || "");
                             setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
                             setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
                             setEditingShipment(s);
+                            setEditConflict(null);
                             setIsEditOpen(true);
                           }}
                           className="text-slate-500 hover:text-slate-900 font-bold"
@@ -7305,23 +7421,30 @@ MARAS Group etir Center`;
                     Since Air and Maritime cargos do not utilize driver apps, you must log current status milestones directly from this panel. These status changes immediately updates client charts and alerts.
                   </p>
 
+                  {/* PR #111 review (forward-only status transitions):
+                      only the immediately valid next status may ever be
+                      selected — an admin/staff session is authorized to
+                      submit it even when it's the freight-mode's closing
+                      status (Closed/Completed), unlike the driver app. */}
+                  {(() => {
+                    const [nextTransitStatus] = getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType);
+                    return (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Select Updated Transit Status</label>
-                      <select
-                        value={manualStatus}
-                        onChange={(e) => setManualStatus(e.target.value as ShipmentStatus)}
-                        className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg focus:ring-1 focus:ring-orange-500 outline-none cursor-pointer"
-                      >
-                        {(targetDetailsShipment.freightType === 'sea'
-                          ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                          : targetDetailsShipment.freightType === 'air'
-                            ? ['Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                            : ['New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
-                        ).map((st) => (
-                          <option key={st} value={st} className="bg-slate-900">{st}</option>
-                        ))}
-                      </select>
+                      {nextTransitStatus ? (
+                        <select
+                          value={nextTransitStatus}
+                          disabled
+                          className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-white rounded-lg outline-none cursor-not-allowed opacity-90"
+                        >
+                          <option value={nextTransitStatus} className="bg-slate-900">{nextTransitStatus}</option>
+                        </select>
+                      ) : (
+                        <div className="w-full text-xs font-bold p-2.5 bg-slate-800 border border-slate-700 text-slate-500 rounded-lg">
+                          No further status — shipment is at its terminal status.
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-1">
@@ -7335,12 +7458,14 @@ MARAS Group etir Center`;
                       />
                     </div>
                   </div>
+                    );
+                  })()}
 
                   <div className="flex justify-end pt-1">
                     <button
                       type="button"
                       onClick={handleManualStatusUpdate}
-                      disabled={isSubmittingStatus}
+                      disabled={isSubmittingStatus || !getAllowedNextShipmentStatuses(targetDetailsShipment.status, targetDetailsShipment.freightType)[0]}
                       className="bg-orange-600 hover:bg-orange-700 text-white font-extrabold text-xs py-2.5 px-5 rounded-lg inline-flex items-center gap-2 transition-all cursor-pointer border-0 shadow-md font-mono disabled:opacity-50"
                     >
                       {isSubmittingStatus ? (
@@ -8640,10 +8765,31 @@ MARAS Group etir Center`;
               <button onClick={() => {
                 setIsEditOpen(false);
                 setEditingShipment(null);
+                setEditConflict(null);
               }} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {editConflict && (
+              <div className="m-6 mb-0 p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
+                <p className="text-sm font-semibold text-amber-800">
+                  {lang === 'tr'
+                    ? "Bu sevkiyat, siz düzenlerken başka biri tarafından kaydedildi. Değişiklikleriniz kaydedilmedi."
+                    : lang === 'ar'
+                      ? "تم حفظ هذه الشحنة من قبل شخص آخر أثناء تعديلك. لم يتم حفظ تغييراتك."
+                      : "This shipment was saved by someone else while you were editing. Your changes were not saved."}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleReloadEditingShipmentFromConflict}
+                  disabled={!editConflict.shipment}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg"
+                >
+                  {lang === 'tr' ? "En Son Verileri Yükle" : lang === 'ar' ? "تحميل أحدث البيانات" : "Reload Latest Data"}
+                </button>
+              </div>
+            )}
 
             <form onSubmit={handleEditShipment} className="p-6 space-y-6 text-sm">
               <div className="space-y-4">
@@ -9431,23 +9577,63 @@ MARAS Group etir Center`;
                   />
                 </div>
 
-                {/* Status selector (Admin override) */}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-700">Status Override / Durum Güncelle</label>
-                  <select
-                    value={editingShipment.status}
-                    onChange={(e) => setEditingShipment({ ...editingShipment, status: e.target.value as ShipmentStatus })}
-                    className="w-full p-2.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-blue-900"
-                  >
-                    {(editingShipment.freightType === 'sea' 
-                      ? ['Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                      : editingShipment.freightType === 'air'
-                        ? ['Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                        : ['New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
-                    ).map(st => (
-                      <option key={st} value={st}>{st}</option>
-                    ))}
-                  </select>
+                {/* Admin Status Correction/Override — PR #111 review
+                    (Admin Status Override authorization correction): a
+                    separate, clearly-labeled administrative-correction
+                    action, deliberately independent of the "Apply Updates"
+                    submit below (which no longer changes status at all —
+                    see buildUpdatedShipment's own server-side comment).
+                    Submits to PUT /api/shipments/:id/status-override,
+                    NOT PUT /api/shipments/:id/status, so it is
+                    intentionally exempt from the forward-only sequence
+                    enforced there (validateShipmentStatusTransition) — an
+                    authorized operational admin (Super Admin / Operations
+                    Admin only — canManageShipmentStatus, enforced
+                    server-side regardless of this UI) can still correct a
+                    status entered in error, including moving it backward.
+                    Hidden entirely once the shipment is already
+                    Closed/Completed — this PR does not support reopening a
+                    terminal shipment. */}
+                <div className="space-y-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                  <label className="text-xs font-bold text-amber-900 uppercase tracking-wide">
+                    ⚠ Administrative Status Correction (not normal progression)
+                  </label>
+                  {isShipmentClosed(editingShipment.status, editingShipment.freightType) ? (
+                    <p className="text-xs text-amber-800">
+                      This shipment is {editingShipment.status} and is locked. Reopening a closed/completed shipment is not supported here.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-amber-800">
+                        Current status: <strong>{editingShipment.status}</strong>. Use this only to correct a status entered in error (including moving it backward) — this is not the normal progression control.
+                      </p>
+                      <select
+                        value={overrideTargetStatus ?? editingShipment.status}
+                        onChange={(e) => setOverrideTargetStatus(e.target.value as ShipmentStatus)}
+                        className="w-full p-2.5 border border-amber-300 bg-white rounded-lg text-xs font-bold text-blue-900"
+                      >
+                        {getStatusSequenceForFreightMode(resolveFreightMode(editingShipment.freightType)).map(st => (
+                          <option key={st} value={st}>{st}</option>
+                        ))}
+                      </select>
+                      <textarea
+                        rows={2}
+                        required
+                        value={overrideReason}
+                        onChange={(e) => setOverrideReason(e.target.value)}
+                        placeholder="Correction reason (required) — e.g. driver logged the wrong milestone by mistake"
+                        className="w-full p-2.5 border border-amber-300 bg-white rounded-lg text-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleStatusOverride}
+                        disabled={isSubmittingOverride || !overrideReason.trim() || !overrideTargetStatus}
+                        className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg transition-all"
+                      >
+                        {isSubmittingOverride ? "Correcting..." : "Apply Administrative Correction"}
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {/* Notes */}
@@ -9467,6 +9653,7 @@ MARAS Group etir Center`;
                 <button type="button" onClick={() => {
                   setIsEditOpen(false);
                   setEditingShipment(null);
+                  setEditConflict(null);
                 }} className="px-4 py-2 bg-slate-100 text-slate-700 font-semibold rounded-lg">
                   Discard
                 </button>

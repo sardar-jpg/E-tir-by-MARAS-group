@@ -62,7 +62,7 @@ import {
   checkPasswordConfirmation,
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
@@ -112,6 +112,27 @@ import {
   InMemorySequenceCounter,
   ShipmentSequenceCounterDoc,
 } from "./src/lib/shipmentNumbering";
+import {
+  INITIAL_SHIPMENT_REVISION,
+  resolveStoredRevision,
+  parseExpectedRevision,
+  checkShipmentRevision,
+  ShipmentRevisionConflictError,
+  applyRevisionedShipmentUpdateMemory,
+  applyNarrowShipmentUpdateMemory,
+  applyIsolatedShipmentUpdateMemory,
+} from "./src/lib/shipmentRevision";
+import {
+  isShipmentClosed,
+  isDriverAssignmentRejection,
+  validateShipmentStatusTransition,
+  ShipmentStatusTransitionError,
+  validateShipmentStatusOverride,
+  ShipmentStatusOverrideError,
+  parseStatusOverrideReason,
+  getShipmentStatusLabel,
+} from "./src/lib/shipmentStatusTransitions";
+import { runShipmentUpdateSideEffects, ShipmentSideEffectTask } from "./src/lib/shipmentUpdateSideEffects";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
@@ -1657,7 +1678,186 @@ async function allocateNextShipmentSequence(): Promise<number> {
     return getShipmentSequenceCounterMemory().next();
   }
 }
-import { 
+
+// Shipment-update lost-update race fix (stability audit). in-memory
+// equivalent of the Firestore transaction below, used only when Firestore
+// is unavailable and STRICT_PERSISTENCE is off — see
+// applyRevisionedShipmentUpdateMemory (shipmentRevision.ts) for the actual
+// (unit-tested) logic and its atomicity reasoning; this just supplies the
+// live memory-store array reference.
+function applyShipmentRevisionedUpdateMemory(
+  shipmentId: string,
+  expectedRevision: number,
+  buildUpdated: (current: Shipment, nextRevision: number) => Shipment
+): Shipment {
+  return applyRevisionedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, expectedRevision, buildUpdated);
+}
+
+// Shipment-update lost-update race fix (stability audit). Compares the
+// client's expectedRevision against the shipment document's actual current
+// revision and performs the update, atomically, inside a single Firestore
+// transaction — exactly one of two concurrent calls starting from the same
+// expectedRevision can ever commit; the other sees ShipmentRevisionConflictError,
+// with no document modification. `buildUpdated` must be a pure, synchronous
+// function of (the transaction's own freshly-read current document, the
+// revision to store) — it must not perform any I/O (no fetches, no other
+// Firestore reads/writes, no notifications), since anything in the
+// transaction callback may run more than once if Firestore internally
+// retries it. Callers run notifications/audit logging only after this
+// resolves successfully — never inside buildUpdated, and never on conflict.
+async function applyShipmentRevisionedUpdate(
+  shipmentId: string,
+  expectedRevision: number,
+  buildUpdated: (current: Shipment, nextRevision: number) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyShipmentRevisionedUpdateMemory(shipmentId, expectedRevision, buildUpdated);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const { ok, currentRevision, nextRevision } = checkShipmentRevision(current.revision, expectedRevision);
+        if (!ok) {
+          throw new ShipmentRevisionConflictError(currentRevision, current);
+        }
+        const updated = buildUpdated(current, nextRevision);
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    // A genuine version conflict is an expected application outcome, not an
+    // infrastructure failure — it must reach the route as-is so it 409s
+    // with no notifications/audit side effects, never fall through to the
+    // memory-fallback retry below (which could silently apply a stale
+    // client's write against different, unrelated in-memory data).
+    if (error instanceof ShipmentRevisionConflictError) throw error;
+    console.warn("Firestore shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyShipmentRevisionedUpdateMemory(shipmentId, expectedRevision, buildUpdated);
+  }
+}
+
+// Shipment-update lost-update race fix (stability audit, PR #111 review —
+// Blocker 2). Narrow-writer counterpart to applyShipmentRevisionedUpdate:
+// for routes where the caller is not a human edit form holding a specific
+// revision it read (status updates, document/chat/share appends and
+// toggles, public share-link subscribes), there is no expectedRevision to
+// check — but the mutation must still atomically advance the revision, or
+// an admin edit form opened before it would save later without ever
+// detecting the change. See applyNarrowShipmentUpdateMemory
+// (shipmentRevision.ts) for the full reasoning and its unit tests.
+//
+// PR #111 review (forward-only status transitions / Admin Status
+// Override): `mutate` may also throw ShipmentStatusTransitionError (the
+// normal status route's transition re-validation) or
+// ShipmentStatusOverrideError (the status-override route's correction
+// validation), both run against this call's own fresh `current` — see
+// those routes. Exactly like ShipmentRevisionConflictError below, both are
+// expected application-level rejections, not an infrastructure failure —
+// they must reach the caller as-is, with no document modification, never
+// fall through to the memory-fallback retry (which could otherwise
+// silently re-run `mutate` a second time against different, unrelated
+// in-memory data).
+async function applyNarrowShipmentUpdate(
+  shipmentId: string,
+  mutate: (current: Shipment) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyNarrowShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const nextRevision = resolveStoredRevision(current.revision) + 1;
+        const mutated = mutate(current);
+        const updated = { ...mutated, revision: nextRevision };
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    if (error instanceof ShipmentStatusTransitionError || error instanceof ShipmentStatusOverrideError) throw error;
+    console.warn("Firestore narrow shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyNarrowShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+}
+
+// Shipment-update lost-update race fix (stability audit, PR #111 review —
+// over-broad-revision-policy correction). Revision-PRESERVING counterpart to
+// applyNarrowShipmentUpdate: for writers whose fields the human edit form
+// (PUT /api/shipments/:id, buildUpdatedShipment) never overwrites — document
+// appends/uploads, chat attachments saved as documents, document visibility
+// toggles, customerEmails/customerNotificationHistory subscriptions
+// (authenticated and public), share-link settings, and the best-effort
+// derived ETA/distance cache on GET .../distance-matrix. These still need
+// atomic, transactional read-mutate-write (two concurrent document uploads,
+// or two concurrent subscriptions, must not overwrite each other's append),
+// but must NEVER advance the shipment's revision — doing so would make an
+// unrelated, already-open admin edit form 409 on its next save even though
+// nothing that edit form could have overwritten actually changed. See
+// applyIsolatedShipmentUpdateMemory (shipmentRevision.ts) for the full
+// reasoning, the documented distance-matrix `eta` trade-off, and unit tests.
+async function applyIsolatedShipmentUpdate(
+  shipmentId: string,
+  mutate: (current: Shipment) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyIsolatedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const mutated = mutate(current);
+        const updated = { ...mutated, revision: current.revision };
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore isolated shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyIsolatedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+}
+import {
   Shipment,
   Driver,
   ChatMessage,
@@ -3639,6 +3839,9 @@ async function startServer() {
         timeline: [initialTimeline],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        // Shipment-update lost-update race fix: new shipments always begin
+        // at revision 1 (see resolveStoredRevision, shipmentRevision.ts).
+        revision: INITIAL_SHIPMENT_REVISION,
         isLinkShared: false,
         shareToken: generateShareToken(),
         shareIncludeDocuments: true,
@@ -3812,7 +4015,6 @@ async function startServer() {
   // doesn't need to re-fetch it.
   app.get("/api/shipments/:id/distance-matrix", requireShipmentAccess, async (req, res) => {
     try {
-      const sRef = doc(db, "shipments", req.params.id);
       const shipment = req.shipment as any;
       let originStr = "";
       let destinationStr = "";
@@ -3881,14 +4083,26 @@ async function startServer() {
 
         const calculatedEta = new Date(Date.now() + durationInTrafficSeconds * 1000).toISOString();
 
-        // Update shipment profile metadata with fallback estimation
+        // Update shipment profile metadata with fallback estimation.
+        // Shipment-update lost-update race fix (PR #111 review — over-broad
+        // revision policy correction): this caches a computed ETA/distance
+        // best-effort, atomically. Deliberately revision-PRESERVING, not
+        // revision-incrementing: a page or map merely requesting a distance
+        // calculation must never make an admin's already-open edit form
+        // stale/409 on save. Accepted, documented trade-off: `eta` IS a
+        // field the edit form's own merge can also overwrite, so an admin
+        // who saves a stale `eta` can still clobber a fresher auto-computed
+        // one here — treating this route as revision-changing instead would
+        // make routine page/map loads invalidate every open edit session,
+        // which is the far more common and disruptive failure mode.
         try {
-          await updateDoc(sRef, {
+          await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
+            ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
             lastCalculatedDistance: `${distanceKm} km`,
             lastCalculatedDuration: `${Math.round(durationInTrafficSeconds / 3600)} hrs ${Math.round((durationInTrafficSeconds % 3600) / 60)} mins`
-          });
+          }));
         } catch (dbErr) {
           console.warn("Could not save computed fallback ETA:", dbErr);
         }
@@ -3918,14 +4132,21 @@ async function startServer() {
 
         const calculatedEta = new Date(Date.now() + durInTrafficObj.value * 1000).toISOString();
 
-        // Automatically update the document ETA field in the firestore database
+        // Automatically update the document ETA field in the firestore
+        // database. Shipment-update lost-update race fix (PR #111 review —
+        // over-broad revision policy correction): same revision-preserving
+        // isolated helper as the fallback-estimate branch above, and the
+        // same accepted `eta` trade-off documented there — still
+        // best-effort (a failure here is silently logged and never fails
+        // this GET request).
         try {
-          await updateDoc(sRef, {
+          await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
+            ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
             lastCalculatedDistance: distObj.text,
             lastCalculatedDuration: durInTrafficObj.text
-          });
+          }));
         } catch (dbErr) {
           console.warn("Failed to auto-update Firestore shipment ETA:", dbErr);
         }
@@ -3976,14 +4197,28 @@ async function startServer() {
   // 4. Update Shipment Profile
   app.put("/api/shipments/:id", requireFullAdmin, async (req, res) => {
     try {
+      const data = req.body;
+
+      // Shipment-update lost-update race fix (stability audit): the client
+      // must always submit the revision it actually read — never a value it
+      // computes itself — or the request is rejected outright. Concurrency
+      // protection is never optional here; there is no legacy bypass.
+      const expectedRevision = parseExpectedRevision(data.expectedRevision);
+      if (expectedRevision === null) {
+        return res.status(400).json({ error: "A valid expectedRevision is required to save shipment changes." });
+      }
+
       const sDocRef = doc(db, "shipments", req.params.id);
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) {
         return res.status(404).json({ error: "Shipment not found" });
       }
 
-      const original = sDoc.data() as Shipment;
-      const data = req.body;
+      // Pre-transaction snapshot, used only for the validation checks below.
+      // Reassigned after a successful commit (see below) to the
+      // transaction's own authoritative read, since that — not this early
+      // read — is what the write actually applied on top of.
+      let original = sDoc.data() as Shipment;
 
       const oldDriverId = original.assignedDriverId;
       const newDriverId = data.assignedDriverId;
@@ -4020,150 +4255,124 @@ async function startServer() {
         }
       }
 
-      // Handle shift in driver statistics
-      if (oldDriverId !== newDriverId) {
-        if (oldDriverId) {
-          const odRef = doc(db, "drivers", oldDriverId);
-          const odDoc = await getDoc(odRef);
-          if (odDoc.exists()) {
-            const od = odDoc.data() as Driver;
-            od.activeShipmentsCount = Math.max(0, od.activeShipmentsCount - 1);
-            await setDoc(odRef, od);
-          }
-        }
-        if (newDriverId && driverObj) {
-          await setDoc(doc(db, "drivers", newDriverId), { ...driverObj, activeShipmentsCount: driverObj.activeShipmentsCount + 1 });
-        }
-      }
-
       const assignedDriverName = driverObj ? driverObj.name : "Unassigned";
 
-      let finalStatus = data.status !== undefined ? data.status : original.status;
-      const timelineCopy = [...(original.timeline || [])];
+      // Shipment-update lost-update race fix: this merge is a pure,
+      // synchronous function of (the Firestore transaction's own
+      // freshly-read current document, the revision to store) — no I/O of
+      // any kind, since Firestore may run it more than once if the
+      // transaction is internally retried. `current` is captured into
+      // capturedCurrent so the notification/audit logic after the
+      // transaction (which must never run inside the transaction itself)
+      // can diff against the exact snapshot the write actually applied on
+      // top of.
+      //
+      // PR #111 review (over-broad revision policy correction, requirement
+      // 6): every field below is spread from this transaction's own fresh
+      // `current`, and the object literal only explicitly overrides the
+      // named edit-form fields — so documents, customerEmails,
+      // customerNotificationHistory, isLinkShared, shareToken,
+      // shareIncludeDocuments, shareIncludePhotos, lastCalculatedEta,
+      // lastCalculatedDistance, and lastCalculatedDuration are never
+      // touched here, no matter what an isolated writer concurrently set
+      // them to. This is exactly why those writers are safe to be
+      // revision-preserving (applyIsolatedShipmentUpdate): this route could
+      // never have overwritten their fields anyway, so a version bump for
+      // them would only produce false conflicts, never prevent a real one.
+      let capturedCurrent: Shipment | null = null;
+      // True only when the "first assignment" New -> Assigned bump below
+      // actually fires — distinct from "is the final status Assigned".
+      let assignmentBumpApplied = false;
+      // PR #111 review (Admin Status Override authorization correction):
+      // this broad edit route no longer accepts a free-form `data.status`
+      // at all — status can only ever change via the automatic
+      // "first assignment" bump below (a side effect of assigning a
+      // driver, not a manual status edit), the forward-only normal
+      // progression endpoint (PUT /api/shipments/:id/status), or the
+      // dedicated, reason-required, freight-validated Admin Status
+      // Override endpoint (PUT /api/shipments/:id/status-override). This
+      // used to also apply whatever raw `data.status` string the client
+      // sent, with no forward-only check, no freight-workflow validation,
+      // no required reason, and no terminal-reopen lock — a complete
+      // bypass of every safety rule those two dedicated endpoints now
+      // enforce, reachable by any authorized editor of this form. `status`
+      // is simply never read from `data` anymore; finalStatus always
+      // starts from the transaction's own fresh `current.status`.
+      function buildUpdatedShipment(current: Shipment, nextRevision: number): Shipment {
+        capturedCurrent = current;
 
-      if (data.status !== undefined && data.status !== original.status) {
-        const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
-          'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
-          'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
-          'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
-          'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
-          'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
-          'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
-          'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
-          'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
-          'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
-          'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
-          'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
+        let finalStatus = current.status;
+        const timelineCopy = [...(current.timeline || [])];
 
-          'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
-          'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إfراج الحاوية" },
-          'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
-          'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
-          'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
-          'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
-          'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
-          'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
+        const updated: Shipment = {
+          ...current,
+          status: finalStatus,
+          timeline: timelineCopy,
+          companyName: data.companyName !== undefined ? data.companyName : current.companyName,
+          loadingCountry: data.loadingCountry !== undefined ? data.loadingCountry : current.loadingCountry,
+          loadingCity: data.loadingCity !== undefined ? data.loadingCity : current.loadingCity,
+          loadingAddress: data.loadingAddress !== undefined ? data.loadingAddress : current.loadingAddress,
+          loadingContactNumber: data.loadingContactNumber !== undefined ? data.loadingContactNumber : current.loadingContactNumber,
+          deliveryCountry: data.deliveryCountry !== undefined ? data.deliveryCountry : current.deliveryCountry,
+          deliveryCity: data.deliveryCity !== undefined ? data.deliveryCity : current.deliveryCity,
+          deliveryAddress: data.deliveryAddress !== undefined ? data.deliveryAddress : current.deliveryAddress,
+          deliveryContactNumber: data.deliveryContactNumber !== undefined ? data.deliveryContactNumber : current.deliveryContactNumber,
+          cargoDescription: data.cargoDescription !== undefined ? data.cargoDescription : current.cargoDescription,
+          cargoWeight: data.cargoWeight !== undefined ? Number(data.cargoWeight) : current.cargoWeight,
+          truckNumber: driverObj ? driverObj.truckNumber : (data.truckNumber !== undefined ? data.truckNumber : current.truckNumber),
+          assignedDriverId: newDriverId !== undefined ? newDriverId : current.assignedDriverId,
+          assignedDriverName: newDriverId !== undefined ? assignedDriverName : current.assignedDriverName,
+          agreedAmount: data.agreedAmount !== undefined ? Number(data.agreedAmount) : current.agreedAmount,
+          currency: data.currency !== undefined ? data.currency : current.currency,
+          internalNotes: data.internalNotes !== undefined ? data.internalNotes : current.internalNotes,
+          updatedAt: new Date().toISOString(),
+          revision: nextRevision,
 
-          'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
-          'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
-          'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
-          'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
+          // Add Sea & Air properties to update payload
+          freightType: data.freightType !== undefined ? data.freightType : current.freightType,
+          shippingLine: data.shippingLine !== undefined ? data.shippingLine : current.shippingLine,
+          vesselName: data.vesselName !== undefined ? data.vesselName : current.vesselName,
+          containerNumber: data.containerNumber !== undefined ? data.containerNumber : current.containerNumber,
+          bookingNumber: data.bookingNumber !== undefined ? data.bookingNumber : current.bookingNumber,
+          billOfLadingNumber: data.billOfLadingNumber !== undefined ? data.billOfLadingNumber : current.billOfLadingNumber,
+          portOfLoading: data.portOfLoading !== undefined ? data.portOfLoading : current.portOfLoading,
+          portOfDischarge: data.portOfDischarge !== undefined ? data.portOfDischarge : current.portOfDischarge,
+          finalDestination: data.finalDestination !== undefined ? data.finalDestination : current.finalDestination,
+          etd: data.etd !== undefined ? data.etd : current.etd,
+          eta: data.eta !== undefined ? data.eta : current.eta,
+          numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : current.numberOfContainers,
+          containerType: data.containerType !== undefined ? data.containerType : current.containerType,
+          airline: data.airline !== undefined ? data.airline : current.airline,
+          flightNumber: data.flightNumber !== undefined ? data.flightNumber : current.flightNumber,
+          airWaybillNumber: data.airWaybillNumber !== undefined ? data.airWaybillNumber : current.airWaybillNumber,
+          airportOfDeparture: data.airportOfDeparture !== undefined ? data.airportOfDeparture : current.airportOfDeparture,
+          airportOfArrival: data.airportOfArrival !== undefined ? data.airportOfArrival : current.airportOfArrival,
+          grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : current.grossWeight,
+          chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : current.chargeableWeight,
+          numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : current.numberOfPackages,
+          additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : current.additionalDrivers,
+          // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
+          // re-derived on every update (from whichever value additionalDrivers
+          // above just resolved to) so this stays in sync even on an update
+          // that doesn't touch additionalDrivers itself.
+          additionalDriverIds: deriveAdditionalDriverIds(
+            data.additionalDrivers !== undefined ? data.additionalDrivers : current.additionalDrivers
+          ),
+          additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : current.additionalContainers,
+
+          // Broker details mapping for land shipments
+          destinationBrokerId: data.destinationBrokerId !== undefined ? data.destinationBrokerId : current.destinationBrokerId,
+          destinationBrokerName: data.destinationBrokerName !== undefined ? data.destinationBrokerName : current.destinationBrokerName,
+          destinationBrokerPhone: data.destinationBrokerPhone !== undefined ? data.destinationBrokerPhone : current.destinationBrokerPhone,
+          iraqBorderBrokerId: data.iraqBorderBrokerId !== undefined ? data.iraqBorderBrokerId : current.iraqBorderBrokerId,
+          iraqBorderBrokerName: data.iraqBorderBrokerName !== undefined ? data.iraqBorderBrokerName : current.iraqBorderBrokerName,
+          iraqBorderBrokerPhone: data.iraqBorderBrokerPhone !== undefined ? data.iraqBorderBrokerPhone : current.iraqBorderBrokerPhone,
         };
-        const labels = labelMap[data.status as string] || { en: data.status, tr: data.status, ar: data.status };
 
-        timelineCopy.push({
-          timestamp: new Date().toISOString(),
-          status: data.status,
-          labelEn: labels.en,
-          labelTr: labels.tr,
-          labelAr: labels.ar,
-          detailsEn: `Status updated manually to ${labels.en} via Operations Panel.`,
-          detailsTr: `Durum Operasyon Paneli üzerinden manuel olarak ${labels.tr} olarak güncellendi.`,
-          detailsAr: `تم تحديث الحالة يدوياً إلى ${labels.ar} عبر لوحة العمليات.`
-        });
-
-        await pushNotification(
-          original.id,
-          original.shipmentNumber,
-          "status_update",
-          `Status Update: ${data.status}`,
-          `Durum Güncellemesi: ${data.status}`,
-          `تحديث الحالة: ${data.status}`,
-          `Shipment ${original.shipmentNumber} is now ${data.status}.`,
-          `Sevkiyat ${original.shipmentNumber} şu anda ${data.status} konumunda.`,
-          `الشحنة رقم ${original.shipmentNumber} الآن هي في حالة [${data.status}].`
-        );
-      }
-
-      const updatedShipment: Shipment = {
-        ...original,
-        status: finalStatus,
-        timeline: timelineCopy,
-        companyName: data.companyName !== undefined ? data.companyName : original.companyName,
-        loadingCountry: data.loadingCountry !== undefined ? data.loadingCountry : original.loadingCountry,
-        loadingCity: data.loadingCity !== undefined ? data.loadingCity : original.loadingCity,
-        loadingAddress: data.loadingAddress !== undefined ? data.loadingAddress : original.loadingAddress,
-        loadingContactNumber: data.loadingContactNumber !== undefined ? data.loadingContactNumber : original.loadingContactNumber,
-        deliveryCountry: data.deliveryCountry !== undefined ? data.deliveryCountry : original.deliveryCountry,
-        deliveryCity: data.deliveryCity !== undefined ? data.deliveryCity : original.deliveryCity,
-        deliveryAddress: data.deliveryAddress !== undefined ? data.deliveryAddress : original.deliveryAddress,
-        deliveryContactNumber: data.deliveryContactNumber !== undefined ? data.deliveryContactNumber : original.deliveryContactNumber,
-        cargoDescription: data.cargoDescription !== undefined ? data.cargoDescription : original.cargoDescription,
-        cargoWeight: data.cargoWeight !== undefined ? Number(data.cargoWeight) : original.cargoWeight,
-        truckNumber: driverObj ? driverObj.truckNumber : (data.truckNumber !== undefined ? data.truckNumber : original.truckNumber),
-        assignedDriverId: newDriverId !== undefined ? newDriverId : original.assignedDriverId,
-        assignedDriverName: newDriverId !== undefined ? assignedDriverName : original.assignedDriverName,
-        agreedAmount: data.agreedAmount !== undefined ? Number(data.agreedAmount) : original.agreedAmount,
-        currency: data.currency !== undefined ? data.currency : original.currency,
-        internalNotes: data.internalNotes !== undefined ? data.internalNotes : original.internalNotes,
-        updatedAt: new Date().toISOString(),
-        
-        // Add Sea & Air properties to update payload
-        freightType: data.freightType !== undefined ? data.freightType : original.freightType,
-        shippingLine: data.shippingLine !== undefined ? data.shippingLine : original.shippingLine,
-        vesselName: data.vesselName !== undefined ? data.vesselName : original.vesselName,
-        containerNumber: data.containerNumber !== undefined ? data.containerNumber : original.containerNumber,
-        bookingNumber: data.bookingNumber !== undefined ? data.bookingNumber : original.bookingNumber,
-        billOfLadingNumber: data.billOfLadingNumber !== undefined ? data.billOfLadingNumber : original.billOfLadingNumber,
-        portOfLoading: data.portOfLoading !== undefined ? data.portOfLoading : original.portOfLoading,
-        portOfDischarge: data.portOfDischarge !== undefined ? data.portOfDischarge : original.portOfDischarge,
-        finalDestination: data.finalDestination !== undefined ? data.finalDestination : original.finalDestination,
-        etd: data.etd !== undefined ? data.etd : original.etd,
-        eta: data.eta !== undefined ? data.eta : original.eta,
-        numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : original.numberOfContainers,
-        containerType: data.containerType !== undefined ? data.containerType : original.containerType,
-        airline: data.airline !== undefined ? data.airline : original.airline,
-        flightNumber: data.flightNumber !== undefined ? data.flightNumber : original.flightNumber,
-        airWaybillNumber: data.airWaybillNumber !== undefined ? data.airWaybillNumber : original.airWaybillNumber,
-        airportOfDeparture: data.airportOfDeparture !== undefined ? data.airportOfDeparture : original.airportOfDeparture,
-        airportOfArrival: data.airportOfArrival !== undefined ? data.airportOfArrival : original.airportOfArrival,
-        grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : original.grossWeight,
-        chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : original.chargeableWeight,
-        numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : original.numberOfPackages,
-        additionalDrivers: data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers,
-        // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
-        // re-derived on every update (from whichever value additionalDrivers
-        // above just resolved to) so this stays in sync even on an update
-        // that doesn't touch additionalDrivers itself.
-        additionalDriverIds: deriveAdditionalDriverIds(
-          data.additionalDrivers !== undefined ? data.additionalDrivers : original.additionalDrivers
-        ),
-        additionalContainers: data.additionalContainers !== undefined ? data.additionalContainers : original.additionalContainers,
-        
-        // Broker details mapping for land shipments
-        destinationBrokerId: data.destinationBrokerId !== undefined ? data.destinationBrokerId : original.destinationBrokerId,
-        destinationBrokerName: data.destinationBrokerName !== undefined ? data.destinationBrokerName : original.destinationBrokerName,
-        destinationBrokerPhone: data.destinationBrokerPhone !== undefined ? data.destinationBrokerPhone : original.destinationBrokerPhone,
-        iraqBorderBrokerId: data.iraqBorderBrokerId !== undefined ? data.iraqBorderBrokerId : original.iraqBorderBrokerId,
-        iraqBorderBrokerName: data.iraqBorderBrokerName !== undefined ? data.iraqBorderBrokerName : original.iraqBorderBrokerName,
-        iraqBorderBrokerPhone: data.iraqBorderBrokerPhone !== undefined ? data.iraqBorderBrokerPhone : original.iraqBorderBrokerPhone,
-      };
-
-      // Set status to Assigned if first assigned
-      if (oldDriverId !== newDriverId && newDriverId) {
-        if (updatedShipment.status === "New") {
-          updatedShipment.status = "Assigned";
-          updatedShipment.timeline.push({
+        // Set status to Assigned if first assigned
+        if (oldDriverId !== newDriverId && newDriverId && updated.status === "New") {
+          updated.status = "Assigned";
+          updated.timeline.push({
             timestamp: new Date().toISOString(),
             status: "Assigned",
             labelEn: "Driver Assigned",
@@ -4173,26 +4382,43 @@ async function startServer() {
             detailsTr: `Sözleşme güncellemesi sırasında sürücü ${assignedDriverName} atandı.`,
             detailsAr: `تم تعيينه للسائق  ${assignedDriverName} أثناء عملية التحديث.`
           });
-          
-          await pushNotification(
-            original.id,
-            original.shipmentNumber,
-            "assignment",
-            "New Assignment Assigned",
-            "Yeni Görev Atandı",
-            "تم تعيين مهمة جديدة",
-            `Shipment ${original.shipmentNumber} has been assigned to you.`,
-            `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
-            `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
-          );
+          assignmentBumpApplied = true;
         }
+
+        return updated;
       }
 
-      // Notify customer watchers of configuration or status updates
-      const updatedDiffTexts: string[] = [];
-      if (data.status !== undefined && data.status !== original.status) {
-        updatedDiffTexts.push(`Status is now: ${data.status}.`);
+      let updatedShipment: Shipment;
+      try {
+        updatedShipment = await applyShipmentRevisionedUpdate(req.params.id, expectedRevision, buildUpdatedShipment);
+      } catch (err) {
+        if (err instanceof ShipmentRevisionConflictError) {
+          // Stale save: no document was modified, and no notification/audit
+          // side effect below ever runs for this request.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentRevision: err.currentRevision,
+            shipment: err.currentShipment,
+          });
+        }
+        throw err;
       }
+
+      // Everything below only runs after a successful, committed write —
+      // never on validation failure, a missing shipment, a revision
+      // conflict, or a transaction/infrastructure failure. The shipment
+      // itself is already safely saved at this point: none of these tasks
+      // may cause this request to report a save failure (PR #111 review —
+      // see runShipmentUpdateSideEffects's own header for why).
+      original = capturedCurrent!;
+
+      // PR #111 review (Admin Status Override authorization correction):
+      // status is no longer part of this route's update payload at all
+      // (buildUpdatedShipment ignores data.status entirely — see its own
+      // header comment) — a "Status is now: X" diff line here would
+      // describe a value that was never actually applied to the shipment.
+      const updatedDiffTexts: string[] = [];
       if (data.eta !== undefined && data.eta !== original.eta) {
         updatedDiffTexts.push(`Estimated Time of Arrival (ETA) updated to ${data.eta}.`);
       }
@@ -4206,43 +4432,118 @@ async function startServer() {
         updatedDiffTexts.push(`Flight Number updated to ${data.flightNumber}.`);
       }
 
-      const diffMsg = updatedDiffTexts.length > 0 
-        ? updatedDiffTexts.join(" • ") 
+      const diffMsg = updatedDiffTexts.length > 0
+        ? updatedDiffTexts.join(" • ")
         : "Some shipment parameters were updated by operations office.";
 
-      await notifyCustomerWatchers(
-        updatedShipment,
-        "edit",
-        "Shipment Parameters Updated",
-        `Attention: Your shipment #${original.shipmentNumber} was updated by central operations. ${diffMsg}`
-      );
+      const sideEffectTasks: ShipmentSideEffectTask[] = [];
+
+      // Driver activeShipmentsCount is a derived, cached tally — not the
+      // authoritative record of which shipments a driver is assigned to
+      // (that's each Shipment's own assignedDriverId/additionalDrivers,
+      // already safely committed inside the transaction above). If one of
+      // these writes fails, the assignment itself is still correct; only
+      // this cached count can drift by one until a future successful
+      // update on either driver recomputes it. Known, accepted limitation —
+      // fixing it properly (a computed/query-derived count instead of a
+      // cached field) is a larger change, out of scope for this PR.
+      if (oldDriverId !== newDriverId) {
+        if (oldDriverId) {
+          sideEffectTasks.push({
+            name: "driver-stat-decrement",
+            run: async () => {
+              const odRef = doc(db, "drivers", oldDriverId);
+              const odDoc = await getDoc(odRef);
+              if (odDoc.exists()) {
+                const od = odDoc.data() as Driver;
+                od.activeShipmentsCount = Math.max(0, od.activeShipmentsCount - 1);
+                await setDoc(odRef, od);
+              }
+            },
+          });
+        }
+        if (newDriverId && driverObj) {
+          sideEffectTasks.push({
+            name: "driver-stat-increment",
+            run: async () => {
+              await setDoc(doc(db, "drivers", newDriverId), { ...driverObj, activeShipmentsCount: driverObj.activeShipmentsCount + 1 });
+            },
+          });
+        }
+      }
+
+      // PR #111 review (Admin Status Override authorization correction): a
+      // dedicated "status-update-notification" task used to fire here too
+      // when data.status changed — removed along with buildUpdatedShipment's
+      // status handling, since this route can no longer change status at
+      // all (except the automatic assignment bump just below, which has
+      // its own dedicated "assignment-notification" task).
+      if (assignmentBumpApplied) {
+        sideEffectTasks.push({
+          name: "assignment-notification",
+          run: () => pushNotification(
+            original.id,
+            original.shipmentNumber,
+            "assignment",
+            "New Assignment Assigned",
+            "Yeni Görev Atandı",
+            "تم تعيين مهمة جديدة",
+            `Shipment ${original.shipmentNumber} has been assigned to you.`,
+            `Sistem size ${original.shipmentNumber} numaralı sevkiyat yükünü atadı.`,
+            `تم تعيين الشحنة رقم ${original.shipmentNumber} لك.`
+          ),
+        });
+      }
+
+      sideEffectTasks.push({
+        name: "customer-watcher-notification",
+        run: () => notifyCustomerWatchers(
+          updatedShipment,
+          "edit",
+          "Shipment Parameters Updated",
+          `Attention: Your shipment #${original.shipmentNumber} was updated by central operations. ${diffMsg}`
+        ),
+      });
 
       // In-app notification for the customer application
-      await pushNotification(
-        original.id,
-        original.shipmentNumber,
-        "status_update",
-        "Shipment Updated",
-        "Sevkiyat Güncellendi",
-        "تم تحديث الشحنة",
-        `Attention: Your shipment #${original.shipmentNumber} was updated: ${diffMsg}`,
-        `Yükünüz #${original.shipmentNumber} güncellendi: ${diffMsg}`,
-        `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
-      );
+      sideEffectTasks.push({
+        name: "shipment-updated-notification",
+        run: () => pushNotification(
+          original.id,
+          original.shipmentNumber,
+          "status_update",
+          "Shipment Updated",
+          "Sevkiyat Güncellendi",
+          "تم تحديث الشحنة",
+          `Attention: Your shipment #${original.shipmentNumber} was updated: ${diffMsg}`,
+          `Yükünüz #${original.shipmentNumber} güncellendi: ${diffMsg}`,
+          `تنبيه: تم تحديث شحنتكم رقم #${original.shipmentNumber}: ${diffMsg}`
+        ),
+      });
 
-      await setDoc(sDocRef, updatedShipment);
+      sideEffectTasks.push({
+        name: "audit-log",
+        run: () => logActivity(
+          original.id,
+          original.shipmentNumber,
+          "Admin Office",
+          `Updated shipment parameters for ${original.shipmentNumber}`,
+          `${original.shipmentNumber} sevkiyat parametreleri güncellendi`,
+          `تم تحديث معايير الشحنة ${original.shipmentNumber}`
+        ),
+      });
 
-      await logActivity(
-        original.id,
-        original.shipmentNumber,
-        "Admin Office",
-        `Updated shipment parameters for ${original.shipmentNumber}`,
-        `${original.shipmentNumber} sevkiyat parametreleri güncellendi`,
-        `تم تحديث معايير الشحنة ${original.shipmentNumber}`
-      );
+      const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[shipment-update] post-commit side effect "${failure.name}" failed for shipment ${original.id} (${original.shipmentNumber}) — the shipment save itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.json(updatedShipment);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update shipment details" });
     }
@@ -4252,6 +4553,10 @@ async function startServer() {
   app.put("/api/shipments/:id/status", requireAuth, async (req, res) => {
     try {
       const { status, remarksDesc, updaterName, role } = req.body;
+      const requestedStatus: string = status;
+      if (typeof requestedStatus !== "string" || !requestedStatus.trim()) {
+        return res.status(400).json({ error: "status is required" });
+      }
       const shipmentId = req.params.id;
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);
@@ -4271,111 +4576,320 @@ async function startServer() {
         if (!owns) return res.status(403).json({ error: "You are not assigned to this shipment." });
       } else if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update shipment status." });
-      } else if (req.session!.role === "admin" && !canViewShipmentRegistry(req.session!.adminType)) {
-        // PR #83 (Shipment Registry review): this route used bare
-        // requireAuth with no adminType check at all, unlike every other
-        // shipment-mutating route (POST/PUT /api/shipments both use
-        // requireFullAdmin) — an accounts-type admin session could update
-        // any shipment's status directly, even though the whole Shipment
-        // Registry tab (and its only client-side call site for this route,
-        // the shipment details modal) is hidden from them. Not reachable
-        // via the UI today, but the same defense-in-depth gap shape this
-        // codebase has fixed repeatedly elsewhere (BUG-08, BUG-26, etc.).
+      } else if (req.session!.role === "admin" && !canManageShipmentStatus(req.session)) {
+        // PR #83 (Shipment Registry review), narrowed further by the PR
+        // #111 role-authorization correction: shipment status management
+        // is a dedicated write permission (canManageShipmentStatus,
+        // adminAccess.ts), not the read-only canViewShipmentRegistry this
+        // used to reuse — an accounts-type admin session could otherwise
+        // update any shipment's status directly, even though the whole
+        // Shipment Registry tab (and its only client-side call site for
+        // this route, the shipment details modal) is hidden from them.
         return res.status(403).json({ error: "Accounts-role admins cannot update shipment status." });
       }
 
-      const previousStatus = item.status;
-      item.status = status as ShipmentStatus;
-      item.updatedAt = new Date().toISOString();
-
-      const labelMap: Record<string, { en: string; tr: string; ar: string }> = {
-        'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
-        'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
-        'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
-        'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
-        'Loaded': { en: "Cargo Loaded", tr: "Yükleme Tamamlandı", ar: "تم التحميل والتعبئة" },
-        'In Transit': { en: "On Road (Transit)", tr: "Taşıma Aşamasında", ar: "في الطريق (ترانزيت)" },
-        'Border Crossing': { en: "Border Processing", tr: "Sınır Geçişinde", ar: "اجراءات المعبر الحدودي" },
-        'Customs Clearance': { en: "Customs Inspection", tr: "Gümrük İşlemlerinde", ar: "التخليص الجمركي" },
-        'Arrived': { en: "Arrived at Destination", tr: "Varış Noktasına Ulaştı", ar: "وصلت إلى الوجهة" },
-        'Delivered': { en: "Shipment Delivered", tr: "Teslim Edildi", ar: "تم التسليم" },
-        'Closed': { en: "Shipment Closed & Invoiced", tr: "Kapatıldı ve Faturalandırıldı", ar: "مغلق ومسيرة الفواتير" },
-        // Sea status translations
-        'Booking Confirmed': { en: "Booking Confirmed", tr: "Rezervasyon Onaylandı", ar: "تأكيد الحجز" },
-        'Container Released': { en: "Container Released", tr: "Konteyner Serbest Bırakıldı", ar: "إفراج الحاوية" },
-        'Loaded on Vessel': { en: "Loaded on Vessel", tr: "Gemiye Yüklendi", ar: "تم الشحن على السفينة" },
-        'Vessel Departed': { en: "Vessel Departed", tr: "Gemi Hareket Etti", ar: "مغادرة السفينة" },
-        'Arrived at Port': { en: "Arrived at Port", tr: "Limana Ulaştı", ar: "الوصول إلى الميناء" },
-        'Released': { en: "Released from terminal", tr: "Terminalden Çekildi", ar: "الإفراج من المحطة" },
-        'Out for Delivery': { en: "Out for final delivery", tr: "Dağıtıma Çıktı", ar: "خروج للتوصيل النهائي" },
-        'Completed': { en: "Completed & Closed", tr: "Tamamlandı ve Kapatıldı", ar: "مكتمل ومغلق" },
-        // Air status translations
-        'Cargo Received': { en: "Cargo Received", tr: "Kargo Teslim Alındı", ar: "تم استلام الشحنة" },
-        'Security Check Completed': { en: "Security Screening Approved", tr: "Güvenlik Taraması Onaylandı", ar: "الفحص الأمني والرقابي" },
-        'Departed Airport': { en: "Flight Departed", tr: "Uçak Kalkış Yaptı", ar: "إقلاع الطائرة" },
-        'Arrived Airport': { en: "Arrived at Airport Hub", tr: "Havalimanı Terminaline Ulaştı", ar: "الوصول إلى المطار" }
-      };
-
-      const labels = labelMap[status as ShipmentStatus] || labelMap['In Transit'];
-
-      item.timeline.push({
-        timestamp: new Date().toISOString(),
-        status: status as ShipmentStatus,
-        labelEn: labels.en,
-        labelTr: labels.tr,
-        labelAr: labels.ar,
-        detailsEn: remarksDesc || `Status updated from ${previousStatus} to ${status} by ${updaterName || 'System'}.`,
-        detailsTr: remarksDesc || `Durum ${updaterName || 'Sistem'} tarafından ${previousStatus} seviyesinden ${status} seviyesine çekildi.`,
-        detailsAr: remarksDesc || `تم تحديث الحالة من ${previousStatus} إلى ${status} بواسطة ${updaterName || 'النظام'}.`
-      });
-
-      // Handle delivery statistics
-      if (status === "Delivered") {
-        const dDocRef = doc(db, "drivers", item.assignedDriverId);
-        const dDoc = await getDoc(dDocRef);
-        if (dDoc.exists()) {
-          const driver = dDoc.data() as Driver;
-          driver.activeShipmentsCount = Math.max(0, driver.activeShipmentsCount - 1);
-          driver.completedShipmentsCount += 1;
-          await setDoc(dDocRef, driver);
-        }
+      // PR #111 review (Delivered/Closed terminal & chat rules): closing a
+      // shipment (Land's "Closed", Sea/Air's "Completed" — see
+      // getClosingStatusForFreightMode, shipmentStatusTransitions.ts) is
+      // reserved for authorized internal MARAS staff, never a driver or
+      // customer/public session, regardless of whether the client-side
+      // control happens to expose it. freightType is never changed by any
+      // route, so the pre-read `item.freightType` is safe to use here.
+      // This is a real server-side authorization gate, not just a UI
+      // omission — the same canManageShipmentStatus check every other
+      // admin status change above already requires (never
+      // canViewShipmentRegistry — see that function's own header comment).
+      if (
+        isShipmentClosed(requestedStatus, item.freightType) &&
+        !(req.session!.role === "admin" && canManageShipmentStatus(req.session))
+      ) {
+        return res.status(403).json({ error: "Only authorized MARAS staff may close a shipment." });
       }
 
-      // Notify customer watchers of status update
-      await notifyCustomerWatchers(
-        item,
-        status === "Delivered" ? "delivery" : "status_update",
-        `Shipment Status Updated: ${status}`,
-        `Good day, your shipment #${item.shipmentNumber} status is now: ${status}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
-      );
+      // PR #111 review (forward-only status transitions): validated and
+      // built entirely inside applyNarrowShipmentUpdate's mutate callback,
+      // from `current` — that call's own fresh read (the Firestore
+      // transaction's live document, or the memory-fallback's live array
+      // entry) — never from the pre-read `item` above. If another status
+      // update committed between this request's initial read and now, this
+      // runs against that committed result, not stale data (requirement:
+      // "revalidate the transition inside the transaction using the
+      // transaction's current shipment"). isDriverAssignmentRejection is
+      // the one deliberate, narrowly-scoped exception to forward-only —
+      // see its own header comment (shipmentStatusTransitions.ts).
+      let updatedItem: Shipment;
+      try {
+        updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+          if (!isDriverAssignmentRejection(current.status, requestedStatus)) {
+            const transition = validateShipmentStatusTransition(current.status, requestedStatus, current.freightType);
+            if (!transition.ok) {
+              throw new ShipmentStatusTransitionError(current.status, requestedStatus, transition.allowedNextStatuses, transition.reason!);
+            }
+          }
 
-      await setDoc(sDocRef, item);
+          const labels = getShipmentStatusLabel(requestedStatus);
+          const nowIso = new Date().toISOString();
+          return {
+            ...current,
+            status: requestedStatus as ShipmentStatus,
+            timeline: [
+              ...current.timeline,
+              {
+                timestamp: nowIso,
+                status: requestedStatus as ShipmentStatus,
+                labelEn: labels.en,
+                labelTr: labels.tr,
+                labelAr: labels.ar,
+                detailsEn: remarksDesc || `Status updated from ${current.status} to ${requestedStatus} by ${updaterName || 'System'}.`,
+                detailsTr: remarksDesc || `Durum ${updaterName || 'Sistem'} tarafından ${current.status} seviyesinden ${requestedStatus} seviyesine çekildi.`,
+                detailsAr: remarksDesc || `تم تحديث الحالة من ${current.status} إلى ${requestedStatus} بواسطة ${updaterName || 'النظام'}.`
+              },
+            ],
+            updatedAt: nowIso,
+          };
+        });
+      } catch (err) {
+        if (err instanceof ShipmentStatusTransitionError) {
+          // No document modification, no notification, no audit entry —
+          // the transaction's mutate callback threw before building or
+          // writing anything.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentStatus: err.currentStatus,
+            requestedStatus: err.requestedStatus,
+            allowedNextStatuses: err.allowedNextStatuses,
+          });
+        }
+        throw err;
+      }
 
-      await pushNotification(
-        item.id,
-        item.shipmentNumber,
-        status === "Accepted" ? "acceptance" : (status === "Delivered" ? "delivery" : "status_update"),
-        `Status Update: ${status}`,
-        `Durum Güncellemesi: ${status}`,
-        `تحديث الحالة: ${status}`,
-        `Shipment ${item.shipmentNumber} is now ${status}.`,
-        `Sevkiyat ${item.shipmentNumber} şu anda ${status} konumunda.`,
-        `الشحنة رقم ${item.shipmentNumber} الآن هي في حالة [${status}].`
-      );
+      // Everything below only runs after a successful, committed status
+      // change — never on a rejected transition (409 above), a permission
+      // denial, or a transaction/infrastructure failure. PR #111 review
+      // (post-commit response semantics): the driver-stat cache update and
+      // customer notification used to run BEFORE the commit, against the
+      // pre-read `item` — meaning they'd already have fired even for a
+      // transition later rejected as invalid. Both are now strictly
+      // post-commit and built from `updatedItem` (the committed result),
+      // alongside the notification/audit tasks already fixed here in the
+      // prior review round.
+      const sideEffectTasks: ShipmentSideEffectTask[] = [];
 
-      await logActivity(
-        item.id,
-        item.shipmentNumber,
-        updaterName || role || "System",
-        `Changed status of ${item.shipmentNumber} to ${status}`,
-        `${item.shipmentNumber} sevkiyat durumunu ${status} olarak güncelledi`,
-        `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
-      );
+      if (requestedStatus === "Delivered" && updatedItem.assignedDriverId) {
+        // Driver activeShipmentsCount is a derived, cached tally — not the
+        // authoritative record (same reasoning as PUT /api/shipments/:id's
+        // own driver-stat tasks). If this fails, the status change itself
+        // is still correct; only this cached count can drift by one until
+        // a future successful update on either driver recomputes it.
+        sideEffectTasks.push({
+          name: "driver-stat-delivered-increment",
+          run: async () => {
+            const dDocRef = doc(db, "drivers", updatedItem.assignedDriverId);
+            const dDoc = await getDoc(dDocRef);
+            if (dDoc.exists()) {
+              const driver = dDoc.data() as Driver;
+              driver.activeShipmentsCount = Math.max(0, driver.activeShipmentsCount - 1);
+              driver.completedShipmentsCount += 1;
+              await setDoc(dDocRef, driver);
+            }
+          },
+        });
+      }
 
-      res.json(buildShipmentViewForRole(item, req.session!));
+      sideEffectTasks.push({
+        name: "customer-watcher-notification",
+        run: () => notifyCustomerWatchers(
+          updatedItem,
+          requestedStatus === "Delivered" ? "delivery" : "status_update",
+          `Shipment Status Updated: ${requestedStatus}`,
+          `Good day, your shipment #${updatedItem.shipmentNumber} status is now: ${requestedStatus}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
+        ),
+      });
+
+      sideEffectTasks.push({
+        name: "status-update-notification",
+        run: () => pushNotification(
+          updatedItem.id,
+          updatedItem.shipmentNumber,
+          requestedStatus === "Accepted" ? "acceptance" : (requestedStatus === "Delivered" ? "delivery" : "status_update"),
+          `Status Update: ${requestedStatus}`,
+          `Durum Güncellemesi: ${requestedStatus}`,
+          `تحديث الحالة: ${requestedStatus}`,
+          `Shipment ${updatedItem.shipmentNumber} is now ${requestedStatus}.`,
+          `Sevkiyat ${updatedItem.shipmentNumber} şu anda ${requestedStatus} konumunda.`,
+          `الشحنة رقم ${updatedItem.shipmentNumber} الآن هي في حالة [${requestedStatus}].`
+        ),
+      });
+
+      sideEffectTasks.push({
+        name: "audit-log",
+        run: () => logActivity(
+          updatedItem.id,
+          updatedItem.shipmentNumber,
+          updaterName || role || "System",
+          `Changed status of ${updatedItem.shipmentNumber} to ${requestedStatus}`,
+          `${updatedItem.shipmentNumber} sevkiyat durumunu ${requestedStatus} olarak güncelledi`,
+          `تغيير حالة الشحنة برقم ${updatedItem.shipmentNumber} إلى ${requestedStatus}`
+        ),
+      });
+
+      const sideEffectFailures = await runShipmentUpdateSideEffects(sideEffectTasks);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[status-update] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the status save itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
+
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update status" });
+    }
+  });
+
+  // 5a. Admin Status Override — the deliberate, separate exceptional-
+  // correction workflow (PR #111 review, requirement 6: "Admin Status
+  // Override must remain separate from the normal sequential status
+  // endpoint"). Unlike PUT /api/shipments/:id/status above, this is not
+  // forward-only — an authorized operational admin may correct a status
+  // backward (or to any other valid status in the shipment's own freight
+  // workflow) when an operational mistake occurred. It replaces the old
+  // free-form `data.status` field that used to be accepted by the broad
+  // edit route (PUT /api/shipments/:id) with no freight validation, no
+  // required reason, and no terminal-reopen lock — that field is no longer
+  // read there at all (see buildUpdatedShipment's own comment); this is now
+  // the only way to correct a shipment's status outside forward-only
+  // progression.
+  app.put("/api/shipments/:id/status-override", requireAuth, async (req, res) => {
+    try {
+      const { status, correctionReason, updaterName } = req.body;
+      const requestedStatus: string = status;
+      if (typeof requestedStatus !== "string" || !requestedStatus.trim()) {
+        return res.status(400).json({ error: "status is required" });
+      }
+      const reason = parseStatusOverrideReason(correctionReason);
+      if (!reason) {
+        return res.status(400).json({ error: "A correction reason is required for a status override." });
+      }
+
+      // PR #111 review (Admin Status Override authorization correction):
+      // canManageShipmentStatus (Super Admin / Operations Admin only) —
+      // never canViewShipmentRegistry, a read permission. Driver, client,
+      // Accounts Admin, and any other admin adminType are all rejected
+      // here regardless of what a manually-crafted request sends.
+      if (!canManageShipmentStatus(req.session)) {
+        return res.status(403).json({ error: "Only authorized MARAS staff may override shipment status." });
+      }
+
+      const shipmentId = req.params.id;
+      const sDocRef = doc(db, "shipments", shipmentId);
+      const sDoc = await getDoc(sDocRef);
+      if (!sDoc.exists()) {
+        return res.status(404).json({ error: "Shipment not found" });
+      }
+
+      // PR #111 review (forward-only status transitions / Admin Status
+      // Override, requirement 10 & 7): validated and built entirely inside
+      // applyNarrowShipmentUpdate's mutate callback, from `current` — that
+      // call's own fresh read — never a pre-transaction snapshot, so
+      // concurrent history can never be lost and the terminal-lock check
+      // always runs against the real current status. Rejects unknown
+      // statuses, statuses from another freight workflow, and any attempt
+      // to reopen an already-closed/completed shipment (no reopening in
+      // this PR — see validateShipmentStatusOverride's own header comment).
+      let capturedPreviousStatus: ShipmentStatus | null = null;
+      let updatedItem: Shipment;
+      try {
+        updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+          const validation = validateShipmentStatusOverride(current.status, requestedStatus, current.freightType);
+          if (!validation.ok) {
+            throw new ShipmentStatusOverrideError(current.status, requestedStatus, validation.reason!);
+          }
+
+          capturedPreviousStatus = current.status;
+          const labels = getShipmentStatusLabel(requestedStatus);
+          const nowIso = new Date().toISOString();
+          return {
+            ...current,
+            status: requestedStatus as ShipmentStatus,
+            timeline: [
+              ...current.timeline,
+              {
+                timestamp: nowIso,
+                status: requestedStatus as ShipmentStatus,
+                labelEn: labels.en,
+                labelTr: labels.tr,
+                labelAr: labels.ar,
+                // PR #111 review (requirement 9): the correction reason is
+                // deliberately NOT included here — this timeline is
+                // returned unfiltered to driver/client views
+                // (buildShipmentViewForRole) and to the public share view
+                // (buildSecureShareView, both spread `timeline` through
+                // unredacted). Only a generic, customer/public-safe label
+                // goes here; the reason is recorded exclusively in the
+                // internal audit log below (logActivity — GET /api/logs is
+                // super-admin-only, never customer/public-reachable).
+                detailsEn: `Status corrected to ${labels.en} by administrative review.`,
+                detailsTr: `Durum, yönetimsel inceleme ile ${labels.tr} olarak düzeltildi.`,
+                detailsAr: `تم تصحيح الحالة إلى ${labels.ar} عبر مراجعة إدارية.`,
+              },
+            ],
+            updatedAt: nowIso,
+          };
+        });
+      } catch (err) {
+        if (err instanceof ShipmentStatusOverrideError) {
+          // No document modification, no notification, no audit entry —
+          // the transaction's mutate callback threw before building or
+          // writing anything.
+          return res.status(409).json({
+            code: err.code,
+            error: err.message,
+            currentStatus: err.currentStatus,
+            requestedStatus: err.requestedStatus,
+            reason: err.reason,
+          });
+        }
+        throw err;
+      }
+
+      // PR #111 review (requirement 8 & 10): the audit entry is the
+      // authoritative record of this administrative correction — actor,
+      // previous status, new status, shipmentNumber, timestamp (via
+      // logActivity's own timestamp field), and the full reason text
+      // (safe here: this collection is never exposed to customer/driver/
+      // public views). Explicitly labeled "ADMINISTRATIVE CORRECTION" so
+      // it reads unambiguously as an override, not a normal progression
+      // entry, in the audit trail. Runs strictly post-commit — never on a
+      // rejected/unauthorized attempt above.
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            updatedItem.id,
+            updatedItem.shipmentNumber,
+            updaterName || req.session!.id || "Admin",
+            `ADMINISTRATIVE CORRECTION: shipment ${updatedItem.shipmentNumber} status corrected from "${capturedPreviousStatus}" to "${requestedStatus}". Reason: ${reason}`,
+            `YÖNETİMSEL DÜZELTME: ${updatedItem.shipmentNumber} numaralı sevkiyatın durumu "${capturedPreviousStatus}" konumundan "${requestedStatus}" konumuna düzeltildi. Sebep: ${reason}`,
+            `تصحيح إداري: تم تصحيح حالة الشحنة رقم ${updatedItem.shipmentNumber} من "${capturedPreviousStatus}" إلى "${requestedStatus}". السبب: ${reason}`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[status-override] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the override itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
+
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to override shipment status" });
     }
   });
 
@@ -4400,46 +4914,61 @@ async function startServer() {
         return res.status(404).json({ error: "Shipment not found" });
       }
 
-      const item = sDoc.data() as Shipment;
-      
-      if (!item.customerEmails) {
-        item.customerEmails = [];
-      }
-
       const cleanEmail = email.trim().toLowerCase();
-      if (!item.customerEmails.includes(cleanEmail)) {
-        item.customerEmails.push(cleanEmail);
-      }
-
-      if (!item.customerNotificationHistory) {
-        item.customerNotificationHistory = [];
-      }
-
-      // Add subscription confirmation alert entry
       const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-      item.customerNotificationHistory.push({
-        id: alertId,
-        timestamp: new Date().toISOString(),
-        type: "setup",
-        title: "Subscribed Successfully",
-        message: `Your alert subscription for shipment #${item.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
-        email: cleanEmail,
-        channel: channel || "email"
+
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT customerEmails/customerNotificationHistory actually are
+      // (not a pre-read snapshot), atomically. Revision-PRESERVING: the
+      // human edit form's own merge (buildUpdatedShipment) never overwrites
+      // these fields, so a customer subscribing to alerts must not make an
+      // unrelated, already-open admin edit form 409 on its next save.
+      const updatedItem = await applyIsolatedShipmentUpdate(shipmentId, (current) => {
+        const customerEmails = current.customerEmails ? [...current.customerEmails] : [];
+        if (!customerEmails.includes(cleanEmail)) {
+          customerEmails.push(cleanEmail);
+        }
+        const customerNotificationHistory = current.customerNotificationHistory ? [...current.customerNotificationHistory] : [];
+        customerNotificationHistory.push({
+          id: alertId,
+          timestamp: new Date().toISOString(),
+          type: "setup",
+          title: "Subscribed Successfully",
+          message: `Your alert subscription for shipment #${current.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
+          email: cleanEmail,
+          channel: channel || "email"
+        });
+        return { ...current, customerEmails, customerNotificationHistory };
       });
 
-      await setDoc(sDocRef, item);
+      // PR #111 review (post-commit response semantics re-audit): the
+      // subscription append above is already safely committed — a
+      // logActivity failure afterward must not make this request falsely
+      // report "Failed to join notification server registration scheme".
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            updatedItem.id,
+            updatedItem.shipmentNumber,
+            "Customer (Tracking Subscription)",
+            `Subscribed to real-time cargo updates`,
+            `Canlı kargo güncellemelerine abone oldu`,
+            `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[subscribe-customer] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the subscription itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
-      await logActivity(
-        item.id,
-        item.shipmentNumber,
-        "Customer (Tracking Subscription)",
-        `Subscribed to real-time cargo updates`,
-        `Canlı kargo güncellemelerine abone oldu`,
-        `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
-      );
-
-      res.json(buildShipmentViewForRole(item, req.session!));
+      res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error("Error subscribing customer: ", err);
       res.status(500).json({ error: "Failed to join notification server registration scheme" });
     }
@@ -4720,6 +5249,26 @@ async function startServer() {
       }
       const shipmentItem = sDoc.data() as Shipment;
 
+      // PR #111 review (Delivered/Closed terminal & chat rules): "Closed"
+      // (Land) / "Completed" (Sea/Air — see isShipmentClosed,
+      // shipmentStatusTransitions.ts) is the only status that locks
+      // shipment communication. Reaching "Delivered" must NOT close chat —
+      // Admin/Driver still routinely exchange CMR/POD corrections, final
+      // remarks, and payment follow-up after delivery — so this checks the
+      // freight-mode-appropriate closing status specifically, not any
+      // "finished/terminal-looking" status. Rejected before any message,
+      // unread-fanout record, or document is created, and before any
+      // notification fires — every channel (admin, driver, customer) goes
+      // through this one route, so this is the single enforcement point
+      // for all of them.
+      if (isShipmentClosed(shipmentItem.status, shipmentItem.freightType)) {
+        return res.status(409).json({
+          code: "SHIPMENT_CHAT_CLOSED",
+          error: "This shipment is closed. New messages and attachments can no longer be sent.",
+          shipmentStatus: shipmentItem.status,
+        });
+      }
+
       const newMessage: ChatMessage = {
         id: `msg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         shipmentId,
@@ -4770,35 +5319,62 @@ async function startServer() {
           isSharedExternally: resolveNewDocumentSharedExternally()
         };
 
-        shipmentItem.documents.push(newDoc);
-        await setDoc(sDocRef, shipmentItem);
+        // Shipment-update lost-update race fix (PR #111 review — over-broad
+        // revision policy correction): appends to whatever the document's
+        // CURRENT documents array actually is (not the earlier pre-read
+        // shipmentItem), atomically. Revision-PRESERVING: the human edit
+        // form's own merge (buildUpdatedShipment) never overwrites
+        // `documents`, so a chat attachment must not make an unrelated,
+        // already-open admin edit form 409 on its next save.
+        await applyIsolatedShipmentUpdate(shipmentId, (current) => ({
+          ...current,
+          documents: [...current.documents, newDoc],
+        }));
 
-        await logActivity(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          senderName || sender,
-          `Uploaded document [${newDoc.name}] through Chat`,
-          `Mesajlaşma paneli üzerinden [${newDoc.name}] belgesini yükledi`,
-          `تحميل المستند [${newDoc.name}] من خلال المحادثة`
-        );
-
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "doc_upload",
-          "New Document Received",
-          "Yeni Belge Alındı",
-          "تم استلام مستند جديد",
-          `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
-          `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
-          `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`,
-          // PR #44: this branch is client_admin-only (shouldSaveChatFileAsShipmentDocument
-          // above), so pass the channel through — without it, doc_upload's default
-          // (unrestricted) recipient rule would also page the driver for a purely
-          // client<->admin exchange.
-          undefined,
-          channel
-        );
+        // PR #111 review (post-commit response semantics re-audit): the
+        // chat message (commitChatMessageWithUnreadFanout above) and the
+        // document append above are both already safely committed at this
+        // point — logActivity/pushNotification failing afterward must not
+        // make this request falsely report "Failed to post chat message".
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "audit-log",
+            run: () => logActivity(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              senderName || sender,
+              `Uploaded document [${newDoc.name}] through Chat`,
+              `Mesajlaşma paneli üzerinden [${newDoc.name}] belgesini yükledi`,
+              `تحميل المستند [${newDoc.name}] من خلال المحادثة`
+            ),
+          },
+          {
+            name: "doc-upload-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "doc_upload",
+              "New Document Received",
+              "Yeni Belge Alındı",
+              "تم استلام مستند جديد",
+              `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
+              `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
+              `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`,
+              // PR #44: this branch is client_admin-only (shouldSaveChatFileAsShipmentDocument
+              // above), so pass the channel through — without it, doc_upload's default
+              // (unrestricted) recipient rule would also page the driver for a purely
+              // client<->admin exchange.
+              undefined,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message and document upload already succeeded and are not retried.`,
+            failure.error
+          );
+        }
       } else if (type === "file" && fileUrl) {
         // internal_staff/driver_admin attachment, or a customer/client-staff
         // upload on client_admin (see shouldSaveChatFileAsShipmentDocument,
@@ -4807,33 +5383,61 @@ async function startServer() {
         // and notified via the same channel-gated "chat" notification path
         // as a text message rather than the unfiltered "doc_upload"
         // notification.
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "chat",
-          `Message: ${senderName}`,
-          `Mesaj: ${senderName}`,
-          `رسالة من: ${senderName}`,
-          "sent an attachment",
-          "dosya gönderildi",
-          "أرسل ملفًا جديًا",
-          req.session!.id,
-          channel
-        );
+        //
+        // PR #111 review (post-commit response semantics re-audit): the
+        // chat message is already committed above — a notification failure
+        // here must not falsely report "Failed to post chat message".
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "chat-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "chat",
+              `Message: ${senderName}`,
+              `Mesaj: ${senderName}`,
+              `رسالة من: ${senderName}`,
+              "sent an attachment",
+              "dosya gönderildi",
+              "أرسل ملفًا جديًا",
+              req.session!.id,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message already succeeded and is not retried.`,
+            failure.error
+          );
+        }
       } else {
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "chat",
-          `Message: ${senderName}`,
-          `Mesaj: ${senderName}`,
-          `رسالة من: ${senderName}`,
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
-          req.session!.id,
-          channel
-        );
+        // PR #111 review (post-commit response semantics re-audit): same
+        // reasoning as the two branches above.
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "chat-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "chat",
+              `Message: ${senderName}`,
+              `Mesaj: ${senderName}`,
+              `رسالة من: ${senderName}`,
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
+              req.session!.id,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message already succeeded and is not retried.`,
+            failure.error
+          );
+        }
       }
 
       res.status(201).json(newMessage);
@@ -4894,20 +5498,45 @@ async function startServer() {
         isSharedExternally: resolveNewDocumentSharedExternally(isSharedExternally)
       };
 
-      shipmentItem.documents.push(newDoc);
-      await setDoc(sDocRef, shipmentItem);
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT documents array actually is (not the pre-read
+      // shipmentItem), atomically. Revision-PRESERVING: the human edit
+      // form's own merge (buildUpdatedShipment) never overwrites
+      // `documents`, so a direct document upload must not make an
+      // unrelated, already-open admin edit form 409 on its next save.
+      await applyIsolatedShipmentUpdate(shipmentId, (current) => ({
+        ...current,
+        documents: [...current.documents, newDoc],
+      }));
 
-      await logActivity(
-        shipmentId,
-        shipmentItem.shipmentNumber,
-        uploadedBy || "Admin Panel",
-        `Uploaded file ${newDoc.name} in Document Center`,
-        `Belge Merkezine ${newDoc.name} evrakını yükledi`,
-        `تحميل ملف ${newDoc.name} في مركز المستندات للشحنة`
-      );
+      // PR #111 review (post-commit response semantics re-audit): the
+      // document append above is already safely committed — a logActivity
+      // failure afterward must not make this request falsely report
+      // "Failed to upload document".
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            shipmentId,
+            shipmentItem.shipmentNumber,
+            uploadedBy || "Admin Panel",
+            `Uploaded file ${newDoc.name} in Document Center`,
+            `Belge Merkezine ${newDoc.name} evrakını yükledi`,
+            `تحميل ملف ${newDoc.name} في مركز المستندات للشحنة`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[documents] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the document upload itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.status(201).json(newDoc);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to upload document" });
     }
@@ -4925,10 +5554,23 @@ async function startServer() {
       if (!docItem) return res.status(404).json({ error: "Document not found" });
 
       const { isSharedExternally } = req.body;
-      docItem.isSharedExternally = isSharedExternally;
-      await setDoc(sDocRef, shipment);
-      res.json(docItem);
+
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): toggles the flag on whatever the
+      // document's CURRENT documents array actually is (not the pre-read
+      // shipment), atomically. Revision-PRESERVING: the human edit form's
+      // own merge (buildUpdatedShipment) never overwrites `documents`, so a
+      // visibility toggle must not make an unrelated, already-open admin
+      // edit form 409 on its next save.
+      const updated = await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
+        ...current,
+        documents: current.documents.map(d => d.id === req.params.docId ? { ...d, isSharedExternally } : d),
+      }));
+      const updatedDocItem = updated.documents.find(d => d.id === req.params.docId) ?? { ...docItem, isSharedExternally };
+
+      res.json(updatedDocItem);
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to toggle document visibility" });
     }
@@ -4946,23 +5588,35 @@ async function startServer() {
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) return res.status(404).json({ error: "Shipment not found" });
 
-      const shipment = sDoc.data() as Shipment;
       const { isLinkShared, shareIncludeDocuments, shareIncludePhotos } = req.body;
 
-      if (isLinkShared !== undefined) shipment.isLinkShared = isLinkShared;
-      if (shareIncludeDocuments !== undefined) shipment.shareIncludeDocuments = shareIncludeDocuments;
-      if (shareIncludePhotos !== undefined) shipment.shareIncludePhotos = shareIncludePhotos;
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): applies these field changes onto
+      // whatever the document's CURRENT state actually is (not the
+      // pre-read shipment), atomically. Revision-PRESERVING: the human
+      // edit form's own merge (buildUpdatedShipment) never overwrites
+      // isLinkShared/shareIncludeDocuments/shareIncludePhotos/shareToken,
+      // so a share-settings change must not make an unrelated,
+      // already-open admin edit form 409 on its next save.
+      const updated = await applyIsolatedShipmentUpdate(req.params.id, (current) => {
+        const next: Shipment = { ...current };
+        if (isLinkShared !== undefined) next.isLinkShared = isLinkShared;
+        if (shareIncludeDocuments !== undefined) next.shareIncludeDocuments = shareIncludeDocuments;
+        if (shareIncludePhotos !== undefined) next.shareIncludePhotos = shareIncludePhotos;
 
-      // Migrate away from old guessable tokens, and ensure any shipment that
-      // is (or becomes) shared has a strong, unguessable token. This rotates
-      // legacy "token-100x" values the moment an admin touches sharing.
-      if (isLegacyShareToken(shipment.shareToken)) {
-        shipment.shareToken = generateShareToken();
-      }
+        // Migrate away from old guessable tokens, and ensure any shipment
+        // that is (or becomes) shared has a strong, unguessable token. This
+        // rotates legacy "token-100x" values the moment an admin touches
+        // sharing.
+        if (isLegacyShareToken(next.shareToken)) {
+          next.shareToken = generateShareToken();
+        }
+        return next;
+      });
 
-      await setDoc(sDocRef, shipment);
-      res.json(buildShipmentViewForRole(shipment, req.session!));
+      res.json(buildShipmentViewForRole(updated, req.session!));
     } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to configure share link settings" });
     }
@@ -5056,26 +5710,34 @@ async function startServer() {
       if (!shipment) return;
 
       const cleanEmail = email.trim().toLowerCase();
-      const customerEmails = Array.isArray(shipment.customerEmails) ? [...shipment.customerEmails] : [];
-      if (!customerEmails.includes(cleanEmail)) {
-        customerEmails.push(cleanEmail);
-      }
+      const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      const customerNotificationHistory = Array.isArray(shipment.customerNotificationHistory)
-        ? [...shipment.customerNotificationHistory]
-        : [];
-      customerNotificationHistory.push({
-        id: `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        timestamp: new Date().toISOString(),
-        type: "setup",
-        title: "Subscribed Successfully",
-        message: `Your alert subscription for shipment #${shipment.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
-        email: cleanEmail,
-        channel: "email",
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT customerEmails/customerNotificationHistory actually are
+      // (not the pre-read shipment), atomically. Revision-PRESERVING: the
+      // human edit form's own merge (buildUpdatedShipment) never overwrites
+      // these fields, so a public subscribe must not make an unrelated,
+      // already-open admin edit form 409 on its next save.
+      const updatedShipment = await applyIsolatedShipmentUpdate(shipment.id, (current) => {
+        const customerEmails = Array.isArray(current.customerEmails) ? [...current.customerEmails] : [];
+        if (!customerEmails.includes(cleanEmail)) {
+          customerEmails.push(cleanEmail);
+        }
+        const customerNotificationHistory = Array.isArray(current.customerNotificationHistory)
+          ? [...current.customerNotificationHistory]
+          : [];
+        customerNotificationHistory.push({
+          id: alertId,
+          timestamp: new Date().toISOString(),
+          type: "setup",
+          title: "Subscribed Successfully",
+          message: `Your alert subscription for shipment #${current.shipmentNumber} has been successfully verified. You will receive real-time updates directly.`,
+          email: cleanEmail,
+          channel: "email",
+        });
+        return { ...current, customerEmails, customerNotificationHistory };
       });
-
-      const updatedShipment = { ...shipment, customerEmails, customerNotificationHistory };
-      await setDoc(doc(db, "shipments", shipment.id), updatedShipment);
 
       // Return the same reduced "secure view" shape the public page already
       // expects from /api/share/:token, not the full internal record.

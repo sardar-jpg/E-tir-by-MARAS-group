@@ -12,6 +12,7 @@ import {
   mergeNewerChatMessages,
   prependOlderChatMessages,
 } from '../../lib/chatComposerState';
+import { isShipmentClosed } from '../../lib/shipmentStatusTransitions';
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from '../../lib/chatDisplay';
 import { encodePageCursor } from '../../lib/pagination';
 
@@ -282,7 +283,7 @@ export default function ChatCenter({
   // Distinguishes "the upload itself failed (message never sent)" from
   // "the upload succeeded but creating the chat message failed" — the two
   // cases in section 2/7 of the phase-1 requirements need different copy.
-  const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send'>('');
+  const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send' | 'closed'>('');
   const internalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Shortcut buttons (Shipment Details modal) preselect a shipment + channel.
@@ -298,6 +299,10 @@ export default function ChatCenter({
   const selectedShipment = selectedShipmentId
     ? shipments.find((s) => s.id === selectedShipmentId) ?? null
     : null;
+  // PR #111 review (Delivered/Closed terminal & chat rules): locks only at
+  // the freight-mode-appropriate closing status ("Closed" for Land,
+  // "Completed" for Sea/Air) — reaching "Delivered" must NOT lock chat.
+  const isSelectedShipmentClosed = selectedShipment ? isShipmentClosed(selectedShipment.status, selectedShipment.freightType) : false;
 
   // Loads the selected channel's real messages from the same admin-scoped
   // GET endpoint the existing chat drawer uses (App.tsx). For driver_admin
@@ -551,7 +556,7 @@ export default function ChatCenter({
   const handleSendInternalMessage = async () => {
     const text = internalMessageText.trim();
     if (!selectedShipment) return;
-    if (!canSubmitChatMessage({ text, hasAttachment: Boolean(internalFile), isSending: isSendingInternal })) return;
+    if (!canSubmitChatMessage({ text, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })) return;
     setIsSendingInternal(true);
     setInternalSendError('');
     try {
@@ -618,10 +623,23 @@ export default function ChatCenter({
         resetInternalAttachment();
         setInternalSendError('');
       } else {
-        // Upload (if any) already succeeded at this point — only the
-        // message creation failed. internalUploadedFileUrl stays cached so
-        // a retry reuses it instead of uploading the file again.
-        setInternalSendError('send');
+        // PR #111 review (Delivered/Closed terminal & chat rules): the
+        // shipment was closed (by another session) since this list last
+        // refreshed — a future refresh of the `shipments` prop will hide
+        // this composer entirely (isSelectedShipmentClosed); until then,
+        // this specific error avoids the misleading "just retry" framing
+        // the generic send-failure message uses, since a retry can never
+        // succeed once closed.
+        let closedBody: any = null;
+        try { closedBody = await res.json(); } catch {}
+        if (res.status === 409 && closedBody?.code === 'SHIPMENT_CHAT_CLOSED') {
+          setInternalSendError('closed');
+        } else {
+          // Upload (if any) already succeeded at this point — only the
+          // message creation failed. internalUploadedFileUrl stays cached so
+          // a retry reuses it instead of uploading the file again.
+          setInternalSendError('send');
+        }
       }
     } catch {
       setInternalSendError('send');
@@ -962,13 +980,24 @@ export default function ChatCenter({
               )}
             </div>
 
-            {activeChannel === 'internal_staff' && (
+            {activeChannel === 'internal_staff' && isSelectedShipmentClosed && (
+              // PR #111 review (Delivered/Closed terminal & chat rules):
+              // locks only at the freight-mode-appropriate closing status —
+              // never at "Delivered".
+              <div className="border-t border-slate-200 p-3 text-center text-[11px] font-semibold text-slate-500">
+                This shipment is closed. Chat is now read-only.
+              </div>
+            )}
+            {activeChannel === 'internal_staff' && !isSelectedShipmentClosed && (
               <div className="border-t border-slate-200">
                 {internalSendError === 'upload' && (
                   <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.uploadFailedError}</p>
                 )}
                 {internalSendError === 'send' && (
                   <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.sendFailedError}</p>
+                )}
+                {internalSendError === 'closed' && (
+                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">This shipment is closed. Messages can no longer be sent.</p>
                 )}
                 {internalFile && (
                   <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
@@ -1044,7 +1073,7 @@ export default function ChatCenter({
                   />
                   <button
                     type="submit"
-                    disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal })}
+                    disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })}
                     className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-3 rounded-lg transition-colors"
                   >
                     <Send className="w-3.5 h-3.5" />

@@ -258,3 +258,27 @@ export function resolveFullAdminStatus(
   if (session.adminType === "accounts") return 403;
   return 200;
 }
+
+/**
+ * PR #111 review (Admin Status Override / role authorization correction):
+ * shipment status management — normal admin progression
+ * (PUT /api/shipments/:id/status), the Admin Status Override correction
+ * workflow (PUT /api/shipments/:id/status-override), and the
+ * Delivered -> Closed/Completed closing transition — is a distinct,
+ * dedicated permission from canViewShipmentRegistry above. Viewing the
+ * shipment registry is a read permission; changing or closing a shipment
+ * is a write/operational permission, and must never be authorized by
+ * reusing a read check, even though both happen to allow exactly the same
+ * two adminTypes today — a future change to either concept must not
+ * accidentally couple them.
+ *
+ * Only Super Admin and Operations Admin may manage shipment status.
+ * Accounts Admin, any other admin adminType, and every non-admin role
+ * (driver, client, unauthenticated/public) are rejected.
+ */
+export function canManageShipmentStatus(
+  session: { role?: string; adminType?: AdminType } | null | undefined
+): boolean {
+  if (!session || session.role !== "admin") return false;
+  return session.adminType === "super" || session.adminType === "operation";
+}

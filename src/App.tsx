@@ -22,6 +22,7 @@ import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, Fol
 import { apiFetch } from "./lib/api";
 import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
 import { canSubmitChatMessage, planAttachmentSendForShipment, mergeNewerChatMessages } from "./lib/chatComposerState";
+import { isShipmentClosed } from "./lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
 import { encodePageCursor } from "./lib/pagination";
 import { isValidLocalSessionFastPath } from "./lib/localSessionFastPath";
@@ -547,6 +548,13 @@ export default function App() {
 
   // 3. Document/Attachment Chat context
   const [chatShipment, setChatShipment] = useState<Shipment | null>(null);
+  // PR #111 review (Delivered/Closed terminal & chat rules): the admin
+  // drawer previously had no shipment-status-based lock at all — an admin
+  // could keep messaging a shipment indefinitely, even one already closed.
+  // Locks only at the freight-mode-appropriate closing status ("Closed"
+  // for Land, "Completed" for Sea/Air) — reaching "Delivered" must NOT
+  // lock this drawer.
+  const isChatShipmentClosed = chatShipment ? isShipmentClosed(chatShipment.status, chatShipment.freightType) : false;
   const [chatDrawerTab, setChatDrawerTab] = useState<'messages' | 'attachments'>('messages');
   // BUG-03: which audience thread the admin drawer is showing/replying to.
   // Driver/admin dispatch chat and client/admin customer-service chat are
@@ -783,7 +791,7 @@ export default function App() {
     // this had no reentrancy protection at all, so a double-tap/double-
     // Enter could fire two POSTs before the first resolved.
     if (!chatShipment) return;
-    if (!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage })) return;
+    if (!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage, isLocked: isChatShipmentClosed })) return;
     setIsSendingAdminMessage(true);
     try {
       const res = await apiFetch(`/api/shipments/${chatShipment.id}/chat`, {
@@ -802,7 +810,20 @@ export default function App() {
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
       } else {
-        triggerToast("❌ Failed to send message. Please try again.");
+        // PR #111 review (Delivered/Closed terminal & chat rules): the
+        // shipment was closed (by another admin session) since this
+        // drawer last opened — sync the drawer's local status from the
+        // server's response so the composer locks to match immediately,
+        // rather than leaving it open for a retry the server will keep
+        // rejecting. Never auto-retried.
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        if (res.status === 409 && body?.code === "SHIPMENT_CHAT_CLOSED") {
+          triggerToast("❌ This shipment is closed. Messages can no longer be sent.");
+          setChatShipment((prev) => (prev ? { ...prev, status: body.shipmentStatus } : prev));
+        } else {
+          triggerToast("❌ Failed to send message. Please try again.");
+        }
       }
     } catch (e) {
       console.error(e);
@@ -904,6 +925,18 @@ export default function App() {
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
       } else {
+        // PR #111 review (Delivered/Closed terminal & chat rules): a
+        // closed shipment will keep rejecting this send no matter how
+        // many times it's retried — sync local status so the composer
+        // locks, and don't offer the misleading "retry" framing the
+        // generic failure messages below use.
+        let closedBody: any = null;
+        try { closedBody = await res.json(); } catch {}
+        if (res.status === 409 && closedBody?.code === "SHIPMENT_CHAT_CLOSED") {
+          triggerToast("❌ This shipment is closed. Documents can no longer be sent.");
+          setChatShipment((prev) => (prev ? { ...prev, status: closedBody.shipmentStatus } : prev));
+          return;
+        }
         // fix/chat-safety-reliability-phase1: preserve the draft (file
         // selection + name/category, and the cached uploaded URL if there
         // is one) on failure so the admin can retry without re-uploading —
@@ -1376,6 +1409,16 @@ export default function App() {
                 </div>
 
                 {/* Admin typing input bar */}
+                {/* PR #111 review (Delivered/Closed terminal & chat rules):
+                    this drawer previously had no shipment-status lock at
+                    all — replaced with a read-only banner once the
+                    shipment reaches its freight-mode-appropriate closing
+                    status (never at "Delivered", which must stay open). */}
+                {isChatShipmentClosed ? (
+                  <div className="p-4 bg-slate-950 border-t border-slate-900 text-center text-slate-500 text-xs font-semibold">
+                    This shipment is closed. Chat is now read-only.
+                  </div>
+                ) : (
                 <form onSubmit={handleSendAdminMessage} className="bg-slate-950 p-4 border-t border-slate-900 flex items-center gap-2 relative">
                   <button
                     type="button"
@@ -1411,13 +1454,14 @@ export default function App() {
 
                   <button
                     type="submit"
-                    disabled={!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage })}
+                    disabled={!canSubmitChatMessage({ text: chatMessageText, hasAttachment: false, isSending: isSendingAdminMessage, isLocked: isChatShipmentClosed })}
                     aria-label={lang === 'tr' ? 'Gönder' : lang === 'ar' ? 'إرسال' : 'Send message'}
                     className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-all cursor-pointer inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Send className="w-4 h-4 shrink-0" />
                   </button>
                 </form>
+                )}
               </>
             ) : (
               /* Shipment Document Viewer Tab with BULK DOWNLOAD */
