@@ -235,6 +235,95 @@ describe("PR #111 review — Blocker 1: a committed shipment update can never fa
   });
 });
 
+describe("PR #111 review — over-broad revision policy correction: writer classification per route", () => {
+  const STATUS_ROUTE = extractBetween(
+    'app.put("/api/shipments/:id/status", requireAuth, async (req, res) => {',
+    '// 5b. Subscribe Customer',
+  );
+  const SUBSCRIBE_CUSTOMER_ROUTE = extractBetween(
+    'app.post("/api/shipments/:id/subscribe-customer", requireShipmentAccess, async (req, res) => {',
+    '// 6. Get Chat Messages',
+  );
+  const CHAT_ROUTE = extractBetween(
+    'app.post("/api/shipments/:id/chat", requireShipmentAccess, async (req, res) => {',
+    '// 8. Upload Document Directly',
+  );
+  const DOCUMENTS_UPLOAD_ROUTE = extractBetween(
+    'app.post("/api/shipments/:id/documents", requireShipmentAccess, async (req, res) => {',
+    '// 9. Toggle Document Visibility',
+  );
+  const VISIBILITY_ROUTE = extractBetween(
+    'app.put("/api/shipments/:id/documents/:docId/visibility", requireFullAdmin, async (req, res) => {',
+    '// 10. Configure Sharing Page Link',
+  );
+  const SHARE_ROUTE = extractBetween(
+    'app.post("/api/shipments/:id/share", requireShipmentAccess, async (req, res) => {',
+    'app.get("/api/share/:token", async (req, res) => {',
+  );
+  const PUBLIC_SUBSCRIBE_ROUTE = extractBetween(
+    'app.post("/api/share/:token/subscribe", async (req, res) => {',
+    'app.post("/api/login"',
+  );
+  const DISTANCE_MATRIX_ROUTE = extractBetween(
+    'app.get("/api/shipments/:id/distance-matrix", requireShipmentAccess, async (req, res) => {',
+    'app.put("/api/shipments/:id", requireFullAdmin, async (req, res) => {',
+  );
+
+  it("status route stays on applyNarrowShipmentUpdate — status/timeline ARE broad-edit-overwritable fields", () => {
+    expect(STATUS_ROUTE).toContain("await applyNarrowShipmentUpdate(shipmentId");
+    expect(STATUS_ROUTE).not.toContain("applyIsolatedShipmentUpdate(");
+  });
+
+  it("every isolated writer route uses applyIsolatedShipmentUpdate, never applyNarrowShipmentUpdate", () => {
+    for (const [name, route] of [
+      ["subscribe-customer", SUBSCRIBE_CUSTOMER_ROUTE],
+      ["chat", CHAT_ROUTE],
+      ["documents upload", DOCUMENTS_UPLOAD_ROUTE],
+      ["document visibility", VISIBILITY_ROUTE],
+      ["share settings", SHARE_ROUTE],
+      ["public subscribe", PUBLIC_SUBSCRIBE_ROUTE],
+      ["distance-matrix", DISTANCE_MATRIX_ROUTE],
+    ] as const) {
+      expect(route, `${name} route body`).toContain("applyIsolatedShipmentUpdate(");
+      expect(route, `${name} route body`).not.toContain("applyNarrowShipmentUpdate(");
+    }
+  });
+
+  it("the distance-matrix route calls applyIsolatedShipmentUpdate exactly twice — the fallback-estimate branch and the Google-Maps-success branch", () => {
+    const count = (DISTANCE_MATRIX_ROUTE.match(/applyIsolatedShipmentUpdate\(/g) || []).length;
+    expect(count).toBe(2);
+  });
+
+  it("post-commit response semantics: status route's notification/audit calls run via runShipmentUpdateSideEffects, not bare awaits after the commit", () => {
+    const commitIndex = STATUS_ROUTE.indexOf("await applyNarrowShipmentUpdate(shipmentId");
+    const afterCommit = STATUS_ROUTE.slice(commitIndex);
+    expect(afterCommit).toContain("await runShipmentUpdateSideEffects([");
+    expect(afterCommit).not.toMatch(/\n\s*await pushNotification\(/);
+    expect(afterCommit).not.toMatch(/\n\s*await logActivity\(/);
+  });
+
+  it("post-commit response semantics: subscribe-customer route's audit-log call runs via runShipmentUpdateSideEffects, not a bare await after the commit", () => {
+    const commitIndex = SUBSCRIBE_CUSTOMER_ROUTE.indexOf("await applyIsolatedShipmentUpdate(shipmentId");
+    const afterCommit = SUBSCRIBE_CUSTOMER_ROUTE.slice(commitIndex);
+    expect(afterCommit).toContain("await runShipmentUpdateSideEffects([");
+    expect(afterCommit).not.toMatch(/\n\s*await logActivity\(/);
+  });
+
+  it("post-commit response semantics: documents-upload route's audit-log call runs via runShipmentUpdateSideEffects, not a bare await after the commit", () => {
+    const commitIndex = DOCUMENTS_UPLOAD_ROUTE.indexOf("await applyIsolatedShipmentUpdate(shipmentId");
+    const afterCommit = DOCUMENTS_UPLOAD_ROUTE.slice(commitIndex);
+    expect(afterCommit).toContain("await runShipmentUpdateSideEffects([");
+    expect(afterCommit).not.toMatch(/\n\s*await logActivity\(/);
+  });
+
+  it("post-commit response semantics: chat route's document-upload notification/audit calls run via runShipmentUpdateSideEffects, not bare awaits after the commit", () => {
+    const commitIndex = CHAT_ROUTE.indexOf("await applyIsolatedShipmentUpdate(shipmentId");
+    expect(commitIndex).toBeGreaterThan(-1);
+    const afterCommit = CHAT_ROUTE.slice(commitIndex);
+    expect(afterCommit).toContain("await runShipmentUpdateSideEffects([");
+  });
+});
+
 describe("Scope: shipmentNumber and no second business reference", () => {
   it("shipmentNumber is never reassigned by this route (it is never part of the update payload)", () => {
     expect(ROUTE).not.toMatch(/shipmentNumber:\s*data\.shipmentNumber/);

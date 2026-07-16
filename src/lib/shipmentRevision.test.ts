@@ -6,6 +6,8 @@ import {
   checkShipmentRevision,
   ShipmentRevisionConflictError,
   applyRevisionedShipmentUpdateMemory,
+  applyNarrowShipmentUpdateMemory,
+  applyIsolatedShipmentUpdateMemory,
 } from "./shipmentRevision";
 
 /**
@@ -24,6 +26,23 @@ import {
  */
 
 type TestShipment = { id: string; revision?: number; note?: string };
+
+// Wider shape used by the operational-vs-isolated writer tests below (PR
+// #111 review — over-broad revision policy correction): a status field to
+// stand in for the operational (revision-incrementing) writers, and
+// documents/customerEmails/isLinkShared/eta/companyName to stand in for
+// the isolated (revision-preserving) writers plus a field the broad edit
+// form itself can overwrite.
+type TestFullShipment = {
+  id: string;
+  revision?: number;
+  status?: string;
+  documents: { id: string }[];
+  customerEmails: string[];
+  isLinkShared?: boolean;
+  eta?: string;
+  companyName?: string;
+};
 
 describe("resolveStoredRevision — legacy-record compatibility", () => {
   it("interprets a shipment with no revision field at all as revision 1", () => {
@@ -225,6 +244,156 @@ describe("applyRevisionedShipmentUpdateMemory — local-development memory-fallb
     expect(shipments[0]).toEqual(adminA);
     expect(shipments[0].note).toBe("admin-A-change");
     expect(shipments[0].revision).toBe(2);
+  });
+});
+
+describe("applyNarrowShipmentUpdateMemory — revision-incrementing operational writers (e.g. status changes)", () => {
+  it("unconditionally advances revision by exactly 1, with no expectedRevision to check", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 1, status: "New", documents: [], customerEmails: [] }];
+    const result = applyNarrowShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, status: "Assigned" }));
+    expect(result.status).toBe("Assigned");
+    expect(result.revision).toBe(2);
+    expect(shipments[0]).toEqual(result);
+  });
+
+  it("an admin edit form opened before this status change correctly conflicts on its next save — broad-edit lost-update protection remains intact for operational writers", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 1, status: "New", documents: [], customerEmails: [] }];
+    // Admin reads the shipment at revision 1, then a driver changes status
+    // before the admin saves.
+    applyNarrowShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, status: "Assigned" }));
+    expect(shipments[0].revision).toBe(2);
+
+    expect(() =>
+      applyRevisionedShipmentUpdateMemory(shipments, "s1", 1, (current, nextRevision) => ({
+        ...current,
+        companyName: "Stale Admin Edit",
+        revision: nextRevision,
+      }))
+    ).toThrow(ShipmentRevisionConflictError);
+    // The stale edit never applied.
+    expect(shipments[0].companyName).toBeUndefined();
+  });
+
+  it("throws for a shipment id that doesn't exist in the store", () => {
+    const shipments: TestFullShipment[] = [{ id: "other", revision: 1, documents: [], customerEmails: [] }];
+    expect(() => applyNarrowShipmentUpdateMemory(shipments, "missing", (c) => c)).toThrow("Shipment not found");
+  });
+});
+
+describe("applyIsolatedShipmentUpdateMemory — revision-preserving isolated writers", () => {
+  it("a document upload appends atomically but preserves the stored revision", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 3, documents: [], customerEmails: [] }];
+    const result = applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      documents: [...current.documents, { id: "doc-1" }],
+    }));
+    expect(result.documents).toEqual([{ id: "doc-1" }]);
+    expect(result.revision).toBe(3);
+  });
+
+  it("a customer subscription appends atomically but preserves the stored revision", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 3, documents: [], customerEmails: [] }];
+    const result = applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      customerEmails: [...current.customerEmails, "customer@example.com"],
+    }));
+    expect(result.customerEmails).toEqual(["customer@example.com"]);
+    expect(result.revision).toBe(3);
+  });
+
+  it("a share-setting change preserves the stored revision", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 3, documents: [], customerEmails: [], isLinkShared: false }];
+    const result = applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, isLinkShared: true }));
+    expect(result.isLinkShared).toBe(true);
+    expect(result.revision).toBe(3);
+  });
+
+  it("a distance-matrix ETA/distance cache write preserves the stored revision", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 3, documents: [], customerEmails: [] }];
+    const result = applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, eta: "2026-01-01T00:00:00.000Z" }));
+    expect(result.eta).toBe("2026-01-01T00:00:00.000Z");
+    expect(result.revision).toBe(3);
+  });
+
+  it("forces revision back to the stored value even if `mutate` tries to change it (defensive)", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 3, documents: [], customerEmails: [] }];
+    const result = applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, revision: 999 }));
+    expect(result.revision).toBe(3);
+  });
+
+  it("two concurrent document appends both survive — neither upload is lost", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 1, documents: [], customerEmails: [] }];
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      documents: [...current.documents, { id: "doc-A" }],
+    }));
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      documents: [...current.documents, { id: "doc-B" }],
+    }));
+    expect(shipments[0].documents).toEqual([{ id: "doc-A" }, { id: "doc-B" }]);
+    expect(shipments[0].revision).toBe(1);
+  });
+
+  it("two concurrent customer subscriptions both survive — neither subscriber is lost", () => {
+    const shipments: TestFullShipment[] = [{ id: "s1", revision: 1, documents: [], customerEmails: [] }];
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      customerEmails: [...current.customerEmails, "a@example.com"],
+    }));
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      customerEmails: [...current.customerEmails, "b@example.com"],
+    }));
+    expect(shipments[0].customerEmails).toEqual(["a@example.com", "b@example.com"]);
+    expect(shipments[0].revision).toBe(1);
+  });
+
+  it("throws for a shipment id that doesn't exist in the store", () => {
+    const shipments: TestFullShipment[] = [{ id: "other", revision: 1, documents: [], customerEmails: [] }];
+    expect(() => applyIsolatedShipmentUpdateMemory(shipments, "missing", (c) => c)).toThrow("Shipment not found");
+  });
+});
+
+describe("Cross-writer interaction (PR #111 review — over-broad revision policy correction)", () => {
+  it("an admin edit form opened before document/subscription/share/distance-cache activity can still save successfully, and that save preserves every concurrently-added isolated value", () => {
+    const shipments: TestFullShipment[] = [
+      { id: "s1", revision: 1, documents: [], customerEmails: [], isLinkShared: false, companyName: "Acme" },
+    ];
+
+    // Admin opens the edit form here, reading revision 1. Meanwhile, none
+    // of the following isolated activity touches that revision at all.
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      documents: [...current.documents, { id: "doc-1" }],
+    }));
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({
+      ...current,
+      customerEmails: [...current.customerEmails, "customer@example.com"],
+    }));
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, isLinkShared: true }));
+    applyIsolatedShipmentUpdateMemory(shipments, "s1", (current) => ({ ...current, eta: "2026-01-01T00:00:00.000Z" }));
+
+    // None of that isolated activity advanced the revision the admin is
+    // about to save against.
+    expect(shipments[0].revision).toBe(1);
+
+    // The admin's save, exactly like buildUpdatedShipment in server.ts,
+    // spreads the transaction's own fresh `current` and only explicitly
+    // overrides the fields the edit form actually changed.
+    const saved = applyRevisionedShipmentUpdateMemory(shipments, "s1", 1, (current, nextRevision) => ({
+      ...current,
+      companyName: "New Co",
+      revision: nextRevision,
+    }));
+
+    expect(saved.revision).toBe(2);
+    expect(saved.companyName).toBe("New Co");
+    // Every concurrently-added isolated value survived the admin's save.
+    expect(saved.documents).toEqual([{ id: "doc-1" }]);
+    expect(saved.customerEmails).toEqual(["customer@example.com"]);
+    expect(saved.isLinkShared).toBe(true);
+    expect(saved.eta).toBe("2026-01-01T00:00:00.000Z");
   });
 });
 

@@ -130,22 +130,30 @@ export function applyRevisionedShipmentUpdateMemory<T extends { id: string; revi
 }
 
 /**
- * PR #111 review (Blocker 2): every route that mutates an existing shipment
- * document — not just the human edit form PUT /api/shipments/:id above —
- * must bump revision, or an admin's edit form opened before that mutation
- * would still save successfully afterward without ever detecting the
- * change (checkShipmentRevision only rejects a MISMATCHED revision; a
- * writer that never advances it can't produce a mismatch).
+ * PR #111 review (Blocker 2, then narrowed by the over-broad-policy review
+ * that followed it): a route that mutates a field the human edit form
+ * (PUT /api/shipments/:id) can ALSO overwrite must bump revision, or an
+ * admin's edit form opened before that mutation would still save
+ * successfully afterward without ever detecting the change
+ * (checkShipmentRevision only rejects a MISMATCHED revision; a writer that
+ * never advances it can't produce a mismatch).
  *
- * This is the narrow-writer counterpart to applyRevisionedShipmentUpdateMemory
- * for callers that are NOT a human edit form holding a specific revision it
- * read — status updates, document/chat/share appends and toggles, and
- * similar single-field/append-only server-owned mutations. There is no
- * expectedRevision to check (the caller never had one to submit — a driver
- * status update, a chat attachment, a public share-link subscribe), so this
- * always applies `mutate` and unconditionally advances the revision by
- * exactly 1. Any admin edit form opened beforehand will still 409 on its
- * next save, exactly as if another admin had edited the shipment directly.
+ * This is the OPERATIONAL-writer counterpart to
+ * applyRevisionedShipmentUpdateMemory, for callers that are NOT a human
+ * edit form holding a specific revision it read, but DO change fields the
+ * edit form's own merge overwrites — currently just status/timeline
+ * (PUT /api/shipments/:id/status). There is no expectedRevision to check
+ * (a driver status update never had one to submit), so this always applies
+ * `mutate` and unconditionally advances the revision by exactly 1. Any
+ * admin edit form opened beforehand will still 409 on its next save,
+ * exactly as if another admin had edited the shipment directly.
+ *
+ * Do NOT use this for a writer whose fields the edit form's merge never
+ * touches (documents, customerEmails, customerNotificationHistory, share
+ * settings, derived ETA/distance caches) — that would manufacture a false
+ * conflict for an edit session the mutation could never actually have
+ * clobbered. Use applyIsolatedShipmentUpdateMemory below for those.
+ *
  * Same synchronous, no-`await`-between-read-and-write atomicity guarantee
  * as applyRevisionedShipmentUpdateMemory.
  */
@@ -162,6 +170,51 @@ export function applyNarrowShipmentUpdateMemory<T extends { id: string; revision
   const nextRevision = resolveStoredRevision(current.revision) + 1;
   const mutated = mutate(current);
   const updated = { ...mutated, revision: nextRevision };
+  shipments[idx] = updated;
+  return updated;
+}
+
+/**
+ * Revision-PRESERVING counterpart, for writers whose fields the edit form's
+ * own merge (buildUpdatedShipment, server.ts) never overwrites: document
+ * appends/uploads, chat attachments saved as documents, document visibility
+ * toggles, customerEmails/customerNotificationHistory subscriptions
+ * (authenticated and public), share-link settings, and the best-effort
+ * derived ETA/distance cache written by GET .../distance-matrix.
+ *
+ * These still need atomicity — two concurrent document uploads (or two
+ * concurrent subscriptions) must not silently overwrite each other's
+ * append — but must NEVER advance the shipment's revision: doing so would
+ * make an unrelated, already-open admin edit form 409 on its next save even
+ * though nothing that edit form could have overwritten actually changed.
+ * `revision` is forced back to whatever it already was on `current`
+ * regardless of what `mutate` returns, so this invariant can't be broken by
+ * a future call site forgetting to leave it alone.
+ *
+ * One documented exception: GET .../distance-matrix's cache write includes
+ * `eta`, which the edit form's merge CAN also overwrite — an admin who
+ * saves a stale `eta` value can still clobber a fresher auto-computed one.
+ * This is an intentional, narrow trade-off (see server.ts's own comment at
+ * that call site): treating a background distance calculation as
+ * revision-changing would make routine page/map loads invalidate every open
+ * admin edit session, which is a worse and far more common problem than the
+ * rare stale-eta overwrite this accepts instead.
+ *
+ * Same synchronous, no-`await`-between-read-and-write atomicity guarantee
+ * as applyRevisionedShipmentUpdateMemory / applyNarrowShipmentUpdateMemory.
+ */
+export function applyIsolatedShipmentUpdateMemory<T extends { id: string; revision?: number }>(
+  shipments: T[],
+  shipmentId: string,
+  mutate: (current: T) => T
+): T {
+  const idx = shipments.findIndex((s) => s.id === shipmentId);
+  if (idx === -1) {
+    throw new Error("Shipment not found");
+  }
+  const current = shipments[idx];
+  const mutated = mutate(current);
+  const updated = { ...mutated, revision: current.revision };
   shipments[idx] = updated;
   return updated;
 }

@@ -120,6 +120,7 @@ import {
   ShipmentRevisionConflictError,
   applyRevisionedShipmentUpdateMemory,
   applyNarrowShipmentUpdateMemory,
+  applyIsolatedShipmentUpdateMemory,
 } from "./src/lib/shipmentRevision";
 import { runShipmentUpdateSideEffects, ShipmentSideEffectTask } from "./src/lib/shipmentUpdateSideEffects";
 import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapshotAdapter";
@@ -1781,6 +1782,56 @@ async function applyNarrowShipmentUpdate(
     scheduleFirestoreRecovery(30_000);
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     return applyNarrowShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+}
+
+// Shipment-update lost-update race fix (stability audit, PR #111 review —
+// over-broad-revision-policy correction). Revision-PRESERVING counterpart to
+// applyNarrowShipmentUpdate: for writers whose fields the human edit form
+// (PUT /api/shipments/:id, buildUpdatedShipment) never overwrites — document
+// appends/uploads, chat attachments saved as documents, document visibility
+// toggles, customerEmails/customerNotificationHistory subscriptions
+// (authenticated and public), share-link settings, and the best-effort
+// derived ETA/distance cache on GET .../distance-matrix. These still need
+// atomic, transactional read-mutate-write (two concurrent document uploads,
+// or two concurrent subscriptions, must not overwrite each other's append),
+// but must NEVER advance the shipment's revision — doing so would make an
+// unrelated, already-open admin edit form 409 on its next save even though
+// nothing that edit form could have overwritten actually changed. See
+// applyIsolatedShipmentUpdateMemory (shipmentRevision.ts) for the full
+// reasoning, the documented distance-matrix `eta` trade-off, and unit tests.
+async function applyIsolatedShipmentUpdate(
+  shipmentId: string,
+  mutate: (current: Shipment) => Shipment
+): Promise<Shipment> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyIsolatedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
+  }
+
+  const sDocRef = db.collection("shipments").doc(shipmentId);
+  try {
+    return await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(sDocRef);
+        if (!snap.exists) {
+          throw new Error("Shipment not found");
+        }
+        const current = snap.data() as Shipment;
+        const mutated = mutate(current);
+        const updated = { ...mutated, revision: current.revision };
+        tx.set(sDocRef, cleanUndefined(updated));
+        return updated;
+      }),
+      5000,
+      "Firestore transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore isolated shipment update transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return applyIsolatedShipmentUpdateMemory(getMemoryStore().shipments, shipmentId, mutate);
   }
 }
 import {
@@ -4010,17 +4061,19 @@ async function startServer() {
         const calculatedEta = new Date(Date.now() + durationInTrafficSeconds * 1000).toISOString();
 
         // Update shipment profile metadata with fallback estimation.
-        // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-        // this silently caches a computed ETA/distance onto a
-        // concurrency-relevant field (eta) — previously via a bare
-        // updateDoc with no revision awareness at all, missed in the
-        // initial audit precisely because it doesn't look like the
-        // "shipment edit" surface. Now goes through the same narrow atomic
-        // helper as every other non-form writer, still best-effort (a
-        // failure here is silently logged, exactly as before, and never
-        // fails this GET request).
+        // Shipment-update lost-update race fix (PR #111 review — over-broad
+        // revision policy correction): this caches a computed ETA/distance
+        // best-effort, atomically. Deliberately revision-PRESERVING, not
+        // revision-incrementing: a page or map merely requesting a distance
+        // calculation must never make an admin's already-open edit form
+        // stale/409 on save. Accepted, documented trade-off: `eta` IS a
+        // field the edit form's own merge can also overwrite, so an admin
+        // who saves a stale `eta` can still clobber a fresher auto-computed
+        // one here — treating this route as revision-changing instead would
+        // make routine page/map loads invalidate every open edit session,
+        // which is the far more common and disruptive failure mode.
         try {
-          await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+          await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
             ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
@@ -4058,11 +4111,13 @@ async function startServer() {
 
         // Automatically update the document ETA field in the firestore
         // database. Shipment-update lost-update race fix (PR #111 review —
-        // Blocker 2): same narrow atomic helper as the fallback-estimate
-        // branch above, still best-effort (a failure here is silently
-        // logged and never fails this GET request).
+        // over-broad revision policy correction): same revision-preserving
+        // isolated helper as the fallback-estimate branch above, and the
+        // same accepted `eta` trade-off documented there — still
+        // best-effort (a failure here is silently logged and never fails
+        // this GET request).
         try {
-          await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+          await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
             ...current,
             eta: calculatedEta,
             lastCalculatedEta: calculatedEta,
@@ -4216,6 +4271,19 @@ async function startServer() {
       // transaction (which must never run inside the transaction itself)
       // can diff against the exact snapshot the write actually applied on
       // top of.
+      //
+      // PR #111 review (over-broad revision policy correction, requirement
+      // 6): every field below is spread from this transaction's own fresh
+      // `current`, and the object literal only explicitly overrides the
+      // named edit-form fields — so documents, customerEmails,
+      // customerNotificationHistory, isLinkShared, shareToken,
+      // shareIncludeDocuments, shareIncludePhotos, lastCalculatedEta,
+      // lastCalculatedDistance, and lastCalculatedDuration are never
+      // touched here, no matter what an isolated writer concurrently set
+      // them to. This is exactly why those writers are safe to be
+      // revision-preserving (applyIsolatedShipmentUpdate): this route could
+      // never have overwritten their fields anyway, so a version bump for
+      // them would only produce false conflicts, never prevent a real one.
       let capturedCurrent: Shipment | null = null;
       // True only when the "first assignment" New -> Assigned bump below
       // actually fires — distinct from "is the final status Assigned",
@@ -4600,14 +4668,17 @@ async function startServer() {
         `Good day, your shipment #${item.shipmentNumber} status is now: ${status}. Remarks: ${remarksDesc || 'No remarks recorded.'}`
       );
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // atomically applies the same status/timeline/updatedAt change onto
-      // whatever the document's CURRENT authoritative state is (not the
-      // pre-read `item` above), and unconditionally advances revision —
-      // this route has no client-submitted expectedRevision to check (a
-      // driver/admin status change isn't a human edit form holding a
-      // specific revision it read), but any admin edit form opened before
-      // this status change must still 409 on its next save.
+      // Shipment-update lost-update race fix (PR #111 review — Blocker 2,
+      // scope confirmed by the later over-broad-policy correction): status
+      // and timeline ARE fields the human edit form's own merge
+      // (buildUpdatedShipment) can also overwrite, so this atomically
+      // applies the same status/timeline/updatedAt change onto whatever the
+      // document's CURRENT authoritative state is (not the pre-read `item`
+      // above), and unconditionally advances revision — this route has no
+      // client-submitted expectedRevision to check (a driver/admin status
+      // change isn't a human edit form holding a specific revision it
+      // read), but any admin edit form opened before this status change
+      // must still 409 on its next save.
       const updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => ({
         ...current,
         status: item.status,
@@ -4615,26 +4686,45 @@ async function startServer() {
         updatedAt: item.updatedAt,
       }));
 
-      await pushNotification(
-        item.id,
-        item.shipmentNumber,
-        status === "Accepted" ? "acceptance" : (status === "Delivered" ? "delivery" : "status_update"),
-        `Status Update: ${status}`,
-        `Durum Güncellemesi: ${status}`,
-        `تحديث الحالة: ${status}`,
-        `Shipment ${item.shipmentNumber} is now ${status}.`,
-        `Sevkiyat ${item.shipmentNumber} şu anda ${status} konumunda.`,
-        `الشحنة رقم ${item.shipmentNumber} الآن هي في حالة [${status}].`
-      );
-
-      await logActivity(
-        item.id,
-        item.shipmentNumber,
-        updaterName || role || "System",
-        `Changed status of ${item.shipmentNumber} to ${status}`,
-        `${item.shipmentNumber} sevkiyat durumunu ${status} olarak güncelledi`,
-        `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
-      );
+      // PR #111 review (post-commit response semantics re-audit): the
+      // status change above is already safely committed at this point —
+      // pushNotification/logActivity failing afterward must not make this
+      // request falsely report "Failed to update status" (same reasoning
+      // as PUT /api/shipments/:id's own post-commit block; see
+      // runShipmentUpdateSideEffects's header).
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "status-update-notification",
+          run: () => pushNotification(
+            item.id,
+            item.shipmentNumber,
+            status === "Accepted" ? "acceptance" : (status === "Delivered" ? "delivery" : "status_update"),
+            `Status Update: ${status}`,
+            `Durum Güncellemesi: ${status}`,
+            `تحديث الحالة: ${status}`,
+            `Shipment ${item.shipmentNumber} is now ${status}.`,
+            `Sevkiyat ${item.shipmentNumber} şu anda ${status} konumunda.`,
+            `الشحنة رقم ${item.shipmentNumber} الآن هي في حالة [${status}].`
+          ),
+        },
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            item.id,
+            item.shipmentNumber,
+            updaterName || role || "System",
+            `Changed status of ${item.shipmentNumber} to ${status}`,
+            `${item.shipmentNumber} sevkiyat durumunu ${status} olarak güncelledi`,
+            `تغيير حالة الشحنة برقم ${item.shipmentNumber} إلى ${status}`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[status-update] post-commit side effect "${failure.name}" failed for shipment ${item.id} (${item.shipmentNumber}) — the status save itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
@@ -4668,12 +4758,14 @@ async function startServer() {
       const cleanEmail = email.trim().toLowerCase();
       const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // appends to whatever the document's CURRENT customerEmails/
-      // customerNotificationHistory actually are (not a pre-read snapshot),
-      // and unconditionally advances revision so any admin edit form opened
-      // before this subscribe request 409s on its next save.
-      const updatedItem = await applyNarrowShipmentUpdate(shipmentId, (current) => {
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT customerEmails/customerNotificationHistory actually are
+      // (not a pre-read snapshot), atomically. Revision-PRESERVING: the
+      // human edit form's own merge (buildUpdatedShipment) never overwrites
+      // these fields, so a customer subscribing to alerts must not make an
+      // unrelated, already-open admin edit form 409 on its next save.
+      const updatedItem = await applyIsolatedShipmentUpdate(shipmentId, (current) => {
         const customerEmails = current.customerEmails ? [...current.customerEmails] : [];
         if (!customerEmails.includes(cleanEmail)) {
           customerEmails.push(cleanEmail);
@@ -4691,14 +4783,29 @@ async function startServer() {
         return { ...current, customerEmails, customerNotificationHistory };
       });
 
-      await logActivity(
-        updatedItem.id,
-        updatedItem.shipmentNumber,
-        "Customer (Tracking Subscription)",
-        `Subscribed to real-time cargo updates`,
-        `Canlı kargo güncellemelerine abone oldu`,
-        `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
-      );
+      // PR #111 review (post-commit response semantics re-audit): the
+      // subscription append above is already safely committed — a
+      // logActivity failure afterward must not make this request falsely
+      // report "Failed to join notification server registration scheme".
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            updatedItem.id,
+            updatedItem.shipmentNumber,
+            "Customer (Tracking Subscription)",
+            `Subscribed to real-time cargo updates`,
+            `Canlı kargo güncellemelerine abone oldu`,
+            `قام العميل بالاشتراك في تحديثات الشحنة المباشرة`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[subscribe-customer] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the subscription itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.json(buildShipmentViewForRole(updatedItem, req.session!));
     } catch (err) {
@@ -5033,42 +5140,62 @@ async function startServer() {
           isSharedExternally: resolveNewDocumentSharedExternally()
         };
 
-        // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-        // appends to whatever the document's CURRENT documents array
-        // actually is (not the earlier pre-read shipmentItem), and
-        // unconditionally advances revision so an admin edit form opened
-        // before this chat attachment 409s on its next save.
-        await applyNarrowShipmentUpdate(shipmentId, (current) => ({
+        // Shipment-update lost-update race fix (PR #111 review — over-broad
+        // revision policy correction): appends to whatever the document's
+        // CURRENT documents array actually is (not the earlier pre-read
+        // shipmentItem), atomically. Revision-PRESERVING: the human edit
+        // form's own merge (buildUpdatedShipment) never overwrites
+        // `documents`, so a chat attachment must not make an unrelated,
+        // already-open admin edit form 409 on its next save.
+        await applyIsolatedShipmentUpdate(shipmentId, (current) => ({
           ...current,
           documents: [...current.documents, newDoc],
         }));
 
-        await logActivity(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          senderName || sender,
-          `Uploaded document [${newDoc.name}] through Chat`,
-          `Mesajlaşma paneli üzerinden [${newDoc.name}] belgesini yükledi`,
-          `تحميل المستند [${newDoc.name}] من خلال المحادثة`
-        );
-
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "doc_upload",
-          "New Document Received",
-          "Yeni Belge Alındı",
-          "تم استلام مستند جديد",
-          `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
-          `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
-          `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`,
-          // PR #44: this branch is client_admin-only (shouldSaveChatFileAsShipmentDocument
-          // above), so pass the channel through — without it, doc_upload's default
-          // (unrestricted) recipient rule would also page the driver for a purely
-          // client<->admin exchange.
-          undefined,
-          channel
-        );
+        // PR #111 review (post-commit response semantics re-audit): the
+        // chat message (commitChatMessageWithUnreadFanout above) and the
+        // document append above are both already safely committed at this
+        // point — logActivity/pushNotification failing afterward must not
+        // make this request falsely report "Failed to post chat message".
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "audit-log",
+            run: () => logActivity(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              senderName || sender,
+              `Uploaded document [${newDoc.name}] through Chat`,
+              `Mesajlaşma paneli üzerinden [${newDoc.name}] belgesini yükledi`,
+              `تحميل المستند [${newDoc.name}] من خلال المحادثة`
+            ),
+          },
+          {
+            name: "doc-upload-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "doc_upload",
+              "New Document Received",
+              "Yeni Belge Alındı",
+              "تم استلام مستند جديد",
+              `New document '${newDoc.name}' uploaded in shipment ${shipmentItem.shipmentNumber}`,
+              `Hızlı mesajlaşmadan '${newDoc.name}' isimli belge dosyaya kaydedildi.`,
+              `تم إضافة مستند جديد باسم '${newDoc.name}' في ملف الشحنة ${shipmentItem.shipmentNumber}`,
+              // PR #44: this branch is client_admin-only (shouldSaveChatFileAsShipmentDocument
+              // above), so pass the channel through — without it, doc_upload's default
+              // (unrestricted) recipient rule would also page the driver for a purely
+              // client<->admin exchange.
+              undefined,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message and document upload already succeeded and are not retried.`,
+            failure.error
+          );
+        }
       } else if (type === "file" && fileUrl) {
         // internal_staff/driver_admin attachment, or a customer/client-staff
         // upload on client_admin (see shouldSaveChatFileAsShipmentDocument,
@@ -5077,33 +5204,61 @@ async function startServer() {
         // and notified via the same channel-gated "chat" notification path
         // as a text message rather than the unfiltered "doc_upload"
         // notification.
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "chat",
-          `Message: ${senderName}`,
-          `Mesaj: ${senderName}`,
-          `رسالة من: ${senderName}`,
-          "sent an attachment",
-          "dosya gönderildi",
-          "أرسل ملفًا جديًا",
-          req.session!.id,
-          channel
-        );
+        //
+        // PR #111 review (post-commit response semantics re-audit): the
+        // chat message is already committed above — a notification failure
+        // here must not falsely report "Failed to post chat message".
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "chat-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "chat",
+              `Message: ${senderName}`,
+              `Mesaj: ${senderName}`,
+              `رسالة من: ${senderName}`,
+              "sent an attachment",
+              "dosya gönderildi",
+              "أرسل ملفًا جديًا",
+              req.session!.id,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message already succeeded and is not retried.`,
+            failure.error
+          );
+        }
       } else {
-        await pushNotification(
-          shipmentId,
-          shipmentItem.shipmentNumber,
-          "chat",
-          `Message: ${senderName}`,
-          `Mesaj: ${senderName}`,
-          `رسالة من: ${senderName}`,
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
-          text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
-          req.session!.id,
-          channel
-        );
+        // PR #111 review (post-commit response semantics re-audit): same
+        // reasoning as the two branches above.
+        const sideEffectFailures = await runShipmentUpdateSideEffects([
+          {
+            name: "chat-notification",
+            run: () => pushNotification(
+              shipmentId,
+              shipmentItem.shipmentNumber,
+              "chat",
+              `Message: ${senderName}`,
+              `Mesaj: ${senderName}`,
+              `رسالة من: ${senderName}`,
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "sent an attachment",
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "dosya gönderildi",
+              text ? (text.length > 50 ? `${text.substring(0, 50)}...` : text) : "أرسل ملفًا جديًا",
+              req.session!.id,
+              channel
+            ),
+          },
+        ]);
+        for (const failure of sideEffectFailures) {
+          console.error(
+            `[chat] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the chat message already succeeded and is not retried.`,
+            failure.error
+          );
+        }
       }
 
       res.status(201).json(newMessage);
@@ -5164,24 +5319,41 @@ async function startServer() {
         isSharedExternally: resolveNewDocumentSharedExternally(isSharedExternally)
       };
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // appends to whatever the document's CURRENT documents array actually
-      // is (not the pre-read shipmentItem), and unconditionally advances
-      // revision so an admin edit form opened before this upload 409s on
-      // its next save.
-      await applyNarrowShipmentUpdate(shipmentId, (current) => ({
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT documents array actually is (not the pre-read
+      // shipmentItem), atomically. Revision-PRESERVING: the human edit
+      // form's own merge (buildUpdatedShipment) never overwrites
+      // `documents`, so a direct document upload must not make an
+      // unrelated, already-open admin edit form 409 on its next save.
+      await applyIsolatedShipmentUpdate(shipmentId, (current) => ({
         ...current,
         documents: [...current.documents, newDoc],
       }));
 
-      await logActivity(
-        shipmentId,
-        shipmentItem.shipmentNumber,
-        uploadedBy || "Admin Panel",
-        `Uploaded file ${newDoc.name} in Document Center`,
-        `Belge Merkezine ${newDoc.name} evrakını yükledi`,
-        `تحميل ملف ${newDoc.name} في مركز المستندات للشحنة`
-      );
+      // PR #111 review (post-commit response semantics re-audit): the
+      // document append above is already safely committed — a logActivity
+      // failure afterward must not make this request falsely report
+      // "Failed to upload document".
+      const sideEffectFailures = await runShipmentUpdateSideEffects([
+        {
+          name: "audit-log",
+          run: () => logActivity(
+            shipmentId,
+            shipmentItem.shipmentNumber,
+            uploadedBy || "Admin Panel",
+            `Uploaded file ${newDoc.name} in Document Center`,
+            `Belge Merkezine ${newDoc.name} evrakını yükledi`,
+            `تحميل ملف ${newDoc.name} في مركز المستندات للشحنة`
+          ),
+        },
+      ]);
+      for (const failure of sideEffectFailures) {
+        console.error(
+          `[documents] post-commit side effect "${failure.name}" failed for shipment ${shipmentId} — the document upload itself already succeeded and is not retried.`,
+          failure.error
+        );
+      }
 
       res.status(201).json(newDoc);
     } catch (err) {
@@ -5204,12 +5376,14 @@ async function startServer() {
 
       const { isSharedExternally } = req.body;
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // toggles the flag on whatever the document's CURRENT documents array
-      // actually is (not the pre-read shipment), and unconditionally
-      // advances revision so an admin edit form opened before this toggle
-      // 409s on its next save.
-      const updated = await applyNarrowShipmentUpdate(req.params.id, (current) => ({
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): toggles the flag on whatever the
+      // document's CURRENT documents array actually is (not the pre-read
+      // shipment), atomically. Revision-PRESERVING: the human edit form's
+      // own merge (buildUpdatedShipment) never overwrites `documents`, so a
+      // visibility toggle must not make an unrelated, already-open admin
+      // edit form 409 on its next save.
+      const updated = await applyIsolatedShipmentUpdate(req.params.id, (current) => ({
         ...current,
         documents: current.documents.map(d => d.id === req.params.docId ? { ...d, isSharedExternally } : d),
       }));
@@ -5237,12 +5411,15 @@ async function startServer() {
 
       const { isLinkShared, shareIncludeDocuments, shareIncludePhotos } = req.body;
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // applies these field changes onto whatever the document's CURRENT
-      // state actually is (not the pre-read shipment), and unconditionally
-      // advances revision so an admin edit form opened before this share
-      // change 409s on its next save.
-      const updated = await applyNarrowShipmentUpdate(req.params.id, (current) => {
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): applies these field changes onto
+      // whatever the document's CURRENT state actually is (not the
+      // pre-read shipment), atomically. Revision-PRESERVING: the human
+      // edit form's own merge (buildUpdatedShipment) never overwrites
+      // isLinkShared/shareIncludeDocuments/shareIncludePhotos/shareToken,
+      // so a share-settings change must not make an unrelated,
+      // already-open admin edit form 409 on its next save.
+      const updated = await applyIsolatedShipmentUpdate(req.params.id, (current) => {
         const next: Shipment = { ...current };
         if (isLinkShared !== undefined) next.isLinkShared = isLinkShared;
         if (shareIncludeDocuments !== undefined) next.shareIncludeDocuments = shareIncludeDocuments;
@@ -5356,12 +5533,14 @@ async function startServer() {
       const cleanEmail = email.trim().toLowerCase();
       const alertId = `cnh-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      // Shipment-update lost-update race fix (PR #111 review — Blocker 2):
-      // appends to whatever the document's CURRENT customerEmails/
-      // customerNotificationHistory actually are (not the pre-read
-      // shipment), and unconditionally advances revision so an admin edit
-      // form opened before this public subscribe 409s on its next save.
-      const updatedShipment = await applyNarrowShipmentUpdate(shipment.id, (current) => {
+      // Shipment-update lost-update race fix (PR #111 review — over-broad
+      // revision policy correction): appends to whatever the document's
+      // CURRENT customerEmails/customerNotificationHistory actually are
+      // (not the pre-read shipment), atomically. Revision-PRESERVING: the
+      // human edit form's own merge (buildUpdatedShipment) never overwrites
+      // these fields, so a public subscribe must not make an unrelated,
+      // already-open admin edit form 409 on its next save.
+      const updatedShipment = await applyIsolatedShipmentUpdate(shipment.id, (current) => {
         const customerEmails = Array.isArray(current.customerEmails) ? [...current.customerEmails] : [];
         if (!customerEmails.includes(cleanEmail)) {
           customerEmails.push(cleanEmail);
