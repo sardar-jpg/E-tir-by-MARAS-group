@@ -24,6 +24,7 @@ import { MAX_CHAT_TEXT_LENGTH } from "./lib/chatMessageValidation";
 import { canSubmitChatMessage, planAttachmentSendForShipment, mergeNewerChatMessages } from "./lib/chatComposerState";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
 import { encodePageCursor } from "./lib/pagination";
+import { isValidLocalSessionFastPath } from "./lib/localSessionFastPath";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -952,8 +953,21 @@ export default function App() {
     );
   }
 
+  // audit-issue-4/fix/local-session-startup-gate: a session /api/login already
+  // fully established never depends on Firebase Auth, so it shouldn't wait
+  // behind Firebase's onAuthStateChanged initialization below — only
+  // Firebase-based sessions (and anything that doesn't pass every one of
+  // these checks) still go through the normal gate.
+  let isExplicitlyLoggedOut = false;
+  try {
+    isExplicitlyLoggedOut = localStorage.getItem("etir_logged_out") === "true";
+  } catch (e) {
+    console.error(e);
+  }
+  const hasValidLocalSessionFastPath = isValidLocalSessionFastPath(session, isExplicitlyLoggedOut);
+
   // Render a dedicated Initialization loading state while secure credentials synchronization/verification is in progress
-  if (!isAuthChecked) {
+  if (!isAuthChecked && !hasValidLocalSessionFastPath) {
     return (
       <div className="bg-slate-950 min-h-screen text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
         <div className="flex flex-col items-center gap-4 max-w-sm text-center">
