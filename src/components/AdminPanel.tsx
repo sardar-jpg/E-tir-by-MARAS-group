@@ -1166,6 +1166,10 @@ MARAS Group etir Center`;
 
   // Form states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  // fix/prevent-duplicate-shipment-creation: in-flight guard for
+  // handleCreateShipment — a double-click, repeated Enter, or repeated
+  // submit event must never fire more than one POST /api/shipments.
+  const [isCreatingShipment, setIsCreatingShipment] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDriverCreateOpen, setIsDriverCreateOpen] = useState(false);
   const [editingShipment, setEditingShipment] = useState<Shipment | null>(null);
@@ -3268,6 +3272,8 @@ MARAS Group etir Center`;
   // Create Shipment Action
   const handleCreateShipment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreatingShipment) return;
+    setIsCreatingShipment(true);
     try {
       // BUG-13: Sea/Air freight collect Port/Airport fields instead of a
       // city field in this form. Never submit whatever Land's loadingCity/
@@ -3307,6 +3313,8 @@ MARAS Group etir Center`;
     } catch (err) {
       console.error(err);
       triggerToast("❌ Could not reach the server. Please check your connection and try again.");
+    } finally {
+      setIsCreatingShipment(false);
     }
   };
 
@@ -8581,8 +8589,14 @@ MARAS Group etir Center`;
                 <button type="button" onClick={closeCreateShipmentModal} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
                   {t('cancel')}
                 </button>
-                <button type="submit" className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-semibold rounded-xl shadow-lg transition-all">
-                  {t('save')}
+                <button
+                  type="submit"
+                  disabled={isCreatingShipment}
+                  className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-lg transition-all"
+                >
+                  {isCreatingShipment
+                    ? (lang === 'tr' ? 'Oluşturuluyor...' : lang === 'ar' ? 'جاري الإنشاء...' : 'Creating...')
+                    : t('save')}
                 </button>
               </div>
 
