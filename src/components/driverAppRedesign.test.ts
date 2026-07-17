@@ -96,8 +96,13 @@ describe("Arabic RTL — driver surfaces use logical layout utilities only", () 
   });
 
   it("directional arrows mirror under RTL", () => {
+    // The design system's ONE canonical route element owns the arrow —
+    // every screen renders routes through it, so mirroring is fixed in
+    // exactly one place.
+    const ROUTE = read("driver/RouteBlock.tsx");
+    expect(ROUTE).toContain("rtl:rotate-180");
     const CARD = read("driver/DriverActiveJobCard.tsx");
-    expect(CARD).toContain("rtl:rotate-180");
+    expect(CARD).toContain("<RouteBlock");
   });
 });
 

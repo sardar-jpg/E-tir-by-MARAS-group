@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import {
-  ArrowRight, Check, CheckCircle2, Clock, DollarSign, FileText, X,
+  Check, CheckCircle2, Clock, DollarSign, FileText, X,
 } from "lucide-react";
 import type { Language } from "../../types";
 import { TRUCK_TYPES } from "../../types";
 import type { DriverOfferView } from "../../lib/driverAlliance";
 import { MAX_QUOTE_PRICE_USD } from "../../lib/driverAlliance";
+import { HERO_CARD, INNER_CARD } from "./driverUi";
+import RouteBlock from "./RouteBlock";
 
 /**
  * Driver App V2 — the offer sections embedded inside the Job screen
@@ -270,7 +272,7 @@ export default function DriverOffersScreen({
 
   if (offers.length === 0 && !hasActiveJob) {
     return (
-      <div className="py-10 text-center bg-slate-900 rounded-3xl p-6 border border-slate-800">
+      <div className="py-10 text-center bg-slate-900 rounded-3xl p-6 border border-slate-800/60">
         <p className="text-sm text-slate-400 leading-relaxed max-w-[280px] mx-auto">{t.empty}</p>
       </div>
     );
@@ -288,8 +290,12 @@ export default function DriverOffersScreen({
     return (
       <div
         key={o.id}
-        className={`bg-slate-900 border rounded-3xl ${
-          pending && !hasActiveJob ? "border-orange-500/40" : o.isWinner ? "border-emerald-500/30" : "border-slate-800"
+        className={`${
+          pending && !hasActiveJob
+            ? `${HERO_CARD} border-s-4 border-s-amber-400`
+            : o.isWinner
+              ? "bg-slate-900 border border-emerald-500/30 rounded-3xl border-s-4 border-s-emerald-500"
+              : "bg-slate-900 border border-slate-800/60 rounded-3xl"
         }`}
       >
         {/* ── Collapsed summary: only what matters at a glance ── */}
@@ -299,13 +305,11 @@ export default function DriverOffersScreen({
           className="w-full text-start p-4 space-y-3 cursor-pointer active:scale-[0.995] transition-transform"
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2.5 text-base min-w-0">
-              <span className="font-bold text-slate-200 truncate">{o.pickupCity}</span>
-              <ArrowRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
-              <span className="font-bold text-slate-200 truncate">{o.deliveryCity}</span>
+            <span className="text-base min-w-0">
+              <RouteBlock fromCity={o.pickupCity} toCity={o.deliveryCity} />
             </span>
             {pending && !hasActiveJob && (
-              <span className="shrink-0 bg-orange-500 text-white text-xs font-bold rounded-full px-2.5 py-0.5 light-preserve">{t.newTag}</span>
+              <span className="shrink-0 bg-amber-400 text-slate-950 text-xs font-bold rounded-full px-2.5 py-0.5 light-preserve">{t.newTag}</span>
             )}
             {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
           </div>
@@ -371,7 +375,7 @@ export default function DriverOffersScreen({
                 the offer contract yet — they render here automatically
                 once the contract carries them (no placeholders, no
                 invented values). */}
-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 text-start text-sm">
+            <div className={`${INNER_CARD} p-4 space-y-0 divide-y divide-slate-800/50 text-start text-sm [&>p]:py-2 [&>p:first-child]:pt-0 [&>p:last-child]:pb-0`}>
               <p className="text-slate-300"><span className="text-slate-500">{t.from}:</span> <span className="font-semibold">{o.pickupCity}, {o.pickupCountry}</span></p>
               <p className="text-slate-300"><span className="text-slate-500">{t.to}:</span> <span className="font-semibold">{o.deliveryCity}, {o.deliveryCountry}</span></p>
               {o.loadingAddress && (
@@ -498,7 +502,7 @@ export default function DriverOffersScreen({
                       type="button"
                       onClick={() => setPhase("confirming")}
                       disabled={isSending || !price.trim() || Number(price) <= 0}
-                      className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                      className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
                     >
                       <DollarSign className="w-5 h-5 shrink-0" />
                       <span>{t.submitPrice}</span>

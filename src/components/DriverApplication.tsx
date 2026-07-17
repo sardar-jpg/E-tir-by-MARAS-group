@@ -1,3 +1,12 @@
+// Premium Arabic UI typography (self-hosted, no external requests):
+// IBM Plex Sans Arabic in the four UI weights. Applied only inside
+// the driver shell and only under RTL — see .driver-shell rules in
+// index.css. The Latin stack stays system-ui (SF on iOS), which is
+// deliberately the native-quality choice.
+import "@fontsource/ibm-plex-sans-arabic/400.css";
+import "@fontsource/ibm-plex-sans-arabic/500.css";
+import "@fontsource/ibm-plex-sans-arabic/600.css";
+import "@fontsource/ibm-plex-sans-arabic/700.css";
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Shipment,
@@ -1198,7 +1207,7 @@ export default function DriverApplication({
 
   return (
     <div
-      className={`${isMobileMode
+      className={`driver-shell ${isMobileMode
         ? "w-full h-[100dvh] text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none"
         : "p-4 md:p-8 bg-slate-950 min-h-screen text-slate-100 flex flex-col lg:flex-row gap-8 justify-center items-center font-sans select-none"
       } ${theme === 'light' ? 'theme-light' : ''}`}
@@ -1324,12 +1333,12 @@ export default function DriverApplication({
           >
 
             {/* Header */}
-            <div className="px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-800 flex items-center justify-between z-20 relative shrink-0">
+            <div className="px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-800/60 flex items-center justify-between z-20 relative shrink-0">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
-                  <Truck className="w-4.5 h-4.5 text-orange-500" />
+                <div className="w-9 h-9 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
+                  <Truck className="w-5 h-5 text-orange-500" />
                 </div>
-                <h1 className="text-white font-bold text-sm">{t('brand')}</h1>
+                <h1 className="text-white font-extrabold text-base tracking-tight">{t('brand')}</h1>
               </div>
 
               <NotificationBell
@@ -1351,7 +1360,7 @@ export default function DriverApplication({
                 other screens scroll here. Bottom navigation sits OUTSIDE
                 this area, so it can never cover content. */}
             {showNotifications ? (
-              <div className="flex-1 overflow-y-auto bg-slate-950 p-4">
+              <div className="flex-1 overflow-y-auto bg-slate-950 px-4 pt-5 pb-4">
                 <NotificationsPanel
                   notifications={myNotifications}
                   lang={lang}
@@ -1401,7 +1410,7 @@ export default function DriverApplication({
                 />
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto bg-slate-950 p-4">
+              <div className="flex-1 overflow-y-auto bg-slate-950 px-4 pt-5 pb-4">
                 {activeTab === 'home' && (
                   <DriverHomeScreen
                     driverName={getDriverName()}

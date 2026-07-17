@@ -16,6 +16,7 @@ import {
 } from "../../lib/driverAccountDeletion";
 import { accountDeletionCopy } from "../../lib/accountDeletion";
 import PrivacyPolicyModal from "../PrivacyPolicyModal";
+import { SCREEN_TITLE } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — one Account screen merging
@@ -502,10 +503,10 @@ export default function DriverAccountScreen({
 
   return (
     <div className="space-y-4 animate-fade-in pb-4">
-      <h2 className="text-xl font-bold text-white text-start">{t.title}</h2>
+      <h2 className={SCREEN_TITLE}>{t.title}</h2>
 
       {/* ── Profile card ── */}
-      <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">
+      <section className="bg-slate-900 border border-slate-800/60 rounded-3xl p-5 space-y-4">
         <div className="flex items-center gap-4">
           <div className="relative shrink-0">
             <div className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center text-white font-bold text-lg border-2 border-slate-800 bg-slate-800">
@@ -529,10 +530,10 @@ export default function DriverAccountScreen({
             </button>
           </div>
           <div className="min-w-0 text-start">
-            <h3 className="text-base font-bold text-slate-200 truncate">{profileName || "—"}</h3>
+            <h3 className="text-lg font-bold text-white truncate tracking-tight">{profileName || "—"}</h3>
             <p className="text-sm text-slate-400 truncate">@{profileUsername || "driver"}</p>
-            <p className="text-sm text-slate-400 mt-0.5 flex items-center gap-1.5">
-              <Truck className="w-3.5 h-3.5 shrink-0" />
+            <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-bold text-slate-200 bg-slate-950 border border-slate-700/60 rounded-lg px-2 py-1 tabular-nums">
+              <Truck className="w-3.5 h-3.5 shrink-0 text-slate-500" />
               <span className="truncate">{profileTruckNumber || "—"}</span>
             </p>
           </div>
@@ -547,7 +548,7 @@ export default function DriverAccountScreen({
                 { icon: Truck, label: t.truckNumber, value: profileTruckNumber },
                 { icon: Truck, label: t.truckType, value: truckTypeLabel },
               ].map((row, i) => (
-                <div key={row.label} className={`flex items-center justify-between gap-3 py-2.5 ${i > 0 ? "border-t border-slate-800" : ""}`}>
+                <div key={row.label} className={`flex items-center justify-between gap-3 py-2.5 ${i > 0 ? "border-t border-slate-800/60" : ""}`}>
                   <dt className="text-slate-500 flex items-center gap-2 shrink-0">
                     <row.icon className="w-4 h-4" />
                     {row.label}
@@ -623,7 +624,7 @@ export default function DriverAccountScreen({
       </section>
 
       {/* ── Settings ── */}
-      <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">
+      <section className="bg-slate-900 border border-slate-800/60 rounded-3xl p-5 space-y-4">
         <h3 className="text-sm font-bold text-slate-200 text-start">{t.settings}</h3>
 
         {/* Availability status — read-only; the switch itself is on Home */}

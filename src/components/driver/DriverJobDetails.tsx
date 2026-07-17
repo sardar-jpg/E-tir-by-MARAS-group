@@ -136,7 +136,7 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden">
+    <section className="bg-slate-900 border border-slate-800/60 rounded-3xl overflow-hidden">
       <button
         type="button"
         disabled={!collapsible}
@@ -256,7 +256,7 @@ export default function DriverJobDetails({
             { label: t.loading, city: s.loadingCity, country: s.loadingCountry, address: s.loadingAddress },
             { label: t.delivery, city: s.deliveryCity, country: s.deliveryCountry, address: s.deliveryAddress },
           ].map((stop) => (
-            <div key={stop.label} className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 text-start">
+            <div key={stop.label} className="bg-slate-950 rounded-2xl p-3.5 text-start">
               <p className="text-xs text-slate-500 font-semibold">{stop.label}</p>
               <p className="text-base font-bold text-slate-200 mt-0.5">
                 {stop.city || "—"}
@@ -325,7 +325,7 @@ export default function DriverJobDetails({
           pricing/costs/invoices are never present on a driver-scoped
           shipment view and are never rendered here. */}
       <Section icon={<Wallet className="w-4 h-4" />} title={t.payment}>
-        <div className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-2xl p-3.5">
+        <div className="flex items-center justify-between bg-slate-950 rounded-2xl p-3.5">
           <span className="text-sm text-slate-400 text-start">{t.paymentSub}</span>
           {agreedAmount !== null ? (
             <span className="text-xl font-bold text-orange-500">
@@ -360,7 +360,7 @@ export default function DriverJobDetails({
 
       {/* F. Latest operational note (from the shipment's own driver-visible timeline) */}
       {latestNote && (
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 text-start">
+        <div className="bg-slate-900 border border-slate-800/60 rounded-3xl p-4 text-start">
           <p className="text-xs font-semibold text-slate-500 mb-1">{t.latestNote}</p>
           <p className="text-sm text-slate-300 leading-relaxed">{latestNote}</p>
         </div>

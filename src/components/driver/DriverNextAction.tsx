@@ -3,6 +3,7 @@ import { Check, CheckCircle2, Clock, Lock, X } from "lucide-react";
 import type { Language, Shipment } from "../../types";
 import { getDriverNextAction, localizeNextActionLabel } from "../../lib/driverJobFlow";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
+import { BTN_PRIMARY } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — the ONE place the driver
@@ -108,7 +109,7 @@ export default function DriverNextAction({
 
   if (shipment.status === "Assigned") {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+      <div className="bg-slate-900 border border-slate-800/60 rounded-2xl p-4 space-y-3">
         <p className="text-sm font-semibold text-slate-200 text-start">{t.acceptPrompt}</p>
         <div className="grid grid-cols-3 gap-2">
           <button
@@ -136,7 +137,7 @@ export default function DriverNextAction({
 
   if (shipment.status === "New") {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-3 text-start">
+      <div className="bg-slate-900 border border-slate-800/60 rounded-2xl p-4 flex items-center gap-3 text-start">
         <div className="w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
           <Clock className="w-5 h-5" />
         </div>
@@ -153,7 +154,7 @@ export default function DriverNextAction({
   if (!action) {
     const closed = isShipmentClosed(shipment.status, shipment.freightType);
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-3 text-start">
+      <div className="bg-slate-900 border border-slate-800/60 rounded-2xl p-4 flex items-center gap-3 text-start">
         <div
           className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 border ${
             closed
@@ -205,7 +206,7 @@ export default function DriverNextAction({
       type="button"
       onClick={() => setConfirming(true)}
       disabled={isSubmitting}
-      className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-lg flex items-center justify-center gap-2.5 shadow-[0_6px_18px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 light-preserve"
+      className={`w-full ${BTN_PRIMARY} gap-2.5`}
     >
       <CheckCircle2 className="w-6 h-6 shrink-0" />
       <span>{actionLabel}</span>

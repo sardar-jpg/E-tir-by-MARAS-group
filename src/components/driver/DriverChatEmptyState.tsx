@@ -35,8 +35,8 @@ export default function DriverChatEmptyState({ lang, onOpenJob }: DriverChatEmpt
   const t = LABELS[lang] ?? LABELS.en;
   return (
     <div className="h-full flex items-center justify-center p-6">
-      <div className="w-full max-w-[320px] py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800">
-        <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto">
+      <div className="w-full max-w-[320px] py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800/60">
+        <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800/60 flex items-center justify-center mx-auto">
           <MessageSquare className="w-7 h-7 text-slate-600 shrink-0" />
         </div>
         <div>

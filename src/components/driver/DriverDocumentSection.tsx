@@ -64,7 +64,7 @@ export default function DriverDocumentSection({
                 href={d.url}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-3 p-3 min-h-[56px] bg-slate-950 border border-slate-800 rounded-2xl hover:border-orange-500/40 transition-colors cursor-pointer"
+                className="flex items-center gap-3 p-3 min-h-[56px] bg-slate-950 border border-slate-800/60 rounded-2xl hover:border-orange-500/40 transition-colors cursor-pointer"
               >
                 <span className="w-10 h-10 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-500 flex items-center justify-center shrink-0">
                   {d.category === "photo" ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}

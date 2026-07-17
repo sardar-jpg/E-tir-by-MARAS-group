@@ -1,4 +1,5 @@
-import { ArrowRight, Briefcase, ChevronRight, MessageSquare } from "lucide-react";
+import { Briefcase, ChevronRight, MessageSquare } from "lucide-react";
+import RouteBlock from "./RouteBlock";
 import type { Language, Shipment } from "../../types";
 import type { DriverOfferView } from "../../lib/driverAlliance";
 import DriverActiveJobCard from "./DriverActiveJobCard";
@@ -7,7 +8,7 @@ import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverOffersScreen from "./DriverOffersScreen";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
-import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
+import { BTN_QUIET, BTN_SECONDARY, CARD, LIST_ROW, SCREEN_TITLE, SECTION_LABEL, getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
 /**
  * Driver App V2 — the Job tab is the ONE operational center, in strict
@@ -121,7 +122,7 @@ export default function DriverActiveJobScreen({
 
   return (
     <div className="space-y-5 animate-fade-in pb-4">
-      <h2 className="text-2xl font-bold text-white text-start">{t.title}</h2>
+      <h2 className={SCREEN_TITLE}>{t.title}</h2>
 
       {/* ── 1. The active/assigned job ── */}
       {activeJob ? (
@@ -141,8 +142,8 @@ export default function DriverActiveJobScreen({
             onAccept={() => onAccept(activeJob)}
             onDecline={() => onDecline(activeJob)}
           />
-          <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4">
-            <h3 className="text-sm font-bold text-slate-300 text-start mb-3">{t.progress}</h3>
+          <section className={`${CARD} p-4`}>
+            <h3 className={`${SECTION_LABEL} mb-3`}>{t.progress}</h3>
             <DriverStatusTimeline shipment={activeJob} lang={lang} />
           </section>
           {/* One conversation shortcut — everything (documents, photos,
@@ -154,7 +155,7 @@ export default function DriverActiveJobScreen({
             <button
               type="button"
               onClick={() => onOpenChat(activeJob)}
-              className="w-full min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
+              className={`w-full min-h-[56px] ${BTN_SECONDARY} !bg-slate-900 gap-2`}
             >
               <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
               <span>{t.chat}</span>
@@ -170,7 +171,7 @@ export default function DriverActiveJobScreen({
         </div>
       ) : (
         offers.length === 0 && (
-          <div className="py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800">
+          <div className={`py-12 text-center space-y-4 ${CARD} p-6`}>
             <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto">
               <Briefcase className="w-7 h-7 text-slate-600 shrink-0" />
             </div>
@@ -195,7 +196,7 @@ export default function DriverActiveJobScreen({
       {/* ── 5. Previous jobs — compact and secondary ── */}
       {otherJobs.length > 0 && (
         <section className="space-y-2.5">
-          <h3 className="text-sm font-bold text-slate-400 text-start">{t.previous}</h3>
+          <h3 className={SECTION_LABEL}>{t.previous}</h3>
           {otherJobs.map((s) => {
             const closed = isShipmentClosed(s.status, s.freightType);
             const unread = unreadByShipmentId[s.id] || 0;
@@ -204,10 +205,10 @@ export default function DriverActiveJobScreen({
                 key={s.id}
                 type="button"
                 onClick={() => onOpenJob(s)}
-                className={`w-full text-start bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-2 transition-all cursor-pointer active:scale-[0.99] hover:border-slate-600 ${closed ? "opacity-75" : ""}`}
+                className={`${LIST_ROW} p-3.5 space-y-2 ${closed ? "opacity-70" : ""}`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-white selectable truncate">#{s.shipmentNumber}</span>
+                  <span className="text-[13px] font-bold text-slate-300 tabular-nums selectable truncate">#{s.shipmentNumber}</span>
                   <span className="flex items-center gap-1.5 shrink-0">
                     {unread > 0 && (
                       <span className="inline-flex items-center gap-1 bg-orange-500 text-white text-xs font-bold rounded-full px-2 py-0.5 light-preserve">
@@ -226,9 +227,7 @@ export default function DriverActiveJobScreen({
                   </span>
                 </div>
                 <div className="flex items-center gap-2.5 text-sm">
-                  <span className="font-bold text-slate-200 truncate">{s.loadingCity || "—"}</span>
-                  <ArrowRight className="w-4 h-4 text-orange-500 shrink-0 rtl:rotate-180" />
-                  <span className="font-bold text-slate-200 truncate">{s.deliveryCity || "—"}</span>
+                  <RouteBlock fromCity={s.loadingCity} toCity={s.deliveryCity} />
                   <ChevronRight className="w-4 h-4 text-slate-500 shrink-0 ms-auto rtl:rotate-180" />
                 </div>
               </button>
@@ -240,7 +239,7 @@ export default function DriverActiveJobScreen({
                 type="button"
                 onClick={onLoadMore}
                 disabled={isLoadingMore}
-                className="px-5 min-h-[48px] bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-300 text-sm font-bold rounded-2xl transition-all disabled:opacity-50 cursor-pointer"
+                className={`px-5 ${BTN_QUIET} min-h-[48px] bg-slate-900 border border-slate-800/60 hover:border-slate-600 text-sm`}
               >
                 {isLoadingMore ? t.loading : t.loadOlder}
               </button>
