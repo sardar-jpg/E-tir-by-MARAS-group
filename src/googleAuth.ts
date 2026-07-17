@@ -1,6 +1,5 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
 import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithCredential, reauthenticateWithPopup, reauthenticateWithCredential, User } from "firebase/auth";
-import { getStorage } from "firebase/storage";
 import { Capacitor } from "@capacitor/core";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
 import firebaseConfig from "../firebase-applet-config.json";
@@ -8,7 +7,6 @@ import firebaseConfig from "../firebase-applet-config.json";
 // Initialize Firebase client-side safely
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
-export const storage = getStorage(app);
 
 const isNative = Capacitor.isNativePlatform();
 
