@@ -58,19 +58,28 @@ export default function AdminCostsSection({
     return acc;
   }, { Paid: 0, Partial: 0, Unpaid: 0 } as Record<string, number>);
 
+  // Accounting Phase B: chart buckets are keyed by (name, CURRENCY) and
+  // every label carries its currency — amounts in USD, IQD, TRY, and EUR
+  // are never added together as if they were equivalent (there is no FX
+  // conversion in this system by design). The statement-level cards above
+  // already group by currency (totalCostsByCurrency).
   const freightCosts = costStatements.reduce((acc, s) => {
     const type = s.shipmentType || "land";
-    acc[type] = (acc[type] || 0) + Number(s.totalCost || 0);
+    const cur = s.currency || "USD";
+    const key = `${type}|${cur}`;
+    acc[key] = (acc[key] || 0) + Number(s.totalCost || 0);
     return acc;
   }, {} as Record<string, number>);
-  const freightChartData = Object.entries(freightCosts).map(([name, value]) => ({
-    name: name === 'land' ? (lang === 'tr' ? 'Karayolu' : 'Land Freight') : name === 'sea' ? (lang === 'tr' ? 'Denizyolu' : 'Sea Freight') : (lang === 'tr' ? 'Havayolu' : 'Air Freight'),
-    value
-  }));
+  const freightChartData = Object.entries(freightCosts).map(([key, value]) => {
+    const [name, cur] = key.split("|");
+    const label = name === 'land' ? (lang === 'tr' ? 'Karayolu' : 'Land Freight') : name === 'sea' ? (lang === 'tr' ? 'Denizyolu' : 'Sea Freight') : (lang === 'tr' ? 'Havayolu' : 'Air Freight');
+    return { name: `${label} (${cur})`, value };
+  });
 
   const customerCosts = costStatements.reduce((acc, s) => {
-    const name = s.companyName || "Unknown";
-    acc[name] = (acc[name] || 0) + Number(s.totalCost || 0);
+    const cur = s.currency || "USD";
+    const key = `${s.companyName || "Unknown"} (${cur})`;
+    acc[key] = (acc[key] || 0) + Number(s.totalCost || 0);
     return acc;
   }, {} as Record<string, number>);
   const customerChartData = Object.entries(customerCosts)
@@ -81,8 +90,9 @@ export default function AdminCostsSection({
   const supplierCosts = {} as Record<string, number>;
   costStatements.forEach(s => {
     (s.items || []).forEach(item => {
-      const name = item.supplierName || (lang === 'tr' ? 'Diğer Vendor' : 'Other Vendor');
-      supplierCosts[name] = (supplierCosts[name] || 0) + Number(item.totalAmount || 0);
+      const base = item.supplierName || (lang === 'tr' ? 'Diğer Vendor' : 'Other Vendor');
+      const key = `${base} (${item.currency || s.currency || "USD"})`;
+      supplierCosts[key] = (supplierCosts[key] || 0) + Number(item.totalAmount || 0);
     });
   });
   const supplierChartData = Object.entries(supplierCosts)

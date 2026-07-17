@@ -37,7 +37,8 @@ import { getAssignableDrivers, getCoreDriverSelectOptions } from "../lib/driverA
 import { computeBusyDriverIds, resolveDriverAvailability } from "../lib/driverAlliance";
 import DriverAllianceOffers from "./admin/DriverAllianceOffers";
 import DriverRouteEditor from "./admin/DriverRouteEditor";
-import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
+import { resolveExportItems, resolveExportNotes, resolveExportHeaderStatus } from "../lib/costStatementExportView";
+import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../lib/costStatementMath";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
@@ -777,6 +778,11 @@ export default function AdminPanel({
 
   const [isStatementEditorOpen, setIsStatementEditorOpen] = useState(false);
   const [statementPreviewMode, setStatementPreviewMode] = useState<'statement' | 'invoice' | 'client_statement' | 'vendor_statement'>('statement');
+  // Accounting Phase B: true when a save was rejected with 409 (another
+  // admin saved this statement first). The editor stays open, the
+  // admin's edits stay in place, and reloading the latest server copy is
+  // an explicit button, never automatic.
+  const [statementConflict, setStatementConflict] = useState(false);
   const [selectedVendorForStatement, setSelectedVendorForStatement] = useState<string>('');
   const [costSearchQuery, setCostSearchQuery] = useState("");
   const [costStatusFilter, setCostStatusFilter] = useState<'All' | 'Unpaid' | 'Partial' | 'Paid'>('All');
@@ -2032,6 +2038,21 @@ MARAS Group etir Center`;
     }
   };
 
+  const handleReloadLatestStatement = async () => {
+    if (!selectedCostStatement) return;
+    try {
+      const res = await apiFetch(`/api/cost-statements/${selectedCostStatement.shipmentId}`);
+      if (res.ok) {
+        const latest = await res.json() as CostStatement;
+        setSelectedCostStatement(latest);
+        savedStatementSnapshotRef.current = JSON.stringify(latest);
+        setStatementConflict(false);
+      }
+    } catch (err) {
+      console.error("Failed to reload latest cost statement:", err);
+    }
+  };
+
   const handleSaveCostStatement = async () => {
     if (!selectedCostStatement) return;
     setIsSavingCostStatement(true);
@@ -2064,12 +2085,19 @@ MARAS Group etir Center`;
         });
         setSelectedCostStatement(saved);
         savedStatementSnapshotRef.current = JSON.stringify(saved);
+        setStatementConflict(false);
         triggerToast(lang === 'tr' ? "Maliyet tablosu başarıyla kaydedildi!" : (lang === 'ar' ? "تم حفظ كشف التكلفة بنجاح!" : "Cost statement saved successfully!"));
         const resLogs = await apiFetch("/api/logs");
         if (resLogs.ok) {
           const safeJson = async (r: Response) => JSON.parse(await r.text());
           setActivityLogs(await safeJson(resLogs));
         }
+      } else if (res.status === 409) {
+        // Accounting Phase B optimistic concurrency: someone else saved
+        // this statement since it was opened. Keep the editor open with
+        // the admin's unsaved changes intact — reloading is an explicit
+        // action, never automatic.
+        setStatementConflict(true);
       } else {
         triggerToast(lang === 'tr' ? "Maliyet tablosu kaydedilemedi" : (lang === 'ar' ? "فشل حفظ كشف التكلفة" : "Failed to save cost statement"));
       }
@@ -2243,6 +2271,28 @@ MARAS Group etir Center`;
       ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(",");
       csvContent += row + "\n";
     });
+    // Accounting Phase B: mode-aware summary rows through the SAME shared
+    // rules the preview and PDF use — customer documents get customer-side
+    // money and status only; the internal expense status never appears on
+    // an invoice/client CSV.
+    const headerStatus = resolveExportHeaderStatus(statementPreviewMode, stmt, matchingShipment);
+    csvContent += "\n";
+    if (statementPreviewMode === 'invoice' || statementPreviewMode === 'client_statement') {
+      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(stmt));
+      const custCur = stmt.agreedCurrency || stmt.currency;
+      csvContent += `"Agreed Amount","${cust.agreedAmount}","${custCur}"\n`;
+      csvContent += `"Customer Payment Received","${cust.customerReceivedAmount}","${custCur}"\n`;
+      csvContent += `"Customer Receivable","${cust.customerReceivable}","${custCur}"\n`;
+      if (cust.customerCredit > 0) csvContent += `"Customer Credit","${cust.customerCredit}","${custCur}"\n`;
+      if (headerStatus) csvContent += `"Customer Payment Status","${headerStatus.value}"\n`;
+    } else if (statementPreviewMode === 'statement') {
+      const exp = deriveExpenseSummary(Number(stmt.totalCost) || 0, Number(stmt.paidAmount) || 0);
+      csvContent += `"Total Cost","${exp.totalCost}","${stmt.currency}"\n`;
+      csvContent += `"Expense Paid Amount","${exp.paidAmount}","${stmt.currency}"\n`;
+      csvContent += `"Expense Payable","${exp.expenseRemaining}","${stmt.currency}"\n`;
+      if (exp.expenseCredit > 0) csvContent += `"Expense Credit","${exp.expenseCredit}","${stmt.currency}"\n`;
+      if (headerStatus) csvContent += `"Expense Payment Status","${headerStatus.value}"\n`;
+    }
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
@@ -2504,27 +2554,27 @@ MARAS Group etir Center`;
       let balanceVal = Number(selectedCostStatement.remainingBalance || 0);
 
       if (statementPreviewMode === 'invoice') {
-        const totalInv = matchingShipment?.agreedAmount || 0;
-        const paidDeposit = selectedCostStatement.paidAmount || 0;
-        const balanceRemaining = totalInv - paidDeposit;
+        // Accounting Phase B: customer documents show ONLY customer-side
+        // money — received-from-customer, never the expense paidAmount.
+        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
+        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
         val1Label = lang === 'tr' ? "Matrah / Toplam Paket:" : "Base Transport Fee:";
-        val2Label = lang === 'tr' ? "Alınan ÖnÖdeme:" : "Advance Deposit Paid:";
-        val3Label = lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:";
-        val1Text = `${totalInv.toLocaleString()} ${selectedCostStatement.currency}`;
-        val2Text = `- ${paidDeposit.toLocaleString()} ${selectedCostStatement.currency}`;
-        val3Text = `${balanceRemaining.toLocaleString()} ${selectedCostStatement.currency}`;
-        balanceVal = balanceRemaining;
+        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
+        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ ALACAĞI (KREDİ):" : "CUSTOMER CREDIT:") : (lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:");
+        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
+        val2Text = `- ${cust.customerReceivedAmount.toLocaleString()} ${custCur}`;
+        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+        balanceVal = cust.customerReceivable;
       } else if (statementPreviewMode === 'client_statement') {
-        const totalInv = matchingShipment?.agreedAmount || 0;
-        const paidDeposit = selectedCostStatement.paidAmount || 0;
-        const balanceRemaining = totalInv - paidDeposit;
+        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
+        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
         val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
-        val2Label = lang === 'tr' ? "Toplam Kredi Cari:" : "Total Credit Settle:";
-        val3Label = lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:";
-        val1Text = `${totalInv.toLocaleString()} ${selectedCostStatement.currency}`;
-        val2Text = `(${paidDeposit.toLocaleString()}) ${selectedCostStatement.currency}`;
-        val3Text = `${balanceRemaining.toLocaleString()} ${selectedCostStatement.currency}`;
-        balanceVal = balanceRemaining;
+        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
+        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ KREDİSİ:" : "Customer Credit Balance:") : (lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:");
+        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
+        val2Text = `(${cust.customerReceivedAmount.toLocaleString()}) ${custCur}`;
+        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+        balanceVal = cust.customerReceivable;
       } else if (statementPreviewMode === 'vendor_statement') {
         const vendorTotal = itemsToRender.reduce((acc, it) => acc + (Number(it.totalAmount) || 0), 0);
         val1Label = lang === 'tr' ? "Alt Toplam Alacak:" : "Subtotal Credit Accrued:";
@@ -2670,19 +2720,31 @@ MARAS Group etir Center`;
   };
 
   const renderStatementHeader = (selectedStatement: CostStatement) => {
+    // Accounting Phase B: the shipment's MAR-YYYY-#### is the ONE business
+    // reference on every accounting document — displayed plainly, with a
+    // document-type label only. No derived prefixes, no duplicated year,
+    // no second numbering system.
     let title = lang === 'tr' ? 'MALİYET BEYANNAMESİ' : 'COST STATEMENT';
-    let refNum = `Reference: MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
-    
+    let refNum = `${lang === 'tr' ? 'Maliyet Tablosu' : 'Cost Statement'} — ${selectedStatement.shipmentNumber}`;
+
     if (statementPreviewMode === 'invoice') {
       title = lang === 'tr' ? 'SATIŞ FATURASI' : 'COMMERCIAL SALES INVOICE';
-      refNum = `Invoice No: INV-MARAS-${new Date(selectedStatement.date || '').getFullYear() || '2026'}-${selectedStatement.shipmentNumber}`;
+      refNum = `${lang === 'tr' ? 'Fatura' : 'Invoice'} — ${selectedStatement.shipmentNumber}`;
     } else if (statementPreviewMode === 'client_statement') {
       title = lang === 'tr' ? 'MÜŞTERİ CARİ HESAP EKSTRESİ' : 'CLIENT ACCOUNT STATEMENT';
-      refNum = `Statement Ref: CLI-${selectedStatement.shipmentNumber}`;
+      refNum = `${lang === 'tr' ? 'Müşteri Ekstresi' : 'Client Statement'} — ${selectedStatement.shipmentNumber}`;
     } else if (statementPreviewMode === 'vendor_statement') {
       title = lang === 'tr' ? 'TEDARİKÇİ CARİ HESAP EKSTRESİ' : 'VENDOR ACCOUNT STATEMENT';
-      refNum = `Statement Ref: VND-${selectedVendorForStatement ? selectedVendorForStatement.toUpperCase().replace(/\s+/g, '_') : 'UNSPECIFIED'}-${selectedStatement.shipmentNumber}`;
+      refNum = `${lang === 'tr' ? 'Tedarikçi Ekstresi' : 'Vendor Statement'} — ${selectedStatement.shipmentNumber}`;
     }
+    // Mode-aware status (shared rule with PDF/CSV): expense status on the
+    // internal statement, CUSTOMER status on invoice/client documents,
+    // and no status at all on vendor documents.
+    const headerStatus = resolveExportHeaderStatus(
+      statementPreviewMode,
+      selectedStatement,
+      resolveStatementShipmentContext(selectedStatement, shipments)
+    );
 
     return (
       <div className="flex justify-between items-start border-b-2 border-orange-500 pb-5 gap-6">
@@ -2702,7 +2764,12 @@ MARAS Group etir Center`;
           <p className="text-[10px] font-bold text-slate-400 font-mono uppercase mt-0.5">{refNum}</p>
           <div className="mt-3 text-[10px] text-slate-500 space-y-0.5">
             <div><strong>{lang === 'tr' ? 'İşlem Tarihi:' : 'Release Date:'}</strong> {selectedStatement.date}</div>
-            <div><strong>{lang === 'tr' ? 'Ödeme Statüsü:' : 'Payment Status:'}</strong> <span className="font-extrabold text-slate-800 uppercase">{selectedStatement.paymentStatus}</span></div>
+            {headerStatus && (
+              <div>
+                <strong>{headerStatus.kind === 'customer' ? (lang === 'tr' ? 'Müşteri Ödeme Statüsü:' : 'Customer Payment Status:') : (lang === 'tr' ? 'Gider Ödeme Statüsü:' : 'Expense Payment Status:')}</strong>{' '}
+                <span className="font-extrabold text-slate-800 uppercase">{headerStatus.value}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2801,9 +2868,14 @@ MARAS Group etir Center`;
     }
 
     if (statementPreviewMode === 'client_statement') {
-      const contractAmt = matchingShipment?.agreedAmount || 0;
-      const paidAmt = selectedStatement.paidAmount || 0;
-      const balDue = contractAmt - paidAmt;
+      // Accounting Phase B: this ledger shows CUSTOMER money only —
+      // payments received FROM the customer. The expense-side paidAmount
+      // (money MARAS paid vendors) never appears on a customer document.
+      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedStatement));
+      const custCur = selectedStatement.agreedCurrency || selectedStatement.currency;
+      const contractAmt = cust.agreedAmount;
+      const paidAmt = cust.customerReceivedAmount;
+      const balDue = cust.customerCredit > 0 ? 0 : cust.customerReceivable;
       return (
         <div className="space-y-2">
           <h5 className="font-black text-slate-800 text-[10px] uppercase tracking-wider">{lang === 'tr' ? 'MÜŞTERİ CARİ HESAP EKSTRESİ' : 'CLIENT ACCOUNT LEDGER & MOVEMENT LOG'}</h5>
@@ -2827,7 +2899,7 @@ MARAS Group etir Center`;
                   </td>
                   <td className="p-3 text-right font-mono text-slate-900">{contractAmt.toLocaleString()}</td>
                   <td className="p-3 text-slate-300 font-mono">-</td>
-                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{contractAmt.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                  <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{contractAmt.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{custCur}</span></td>
                 </tr>
                 {paidAmt > 0 && (
                   <tr className="text-slate-700 bg-emerald-50/20">
@@ -2838,7 +2910,7 @@ MARAS Group etir Center`;
                     </td>
                     <td className="p-3 text-slate-300 font-mono">-</td>
                     <td className="p-3 text-right font-mono text-emerald-700">({paidAmt.toLocaleString()})</td>
-                    <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{balDue.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{selectedStatement.currency}</span></td>
+                    <td className="p-3 text-right pr-3 font-mono font-bold text-slate-900">{balDue.toLocaleString()} <span className="text-[8px] text-slate-400 font-normal">{custCur}</span></td>
                   </tr>
                 )}
               </tbody>
@@ -2934,9 +3006,12 @@ MARAS Group etir Center`;
   const renderStatementTotalsSection = (selectedStatement: CostStatement) => {
     const matchingShipment = resolveStatementShipmentContext(selectedStatement, shipments);
     if (statementPreviewMode === 'invoice') {
-      const totalInv = matchingShipment?.agreedAmount || 0;
-      const paidDeposit = selectedStatement.paidAmount || 0;
-      const balanceRemaining = totalInv - paidDeposit;
+      // Accounting Phase B: customer-side figures only on customer docs.
+      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedStatement));
+      const custCur = selectedStatement.agreedCurrency || selectedStatement.currency;
+      const totalInv = cust.agreedAmount;
+      const paidDeposit = cust.customerReceivedAmount;
+      const balanceRemaining = cust.customerCredit > 0 ? 0 : cust.customerReceivable;
       return (
         <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
           <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
@@ -2956,13 +3031,19 @@ MARAS Group etir Center`;
               <strong>0.00 <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
             </div>
             <div className="flex justify-between items-center text-emerald-600 py-1">
-              <span>{lang === 'tr' ? 'Alınan ÖnÖdeme:' : 'Advance Deposit Paid:'}</span>
-              <strong>- {paidDeposit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{selectedStatement.currency}</span></strong>
+              <span>{lang === 'tr' ? 'Müşteriden Alınan:' : 'Payment Received:'}</span>
+              <strong>- {paidDeposit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{custCur}</span></strong>
             </div>
+            {cust.customerCredit > 0 && (
+              <div className="flex justify-between items-center text-emerald-700 py-1">
+                <span>{lang === 'tr' ? 'Müşteri Kredisi:' : 'Customer Credit:'}</span>
+                <strong>{cust.customerCredit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{custCur}</span></strong>
+              </div>
+            )}
             <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
               <span>{lang === 'tr' ? 'GENEL TOPLAM BORÇ:' : 'NET TOTAL PAYABLE:'}</span>
               <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs select-none">
-                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{custCur}</span>
               </span>
             </div>
           </div>
@@ -2971,9 +3052,12 @@ MARAS Group etir Center`;
     }
 
     if (statementPreviewMode === 'client_statement') {
-      const totalInv = matchingShipment?.agreedAmount || 0;
-      const paidDeposit = selectedStatement.paidAmount || 0;
-      const balanceRemaining = totalInv - paidDeposit;
+      // Accounting Phase B: customer-side figures only on customer docs.
+      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedStatement));
+      const custCur = selectedStatement.agreedCurrency || selectedStatement.currency;
+      const totalInv = cust.agreedAmount;
+      const paidDeposit = cust.customerReceivedAmount;
+      const balanceRemaining = cust.customerCredit > 0 ? 0 : cust.customerReceivable;
       return (
         <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
           <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
@@ -2983,16 +3067,22 @@ MARAS Group etir Center`;
           <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
             <div className="flex justify-between items-center text-slate-600 pb-1.5">
               <span>Total Debited Package Value:</span>
-              <strong className="text-slate-900">{totalInv.toLocaleString()} <span className="text-[9px] font-bold text-slate-400">{selectedStatement.currency}</span></strong>
+              <strong className="text-slate-900">{totalInv.toLocaleString()} <span className="text-[9px] font-bold text-slate-400">{custCur}</span></strong>
             </div>
             <div className="flex justify-between items-center text-emerald-600 py-1">
-              <span>Total Credit Settlements:</span>
-              <strong>({paidDeposit.toLocaleString()}) <span className="text-[9px] font-bold text-emerald-500">{selectedStatement.currency}</span></strong>
+              <span>{lang === 'tr' ? 'Müşteriden Alınan Ödemeler:' : 'Customer Payments Received:'}</span>
+              <strong>({paidDeposit.toLocaleString()}) <span className="text-[9px] font-bold text-emerald-500">{custCur}</span></strong>
             </div>
+            {cust.customerCredit > 0 && (
+              <div className="flex justify-between items-center text-emerald-700 py-1">
+                <span>{lang === 'tr' ? 'Müşteri Kredisi:' : 'Customer Credit:'}</span>
+                <strong>{cust.customerCredit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{custCur}</span></strong>
+              </div>
+            )}
             <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
               <span>{lang === 'tr' ? 'CARİ BAKİYE (BORÇ):' : 'STATEMENT OUTSTANDING:'}</span>
               <span className={`font-mono bg-slate-50 border px-2 py-0.5 rounded text-xs select-none ${balanceRemaining > 0 ? 'text-red-600 border-red-200' : 'text-emerald-700 border-emerald-200'}`}>
-                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedStatement.currency}</span>
+                {balanceRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{custCur}</span>
               </span>
             </div>
           </div>
@@ -3025,10 +3115,12 @@ MARAS Group etir Center`;
       );
     }
 
-    // Default 'statement' View
-    const grossCost = Number(selectedStatement.totalCost) || 0;
-    const paidAmt = Number(selectedStatement.paidAmount) || 0;
-    const remainingAmt = Number(selectedStatement.remainingBalance) || 0;
+    // Default 'statement' View — internal expense ledger. Overpayment is
+    // presented as an expense CREDIT, never as a negative "due" amount.
+    const expenseSummary = deriveExpenseSummary(Number(selectedStatement.totalCost) || 0, Number(selectedStatement.paidAmount) || 0);
+    const grossCost = expenseSummary.totalCost;
+    const paidAmt = expenseSummary.paidAmount;
+    const remainingAmt = expenseSummary.expenseRemaining;
     return (
       <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
         
@@ -3057,6 +3149,12 @@ MARAS Group etir Center`;
             <strong>- {paidAmt.toLocaleString()} <span className="text-[9px] text-emerald-500">{selectedStatement.currency}</span></strong>
           </div>
 
+          {expenseSummary.expenseCredit > 0 && (
+            <div className="flex justify-between items-center text-emerald-700 py-1">
+              <span>{lang === 'tr' ? 'Gider Kredisi (Fazla Ödeme):' : 'Expense Credit (Overpaid):'}</span>
+              <strong>{expenseSummary.expenseCredit.toLocaleString()} <span className="text-[9px] font-bold text-emerald-500">{selectedStatement.currency}</span></strong>
+            </div>
+          )}
           <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
             <span>{lang === 'tr' ? 'KALAN DÖKÜM BAKİYESİ:' : 'STATEMENT BALANCE DUE:'}</span>
             <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs select-none">
@@ -6485,7 +6583,29 @@ MARAS Group etir Center`;
               
               {/* LEFT COLUMN: SCROLLABLE DATA ENTRY SYSTEM & FORM BLOCK */}
               <div className="w-full lg:w-1/2 p-4 md:p-6 overflow-y-auto space-y-6 lg:border-r border-slate-300">
-                
+
+                {/* Accounting Phase B: optimistic-concurrency conflict.
+                    The admin's unsaved edits stay on screen; reloading the
+                    other admin's saved copy is an explicit choice. */}
+                {statementConflict && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-2xl p-3.5 flex items-start justify-between gap-3">
+                    <p className="text-[11px] font-semibold text-amber-800 leading-snug text-start">
+                      {lang === 'tr'
+                        ? 'Bu maliyet tablosu siz açtıktan sonra başka bir yönetici tarafından değiştirildi. Kaydetmeden önce en son verileri yükleyin; mevcut değişiklikleriniz silinmedi.'
+                        : lang === 'ar'
+                          ? 'تم تعديل كشف التكلفة هذا من قبل مسؤول آخر بعد فتحه. حمّل أحدث البيانات قبل الحفظ — تغييراتك الحالية لم تُحذف.'
+                          : 'This cost statement was changed by another admin after you opened it. Load the latest data before saving — your current edits have not been discarded.'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleReloadLatestStatement}
+                      className="shrink-0 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold rounded-xl cursor-pointer border-0"
+                    >
+                      {lang === 'tr' ? 'En Son Veriyi Yükle' : lang === 'ar' ? 'تحميل أحدث البيانات' : 'Load Latest Data'}
+                    </button>
+                  </div>
+                )}
+
                 {/* Section header */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
                   <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2 flex items-center justify-between">
@@ -6528,9 +6648,9 @@ MARAS Group etir Center`;
                       </select>
                     </div>
 
-                    {/* Paid Amount */}
+                    {/* Expense Paid Amount — money MARAS paid toward costs/vendors (NEVER customer money) */}
                     <div>
-                      <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">{lang === 'tr' ? 'Tahsil Edilen (Müşteri Ödemesi)' : 'Paid Amount (Received from Customer)'}</label>
+                      <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">{lang === 'tr' ? 'Ödenen Gider Tutarı (Tedarikçilere)' : 'Expense Paid Amount (to Vendors)'}</label>
                       <div className="relative">
                         <input
                           type="number"
@@ -6556,9 +6676,9 @@ MARAS Group etir Center`;
                       </div>
                     </div>
 
-                    {/* Calculated paymentStatus readout */}
+                    {/* Calculated EXPENSE paymentStatus readout */}
                     <div>
-                      <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">{lang === 'tr' ? 'Güncel Ödeme Statüsü' : 'Calculated Budget Status'}</label>
+                      <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">{lang === 'tr' ? 'Gider Ödeme Statüsü' : 'Expense Payment Status'}</label>
                       <div className="p-2 border border-slate-200 rounded-xl text-xs bg-slate-50 font-bold uppercase tracking-wider flex items-center justify-between">
                         <span>{selectedCostStatement.paymentStatus}</span>
                         <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${
@@ -6567,7 +6687,74 @@ MARAS Group etir Center`;
                       </div>
                     </div>
 
+                    {/* Customer Received Amount — money MARAS received FROM the customer (Accounting Phase B) */}
+                    <div>
+                      <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">{lang === 'tr' ? 'Müşteriden Alınan Tutar' : 'Customer Received Amount'}</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min={0}
+                          value={selectedCostStatement.customerReceivedAmount || ""}
+                          onChange={(e) => {
+                            const val = Math.max(0, Number(e.target.value) || 0);
+                            setSelectedCostStatement(prev => prev ? { ...prev, customerReceivedAmount: val } : prev);
+                          }}
+                          placeholder="0.00"
+                          className="w-full p-2 pr-12 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:bg-white focus:border-slate-400"
+                        />
+                        <span className="absolute right-2.5 top-2 bg-emerald-100 text-emerald-700 font-mono text-[9px] font-black px-1.5 py-0.5 rounded uppercase">{selectedCostStatement.agreedCurrency || selectedCostStatement.currency}</span>
+                      </div>
+                    </div>
+
                   </div>
+
+                  {/* ── Internal shipment accounting summary (Accounting Phase B) —
+                       authorized internal view only; each side keeps its own
+                       currency label and unlike currencies are never combined. ── */}
+                  {(() => {
+                    const ctx = resolveStatementShipmentContext(selectedCostStatement, shipments);
+                    const exp = deriveExpenseSummary(Number(selectedCostStatement.totalCost) || 0, Number(selectedCostStatement.paidAmount) || 0);
+                    const cust = deriveCustomerSummary(ctx.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
+                    const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
+                    const expCur = selectedCostStatement.currency;
+                    const profit = computeGrossProfit(ctx.agreedAmount || 0, selectedCostStatement.agreedCurrency || selectedCostStatement.currency, exp.totalCost, selectedCostStatement.currency);
+                    const row = (label: string, value: string, cls = "text-slate-700") => (
+                      <div key={label} className={`flex justify-between items-center py-1 text-[11px] font-mono ${cls}`}>
+                        <span className="font-sans font-semibold text-slate-500">{label}</span>
+                        <strong>{value}</strong>
+                      </div>
+                    );
+                    return (
+                      <div className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-3.5">
+                        <h5 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest mb-1.5">{lang === 'tr' ? 'Sevkiyat Muhasebe Özeti (Dahili)' : 'Shipment Accounting Summary (Internal)'}</h5>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+                          <div>
+                            {row(lang === 'tr' ? 'Müşteri Anlaşma Tutarı' : 'Customer Agreed Revenue', `${cust.agreedAmount.toLocaleString()} ${custCur}`)}
+                            {row(lang === 'tr' ? 'Müşteriden Alınan' : 'Customer Received', `${cust.customerReceivedAmount.toLocaleString()} ${custCur}`, 'text-emerald-700')}
+                            {row(lang === 'tr' ? 'Müşteri Alacak Bakiyesi' : 'Customer Receivable', `${cust.customerReceivable.toLocaleString()} ${custCur}`, cust.customerReceivable > 0 ? 'text-red-600' : 'text-slate-700')}
+                            {cust.customerCredit > 0 && row(lang === 'tr' ? 'Müşteri Kredisi' : 'Customer Credit', `${cust.customerCredit.toLocaleString()} ${custCur}`, 'text-emerald-700')}
+                          </div>
+                          <div>
+                            {row(lang === 'tr' ? 'Toplam Dahili Gider' : 'Total Internal Expense', `${exp.totalCost.toLocaleString()} ${expCur}`)}
+                            {row(lang === 'tr' ? 'Ödenen Gider' : 'Expense Paid', `${exp.paidAmount.toLocaleString()} ${expCur}`, 'text-emerald-700')}
+                            {row(lang === 'tr' ? 'Ödenecek Gider' : 'Expense Payable', `${exp.expenseRemaining.toLocaleString()} ${expCur}`, exp.expenseRemaining > 0 ? 'text-orange-600' : 'text-slate-700')}
+                            {exp.expenseCredit > 0 && row(lang === 'tr' ? 'Gider Kredisi (Fazla Ödeme)' : 'Expense Credit (Overpaid)', `${exp.expenseCredit.toLocaleString()} ${expCur}`, 'text-emerald-700')}
+                          </div>
+                        </div>
+                        <div className="mt-1.5 pt-1.5 border-t border-slate-200">
+                          {profit !== null
+                            ? row(lang === 'tr' ? 'Brüt Sevkiyat Kârı' : 'Gross Shipment Profit', `${profit.toLocaleString()} ${expCur}`, profit >= 0 ? 'text-emerald-700 font-black' : 'text-red-600 font-black')
+                            : (
+                              <p className="text-[10px] text-slate-400 italic">
+                                {lang === 'tr'
+                                  ? `Brüt kâr hesaplanmadı: gelir (${custCur}) ve gider (${expCur}) para birimleri farklı — farklı para birimleri asla toplanmaz.`
+                                  : `Gross profit not computed: revenue (${custCur}) and expense (${expCur}) currencies differ — unlike currencies are never combined.`}
+                              </p>
+                            )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* COST BREAKDOWN ACCORDION BLOCK OR EDITABLE LIST */}
@@ -9915,16 +10102,29 @@ MARAS Group etir Center`;
                     </div>
 
                     <div className="flex justify-between items-center text-emerald-600 pt-1.5 pb-1.5">
-                      <span>{lang === 'tr' ? 'Alınan Ödeme (Tahsil):' : 'Amount Received:'}</span>
+                      <span>{lang === 'tr' ? 'Ödenen Gider Tutarı:' : 'Expense Paid Amount:'}</span>
                       <strong>- {Number(selectedCostStatement.paidAmount).toLocaleString()} <span className="text-[9px] text-emerald-500">{selectedCostStatement.currency}</span></strong>
                     </div>
 
-                    <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
-                      <span>{lang === 'tr' ? 'KALAN DÖKÜM BAKİYESİ:' : 'STATEMENT BALANCE DUE:'}</span>
-                      <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs">
-                        {Number(selectedCostStatement.remainingBalance).toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedCostStatement.currency}</span>
-                      </span>
-                    </div>
+                    {(() => {
+                      const exp = deriveExpenseSummary(Number(selectedCostStatement.totalCost) || 0, Number(selectedCostStatement.paidAmount) || 0);
+                      return (
+                        <>
+                          {exp.expenseCredit > 0 && (
+                            <div className="flex justify-between items-center text-emerald-700 py-1">
+                              <span>{lang === 'tr' ? 'Gider Kredisi:' : 'Expense Credit:'}</span>
+                              <strong>{exp.expenseCredit.toLocaleString()} <span className="text-[9px] text-emerald-500">{selectedCostStatement.currency}</span></strong>
+                            </div>
+                          )}
+                          <div className="flex justify-between items-center text-slate-900 pt-2 text-xs font-black">
+                            <span>{lang === 'tr' ? 'KALAN DÖKÜM BAKİYESİ:' : 'STATEMENT BALANCE DUE:'}</span>
+                            <span className="text-[#f97316] font-mono bg-orange-50 border border-orange-200/55 px-2 py-0.5 rounded text-xs">
+                              {exp.expenseRemaining.toLocaleString()} <span className="text-[10px] font-bold text-slate-600">{selectedCostStatement.currency}</span>
+                            </span>
+                          </div>
+                        </>
+                      );
+                    })()}
 
                   </div>
                 </div>

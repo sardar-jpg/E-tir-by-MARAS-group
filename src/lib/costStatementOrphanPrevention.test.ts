@@ -80,7 +80,16 @@ describe("POST /api/cost-statements/:shipmentId cannot create an orphan Cost Sta
     // The old bug's exact shape must never reappear in actual code (this
     // sentence itself, and the route's own explanatory comments, may
     // legitimately still mention it in prose — see stripComments above).
-    expect(executableSource).not.toContain("useMemoryFallback");
+    // Scoped to the region BEFORE input validation: everything up to
+    // validateCostStatementInput is the identity/existence phase, which
+    // must stay persistence-agnostic. The later Phase B concurrency
+    // dispatch legitimately selects Firestore-transaction vs memory-array
+    // write paths — but both enforce the same decideStatementRevision rule.
+    const existenceRegion = executableSource.slice(
+      0,
+      executableSource.indexOf("validateCostStatementInput")
+    );
+    expect(existenceRegion).not.toContain("useMemoryFallback");
   });
 
   it("a submitted fake shipmentNumber is always ignored: the client payload is never read as a shipmentNumber fallback", () => {

@@ -18,16 +18,23 @@
  * 'invoice'/'client_statement' get the customer-safe synthetic lines.
  */
 import type { CostItem, CostStatement, Shipment } from "../types";
+import {
+  deriveCustomerSummary,
+  resolveCustomerReceivedAmount,
+  type CustomerPaymentStatus,
+  type ExpensePaymentStatus,
+} from "./costStatementMath";
 
 export type CostStatementExportMode = "statement" | "invoice" | "client_statement" | "vendor_statement";
 
 const CUSTOMER_SAFE_SUPPLIER = "MARAS GROUP";
 
 function buildInvoiceItems(
-  statement: Pick<CostStatement, "currency">,
+  statement: Pick<CostStatement, "currency" | "agreedCurrency">,
   shipment: Pick<Shipment, "agreedAmount" | "freightType"> | undefined
 ): CostItem[] {
   const amount = shipment?.agreedAmount || 0;
+  const currency = statement.agreedCurrency || statement.currency;
   return [
     {
       id: "customer-safe-freight",
@@ -36,7 +43,7 @@ function buildInvoiceItems(
       quantity: 1,
       unitPrice: amount,
       totalAmount: amount,
-      currency: statement.currency,
+      currency,
       supplierName: CUSTOMER_SAFE_SUPPLIER,
     },
     {
@@ -46,18 +53,23 @@ function buildInvoiceItems(
       quantity: 1,
       unitPrice: 0,
       totalAmount: 0,
-      currency: statement.currency,
+      currency,
       supplierName: CUSTOMER_SAFE_SUPPLIER,
     },
   ];
 }
 
 function buildClientStatementItems(
-  statement: Pick<CostStatement, "currency" | "paidAmount" | "shipmentNumber">,
+  statement: Pick<CostStatement, "currency" | "customerReceivedAmount" | "shipmentNumber" | "agreedCurrency">,
   shipment: Pick<Shipment, "agreedAmount"> | undefined
 ): CostItem[] {
   const amount = shipment?.agreedAmount || 0;
-  const paidAmount = statement.paidAmount || 0;
+  // Accounting Phase B: the ONLY payment a customer statement may show is
+  // money RECEIVED FROM THE CUSTOMER (customerReceivedAmount). The
+  // expense-side paidAmount — money MARAS paid toward vendors/costs — is
+  // never read here and never presented as a customer receipt.
+  const received = resolveCustomerReceivedAmount(statement);
+  const currency = statement.agreedCurrency || statement.currency;
   const items: CostItem[] = [
     {
       id: "customer-safe-charter",
@@ -66,19 +78,19 @@ function buildClientStatementItems(
       quantity: 1,
       unitPrice: amount,
       totalAmount: amount,
-      currency: statement.currency,
+      currency,
       supplierName: CUSTOMER_SAFE_SUPPLIER,
     },
   ];
-  if (paidAmount > 0) {
+  if (received > 0) {
     items.push({
       id: "customer-safe-payment",
       costType: "Payment Received",
       description: "Account Payment Received via Wire Transfer",
       quantity: 1,
-      unitPrice: -paidAmount,
-      totalAmount: -paidAmount,
-      currency: statement.currency,
+      unitPrice: -received,
+      totalAmount: -received,
+      currency,
       supplierName: CUSTOMER_SAFE_SUPPLIER,
     });
   }
@@ -112,4 +124,39 @@ export function resolveExportItems(
  */
 export function resolveExportNotes(mode: CostStatementExportMode, notes: string): string {
   return mode === "statement" ? notes : "";
+}
+
+/**
+ * Accounting Phase B — the ONE mode-aware status rule shared by the
+ * on-screen preview, the PDF, and the CSV so they can never drift:
+ *
+ *   statement (internal)  → the expense-side paymentStatus (paidAmount
+ *                           vs totalCost). Internal eyes only.
+ *   vendor_statement      → NO status. A statement-wide status is not
+ *                           that vendor's information, and customer
+ *                           payment data never belongs on a vendor doc.
+ *   invoice / client      → the CUSTOMER-side status, derived from
+ *                           customerReceivedAmount vs the shipment's
+ *                           agreedAmount. The internal expense
+ *                           paymentStatus must never appear here — an
+ *                           invoice is not "PAID" because MARAS paid a
+ *                           supplier.
+ */
+export type ExportHeaderStatus =
+  | { kind: "expense"; value: ExpensePaymentStatus }
+  | { kind: "customer"; value: CustomerPaymentStatus }
+  | null;
+
+export function resolveExportHeaderStatus(
+  mode: CostStatementExportMode,
+  statement: Pick<CostStatement, "paymentStatus" | "customerReceivedAmount">,
+  shipment: Pick<Shipment, "agreedAmount"> | undefined
+): ExportHeaderStatus {
+  if (mode === "statement") return { kind: "expense", value: statement.paymentStatus };
+  if (mode === "vendor_statement") return null;
+  const summary = deriveCustomerSummary(
+    shipment?.agreedAmount || 0,
+    resolveCustomerReceivedAmount(statement)
+  );
+  return { kind: "customer", value: summary.customerStatus };
 }

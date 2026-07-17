@@ -469,9 +469,37 @@ export interface CostStatement {
   date: string;
   currency: Currency;
   totalCost: number;
+  /**
+   * Expense Paid Amount (Accounting Phase B): money MARAS has PAID toward
+   * this shipment's internal costs/vendors. This is strictly the expense
+   * side of the ledger — it is NEVER money received from the customer
+   * (that is customerReceivedAmount below), and no customer-facing
+   * document may present it as a customer payment. The field name is
+   * kept for legacy-record compatibility; its meaning is now canonical.
+   */
   paidAmount: number;
   remainingBalance: number;
+  /** Expense-side status only (paidAmount vs totalCost) — never shown on customer-facing documents. */
   paymentStatus: 'Unpaid' | 'Partial' | 'Paid';
+  /**
+   * Customer side (Accounting Phase B): total amount MARAS has RECEIVED
+   * from the customer for this shipment, in the shipment's agreed
+   * currency. Optional because legacy statements predate it — absent
+   * always resolves to 0 (resolveCustomerReceivedAmount,
+   * src/lib/costStatementMath.ts). Customer receivable/credit and the
+   * customer-side payment status are derived from THIS field and the
+   * shipment's agreedAmount only.
+   */
+  customerReceivedAmount?: number;
+  /**
+   * Optimistic-concurrency revision (Accounting Phase B), mirroring the
+   * Shipment revision architecture: new statements start at 1, every
+   * successful save increments by exactly one, and a save whose submitted
+   * revision doesn't match the stored one is rejected with 409. Legacy
+   * statements without the field resolve as revision 1
+   * (resolveStatementRevision, src/lib/costStatementMath.ts).
+   */
+  revision?: number;
   notes: string;
   items: CostItem[];
   createdAt: string;
@@ -491,6 +519,15 @@ export interface CostStatement {
   // a shipments join to read it.
   agreedAmount?: number;
   truckNumber?: string;
+  /**
+   * Accounting Phase B snapshot: the currency the shipment's agreedAmount
+   * is denominated in, copied from the authoritative shipment at save
+   * time (like agreedAmount itself). Needed so customer-side figures and
+   * the internal gross-profit calculation can label — and refuse to mix —
+   * currencies correctly without shipment-registry access. Optional for
+   * legacy statements.
+   */
+  agreedCurrency?: Currency;
 }
 
 
