@@ -64,7 +64,7 @@ describe("isDocumentVisibleForShare", () => {
 });
 
 describe("isDocumentVisibleToDriver", () => {
-  const driverSafe: DocumentCategory[] = ["cmr", "packing_list", "customs", "delivery_proof"];
+  const driverSafe: DocumentCategory[] = ["cmr", "packing_list", "t1", "tir_carnet", "customs", "delivery_proof"];
   const driverBlocked: DocumentCategory[] = ["invoice", "photo", "other"];
 
   it("allows operational document categories", () => {
@@ -86,7 +86,7 @@ describe("canDriverUploadDocumentCategory", () => {
   });
 
   it("allows every other operational upload category", () => {
-    const allowed: DocumentCategory[] = ["photo", "delivery_proof", "customs", "packing_list", "invoice", "other"];
+    const allowed: DocumentCategory[] = ["photo", "delivery_proof", "customs", "t1", "tir_carnet", "packing_list", "invoice", "other"];
     for (const category of allowed) {
       expect(canDriverUploadDocumentCategory(category)).toBe(true);
     }
@@ -114,7 +114,7 @@ describe("canDriverUploadDocumentCategory", () => {
 
 describe("isDocumentVisibleToClient", () => {
   it("keeps customer-safe operational categories visible unconditionally", () => {
-    const categories: DocumentCategory[] = ["cmr", "packing_list", "customs", "delivery_proof", "photo"];
+    const categories: DocumentCategory[] = ["cmr", "packing_list", "t1", "tir_carnet", "customs", "delivery_proof", "photo"];
     for (const category of categories) {
       expect(isDocumentVisibleToClient({ category, isSharedExternally: false })).toBe(true);
       expect(isDocumentVisibleToClient({ category, isSharedExternally: true })).toBe(true);

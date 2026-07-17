@@ -27,99 +27,64 @@
  * public/anonymous audience isSharedExternally exists to gate, and keep
  * receiving the real document record including its Storage URL.
  */
-import type { DocumentCategory, Shipment, ShipmentDocument } from "../types";
+import type { Shipment, ShipmentDocument } from "../types";
+import { getDocumentCategoryPolicy, normalizeDocumentCategory } from "./shipmentDocuments";
+
+/*
+ * Documents-architecture cleanup: every function below used to consult
+ * its own hand-maintained category set (plus one literal 'cmr' string
+ * comparison in the upload check). They now all read the SAME per-category
+ * policy flags from the DOCUMENT_CATEGORY_POLICIES registry
+ * (src/lib/shipmentDocuments.ts) — no category id appears in this file at
+ * all, and no category (CMR included) gets special-cased code. Behavior
+ * is unchanged; only where the rules live changed.
+ */
 
 /**
- * Document-category visibility policy (feature/document-category-visibility-review).
- *
- * 'invoice' and 'other' are the two categories that can carry
- * accounting/cost/vendor/internal content: 'invoice' is self-explanatory,
- * and 'other' is this app's only catch-all category — nothing stops an
- * admin from filing an internal cost statement or a vendor invoice under
- * it, since there is no dedicated category for those (see the final report
- * for a follow-up suggestion). Both are therefore treated as
- * approval-required rather than safe-by-default everywhere below.
+ * Read direction for the assigned driver: operational paperwork
+ * (driverVisible categories) only. Accounting-capable and unclassified
+ * content is withheld — a driver has no relation to customer invoices or
+ * internal cost documents.
  */
-const AMBIGUOUS_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set(["invoice", "other"]);
-
-/**
- * Categories a driver may see for their own assigned shipment — CMR/POD,
- * loading/packing instructions, and customs/border paperwork, i.e. exactly
- * the "operational documents needed for the job" the Driver App's document
- * panel already labels itself as ("No operational files registered.").
- * Everything else (invoice, other, and photo, which isn't one of the listed
- * driver-safe types) is withheld — a driver has no relation to customer
- * invoices/accounting/cost documents, and 'other' is an unclassified
- * catch-all that could contain any of those.
- *
- * 'cmr' being driver-visible here is read-only view/download of a document
- * Admin already published — it is not permission to create one. Driver App
- * simplification / CMR Read-Only Review removed the driver-facing upload UI
- * that used to let a driver pick 'cmr' as the category of a file *they*
- * were sending (DriverApplication.tsx, FileUploadModal.tsx); this function
- * and its category set were already correct and needed no change. The
- * upload-direction rule itself is enforced by
- * canDriverUploadDocumentCategory below, which server.ts's chat and
- * document-center upload routes now check against the caller's *session*
- * role — removing the UI option alone doesn't stop a direct API call.
- */
-const DRIVER_VISIBLE_DOCUMENT_CATEGORIES: ReadonlySet<DocumentCategory> = new Set([
-  "cmr",
-  "packing_list",
-  "customs",
-  "delivery_proof",
-]);
-
 export function isDocumentVisibleToDriver(doc: Pick<ShipmentDocument, "category">): boolean {
-  return DRIVER_VISIBLE_DOCUMENT_CATEGORIES.has(doc.category);
+  return getDocumentCategoryPolicy(doc.category).driverVisible;
 }
 
 /**
- * Upload-direction counterpart to isDocumentVisibleToDriver (read
- * direction) — whether a driver session may set this category on a
- * document/chat attachment *they* are sending. CMR is the one category a
- * driver must never originate: it is created, signed, stamped, approved,
- * and published only by MARAS/Admin (docs/FOLLOW_UP_ROADMAP.md, "Driver
- * app simplification"). Every other category a driver already sends
- * operational uploads under (photo, delivery_proof, customs, packing_list,
- * invoice, other) stays allowed here — this only blocks 'cmr'.
+ * Upload-direction counterpart to isDocumentVisibleToDriver — whether a
+ * driver session may set this category on a document/chat attachment
+ * *they* are sending. Categories flagged driverUploadable: false in the
+ * registry are admin-published only (today that is CMR — created, signed,
+ * stamped, approved, and published by MARAS/Admin; a driver views one but
+ * never originates one).
  *
  * `category` is typed loosely (not DocumentCategory) because it comes
- * straight off an unvalidated request body — an absent/unrecognized value
- * must not be treated as "cmr" and rejected.
- *
- * PR #85 (production release readiness E2E): this used to be a strict
- * `category !== "cmr"` check — a driver session could bypass the block
- * entirely just by sending a differently-cased or padded variant
- * ("CMR", " cmr", "Cmr") in the request body, since server.ts's two call
- * sites (POST /api/shipments/:id/documents, POST /api/shipments/:id/chat)
- * pass the raw, unvalidated body field straight through. The real UI only
- * ever sends the canonical lowercase "cmr" literal (DocumentCategory is a
- * TypeScript union), so this was never reachable by a legitimate client —
- * only by a direct, deliberately-crafted API call. Normalized so any
- * case/whitespace variant of "cmr" is still blocked.
+ * straight off an unvalidated request body. Normalization (PR #85) makes
+ * case/whitespace variants of a blocked category id ("CMR", " cmr") hit
+ * the same policy row; an absent/unrecognized value is NOT treated as a
+ * blocked category and stays allowed, exactly as before.
  */
 export function canDriverUploadDocumentCategory(category: unknown): boolean {
-  return typeof category !== "string" || category.trim().toLowerCase() !== "cmr";
+  const normalized = normalizeDocumentCategory(category);
+  if (normalized === null) return true;
+  return getDocumentCategoryPolicy(normalized).driverUploadable;
 }
 
 /**
- * Whether an ambiguous-category document (invoice/other) may reach the
- * authenticated Client dashboard. Non-ambiguous categories (cmr,
- * packing_list, customs, delivery_proof, photo) stay visible by default, as
- * they already were — this only tightens the two categories capable of
- * carrying accounting/internal content, matching "customer invoices only
- * if explicitly intended for customer visibility." isSharedExternally is
- * reused as that explicit-intent flag: it is the only existing per-document
+ * Whether an approval-required document (requiresExplicitClientShare —
+ * the categories capable of carrying accounting/internal content) may
+ * reach the authenticated Client dashboard. Operational categories stay
+ * visible by default, as they always were. isSharedExternally is reused
+ * as the explicit-intent flag: it is the only existing per-document
  * "admin approved this" signal (see resolveNewDocumentSharedExternally —
- * every new document defaults to false/unapproved), so an admin now has to
- * flip it for an invoice/other document before the client's own dashboard
- * shows it, not just before it can appear on the public tracking link.
+ * every new document defaults to false/unapproved), so an admin has to
+ * flip it before the client's own dashboard shows such a document, not
+ * just before it can appear on the public tracking link.
  */
 export function isDocumentVisibleToClient(
   doc: Pick<ShipmentDocument, "category" | "isSharedExternally">
 ): boolean {
-  if (AMBIGUOUS_DOCUMENT_CATEGORIES.has(doc.category)) {
+  if (getDocumentCategoryPolicy(doc.category).requiresExplicitClientShare) {
     return Boolean(doc.isSharedExternally);
   }
   return true;
@@ -133,7 +98,7 @@ export function isDocumentVisibleToClient(
  * earlier.
  *
  * Public tracking is the anonymous, token-only audience — accounting/cost
- * documents must never reach it (see AMBIGUOUS_DOCUMENT_CATEGORIES above),
+ * documents (requiresExplicitClientShare categories) must never reach it,
  * even if a document's isSharedExternally happens to be on, because that
  * flag is meant to gate "share tracking link" visibility per document, and
  * an admin toggling it for an invoice (e.g. so it reaches the authenticated
@@ -146,8 +111,9 @@ export function isDocumentVisibleForShare(
 ): boolean {
   if (!shipment.isLinkShared) return false;
   if (!doc.isSharedExternally) return false;
-  if (AMBIGUOUS_DOCUMENT_CATEGORIES.has(doc.category)) return false;
-  return doc.category === "photo" ? Boolean(shipment.shareIncludePhotos) : Boolean(shipment.shareIncludeDocuments);
+  const policy = getDocumentCategoryPolicy(doc.category);
+  if (policy.requiresExplicitClientShare) return false;
+  return policy.sharesAsPhoto ? Boolean(shipment.shareIncludePhotos) : Boolean(shipment.shareIncludeDocuments);
 }
 
 /**
