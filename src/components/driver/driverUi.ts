@@ -118,22 +118,47 @@ export const INNER_CARD = "bg-slate-950 rounded-2xl";
 /** Legacy alias kept for the few nested surfaces that still want a faint edge. */
 export const INNER_CARD_EDGED = "bg-slate-950 border border-slate-800/60 rounded-2xl";
 
-// ── Typography ───────────────────────────────────────────────────────
+// ── Typography system ────────────────────────────────────────────────
+//
+// The complete named scale. Weight is used intelligently: extrabold is
+// reserved for the two display levels (payment, route cities), bold for
+// titles and data values, semibold for headings/labels, regular for
+// body. Numerals are always tabular where figures appear. Under Arabic
+// RTL the shell swaps to IBM Plex Sans Arabic and neutralizes the
+// Latin-only tight tracking (see index.css).
+//
+//   DISPLAY_XL  32  payment figure
+//   DISPLAY_L   26  route cities
+//   TITLE       22  screen titles
+//   HEADING     15  card headings (semibold)
+//   BODY        15  body copy (regular)
+//   BODY_SM     13  secondary body / section labels
+//   CAPTION     12  captions and helper lines
+//   METADATA    11  chips, references, unit labels
 
-/** Display — route cities and money. Tabular numerals so figures never wiggle. */
-export const TYPE_DISPLAY = "text-[28px] leading-8 font-extrabold text-white tracking-tight tabular-nums";
+/** Display XL — the payment figure. */
+export const TYPE_DISPLAY_XL = "text-[32px] leading-9 font-extrabold text-white tracking-tight tabular-nums";
+
+/** Display L — route cities. */
+export const TYPE_DISPLAY = "text-[26px] leading-8 font-extrabold text-white tracking-tight tabular-nums";
 
 /** Screen title — identical on every section. */
 export const SCREEN_TITLE = "text-[22px] leading-7 font-bold text-white text-start tracking-tight";
 
-/** Card heading. */
-export const TYPE_HEADING = "text-[15px] font-bold text-slate-100";
+/** Card heading — semibold, never shouts. */
+export const TYPE_HEADING = "text-[15px] font-semibold text-slate-100";
+
+/** Body. */
+export const TYPE_BODY = "text-[15px] text-slate-300";
 
 /** Section label above a group of cards/rows. */
 export const SECTION_LABEL = "text-[13px] font-semibold text-slate-400 text-start";
 
-/** Meta/caption line. */
+/** Caption / helper line. */
 export const TYPE_CAPTION = "text-xs text-slate-500";
+
+/** Metadata — references, units, chips. */
+export const TYPE_METADATA = "text-[11px] font-semibold text-slate-500 tabular-nums";
 
 // ── Buttons — exactly four recipes ───────────────────────────────────
 

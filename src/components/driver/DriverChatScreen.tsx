@@ -284,7 +284,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                   {isMe ? t.you : `${t.maras} · ${msg.senderName}`}
                 </span>
                 <div
-                  className={`p-3 rounded-2xl text-sm leading-relaxed break-words max-w-full ${
+                  className={`px-3.5 py-2.5 rounded-2xl text-[15px] leading-relaxed break-words max-w-full ${
                     isMe
                       ? "bg-orange-600 text-white rounded-se-md light-preserve"
                       : "bg-slate-900 border border-slate-800/50 text-slate-200 rounded-ss-md"
@@ -317,7 +317,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                     <p className="selectable">{msg.text}</p>
                   )}
                 </div>
-                <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500">
+                <div className="flex items-center gap-1.5 mt-1 text-[11px] text-slate-500 tabular-nums">
                   <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                   {isMe && (
                     <span className={msg.status === "seen" ? "text-emerald-400 font-semibold" : ""}>
@@ -382,7 +382,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
             disabled={isUploading || isSending}
             aria-label={t.attach}
             title={t.attach}
-            className="w-12 h-12 shrink-0 bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-400 hover:text-white rounded-2xl transition-all cursor-pointer flex items-center justify-center active:scale-95 disabled:opacity-50"
+            className="w-12 h-12 shrink-0 bg-slate-900 border border-slate-800/60 hover:border-slate-600 text-slate-400 hover:text-white rounded-full transition-all cursor-pointer flex items-center justify-center active:scale-95 disabled:opacity-50"
           >
             {isUploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5 shrink-0" />}
           </button>
@@ -402,14 +402,14 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
             maxLength={MAX_CHAT_TEXT_LENGTH}
             disabled={isSending}
             style={{ minHeight: composerMinHeightPx, maxHeight: composerMaxHeightPx }}
-            className="flex-1 p-3 bg-slate-900 border border-slate-800 focus:border-orange-500/60 outline-none rounded-2xl text-sm text-white placeholder-slate-600 transition-colors disabled:opacity-60 resize-none overflow-y-auto leading-normal"
+            className="flex-1 px-4 py-3 bg-slate-900 border border-slate-800/60 focus:border-slate-500 outline-none rounded-3xl text-[15px] text-white placeholder-slate-600 transition-colors disabled:opacity-60 resize-none overflow-y-auto leading-normal"
           />
 
           <button
             type="submit"
             disabled={!canSubmitChatMessage({ text: newMessageText, hasAttachment: false, isSending, isLocked: isChatClosed })}
             aria-label={t.send}
-            className="w-12 h-12 shrink-0 bg-orange-500 hover:bg-orange-600 text-white rounded-2xl transition-all cursor-pointer flex items-center justify-center disabled:opacity-40 active:scale-95 light-preserve"
+            className="w-12 h-12 shrink-0 bg-orange-500 hover:bg-orange-600 text-white rounded-full shadow-[0_6px_16px_-6px_rgba(249,115,22,0.6)] transition-all cursor-pointer flex items-center justify-center disabled:opacity-40 active:scale-95 light-preserve"
           >
             <Send className="w-5 h-5 shrink-0 rtl:-scale-x-100" />
           </button>

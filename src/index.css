@@ -151,3 +151,25 @@ input, textarea, select, [contenteditable] {
   border-color: #cbd5e1 !important;
 }
 
+
+/* ── Driver App Arabic typography (final design pass) ─────────────────
+   IBM Plex Sans Arabic (self-hosted via @fontsource, imported in
+   DriverApplication.tsx) becomes the primary face whenever the driver
+   shell runs right-to-left. Three Arabic-script corrections ride along:
+   negative letter-spacing (tracking-tight) is a Latin-only device and
+   damages Arabic letterforms, so it is neutralized; line heights get a
+   touch more air (Arabic ascenders/descenders need it); and numerals
+   stay tabular so figures align exactly as they do in English. Scoped
+   to .driver-shell so the Admin Panel and customer views are untouched. */
+.driver-shell[dir="rtl"] {
+  font-family: "IBM Plex Sans Arabic", system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.55;
+}
+.driver-shell[dir="rtl"] .tracking-tight,
+.driver-shell[dir="rtl"] .tracking-wide {
+  letter-spacing: 0 !important;
+}
+.driver-shell[dir="rtl"] .leading-8 { line-height: 2.375rem; }
+.driver-shell[dir="rtl"] .leading-7 { line-height: 2.125rem; }
+.driver-shell[dir="rtl"] .leading-snug { line-height: 1.55; }
+.driver-shell[dir="rtl"] .leading-relaxed { line-height: 1.75; }

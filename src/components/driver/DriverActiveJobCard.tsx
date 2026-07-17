@@ -101,7 +101,7 @@ export default function DriverActiveJobCard({
         <div className="min-w-0 text-start">
           <p className="text-[11px] font-semibold text-slate-500">{t.payment}</p>
           {agreedAmount !== null ? (
-            <p className="text-[26px] leading-8 font-extrabold text-white tracking-tight tabular-nums mt-0.5">
+            <p className="text-[32px] leading-9 font-extrabold text-white tracking-tight tabular-nums mt-0.5">
               {agreedAmount.toLocaleString()} <span className="text-sm font-bold text-slate-400">{s.currency || "USD"}</span>
             </p>
           ) : (
