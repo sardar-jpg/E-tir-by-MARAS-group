@@ -35,18 +35,19 @@ const driverSources: Array<[string, string]> = [
   ["../hooks/driver/useDriverLocationReporting.ts", read("../hooks/driver/useDriverLocationReporting.ts")],
 ];
 
-describe("DriverBottomNavigation — exactly Home, Jobs, Chat, Account", () => {
+describe("DriverBottomNavigation — exactly Home, Offers, Job, Chat, Documents, Profile", () => {
   const SOURCE = read("driver/DriverBottomNavigation.tsx");
 
-  it("declares exactly the four required tabs, in order", () => {
-    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "jobs", "chat", "account"];');
-    expect(SOURCE).toContain('export type DriverTab = "home" | "jobs" | "chat" | "account";');
-    // The old fifth/sixth sections must not resurface.
-    expect(SOURCE).not.toMatch(/"menu"|"profile"|"notifications"/);
+  it("declares exactly the six required sections, in order — nothing more", () => {
+    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "offers", "job", "chat", "documents", "profile"];');
+    expect(SOURCE).toContain('export type DriverTab = "home" | "offers" | "job" | "chat" | "documents" | "profile";');
+    // Retired sections must not resurface as navigation items.
+    expect(SOURCE).not.toMatch(/"menu"|"notifications"|"jobs"|"account"/);
+    expect(SOURCE).toContain("grid-cols-6");
   });
 
   it("localizes every tab label in English, Turkish, and Arabic", () => {
-    for (const tab of ["home", "jobs", "chat", "account"]) {
+    for (const tab of ["home", "offers", "job", "chat", "documents", "profile"]) {
       const entry = SOURCE.slice(SOURCE.indexOf(`${tab}: {`));
       expect(entry).toContain("en:");
       expect(entry).toContain("tr:");
@@ -54,6 +55,7 @@ describe("DriverBottomNavigation — exactly Home, Jobs, Chat, Account", () => {
     }
     expect(SOURCE).toContain("الرئيسية");
     expect(SOURCE).toContain("Ana Sayfa");
+    expect(SOURCE).toContain("العروض");
   });
 
   it("reserves the device safe-area inset so the bar never sits under a home indicator", () => {
@@ -152,7 +154,7 @@ describe("Privacy — driver surfaces never reference customer/internal fields",
   });
 
   it("driver payment surfaces resolve the amount through resolveDriverAgreedAmount only", () => {
-    for (const file of ["driver/DriverActiveJobCard.tsx", "driver/DriverJobsScreen.tsx", "driver/DriverJobDetails.tsx"]) {
+    for (const file of ["driver/DriverActiveJobCard.tsx", "driver/DriverJobDetails.tsx"]) {
       const source = read(file);
       expect(source).toContain("resolveDriverAgreedAmount");
       // Never reads the raw field off the shipment directly.
@@ -220,6 +222,40 @@ describe("Plain language & Google Sign-In absence", () => {
     const CHAT = read("driver/DriverChatScreen.tsx");
     expect(CHAT).toContain("new messages can't be sent");
     expect(CHAT).toContain("{isChatClosed ? (");
+  });
+});
+
+describe("Documents section — unified model, no category special-casing", () => {
+  const DOCS = read("driver/DriverDocumentsScreen.tsx");
+
+  it("groups and labels entirely through the shipmentDocuments registry", () => {
+    expect(DOCS).toContain("listDocumentCategories()");
+    expect(DOCS).toContain("getDocumentCategoryPolicy(");
+    // No category literal — CMR included — may appear in the code.
+    const codeOnly = DOCS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(codeOnly).not.toMatch(/["'](cmr|invoice|packing_list|t1|tir_carnet|customs|delivery_proof|photo|other)["']/);
+  });
+
+  it("keeps the driver's only upload path as the chat attachment handoff — no second upload pipeline", () => {
+    expect(DOCS).toContain("onSendDocumentViaChat");
+    expect(DOCS).not.toContain("apiFetch(");
+  });
+});
+
+describe("Profile section — routes read-only, availability switch lives on Home", () => {
+  const ACCOUNT = read("driver/DriverAccountScreen.tsx");
+  const HOME = read("driver/DriverHomeScreen.tsx");
+
+  it("shows registered routes read-only (managed by Operations); the driver UI never writes workingRoutes", () => {
+    expect(ACCOUNT).toContain("workingRoutes");
+    expect(ACCOUNT).toContain("routesManaged");
+    expect(ACCOUNT).not.toContain("workingRoutes:");
+  });
+
+  it("the interactive Available-for-Offers switch is on Home; Profile only displays the status", () => {
+    expect(HOME).toContain("availableForOffers: !offersEnabled");
+    expect(ACCOUNT).not.toContain("availableForOffers: !offersEnabled");
+    expect(ACCOUNT).toContain("driver?.availableForOffers !== false");
   });
 });
 

@@ -1,26 +1,30 @@
 import { useState } from "react";
-import { ArrowLeft, ArrowRight, Check, CheckCircle2, Clock, DollarSign, Truck, X } from "lucide-react";
+import {
+  ArrowRight, Briefcase, Check, CheckCircle2, ChevronDown, Clock, DollarSign, Truck, X,
+} from "lucide-react";
 import type { Language } from "../../types";
 import { TRUCK_TYPES } from "../../types";
 import type { DriverOfferView } from "../../lib/driverAlliance";
 import { MAX_QUOTE_PRICE_USD } from "../../lib/driverAlliance";
 
 /**
- * Driver Alliance Phase 1 — the driver's transport-offer screen, kept
- * deliberately tiny: see the offer, then EITHER submit one USD price
- * (with an optional note) OR reject. No chat, no bidding, no
- * negotiation, no second answer. Rendered as an overlay from Home — the
- * four-tab navigation is untouched. All rules are enforced server-side;
- * a stale action simply comes back with a clear message.
+ * Driver App V2 — the Offers tab, kept deliberately tiny: each offer is
+ * ONE large card showing origin, destination, truck type, loading date,
+ * and expiry, with exactly two possible answers — submit one USD price
+ * (with a required confirmation step, because it can never be changed)
+ * or reject (optional reason). No chat, no bidding, no negotiation, no
+ * competitor information, no accept-without-price action, no second
+ * answer. A driver with an active job cannot answer offers — the server
+ * enforces it, and this screen shows a paused banner instead of answer
+ * controls. All rules are enforced server-side; a stale action simply
+ * comes back with a clear message.
  */
 const LABELS: Record<Language, {
   title: string;
   empty: string;
-  back: string;
+  pausedBanner: string;
   loading: string;
-  cargo: string;
   truck: string;
-  freight: string;
   freightNames: Record<string, string>;
   distance: string;
   expires: string;
@@ -29,14 +33,16 @@ const LABELS: Record<Language, {
   pricePlaceholder: string;
   notePlaceholder: string;
   reasonPlaceholder: string;
-  acceptToQuote: string;
+  answer: string;
   reject: string;
   confirmReject: string;
   submitPrice: string;
-  cancel: string;
+  confirmTitle: (p: string) => string;
+  confirmWarning: string;
+  confirmSend: string;
+  back: string;
   sending: string;
-  quoted: (p: string) => string;
-  waitingAnswer: string;
+  submitted: (p: string) => string;
   rejected: string;
   won: string;
   lost: string;
@@ -46,13 +52,11 @@ const LABELS: Record<Language, {
   usdOnly: string;
 }> = {
   en: {
-    title: "My Offers",
+    title: "Offers",
     empty: "No transport offers right now. New offers from MARAS will appear here.",
-    back: "Back",
+    pausedBanner: "You have an active job. New offers are paused until it is finished.",
     loading: "Loading date",
-    cargo: "Cargo",
     truck: "Truck type",
-    freight: "Freight type",
     freightNames: { land: "Land", sea: "Sea", air: "Air" },
     distance: "Distance",
     expires: "Offer expires",
@@ -61,16 +65,18 @@ const LABELS: Record<Language, {
     pricePlaceholder: "e.g. 3800",
     notePlaceholder: "Optional note to MARAS…",
     reasonPlaceholder: "Optional reason…",
-    acceptToQuote: "Accept to Quote",
+    answer: "Answer this offer",
     reject: "Reject",
     confirmReject: "Confirm Reject",
     submitPrice: "Submit Price",
-    cancel: "Cancel",
+    confirmTitle: (p) => `Send ${p} USD?`,
+    confirmWarning: "You can submit one price only. It cannot be changed later.",
+    confirmSend: "Yes, Send Price",
+    back: "Back",
     sending: "Sending…",
-    quoted: (p) => `You quoted ${p} USD. Waiting for MARAS.`,
-    waitingAnswer: "Waiting for your answer",
+    submitted: (p) => `Submitted — ${p} USD. Waiting for MARAS.`,
     rejected: "You rejected this offer.",
-    won: "MARAS selected your price — the shipment is assigned to you. Check your Jobs.",
+    won: "MARAS selected your price — the shipment is assigned to you. Check your Job.",
     lost: "Another driver has been selected. Thank you for your quotation.",
     expired: "This offer has expired. Prices can no longer be submitted.",
     closed: "This offer is closed.",
@@ -78,13 +84,11 @@ const LABELS: Record<Language, {
     usdOnly: "USD only",
   },
   tr: {
-    title: "Tekliflerim",
+    title: "Teklifler",
     empty: "Şu anda taşıma teklifi yok. MARAS'tan gelen yeni teklifler burada görünecek.",
-    back: "Geri",
+    pausedBanner: "Aktif bir seferiniz var. Yeni teklifler sefer bitene kadar durduruldu.",
     loading: "Yükleme tarihi",
-    cargo: "Yük",
     truck: "Araç tipi",
-    freight: "Taşıma türü",
     freightNames: { land: "Karayolu", sea: "Denizyolu", air: "Havayolu" },
     distance: "Mesafe",
     expires: "Teklifin bitişi",
@@ -93,16 +97,18 @@ const LABELS: Record<Language, {
     pricePlaceholder: "örn. 3800",
     notePlaceholder: "MARAS'a isteğe bağlı not…",
     reasonPlaceholder: "İsteğe bağlı neden…",
-    acceptToQuote: "Fiyat Vermek İstiyorum",
+    answer: "Bu teklifi cevapla",
     reject: "Reddet",
     confirmReject: "Reddetmeyi Onayla",
     submitPrice: "Fiyatı Gönder",
-    cancel: "Vazgeç",
+    confirmTitle: (p) => `${p} USD gönderilsin mi?`,
+    confirmWarning: "Yalnızca bir fiyat gönderebilirsiniz. Daha sonra değiştirilemez.",
+    confirmSend: "Evet, Fiyatı Gönder",
+    back: "Geri",
     sending: "Gönderiliyor…",
-    quoted: (p) => `${p} USD teklif verdiniz. MARAS bekleniyor.`,
-    waitingAnswer: "Cevabınız bekleniyor",
+    submitted: (p) => `Gönderildi — ${p} USD. MARAS bekleniyor.`,
     rejected: "Bu teklifi reddettiniz.",
-    won: "MARAS fiyatınızı seçti — sevkiyat size atandı. Seferlerinize bakın.",
+    won: "MARAS fiyatınızı seçti — sevkiyat size atandı. Seferinize bakın.",
     lost: "Başka bir sürücü seçildi. Fiyat teklifiniz için teşekkür ederiz.",
     expired: "Bu teklifin süresi doldu. Artık fiyat gönderilemez.",
     closed: "Bu teklif kapandı.",
@@ -110,13 +116,11 @@ const LABELS: Record<Language, {
     usdOnly: "Sadece USD",
   },
   ar: {
-    title: "عروضي",
+    title: "العروض",
     empty: "لا توجد عروض نقل حالياً. ستظهر هنا العروض الجديدة من MARAS.",
-    back: "رجوع",
+    pausedBanner: "لديك مهمة نشطة. العروض الجديدة متوقفة حتى انتهائها.",
     loading: "تاريخ التحميل",
-    cargo: "الحمولة",
     truck: "نوع الشاحنة",
-    freight: "نوع الشحن",
     freightNames: { land: "بري", sea: "بحري", air: "جوي" },
     distance: "المسافة",
     expires: "ينتهي العرض",
@@ -125,16 +129,18 @@ const LABELS: Record<Language, {
     pricePlaceholder: "مثال: 3800",
     notePlaceholder: "ملاحظة اختيارية إلى MARAS…",
     reasonPlaceholder: "سبب اختياري…",
-    acceptToQuote: "أريد تقديم سعر",
+    answer: "أجب على هذا العرض",
     reject: "رفض",
     confirmReject: "تأكيد الرفض",
     submitPrice: "إرسال السعر",
-    cancel: "إلغاء",
+    confirmTitle: (p) => `إرسال ${p} دولار؟`,
+    confirmWarning: "يمكنك إرسال سعر واحد فقط، ولا يمكن تغييره لاحقاً.",
+    confirmSend: "نعم، أرسل السعر",
+    back: "رجوع",
     sending: "جارٍ الإرسال…",
-    quoted: (p) => `قدمت سعر ${p} دولار. بانتظار MARAS.`,
-    waitingAnswer: "بانتظار إجابتك",
+    submitted: (p) => `تم الإرسال — ${p} دولار. بانتظار MARAS.`,
     rejected: "رفضت هذا العرض.",
-    won: "اختارت MARAS سعرك — تم تعيين الشحنة لك. راجع مهامك.",
+    won: "اختارت MARAS سعرك — تم تعيين الشحنة لك. راجع مهمتك.",
     lost: "تم اختيار سائق آخر. شكراً لك على تقديم سعرك.",
     expired: "انتهت مدة هذا العرض. لم يعد بالإمكان إرسال الأسعار.",
     closed: "هذا العرض مغلق.",
@@ -152,275 +158,266 @@ function truckTypeLabel(id: string, lang: Language): string {
 interface DriverOffersScreenProps {
   lang: Language;
   offers: DriverOfferView[];
-  onBack: () => void;
+  /** One-active-job rule: with a job underway, answer controls are hidden. */
+  hasActiveJob: boolean;
   onOpenOffer: (offerId: string) => void;
   onRespond: (offerId: string, action: "quote" | "reject", priceUsd?: number, note?: string) => Promise<boolean>;
 }
 
-export default function DriverOffersScreen({ lang, offers, onBack, onOpenOffer, onRespond }: DriverOffersScreenProps) {
+export default function DriverOffersScreen({ lang, offers, hasActiveJob, onOpenOffer, onRespond }: DriverOffersScreenProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const [openOfferId, setOpenOfferId] = useState<string | null>(null);
-  const [isQuoting, setIsQuoting] = useState(false);
-  const [isRejecting, setIsRejecting] = useState(false);
+  // Composer phases within the open card: idle → quoting → confirming,
+  // or idle → rejecting. One free-text field, reused: quote note when
+  // quoting, optional reject reason when rejecting — never both.
+  const [phase, setPhase] = useState<"idle" | "quoting" | "confirming" | "rejecting">("idle");
   const [price, setPrice] = useState("");
-  // One free-text field, reused: quote note when quoting, optional
-  // reject reason when rejecting — never both in one answer.
   const [note, setNote] = useState("");
   const [isSending, setIsSending] = useState(false);
 
-  const open = offers.find((o) => o.id === openOfferId) || null;
-
   const resetComposer = () => {
-    setIsQuoting(false);
-    setIsRejecting(false);
+    setPhase("idle");
     setPrice("");
     setNote("");
   };
 
-  const submit = async (action: "quote" | "reject") => {
-    if (!open || isSending) return;
+  const toggleCard = (offerId: string) => {
+    if (openOfferId === offerId) {
+      setOpenOfferId(null);
+      resetComposer();
+      return;
+    }
+    setOpenOfferId(offerId);
+    resetComposer();
+    onOpenOffer(offerId);
+  };
+
+  const submit = async (open: DriverOfferView, action: "quote" | "reject") => {
+    if (isSending) return;
     setIsSending(true);
     const ok = await onRespond(open.id, action, action === "quote" ? Number(price) : undefined, note.trim() || undefined);
     setIsSending(false);
     if (ok) resetComposer();
   };
 
-  // ── Detail ──
-  if (open) {
-    const answered = open.myResponse.status === "quoted" || open.myResponse.status === "rejected" || open.myResponse.status === "closed";
-    // The server resolves an out-of-time offer's status to "expired",
-    // so the expiry rule needs no extra client-side clock check here.
-    const canAnswer = open.status === "broadcast" && !answered;
-    const anotherDriverSelected =
-      !open.isWinner && (open.myResponse.status === "closed" || open.status === "winner_selected");
-    return (
-      <div className="space-y-4 animate-fade-in pb-4">
-        <button
-          type="button"
-          onClick={() => { setOpenOfferId(null); resetComposer(); }}
-          className="inline-flex items-center gap-2 min-h-[44px] px-3.5 text-sm font-bold text-slate-300 hover:text-white bg-slate-900 border border-slate-800 rounded-2xl transition-all cursor-pointer active:scale-95"
-        >
-          <ArrowLeft className="w-4 h-4 shrink-0 rtl:rotate-180" />
-          <span>{t.back}</span>
-        </button>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">
-          {/* Route */}
-          <div className="flex items-center gap-3">
-            <div className="flex-1 min-w-0 text-start">
-              <p className="text-base font-bold text-slate-200 truncate">{open.pickupCity}</p>
-              <p className="text-xs text-slate-500 truncate">{open.pickupCountry}</p>
-            </div>
-            <ArrowRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
-            <div className="flex-1 min-w-0 text-end">
-              <p className="text-base font-bold text-slate-200 truncate">{open.deliveryCity}</p>
-              <p className="text-xs text-slate-500 truncate">{open.deliveryCountry}</p>
-            </div>
-          </div>
-
-          <div className="space-y-2 text-sm text-start">
-            <p className="text-slate-300"><span className="text-slate-500">{t.cargo}:</span> <span className="font-semibold">{open.cargoDescription}</span></p>
-            <p className="text-slate-300"><span className="text-slate-500">{t.freight}:</span> <span className="font-semibold">{t.freightNames[open.freightType || "land"] || t.freightNames.land}</span></p>
-            <p className="text-slate-300 flex items-center gap-1.5">
-              <Truck className="w-4 h-4 text-slate-500 shrink-0" />
-              <span className="text-slate-500">{t.truck}:</span> <span className="font-semibold">{truckTypeLabel(open.truckType, lang)}</span>
-            </p>
-            <p className="text-slate-300"><span className="text-slate-500">{t.loading}:</span> <span className="font-semibold">{open.expectedLoadingDate}</span></p>
-            {typeof open.distanceKm === "number" && (
-              <p className="text-slate-300"><span className="text-slate-500">{t.distance}:</span> <span className="font-semibold">{open.distanceKm.toLocaleString()} km</span></p>
-            )}
-            {open.expiresAt && (
-              <p className="text-slate-300 flex items-center gap-1.5">
-                <Clock className="w-4 h-4 text-slate-500 shrink-0" />
-                <span className="text-slate-500">{t.expires}:</span> <span className="font-semibold">{new Date(open.expiresAt).toLocaleString()}</span>
-              </p>
-            )}
-            {open.notes && <p className="text-slate-300"><span className="text-slate-500">{t.note}:</span> <span className="font-semibold">{open.notes}</span></p>}
-            <p className="text-xs font-bold text-slate-500 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 inline-block">{t.usdOnly}</p>
-          </div>
-        </div>
-
-        {/* Answer states */}
-        {open.isWinner ? (
-          <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-2xl p-4 flex items-start gap-3 text-start">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-            <p className="text-sm font-semibold text-emerald-300 leading-snug">{t.won}</p>
-          </div>
-        ) : anotherDriverSelected ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm font-semibold text-slate-300 leading-snug text-start">
-            {t.lost}
-          </div>
-        ) : open.myResponse.status === "quoted" ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-start gap-3 text-start">
-            <Clock className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-sm font-semibold text-slate-200 leading-snug">
-              {t.quoted((open.myResponse.priceUsd ?? 0).toLocaleString())}
-            </p>
-          </div>
-        ) : open.myResponse.status === "rejected" ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm font-semibold text-slate-400 text-start">
-            {t.rejected}
-          </div>
-        ) : !canAnswer ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm font-semibold text-slate-400 text-start">
-            {open.status === "expired" ? t.expired : t.closed}
-          </div>
-        ) : isRejecting ? (
-          <div className="bg-slate-900 border border-red-500/30 rounded-2xl p-4 space-y-3">
-            <input
-              type="text"
-              maxLength={500}
-              placeholder={t.reasonPlaceholder}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-red-500/50 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
-            />
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={resetComposer}
-                disabled={isSending}
-                className="col-span-1 min-h-[56px] rounded-2xl bg-slate-950 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
-              >
-                {t.cancel}
-              </button>
-              <button
-                type="button"
-                onClick={() => submit("reject")}
-                disabled={isSending}
-                className="col-span-2 min-h-[56px] rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
-              >
-                <X className="w-5 h-5 shrink-0" />
-                <span>{isSending ? t.sending : t.confirmReject}</span>
-              </button>
-            </div>
-          </div>
-        ) : isQuoting ? (
-          <div className="bg-slate-900 border border-orange-500/40 rounded-2xl p-4 space-y-3">
-            <label className="text-sm font-bold text-slate-200 block text-start">{t.yourPrice}</label>
-            <div className="flex items-center gap-2">
-              <span className="w-12 h-12 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center text-orange-500 shrink-0">
-                <DollarSign className="w-5 h-5" />
-              </span>
-              <input
-                type="number"
-                inputMode="decimal"
-                min={1}
-                max={MAX_QUOTE_PRICE_USD}
-                placeholder={t.pricePlaceholder}
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                className="flex-1 min-w-0 min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-lg font-bold text-white rounded-2xl outline-none transition-colors placeholder-slate-600"
-              />
-            </div>
-            <input
-              type="text"
-              maxLength={500}
-              placeholder={t.notePlaceholder}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-sm text-slate-100 rounded-2xl outline-none transition-colors placeholder-slate-600"
-            />
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={resetComposer}
-                disabled={isSending}
-                className="col-span-1 min-h-[56px] rounded-2xl bg-slate-950 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
-              >
-                {t.cancel}
-              </button>
-              <button
-                type="button"
-                onClick={() => submit("quote")}
-                disabled={isSending || !price.trim() || Number(price) <= 0}
-                className="col-span-2 min-h-[56px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
-              >
-                <Check className="w-5 h-5 shrink-0" />
-                <span>{isSending ? t.sending : t.submitPrice}</span>
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => { setIsRejecting(true); setNote(""); }}
-              disabled={isSending}
-              className="col-span-1 min-h-[60px] rounded-2xl bg-slate-950 border border-red-500/30 text-red-400 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
-            >
-              <X className="w-4 h-4 shrink-0" />
-              <span>{t.reject}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => { setIsQuoting(true); setNote(""); }}
-              disabled={isSending}
-              className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
-            >
-              <DollarSign className="w-5 h-5 shrink-0" />
-              <span>{t.acceptToQuote}</span>
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ── List ──
   return (
     <div className="space-y-4 animate-fade-in pb-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold text-white text-start">{t.title}</h2>
-        <button
-          type="button"
-          onClick={onBack}
-          className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 text-sm text-slate-300 hover:text-white font-bold bg-slate-900 border border-slate-800 rounded-2xl cursor-pointer"
-        >
-          <ArrowLeft className="w-4 h-4 rtl:rotate-180" />
-          <span>{t.back}</span>
-        </button>
-      </div>
+      <h2 className="text-2xl font-bold text-white text-start">{t.title}</h2>
+
+      {/* One active job → offers are paused; no answer controls render. */}
+      {hasActiveJob && (
+        <div className="flex items-start gap-2.5 px-3.5 py-3 rounded-2xl bg-slate-900 border border-amber-500/30 text-start">
+          <Briefcase className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <p className="text-sm font-semibold text-amber-400 leading-snug">{t.pausedBanner}</p>
+        </div>
+      )}
 
       {offers.length === 0 ? (
         <div className="py-14 text-center bg-slate-900 rounded-3xl p-6 border border-slate-800">
           <p className="text-sm text-slate-400 leading-relaxed max-w-[280px] mx-auto">{t.empty}</p>
         </div>
       ) : (
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {offers.map((o) => {
+            const answered = o.myResponse.status === "quoted" || o.myResponse.status === "rejected" || o.myResponse.status === "closed";
+            // The server resolves an out-of-time offer's status to
+            // "expired", so no client clock check is needed here.
+            const canAnswer = o.status === "broadcast" && !answered && !hasActiveJob;
             const pending = o.status === "broadcast" && (o.myResponse.status === "invited" || o.myResponse.status === "viewed");
+            const isOpen = openOfferId === o.id;
+            const anotherDriverSelected = !o.isWinner && (o.myResponse.status === "closed" || o.status === "winner_selected");
+
             return (
-              <button
+              <div
                 key={o.id}
-                type="button"
-                onClick={() => { setOpenOfferId(o.id); resetComposer(); onOpenOffer(o.id); }}
-                className={`w-full text-start bg-slate-900 border rounded-3xl p-4 space-y-2 transition-all cursor-pointer active:scale-[0.99] ${
-                  pending ? "border-orange-500/40" : o.isWinner ? "border-emerald-500/30" : "border-slate-800 opacity-80"
+                className={`bg-slate-900 border rounded-3xl transition-all ${
+                  pending ? "border-orange-500/40" : o.isWinner ? "border-emerald-500/30" : "border-slate-800"
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-2 text-sm min-w-0">
-                    <span className="font-bold text-slate-200 truncate">{o.pickupCity}</span>
-                    <ArrowRight className="w-4 h-4 text-orange-500 shrink-0 rtl:rotate-180" />
-                    <span className="font-bold text-slate-200 truncate">{o.deliveryCity}</span>
-                  </span>
-                  {pending && (
-                    <span className="shrink-0 bg-orange-500 text-white text-xs font-bold rounded-full px-2.5 py-0.5 light-preserve">{t.newTag}</span>
+                {/* Card face — everything the driver needs at a glance */}
+                <button
+                  type="button"
+                  onClick={() => toggleCard(o.id)}
+                  className="w-full text-start p-4 space-y-3 cursor-pointer active:scale-[0.995] transition-transform"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2.5 text-base min-w-0">
+                      <span className="font-bold text-slate-200 truncate">{o.pickupCity}</span>
+                      <ArrowRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
+                      <span className="font-bold text-slate-200 truncate">{o.deliveryCity}</span>
+                    </span>
+                    {pending && !hasActiveJob && (
+                      <span className="shrink-0 bg-orange-500 text-white text-xs font-bold rounded-full px-2.5 py-0.5 light-preserve">{t.newTag}</span>
+                    )}
+                    {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap text-sm text-slate-300">
+                    <span className="inline-flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1">
+                      <Truck className="w-4 h-4 text-slate-500 shrink-0" />
+                      <span className="font-semibold">{truckTypeLabel(o.truckType, lang)}</span>
+                    </span>
+                    {o.expectedLoadingDate && (
+                      <span className="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1 font-semibold">
+                        {t.loading}: {o.expectedLoadingDate}
+                      </span>
+                    )}
+                    {typeof o.distanceKm === "number" && (
+                      <span className="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1 font-semibold">
+                        {o.distanceKm.toLocaleString()} km
+                      </span>
+                    )}
+                  </div>
+
+                  {o.expiresAt && pending && (
+                    <p className="text-sm font-semibold text-amber-400/90 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 shrink-0" />
+                      <span>{t.expires}: {new Date(o.expiresAt).toLocaleString()}</span>
+                    </p>
                   )}
-                  {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
-                </div>
-                <p className="text-xs text-slate-500">
-                  {t.freightNames[o.freightType || "land"] || t.freightNames.land} · {truckTypeLabel(o.truckType, lang)} · {o.expectedLoadingDate}
-                  {typeof o.distanceKm === "number" ? ` · ${o.distanceKm.toLocaleString()} km` : ""}
-                  {o.myResponse.status === "quoted" && typeof o.myResponse.priceUsd === "number"
-                    ? ` · ${o.myResponse.priceUsd.toLocaleString()} USD`
-                    : ""}
-                </p>
-                {pending && o.expiresAt && (
-                  <p className="text-xs text-amber-400/90">{t.expires}: {new Date(o.expiresAt).toLocaleString()}</p>
+
+                  {/* Answered / decided states shown right on the card */}
+                  {o.isWinner ? (
+                    <p className="text-sm font-bold text-emerald-400 leading-snug">{t.won}</p>
+                  ) : anotherDriverSelected ? (
+                    <p className="text-sm font-semibold text-slate-400 leading-snug">{t.lost}</p>
+                  ) : o.myResponse.status === "quoted" ? (
+                    <p className="text-sm font-bold text-slate-200 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      {t.submitted((o.myResponse.priceUsd ?? 0).toLocaleString())}
+                    </p>
+                  ) : o.myResponse.status === "rejected" ? (
+                    <p className="text-sm font-semibold text-slate-500">{t.rejected}</p>
+                  ) : o.status === "expired" ? (
+                    <p className="text-sm font-semibold text-slate-500">{t.expired}</p>
+                  ) : !canAnswer && !pending ? (
+                    <p className="text-sm font-semibold text-slate-500">{t.closed}</p>
+                  ) : canAnswer && !isOpen ? (
+                    <span className="inline-flex items-center gap-1.5 text-sm font-bold text-orange-400">
+                      <ChevronDown className="w-4 h-4 shrink-0" />
+                      {t.answer}
+                    </span>
+                  ) : null}
+                </button>
+
+                {/* Answer area — only for an open, still-answerable card */}
+                {isOpen && canAnswer && (
+                  <div className="px-4 pb-4 space-y-3">
+                    {o.notes && (
+                      <p className="text-sm text-slate-300 text-start">
+                        <span className="text-slate-500">{t.note}: </span>
+                        <span className="font-semibold">{o.notes}</span>
+                      </p>
+                    )}
+                    <p className="text-xs font-bold text-slate-500 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 inline-block">{t.usdOnly}</p>
+
+                    {phase === "confirming" ? (
+                      /* Confirmation step — one price, forever. */
+                      <div className="bg-slate-950 border border-orange-500/40 rounded-2xl p-4 space-y-3 text-start">
+                        <p className="text-base font-bold text-white">{t.confirmTitle(Number(price).toLocaleString())}</p>
+                        <p className="text-sm text-slate-400 leading-snug">{t.confirmWarning}</p>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setPhase("quoting")}
+                            disabled={isSending}
+                            className="col-span-1 min-h-[56px] rounded-2xl bg-slate-900 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                          >
+                            {t.back}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => submit(o, "quote")}
+                            disabled={isSending}
+                            className="col-span-2 min-h-[56px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                          >
+                            <Check className="w-5 h-5 shrink-0" />
+                            <span>{isSending ? t.sending : t.confirmSend}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : phase === "rejecting" ? (
+                      <div className="bg-slate-950 border border-red-500/30 rounded-2xl p-4 space-y-3">
+                        <input
+                          type="text"
+                          maxLength={500}
+                          placeholder={t.reasonPlaceholder}
+                          value={note}
+                          onChange={(e) => setNote(e.target.value)}
+                          className="w-full min-h-[48px] px-3.5 bg-slate-900 border border-slate-800 focus:border-red-500/50 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
+                        />
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={resetComposer}
+                            disabled={isSending}
+                            className="col-span-1 min-h-[56px] rounded-2xl bg-slate-900 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                          >
+                            {t.back}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => submit(o, "reject")}
+                            disabled={isSending}
+                            className="col-span-2 min-h-[56px] rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                          >
+                            <X className="w-5 h-5 shrink-0" />
+                            <span>{isSending ? t.sending : t.confirmReject}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Price entry + the two allowed actions */
+                      <div className="space-y-3">
+                        <label className="text-sm font-bold text-slate-200 block text-start">{t.yourPrice}</label>
+                        <div className="flex items-center gap-2">
+                          <span className="w-12 h-12 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center text-orange-500 shrink-0">
+                            <DollarSign className="w-5 h-5" />
+                          </span>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            min={1}
+                            max={MAX_QUOTE_PRICE_USD}
+                            placeholder={t.pricePlaceholder}
+                            value={price}
+                            onChange={(e) => setPrice(e.target.value)}
+                            className="flex-1 min-w-0 min-h-[52px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-xl font-bold text-white rounded-2xl outline-none transition-colors placeholder-slate-600"
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          maxLength={500}
+                          placeholder={t.notePlaceholder}
+                          value={note}
+                          onChange={(e) => setNote(e.target.value)}
+                          className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
+                        />
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => { setPhase("rejecting"); setNote(""); }}
+                            disabled={isSending}
+                            className="col-span-1 min-h-[60px] rounded-2xl bg-slate-950 border border-red-500/30 text-red-400 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                          >
+                            <X className="w-4 h-4 shrink-0" />
+                            <span>{t.reject}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPhase("confirming")}
+                            disabled={isSending || !price.trim() || Number(price) <= 0}
+                            className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                          >
+                            <DollarSign className="w-5 h-5 shrink-0" />
+                            <span>{t.submitPrice}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>

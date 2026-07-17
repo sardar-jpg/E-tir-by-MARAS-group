@@ -15,44 +15,56 @@ function read(relPath: string): string {
 describe("DriverOffersScreen — deliberately tiny", () => {
   const SOURCE = read("driver/DriverOffersScreen.tsx");
 
-  it("offers exactly the allowed driver actions: Accept to Quote, Reject (optional reason), Submit Price (USD), optional note — nothing else", () => {
-    expect(SOURCE).toContain('submit("quote")');
-    expect(SOURCE).toContain('submit("reject")');
+  it("offers exactly the allowed driver actions: one USD price (confirmed) or Reject (optional reason) — nothing else", () => {
+    expect(SOURCE).toContain('submit(o, "quote")');
+    expect(SOURCE).toContain('submit(o, "reject")');
     expect(SOURCE).toContain("MAX_QUOTE_PRICE_USD");
     expect(SOURCE).toContain("reasonPlaceholder");
-    // No chat, no counter-offers, no currency choice.
+    // No chat, no counter-offers, no currency choice, no accept-only action.
     expect(SOURCE).not.toContain("textarea");
     expect(SOURCE).not.toContain("<select");
     expect(SOURCE).not.toMatch(/EUR|TRY|IQD/);
   });
 
-  it("is localized in English, Turkish, and Arabic (My Offers screen)", () => {
-    for (const needle of ["My Offers", "Tekliflerim", "عروضي"]) {
+  it("requires a clear confirmation step before the one-and-only price submission", () => {
+    expect(SOURCE).toContain('setPhase("confirming")');
+    expect(SOURCE).toContain("confirmWarning");
+    expect(SOURCE).toContain("You can submit one price only. It cannot be changed later.");
+  });
+
+  it("is localized in English, Turkish, and Arabic (Offers tab)", () => {
+    for (const needle of ['title: "Offers"', '"Teklifler"', '"العروض"']) {
       expect(SOURCE).toContain(needle);
     }
   });
 
   it("an answered offer can never be re-answered from the UI (quoted/rejected/closed render read-only states)", () => {
-    expect(SOURCE).toContain('open.myResponse.status === "quoted"');
-    expect(SOURCE).toContain('open.myResponse.status === "rejected"');
-    expect(SOURCE).toContain('open.myResponse.status === "closed"');
-    expect(SOURCE).toContain('const canAnswer = open.status === "broadcast" && !answered;');
+    expect(SOURCE).toContain('o.myResponse.status === "quoted"');
+    expect(SOURCE).toContain('o.myResponse.status === "rejected"');
+    expect(SOURCE).toContain('o.myResponse.status === "closed"');
+    expect(SOURCE).toContain('const canAnswer = o.status === "broadcast" && !answered && !hasActiveJob;');
   });
 
-  it("shows the required card facts (freight type, expiry, distance when available) and the fixed lost/expired messages", () => {
-    expect(SOURCE).toContain("freightNames");
+  it("a driver with an active job gets a paused banner and no answer controls", () => {
+    expect(SOURCE).toContain("hasActiveJob &&");
+    expect(SOURCE).toContain("pausedBanner");
+  });
+
+  it("shows the required card facts (truck type, loading date, expiry, distance when available) and the fixed lost/expired messages", () => {
+    expect(SOURCE).toContain("truckTypeLabel");
+    expect(SOURCE).toContain("expectedLoadingDate");
     expect(SOURCE).toContain("expiresAt");
     expect(SOURCE).toContain("distanceKm");
     expect(SOURCE).toContain("Another driver has been selected. Thank you for your quotation.");
     expect(SOURCE).toContain("This offer has expired.");
   });
 
-  it("navigation stays four-tab: the offers screen is an overlay, not a tab", () => {
+  it("navigation is the six-section bar with Offers as a first-class tab", () => {
     const NAV = read("driver/DriverBottomNavigation.tsx");
-    expect(NAV).toContain('const TABS: DriverTab[] = ["home", "jobs", "chat", "account"];');
+    expect(NAV).toContain('const TABS: DriverTab[] = ["home", "offers", "job", "chat", "documents", "profile"];');
     const APP = read("DriverApplication.tsx");
-    expect(APP).toContain("setShowOffers(true)");
-    expect(APP).not.toMatch(/"offers"\s*\|/);
+    expect(APP).toContain("activeTab === 'offers'");
+    expect(APP).toContain("hasActiveJob={!!activeJob}");
   });
 });
 
@@ -98,13 +110,19 @@ describe("Admin Driver Alliance page enhancements", () => {
 });
 
 describe("Driver 'Available for Offers' switch", () => {
-  it("lives in the driver Account screen and saves through the driver's own PUT /api/drivers/:id", () => {
-    const ACCOUNT = read("driver/DriverAccountScreen.tsx");
-    expect(ACCOUNT).toContain("Available for Offers");
-    expect(ACCOUNT).toContain("Tekliflere Açık");
-    expect(ACCOUNT).toContain("متاح لعروض النقل");
-    expect(ACCOUNT).toContain("availableForOffers: !offersEnabled");
+  it("lives on the Home screen and saves through the driver's own PUT /api/drivers/:id", () => {
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).toContain("Available for Offers");
+    expect(HOME).toContain("Tekliflere Açık");
+    expect(HOME).toContain("متاح لعروض النقل");
+    expect(HOME).toContain("availableForOffers: !offersEnabled");
     // Absent counts as available — legacy profiles stay opted in.
+    expect(HOME).toContain('driver?.availableForOffers !== false');
+  });
+
+  it("the Profile screen shows the availability status read-only", () => {
+    const ACCOUNT = read("driver/DriverAccountScreen.tsx");
     expect(ACCOUNT).toContain('driver?.availableForOffers !== false');
+    expect(ACCOUNT).not.toContain("availableForOffers: !offersEnabled");
   });
 });

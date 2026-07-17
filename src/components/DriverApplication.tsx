@@ -21,7 +21,8 @@ import type { DriverOfferView } from "../lib/driverAlliance";
 import { useDriverLocationReporting } from "../hooks/driver/useDriverLocationReporting";
 import DriverBottomNavigation, { type DriverTab } from "./driver/DriverBottomNavigation";
 import DriverHomeScreen from "./driver/DriverHomeScreen";
-import DriverJobsScreen from "./driver/DriverJobsScreen";
+import DriverActiveJobScreen from "./driver/DriverActiveJobScreen";
+import DriverDocumentsScreen from "./driver/DriverDocumentsScreen";
 import DriverJobDetails from "./driver/DriverJobDetails";
 import DriverChatScreen from "./driver/DriverChatScreen";
 import DriverAccountScreen from "./driver/DriverAccountScreen";
@@ -46,14 +47,15 @@ const DRIVER_COMPOSER_MIN_HEIGHT_PX = 44;
 const DRIVER_COMPOSER_MAX_HEIGHT_PX = 128;
 
 /**
- * feature/driver-app-comprehensive-redesign — DriverApplication is now a
- * data/state container only. All rendering moved into the focused
- * components under ./driver (DriverHomeScreen, DriverJobsScreen,
- * DriverJobDetails, DriverChatScreen, DriverAccountScreen,
- * DriverBottomNavigation), and location reporting moved into
- * useDriverLocationReporting. Every server contract, concurrency guard,
- * status-transition rule, and chat-lock rule from PR #111 and the chat
- * safety/scalability phases is preserved here unchanged.
+ * Driver App V2 — DriverApplication is a data/state container only. All
+ * rendering lives in the focused components under ./driver (six
+ * sections: DriverHomeScreen, DriverOffersScreen, DriverActiveJobScreen
+ * + DriverJobDetails, DriverChatScreen, DriverDocumentsScreen,
+ * DriverAccountScreen — plus DriverBottomNavigation), and location
+ * reporting lives in useDriverLocationReporting. Every server contract,
+ * concurrency guard, status-transition rule, and chat-lock rule from
+ * PR #111 and the chat safety/scalability phases is preserved here
+ * unchanged.
  */
 export default function DriverApplication({
   lang,
@@ -222,12 +224,10 @@ export default function DriverApplication({
 
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
   const [showNotifications, setShowNotifications] = useState(false);
-  // Driver Alliance Phase 1: this driver's own sanitized offer views
+  // Driver Quote Requests: this driver's own sanitized offer views
   // (server-scoped — a driver can never receive another driver's offers
-  // or prices). The offers screen is an overlay from Home; the four-tab
-  // navigation is untouched.
+  // or prices). Offers is a first-class navigation section in V2.
   const [allianceOffers, setAllianceOffers] = useState<DriverOfferView[]>([]);
-  const [showOffers, setShowOffers] = useState(false);
 
   // Opening the Notifications screen marks every currently-visible unread
   // notification as read. Re-runs whenever the visible list changes (e.g.
@@ -1141,7 +1141,13 @@ export default function DriverApplication({
 
   const openJobDetails = (shipment: Shipment) => {
     setActiveShipment(shipment);
-    setActiveTab('jobs');
+    setActiveTab('job');
+    setShowNotifications(false);
+  };
+
+  const openJobDocuments = (shipment: Shipment) => {
+    setActiveShipment(shipment);
+    setActiveTab('documents');
     setShowNotifications(false);
   };
 
@@ -1314,16 +1320,6 @@ export default function DriverApplication({
                   onBack={() => setShowNotifications(false)}
                 />
               </div>
-            ) : showOffers ? (
-              <div className="flex-1 overflow-y-auto bg-slate-950 p-4">
-                <DriverOffersScreen
-                  lang={lang}
-                  offers={allianceOffers}
-                  onBack={() => setShowOffers(false)}
-                  onOpenOffer={handleOpenAllianceOffer}
-                  onRespond={handleRespondAllianceOffer}
-                />
-              </div>
             ) : activeTab === 'chat' ? (
               <div className="flex-1 min-h-0 bg-slate-950">
                 <DriverChatScreen
@@ -1363,36 +1359,54 @@ export default function DriverApplication({
                   <DriverHomeScreen
                     driverName={getDriverName()}
                     driverId={selectedDriverId}
+                    driver={currentDriver}
                     activeJob={activeJob}
                     lang={lang}
                     gpsAvailable={gpsAvailable}
                     isReportingLocation={isReportingLocation}
+                    pendingOffersCount={pendingOffersCount}
+                    recentNotifications={myNotifications}
+                    onViewOffers={() => setActiveTab('offers')}
+                    onOpenActiveJob={() => { setActiveShipment(null); setActiveTab('job'); }}
+                    onDriverUpdated={(updated) => {
+                      setDrivers(prev => prev.map(d => d.id === updated.id ? updated : d));
+                      fetchData();
+                    }}
+                    onToast={triggerToast}
+                  />
+                )}
+
+                {activeTab === 'offers' && (
+                  <DriverOffersScreen
+                    lang={lang}
+                    offers={allianceOffers}
+                    hasActiveJob={!!activeJob}
+                    onOpenOffer={handleOpenAllianceOffer}
+                    onRespond={handleRespondAllianceOffer}
+                  />
+                )}
+
+                {activeTab === 'job' && !activeShipment && (
+                  <DriverActiveJobScreen
+                    shipments={shipments}
+                    driverId={selectedDriverId}
+                    lang={lang}
+                    activeJob={activeJob}
+                    unreadByShipmentId={unreadChatByShipmentId}
                     isSubmittingStatus={isSubmittingStatus}
                     onSubmitNextStatus={handleSubmitNextStatus}
                     onAccept={handleAcceptAssignment}
                     onDecline={handleRejectAssignment}
-                    onOpenChat={openJobChat}
-                    onOpenDetails={openJobDetails}
-                    onViewJobs={() => setActiveTab('jobs')}
-                    pendingOffersCount={pendingOffersCount}
-                    onOpenOffers={() => setShowOffers(true)}
-                  />
-                )}
-
-                {activeTab === 'jobs' && !activeShipment && (
-                  <DriverJobsScreen
-                    shipments={shipments}
-                    driverId={selectedDriverId}
-                    lang={lang}
-                    unreadByShipmentId={unreadChatByShipmentId}
                     onOpenJob={openJobDetails}
+                    onOpenChat={openJobChat}
+                    onOpenDocuments={openJobDocuments}
                     hasMore={shipmentsHasMore}
                     isLoadingMore={shipmentsLoadingMore}
                     onLoadMore={handleLoadMoreShipments}
                   />
                 )}
 
-                {activeTab === 'jobs' && activeShipment && (
+                {activeTab === 'job' && activeShipment && (
                   <DriverJobDetails
                     shipment={activeShipment}
                     driverId={selectedDriverId}
@@ -1408,7 +1422,22 @@ export default function DriverApplication({
                   />
                 )}
 
-                {activeTab === 'account' && (
+                {activeTab === 'documents' && (
+                  <DriverDocumentsScreen
+                    lang={lang}
+                    shipment={activeShipment ?? activeJob ?? shipments[0] ?? null}
+                    onSendDocumentViaChat={() => {
+                      const target = activeShipment ?? activeJob ?? shipments[0];
+                      if (target) openJobChat(target);
+                    }}
+                    canSendDocuments={(() => {
+                      const target = activeShipment ?? activeJob ?? shipments[0];
+                      return !!target && !isShipmentClosed(target.status, target.freightType);
+                    })()}
+                  />
+                )}
+
+                {activeTab === 'profile' && (
                   <DriverAccountScreen
                     lang={lang}
                     driverId={selectedDriverId}
@@ -1427,16 +1456,17 @@ export default function DriverApplication({
               </div>
             )}
 
-            {/* Bottom navigation — exactly Home, Jobs, Chat, Account */}
+            {/* Bottom navigation — exactly Home, Offers, Job, Chat, Documents, Profile */}
             <DriverBottomNavigation
               activeTab={activeTab}
               lang={lang}
               chatUnreadCount={totalUnreadChat}
+              pendingOffersCount={pendingOffersCount}
               onSelect={(tab) => {
                 setShowNotifications(false);
-                setShowOffers(false);
-                if (tab === 'jobs' && activeTab === 'jobs') {
-                  // Re-tapping Jobs from details returns to the list.
+                if (tab === 'job') {
+                  // The Job tab always lands on the active-job view; a
+                  // previously opened job's details never linger.
                   setActiveShipment(null);
                 }
                 setActiveTab(tab);
