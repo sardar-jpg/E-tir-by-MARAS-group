@@ -498,7 +498,7 @@ export default function DriverOffersScreen({
                       type="button"
                       onClick={() => setPhase("confirming")}
                       disabled={isSending || !price.trim() || Number(price) <= 0}
-                      className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                      className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
                     >
                       <DollarSign className="w-5 h-5 shrink-0" />
                       <span>{t.submitPrice}</span>

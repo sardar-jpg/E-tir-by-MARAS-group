@@ -64,7 +64,7 @@ export default function DriverBottomNavigation({
             onClick={() => onSelect(tab)}
             aria-current={isActive ? "page" : undefined}
             className={`flex flex-col items-center justify-center gap-1 min-h-[56px] rounded-xl transition-colors cursor-pointer ${
-              isActive ? "text-orange-500" : "text-slate-500 hover:text-slate-300"
+              isActive ? "text-orange-500 bg-orange-500/10" : "text-slate-500 hover:text-slate-300"
             }`}
           >
             <span className="relative">

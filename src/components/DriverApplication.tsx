@@ -1326,10 +1326,10 @@ export default function DriverApplication({
             {/* Header */}
             <div className="px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-800 flex items-center justify-between z-20 relative shrink-0">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
-                  <Truck className="w-4.5 h-4.5 text-orange-500" />
+                <div className="w-9 h-9 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
+                  <Truck className="w-5 h-5 text-orange-500" />
                 </div>
-                <h1 className="text-white font-bold text-sm">{t('brand')}</h1>
+                <h1 className="text-white font-extrabold text-base tracking-tight">{t('brand')}</h1>
               </div>
 
               <NotificationBell

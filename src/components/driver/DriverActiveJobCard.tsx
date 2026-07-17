@@ -2,7 +2,7 @@ import { ArrowRight, FileText, MessageSquare, Phone } from "lucide-react";
 import type { Language, Shipment } from "../../types";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber } from "../../lib/driverVisibility";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
-import { getStatusChipClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
+import { BTN_SECONDARY, CARD, INNER_CARD, getStatusChipClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — the Home screen's active-job
@@ -66,7 +66,7 @@ export default function DriverActiveJobCard({
   const chatAvailable = isDriverChatAvailable(s.status);
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.35)]">
+    <div className={`${CARD} p-4 space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.35)]`}>
       {/* Shipment number + status */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
@@ -81,7 +81,7 @@ export default function DriverActiveJobCard({
       </div>
 
       {/* Route */}
-      <div className="bg-slate-950 rounded-2xl border border-slate-800 p-3.5">
+      <div className={`${INNER_CARD} p-3.5`}>
         <div className="flex items-center gap-3">
           <div className="flex-1 min-w-0 text-start">
             <p className="text-xs text-slate-500 font-medium">{t.from}</p>
@@ -126,7 +126,7 @@ export default function DriverActiveJobCard({
           <button
             type="button"
             onClick={onOpenChat}
-            className="min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+            className={BTN_SECONDARY}
           >
             <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
             <span>{t.chat}</span>
@@ -135,7 +135,7 @@ export default function DriverActiveJobCard({
         <button
           type="button"
           onClick={onOpenDetails}
-          className="min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+          className={BTN_SECONDARY}
         >
           <FileText className="w-4 h-4 text-orange-500 shrink-0" />
           <span>{t.details}</span>
@@ -143,7 +143,7 @@ export default function DriverActiveJobCard({
         {callContact && (
           <a
             href={`tel:${callContact}`}
-            className="min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+            className={BTN_SECONDARY}
           >
             <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{t.call}</span>

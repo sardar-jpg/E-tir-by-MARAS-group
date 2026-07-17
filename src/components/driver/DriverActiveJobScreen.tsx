@@ -7,7 +7,7 @@ import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverOffersScreen from "./DriverOffersScreen";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
-import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
+import { BTN_SECONDARY, CARD, SCREEN_TITLE, getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
 /**
  * Driver App V2 — the Job tab is the ONE operational center, in strict
@@ -121,7 +121,7 @@ export default function DriverActiveJobScreen({
 
   return (
     <div className="space-y-5 animate-fade-in pb-4">
-      <h2 className="text-2xl font-bold text-white text-start">{t.title}</h2>
+      <h2 className={SCREEN_TITLE}>{t.title}</h2>
 
       {/* ── 1. The active/assigned job ── */}
       {activeJob ? (
@@ -141,7 +141,7 @@ export default function DriverActiveJobScreen({
             onAccept={() => onAccept(activeJob)}
             onDecline={() => onDecline(activeJob)}
           />
-          <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4">
+          <section className={`${CARD} p-4`}>
             <h3 className="text-sm font-bold text-slate-300 text-start mb-3">{t.progress}</h3>
             <DriverStatusTimeline shipment={activeJob} lang={lang} />
           </section>
@@ -154,7 +154,7 @@ export default function DriverActiveJobScreen({
             <button
               type="button"
               onClick={() => onOpenChat(activeJob)}
-              className="w-full min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
+              className={`w-full min-h-[56px] ${BTN_SECONDARY} !bg-slate-900 gap-2`}
             >
               <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
               <span>{t.chat}</span>
@@ -170,7 +170,7 @@ export default function DriverActiveJobScreen({
         </div>
       ) : (
         offers.length === 0 && (
-          <div className="py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800">
+          <div className={`py-12 text-center space-y-4 ${CARD} p-6`}>
             <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto">
               <Briefcase className="w-7 h-7 text-slate-600 shrink-0" />
             </div>

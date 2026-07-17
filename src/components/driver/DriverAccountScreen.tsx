@@ -16,6 +16,7 @@ import {
 } from "../../lib/driverAccountDeletion";
 import { accountDeletionCopy } from "../../lib/accountDeletion";
 import PrivacyPolicyModal from "../PrivacyPolicyModal";
+import { SCREEN_TITLE } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — one Account screen merging
@@ -502,7 +503,7 @@ export default function DriverAccountScreen({
 
   return (
     <div className="space-y-4 animate-fade-in pb-4">
-      <h2 className="text-xl font-bold text-white text-start">{t.title}</h2>
+      <h2 className={SCREEN_TITLE}>{t.title}</h2>
 
       {/* ── Profile card ── */}
       <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">

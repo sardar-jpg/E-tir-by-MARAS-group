@@ -45,3 +45,32 @@ export function localizeFreightType(freightType: string | null | undefined, lang
   };
   return labels[key][lang] ?? labels[key].en;
 }
+
+// ── Shared visual tokens (UI polish pass) ───────────────────────────
+//
+// One place for the Driver App's card, button, and title styling so all
+// four sections (Home / Job / Chat / Profile) stay visually identical:
+// same radius, same borders, same touch-target heights, same primary
+// orange. Purely presentational — no behavior, data, or layout-direction
+// logic lives here (RTL comes from logical utilities at the call sites).
+
+/** Screen-level title — identical size/weight on every section. */
+export const SCREEN_TITLE = "text-2xl font-bold text-white text-start";
+
+/** Major card surface. */
+export const CARD = "bg-slate-900 border border-slate-800 rounded-3xl";
+
+/** Sunken inner surface used inside a CARD. */
+export const INNER_CARD = "bg-slate-950 border border-slate-800 rounded-2xl";
+
+/**
+ * The ONE primary action per screen: large, orange, glove-friendly.
+ * Callers add sizing context (w-full etc.); min height is baked in so a
+ * primary action can never shrink below a comfortable touch target.
+ */
+export const BTN_PRIMARY =
+  "min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-lg flex items-center justify-center gap-2 shadow-[0_6px_18px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 light-preserve";
+
+/** Secondary actions — quiet dark buttons, still ≥52px touch targets. */
+export const BTN_SECONDARY =
+  "min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer disabled:opacity-50";

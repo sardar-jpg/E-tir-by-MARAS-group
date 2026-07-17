@@ -5,7 +5,7 @@ import {
 import type { AppNotification, Driver, Language, Shipment } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { getDriverNextAction, localizeNextActionLabel } from "../../lib/driverJobFlow";
-import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
+import { BTN_PRIMARY, CARD, INNER_CARD, SCREEN_TITLE, getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
 /**
  * Driver App V2 — Home shows only what matters right now, with ONE
@@ -200,10 +200,10 @@ export default function DriverHomeScreen({
 
   return (
     <div className="space-y-4 animate-fade-in pb-4">
-      {/* Greeting */}
+      {/* Greeting — brand eyebrow above, large name below */}
       <div className="text-start">
-        <h2 className="text-2xl font-bold text-white leading-tight">{t.greeting(firstName || "—")}</h2>
-        <p className="text-sm text-slate-400 mt-0.5">{t.subtitle}</p>
+        <p className="text-xs font-bold text-orange-400/90 mb-1">{t.subtitle}</p>
+        <h2 className={`${SCREEN_TITLE} leading-tight`}>{t.greeting(firstName || "—")}</h2>
       </div>
 
       {/* Location status in plain words */}
@@ -217,29 +217,32 @@ export default function DriverHomeScreen({
               actions are hidden entirely. ── */
         <div className="space-y-3">
           <h3 className="text-sm font-bold text-slate-300 text-start">{t.activeJob}</h3>
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-3.5">
+          <div className={`${CARD} p-4 space-y-3.5`}>
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="text-base font-bold text-white selectable truncate">#{activeJob.shipmentNumber}</span>
               <span className={`px-3 py-1 rounded-full text-xs font-bold border shrink-0 ${getStatusChipClasses(activeJob.status, activeJob.freightType)}`}>
                 {localizeShipmentStatus(activeJob.status, lang)}
               </span>
             </div>
-            <div className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-2xl p-3.5">
+            <div className={`flex items-center gap-3 ${INNER_CARD} p-3.5`}>
               <span className="flex-1 min-w-0 text-start text-base font-bold text-slate-200 truncate">{activeJob.loadingCity || "—"}</span>
               <ArrowRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
               <span className="flex-1 min-w-0 text-end text-base font-bold text-slate-200 truncate">{activeJob.deliveryCity || "—"}</span>
             </div>
             {nextActionText && (
-              <p className="text-sm text-slate-300 text-start">
-                <span className="text-slate-500">{t.nextStep}: </span>
-                <span className="font-bold text-orange-400">{nextActionText}</span>
-              </p>
+              <div className="flex items-center gap-2.5 bg-orange-500/10 border border-orange-500/30 rounded-2xl px-3.5 py-2.5 text-start">
+                <ChevronRight className="w-4 h-4 text-orange-400 shrink-0 rtl:rotate-180" />
+                <p className="text-sm text-slate-200 min-w-0">
+                  <span className="text-slate-400">{t.nextStep}: </span>
+                  <span className="font-bold text-orange-400">{nextActionText}</span>
+                </p>
+              </div>
             )}
           </div>
           <button
             type="button"
             onClick={onOpenJob}
-            className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer light-preserve"
+            className={`w-full ${BTN_PRIMARY}`}
           >
             <Briefcase className="w-5 h-5 shrink-0" />
             <span>{t.openJob}</span>
@@ -279,14 +282,14 @@ export default function DriverHomeScreen({
           </button>
 
           {/* Offers now + primary action */}
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 text-center space-y-4">
-            <p className={`text-base font-bold ${pendingOffersCount > 0 ? "text-orange-400" : "text-slate-400"}`}>
+          <div className={`${CARD} p-5 text-center space-y-4`}>
+            <p className={`font-bold ${pendingOffersCount > 0 ? "text-lg text-orange-400" : "text-base text-slate-400"}`}>
               {pendingOffersCount > 0 ? t.offersWaiting(pendingOffersCount) : t.noOffers}
             </p>
             <button
               type="button"
               onClick={onOpenJob}
-              className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer light-preserve"
+              className={`w-full ${BTN_PRIMARY}`}
             >
               <Briefcase className="w-5 h-5 shrink-0" />
               <span>{t.openJob}</span>

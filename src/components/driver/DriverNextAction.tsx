@@ -3,6 +3,7 @@ import { Check, CheckCircle2, Clock, Lock, X } from "lucide-react";
 import type { Language, Shipment } from "../../types";
 import { getDriverNextAction, localizeNextActionLabel } from "../../lib/driverJobFlow";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
+import { BTN_PRIMARY } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — the ONE place the driver
@@ -205,7 +206,7 @@ export default function DriverNextAction({
       type="button"
       onClick={() => setConfirming(true)}
       disabled={isSubmitting}
-      className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-lg flex items-center justify-center gap-2.5 shadow-[0_6px_18px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 light-preserve"
+      className={`w-full ${BTN_PRIMARY} gap-2.5`}
     >
       <CheckCircle2 className="w-6 h-6 shrink-0" />
       <span>{actionLabel}</span>
