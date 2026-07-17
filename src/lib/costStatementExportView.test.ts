@@ -122,3 +122,37 @@ describe("resolveExportNotes", () => {
     expect(resolveExportNotes("vendor_statement", notes)).toBe("");
   });
 });
+
+// ═══ Accounting Phase B — customer-money separation on exports ═══
+import { resolveExportHeaderStatus } from "./costStatementExportView";
+
+describe("Accounting Phase B — client statement money source", () => {
+  it("the customer statement's 'Payment Received' comes from customerReceivedAmount, NEVER from the expense paidAmount", () => {
+    // MARAS paid vendors 4,900 but the customer has paid NOTHING → no
+    // payment line may appear on the customer statement.
+    const paidVendorsOnly = makeStatement({ paidAmount: 4900, customerReceivedAmount: 0 });
+    const items = resolveExportItems("client_statement", paidVendorsOnly, makeShipment());
+    expect(items.some((i) => i.costType === "Payment Received")).toBe(false);
+    // A real customer receipt DOES appear, at its own amount.
+    const received = makeStatement({ paidAmount: 0, customerReceivedAmount: 1500 });
+    const pay = resolveExportItems("client_statement", received, makeShipment()).find((i) => i.costType === "Payment Received");
+    expect(pay?.totalAmount).toBe(-1500);
+  });
+
+  it("mode-aware header status: expense status only on 'statement'; CUSTOMER status on invoice/client; none on vendor docs", () => {
+    // Vendors fully paid (expense status "Paid"), customer paid nothing.
+    const stmt = makeStatement({ paymentStatus: "Paid", paidAmount: 999, customerReceivedAmount: 0 });
+    const ship = makeShipment();
+    expect(resolveExportHeaderStatus("statement", stmt, ship)).toEqual({ kind: "expense", value: "Paid" });
+    // An invoice must NOT read "Paid" because MARAS paid a supplier.
+    expect(resolveExportHeaderStatus("invoice", stmt, ship)).toEqual({ kind: "customer", value: "Unpaid" });
+    expect(resolveExportHeaderStatus("client_statement", stmt, ship)).toEqual({ kind: "customer", value: "Unpaid" });
+    expect(resolveExportHeaderStatus("vendor_statement", stmt, ship)).toBeNull();
+  });
+
+  it("customer overpayment surfaces as Credit status", () => {
+    const ship = makeShipment();
+    const credit = makeStatement({ customerReceivedAmount: (ship.agreedAmount || 0) + 500 });
+    expect(resolveExportHeaderStatus("invoice", credit, ship)).toEqual({ kind: "customer", value: "Credit" });
+  });
+});

@@ -62,6 +62,7 @@ import {
   checkPasswordConfirmation,
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
+import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError } from "./src/lib/costStatementMath";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
@@ -8844,19 +8845,12 @@ async function startServer() {
     try {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
-      
+
       // Accounting Phase A — Single Shipment Reference Hardening: a Cost
       // Statement must never be created unless it is linked to a real,
-      // existing shipment — in EVERY persistence mode, not just when
-      // Firestore is reachable. Previously this only 404'd when
-      // `!useMemoryFallback`, so under the memory fallback a nonexistent
-      // shipmentId was silently allowed through and shipmentNumber then
-      // fell back to whatever the client submitted — an orphan financial
-      // record carrying a manually-invented shipment reference, and
-      // different behavior depending on persistence mode. No such
-      // fallback exists anywhere below now: the shipment is confirmed to
-      // exist first, unconditionally, and every reference to it comes
-      // only from that authoritative record.
+      // existing shipment — in EVERY persistence mode. The shipment is
+      // confirmed to exist first, unconditionally, and every reference
+      // to it comes only from that authoritative record.
       const sRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sRef);
       if (!sDoc.exists()) {
@@ -8864,42 +8858,82 @@ async function startServer() {
       }
       const shipment = sDoc.data() as Shipment;
 
-      const items = data.items || [];
-      const totalCost = items.reduce((sum, item) => sum + (Number(item.totalAmount) || 0), 0);
-      const paidAmount = Number(data.paidAmount) || 0;
-      const remainingBalance = totalCost - paidAmount;
-      const paymentStatus = remainingBalance <= 0 && totalCost > 0 ? "Paid" : (paidAmount > 0 ? "Partial" : "Unpaid");
+      // Accounting Phase B — server-authoritative money: every submitted
+      // number is validated (finite, non-negative), item totals are
+      // RECOMPUTED as quantity × unitPrice (a client-sent totalAmount is
+      // ignored), currencies must be one of USD/IQD/TRY/EUR, and every
+      // item currency must equal the statement currency — mixed-currency
+      // statements are rejected outright (no FX engine exists by design).
+      const validated = validateCostStatementInput(data);
+      if (!validated.ok) {
+        return res.status(400).json({ error: validated.error });
+      }
+      const input = validated.input;
+      const expense = deriveExpenseSummary(input.totalCost, input.paidAmount);
 
-      const finalStatement: CostStatement = {
+      // Everything identity-shaped comes from the authoritative shipment,
+      // never the client: the MAR reference, the customer identity, the
+      // freight segment, and the accounting-safe snapshots (agreedAmount +
+      // its currency, truck plate) — refreshed on every save. The
+      // statement's own currency stays an accounting choice (expenses may
+      // be tracked in a different currency than the customer contract);
+      // the shipment's agreed currency is snapshotted alongside so the
+      // two sides are always labelled — and never mixed — correctly.
+      const buildFinal = (nextRevision: number, existing: CostStatement | undefined): CostStatement => ({
         shipmentId,
-        // The one business reference (MAR-YYYY-####), always the real
-        // shipment's own value — never data.shipmentNumber. A submitted
-        // shipmentNumber in the request body is always ignored.
         shipmentNumber: shipment.shipmentNumber,
-        companyName: data.companyName || "",
-        shipmentType: data.shipmentType || "land",
-        date: data.date || new Date().toISOString().split('T')[0],
-        currency: data.currency || "USD",
-        totalCost,
-        paidAmount,
-        remainingBalance,
-        paymentStatus,
-        notes: data.notes || "",
-        items,
-        createdAt: data.createdAt || new Date().toISOString(),
+        companyName: shipment.companyName || "",
+        shipmentType: shipment.freightType === "sea" ? "sea" : shipment.freightType === "air" ? "air" : "land",
+        date: typeof data.date === "string" && data.date ? data.date : new Date().toISOString().split("T")[0],
+        currency: input.currency,
+        totalCost: input.totalCost,
+        // Expense Paid Amount — money MARAS paid toward costs/vendors.
+        paidAmount: input.paidAmount,
+        remainingBalance: expense.remainingBalance,
+        paymentStatus: expense.paymentStatus,
+        // Customer side — money MARAS received from the customer.
+        customerReceivedAmount: input.customerReceivedAmount,
+        revision: nextRevision,
+        notes: typeof data.notes === "string" ? data.notes : "",
+        items: input.items,
+        createdAt: existing?.createdAt || (typeof data.createdAt === "string" && data.createdAt ? data.createdAt : new Date().toISOString()),
         updatedAt: new Date().toISOString(),
-        // Accounts-safe snapshot (PR #60): sourced from the authoritative
-        // shipment record (now always present — see the unconditional
-        // existence check above), so accounts admins reading this
-        // statement later — without shipment-registry access — see a
-        // value that actually matches the shipment. See the
-        // CostStatement.agreedAmount/truckNumber comment in src/types.ts.
         agreedAmount: shipment.agreedAmount,
-        truckNumber: shipment.truckNumber
-      };
-      
-      const dRef = doc(db, "costStatements", shipmentId);
-      await setDoc(dRef, finalStatement);
+        agreedCurrency: shipment.currency,
+        truckNumber: shipment.truckNumber,
+      });
+
+      // Optimistic concurrency (Accounting Phase B), same rule in both
+      // persistence modes via decideStatementRevision: Firestore runs it
+      // inside a real transaction; memory mode applies it synchronously
+      // against the live array (no await between read and write — atomic
+      // within the event loop). A stale submitted revision answers 409
+      // and writes nothing; strict-persistence behavior is unchanged
+      // (infra failures still surface as 503 via the outer catch).
+      let finalStatement: CostStatement;
+      if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+        const dRefTx = doc(db, "costStatements", shipmentId);
+        finalStatement = await withTimeout(
+          (db as any).runTransaction(async (tx: any) => {
+            const snap = await tx.get(dRefTx);
+            const stored = snap.exists ? (snap.data() as CostStatement) : undefined;
+            const decision = decideStatementRevision(stored, data.revision);
+            if (!decision.ok) throw new CostStatementRevisionConflictError(decision.storedRevision);
+            const fin = buildFinal(decision.nextRevision, stored);
+            tx.set(dRefTx, fin);
+            return fin;
+          }),
+          5000,
+          "Firestore cost-statement transaction timed out"
+        );
+      } else {
+        finalStatement = applyCostStatementRevisionedWriteMemory(
+          getMemoryStore().costStatements,
+          shipmentId,
+          data.revision,
+          buildFinal
+        );
+      }
 
       try {
         const logId = `log-${Date.now()}`;
@@ -8920,6 +8954,14 @@ async function startServer() {
 
       res.json(finalStatement);
     } catch (err) {
+      if (err instanceof CostStatementRevisionConflictError) {
+        return res.status(409).json({
+          code: err.code,
+          storedRevision: err.storedRevision,
+          error: err.message,
+        });
+      }
+      if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update cost statement" });
     }
