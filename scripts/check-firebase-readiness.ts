@@ -42,6 +42,7 @@ import fs from "fs";
 import path from "path";
 import { computePersistenceReadiness } from "../src/lib/persistenceReadiness";
 import { checkRulesUids } from "../src/lib/firebaseRulesUid";
+import { checkFirebaseConfigConsistency } from "../src/lib/firebaseConfigConsistency";
 
 const projectRoot = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
 
@@ -138,6 +139,25 @@ function main() {
   if (readiness.isProduction && readiness.configuredMode === "memory-fallback") {
     problems.push("Production is configured to run on the in-memory fallback (see warnings above) — this is a launch blocker.");
   }
+
+  // Static cross-file Firebase config consistency (firebase.json / .firebaserc /
+  // firebase-applet-config.json) — catches missing rules references, project /
+  // database / bucket mismatches, staging↔production alias collisions, and
+  // legacy AI Studio project identifiers. Secret-free; never contacts Firebase.
+  function readJsonIfPresent(rel: string): unknown {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(projectRoot, rel), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+  const configConsistency = checkFirebaseConfigConsistency({
+    firebaseJson: readJsonIfPresent("firebase.json"),
+    firebaserc: readJsonIfPresent(".firebaserc"),
+    appletConfig: readJsonIfPresent("firebase-applet-config.json"),
+  });
+  problems.push(...configConsistency.problems);
+  warnings.push(...configConsistency.warnings);
 
   const firestoreRulesPath = path.join(projectRoot, "firestore.rules");
   const storageRulesPath = path.join(projectRoot, "storage.rules");
