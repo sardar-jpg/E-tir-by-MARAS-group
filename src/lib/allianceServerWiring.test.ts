@@ -272,3 +272,41 @@ describe("storage & workflow reuse", () => {
     expect(region('app.post("/api/alliance/offers/:id/select-winner"', 7000)).toContain("closedAt: nowIso");
   });
 });
+
+/**
+ * Order-status lifecycle (Driver Alliance order linking): the linked Order
+ * moves New (Draft) → "Waiting for Driver Quotes" on broadcast, back to
+ * "New" on cancel, and forward to "Assigned" on winner selection — always
+ * the SAME record, same MAR reference. The waiting stage is alliance-
+ * controlled: the manual status routes reject it (see
+ * shipmentStatusTransitions.test.ts for the pure rules).
+ */
+describe("Order status lifecycle — Waiting for Driver Quotes", () => {
+  it("broadcast stamps the linked Order 'New' → 'Waiting for Driver Quotes' (guarded, timeline entry, same record)", () => {
+    const broadcast = region('app.post("/api/alliance/offers/:id/broadcast"', 6500);
+    expect(broadcast).toContain('await applyNarrowShipmentUpdate(updatedOffer.referenceShipmentId');
+    expect(broadcast).toContain('if (current.status !== "New" || current.assignedDriverId) return current;');
+    expect(broadcast).toContain('status: "Waiting for Driver Quotes" as ShipmentStatus');
+    expect(broadcast).toContain("Sürücü Teklifleri Bekleniyor");
+    // Never creates anything: the broadcast region has no shipment creation.
+    expect(broadcast).not.toContain("createShipmentRecord(");
+  });
+
+  it("cancel releases the linked Order back to 'New' (Draft) — only from the waiting stage and never once assigned", () => {
+    const cancel = region('app.post("/api/alliance/offers/:id/cancel"', 6000);
+    expect(cancel).toContain('if (current.status !== "Waiting for Driver Quotes" || current.assignedDriverId) return current;');
+    expect(cancel).toContain('status: "New" as ShipmentStatus');
+    expect(cancel).toContain("Quote Request Cancelled");
+  });
+
+  it("winner selection moves the Order forward to 'Assigned' from either pre-assignment stage", () => {
+    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
+    expect(winner).toContain('current.status === "New" || current.status === "Waiting for Driver Quotes" ? "Assigned" : current.status');
+  });
+
+  it("an Order already out for quotes cannot back a second parallel request", () => {
+    const create = region('app.post("/api/alliance/offers", requireFullAdmin', 3800);
+    expect(create).toContain('if (order.status === "Waiting for Driver Quotes")');
+    expect(create).toContain("already has an open quote request");
+  });
+});

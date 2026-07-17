@@ -114,7 +114,7 @@ describe("Every write to the shipments collection is a known, reviewed writer", 
     expect(countOccurrences(SOURCE, 'await setDoc(doc(db, "shipments", id), newShipment);')).toBe(1);
   });
 
-  it("exactly three routes call applyNarrowShipmentUpdate — the reviewed revision-incrementing operational writers (status progression, Admin Status Override, and Driver Alliance winner selection)", () => {
+  it("exactly five routes call applyNarrowShipmentUpdate — the reviewed revision-incrementing operational writers (status progression, Admin Status Override, and the Driver Alliance lifecycle: broadcast, cancel, winner selection)", () => {
     // Status/timeline are the only fields, among all narrow writers, that
     // the broad edit form's own merge (buildUpdatedShipment) can also
     // overwrite — every other former "narrow" writer was reclassified as
@@ -128,8 +128,14 @@ describe("Every write to the shipments collection is a known, reviewed writer", 
     // (driver/truck/agreedAmount/status→Assigned + timeline entry) through
     // this same transactional helper, guarded by requireFullAdmin and the
     // one-active-job claim (claimDriverActiveJob) beforehand.
+    // Order-status lifecycle (Driver Alliance order linking): broadcast and
+    // cancel are the fourth and fifth reviewed writers — broadcast stamps
+    // the linked Order "New" → "Waiting for Driver Quotes", cancel releases
+    // it back to "New". Both are guarded no-ops unless the Order is exactly
+    // in the expected pre-assignment state (status check + !assignedDriverId
+    // inside the mutate callback), so they can never move a live shipment.
     const narrowCallCount = (SOURCE.match(/await applyNarrowShipmentUpdate\(/g) || []).length;
-    expect(narrowCallCount).toBe(3);
+    expect(narrowCallCount).toBe(5);
   });
 
   it("every route calling applyIsolatedShipmentUpdate is present — the complete revision-preserving isolated-writer inventory", () => {

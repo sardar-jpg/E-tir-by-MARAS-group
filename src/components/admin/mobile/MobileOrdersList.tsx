@@ -25,6 +25,8 @@ interface MobileOrdersListProps {
 const STATUS_BADGE_CLASS = (status: string) =>
   status === 'New'
     ? 'bg-slate-100 text-slate-700'
+    : status === 'Waiting for Driver Quotes'
+      ? 'bg-sky-100 text-sky-800'
     : status === 'Assigned' || status === 'Accepted'
       ? 'bg-orange-100 text-orange-800'
       : status === 'Delivered'

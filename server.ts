@@ -7923,6 +7923,9 @@ async function startServer() {
       if (isShipmentClosed(order.status, order.freightType)) {
         return res.status(400).json({ error: "The linked Order is already closed." });
       }
+      if (order.status === "Waiting for Driver Quotes") {
+        return res.status(400).json({ error: "The linked Order already has an open quote request. Cancel it before sending a new one." });
+      }
       const nowIso = new Date().toISOString();
       const offer: AllianceOffer = {
         id: `aoffer-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
@@ -8080,6 +8083,41 @@ async function startServer() {
           undefined,
           driver.id
         );
+      }
+
+      // Order lifecycle: broadcasting moves the linked Order from "New"
+      // (Draft) into the alliance-controlled "Waiting for Driver Quotes"
+      // stage. Same MAR reference, same record — only the status moves.
+      // Guarded to "New" so a re-broadcast/edge case can never yank an
+      // already-assigned or in-progress Order backward.
+      if (updatedOffer.referenceShipmentId) {
+        try {
+          await applyNarrowShipmentUpdate(updatedOffer.referenceShipmentId, (current) => {
+            if (current.status !== "New" || current.assignedDriverId) return current;
+            return {
+              ...current,
+              status: "Waiting for Driver Quotes" as ShipmentStatus,
+              timeline: [
+                ...current.timeline,
+                {
+                  timestamp: nowIso,
+                  status: "Waiting for Driver Quotes" as ShipmentStatus,
+                  labelEn: "Waiting for Driver Quotes",
+                  labelTr: "Sürücü Teklifleri Bekleniyor",
+                  labelAr: "بانتظار عروض أسعار السائقين",
+                  detailsEn: `Driver Alliance quote request sent to ${matched.length} matching driver(s).`,
+                  detailsTr: `Driver Alliance fiyat talebi ${matched.length} uygun sürücüye gönderildi.`,
+                  detailsAr: `تم إرسال طلب تسعير تحالف السائقين إلى ${matched.length} سائق مطابق.`,
+                },
+              ],
+              updatedAt: nowIso,
+            };
+          });
+        } catch (orderErr) {
+          // The broadcast itself succeeded; a failed status stamp must not
+          // undo it. The Order simply stays at "New" (a legal state).
+          console.error("[alliance] failed to mark linked order as Waiting for Driver Quotes:", orderErr);
+        }
       }
 
       await logAllianceAudit("offer_broadcast", { offerId: offer.id }, { userId: req.session!.id, userName: allianceActorName(req) });
@@ -8264,12 +8302,12 @@ async function startServer() {
         truckNumber: driver.truckNumber || current.truckNumber,
         agreedAmount: response.priceUsd!,
         currency: "USD",
-        status: current.status === "New" ? "Assigned" : current.status,
+        status: current.status === "New" || current.status === "Waiting for Driver Quotes" ? "Assigned" : current.status,
         timeline: [
           ...current.timeline,
           {
             timestamp: new Date().toISOString(),
-            status: current.status === "New" ? ("Assigned" as ShipmentStatus) : current.status,
+            status: current.status === "New" || current.status === "Waiting for Driver Quotes" ? ("Assigned" as ShipmentStatus) : current.status,
             labelEn: "Driver Assigned",
             labelTr: "Sürücü Atandı",
             labelAr: "تم تعيين السائق",
@@ -8379,6 +8417,38 @@ async function startServer() {
       const nowIso = new Date().toISOString();
       const updatedOffer: AllianceOffer = { ...offer, status: "cancelled", updatedAt: nowIso };
       await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(updatedOffer));
+
+      // Order lifecycle: cancelling the quote request releases the linked
+      // Order from the alliance-controlled "Waiting for Driver Quotes"
+      // stage back to "New" (Draft) — never touching an Order that has
+      // meanwhile been assigned or moved on.
+      if (offer.referenceShipmentId) {
+        try {
+          await applyNarrowShipmentUpdate(offer.referenceShipmentId, (current) => {
+            if (current.status !== "Waiting for Driver Quotes" || current.assignedDriverId) return current;
+            return {
+              ...current,
+              status: "New" as ShipmentStatus,
+              timeline: [
+                ...current.timeline,
+                {
+                  timestamp: nowIso,
+                  status: "New" as ShipmentStatus,
+                  labelEn: "Quote Request Cancelled",
+                  labelTr: "Fiyat Talebi İptal Edildi",
+                  labelAr: "تم إلغاء طلب التسعير",
+                  detailsEn: "The Driver Alliance quote request was cancelled. The Order is back in Draft.",
+                  detailsTr: "Driver Alliance fiyat talebi iptal edildi. Sipariş taslağa geri döndü.",
+                  detailsAr: "تم إلغاء طلب تسعير تحالف السائقين. عاد الطلب إلى حالة المسودة.",
+                },
+              ],
+              updatedAt: nowIso,
+            };
+          });
+        } catch (orderErr) {
+          console.error("[alliance] failed to release linked order after cancel:", orderErr);
+        }
+      }
 
       const responses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
       for (const response of responses) {

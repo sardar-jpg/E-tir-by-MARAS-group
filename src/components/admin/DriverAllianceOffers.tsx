@@ -185,7 +185,7 @@ export default function DriverAllianceOffers({ adminName, onChanged, shipments, 
 
   // ── Order selection: only real, MAR-numbered, unassigned, open Orders ──
   const eligibleOrders = shipments.filter(
-    (s) => isValidMarReference(s.shipmentNumber) && !s.assignedDriverId && !isShipmentClosed(s.status, s.freightType)
+    (s) => isValidMarReference(s.shipmentNumber) && !s.assignedDriverId && !isShipmentClosed(s.status, s.freightType) && s.status !== "Waiting for Driver Quotes"
   );
   const q = orderSearch.trim().toLowerCase();
   const filteredOrders = (q

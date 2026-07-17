@@ -766,7 +766,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     const endVec = findVectorCity(s.deliveryCity);
 
     // If shipment is not in transit yet, it is still at loadingCity
-    if (["New", "Assigned", "Accepted", "Loading", "Loaded"].includes(s.status)) {
+    if (["New", "Waiting for Driver Quotes", "Assigned", "Accepted", "Loading", "Loaded"].includes(s.status)) {
       return { 
         x: startVec.x, 
         y: startVec.y, 

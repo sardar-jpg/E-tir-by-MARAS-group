@@ -61,7 +61,7 @@ export function getDriverJobGroup(
   freightType?: string | null
 ): DriverJobGroup {
   if (!hasRemainingDriverAction(status, freightType)) return "completed";
-  if (status === "New" || status === "Assigned") return "upcoming";
+  if (status === "New" || status === "Waiting for Driver Quotes" || status === "Assigned") return "upcoming";
   return "active";
 }
 
@@ -77,7 +77,7 @@ export function getDriverJobGroup(
  * hides history, it only locks the composer.
  */
 export function isDriverChatAvailable(status: ShipmentStatus): boolean {
-  return status !== "New" && status !== "Assigned";
+  return status !== "New" && status !== "Waiting for Driver Quotes" && status !== "Assigned";
 }
 
 type JobLike = Pick<Shipment, "id" | "status" | "freightType" | "updatedAt">;

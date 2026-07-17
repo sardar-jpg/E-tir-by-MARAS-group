@@ -4,6 +4,13 @@ export type UserRole = 'admin' | 'driver' | 'client';
 
 export type ShipmentStatus =
   | 'New'
+  // Alliance-controlled pre-assignment stage (Land only): set automatically
+  // when a Driver Alliance quote request is broadcast for the Order, and
+  // cleared automatically (back to 'New' on cancel, forward to 'Assigned'
+  // on winner selection). Never set through the manual status controls —
+  // see shipmentStatusTransitions.ts. Occupies the same lifecycle position
+  // as 'New': not dispatched, no driver, no chat.
+  | 'Waiting for Driver Quotes'
   | 'Assigned'
   | 'Accepted'
   | 'Loading'
