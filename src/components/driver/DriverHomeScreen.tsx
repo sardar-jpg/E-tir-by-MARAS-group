@@ -14,10 +14,11 @@ import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
  *  - No active job: the driver's own "Available for Offers" switch (the
  *    one alliance field a driver session may write — moved here from the
  *    old Account screen so availability is always one tap away), how many
- *    offers are waiting, a big View Offers button, and a small recent
- *    activity list. No dense dashboard cards.
+ *    offers are waiting, ONE big Open Job button (the Job section is
+ *    where offers live), and a small recent activity list. No dense
+ *    dashboard cards.
  *  - Active job: a compact summary (route, current status, next required
- *    action) and a big Open Active Job button. Offer actions are hidden —
+ *    action) and the same ONE big Open Job button. Offer actions are hidden —
  *    a driver with an active job cannot answer offers (server-enforced;
  *    Home simply doesn't advertise them).
  *
@@ -35,11 +36,10 @@ const LABELS: Record<Language, {
   availabilityOffMsg: string;
   offersWaiting: (n: number) => string;
   noOffers: string;
-  viewOffers: string;
+  openJob: string;
   activeJob: string;
   nextStep: string;
   respond: string;
-  openJob: string;
   recent: string;
   noRecent: string;
   gpsOn: string;
@@ -57,11 +57,10 @@ const LABELS: Record<Language, {
     availabilityOffMsg: "You will no longer receive transport offers.",
     offersWaiting: (n) => (n === 1 ? "1 offer waiting for your price" : `${n} offers waiting for your price`),
     noOffers: "No new offers right now",
-    viewOffers: "View Offers",
+    openJob: "Open Job",
     activeJob: "Your active job",
     nextStep: "Next step",
     respond: "Accept or decline this job",
-    openJob: "Open Active Job",
     recent: "Recent activity",
     noRecent: "No recent activity.",
     gpsOn: "Location sharing is working",
@@ -79,11 +78,10 @@ const LABELS: Record<Language, {
     availabilityOffMsg: "Artık taşıma teklifi almayacaksınız.",
     offersWaiting: (n) => `${n} teklif fiyatınızı bekliyor`,
     noOffers: "Şu anda yeni teklif yok",
-    viewOffers: "Teklifleri Gör",
+    openJob: "Sefere Git",
     activeJob: "Aktif seferiniz",
     nextStep: "Sonraki adım",
     respond: "Bu seferi kabul edin veya reddedin",
-    openJob: "Aktif Seferi Aç",
     recent: "Son hareketler",
     noRecent: "Son hareket yok.",
     gpsOn: "Konum paylaşımı çalışıyor",
@@ -101,11 +99,10 @@ const LABELS: Record<Language, {
     availabilityOffMsg: "لن تصلك عروض النقل بعد الآن.",
     offersWaiting: (n) => `${n} عرض بانتظار سعرك`,
     noOffers: "لا توجد عروض جديدة حالياً",
-    viewOffers: "عرض العروض",
+    openJob: "فتح المهمة",
     activeJob: "مهمتك النشطة",
     nextStep: "الخطوة التالية",
     respond: "اقبل هذه المهمة أو ارفضها",
-    openJob: "فتح المهمة النشطة",
     recent: "آخر النشاطات",
     noRecent: "لا يوجد نشاط حديث.",
     gpsOn: "مشاركة الموقع تعمل",
@@ -129,8 +126,7 @@ interface DriverHomeScreenProps {
   pendingOffersCount: number;
   /** Newest-first; Home shows the top few as the recent-activity summary. */
   recentNotifications: AppNotification[];
-  onViewOffers: () => void;
-  onOpenActiveJob: () => void;
+  onOpenJob: () => void;
   onDriverUpdated: (driver: Driver) => void;
   onToast: (msg: string) => void;
 }
@@ -145,8 +141,7 @@ export default function DriverHomeScreen({
   isReportingLocation,
   pendingOffersCount,
   recentNotifications,
-  onViewOffers,
-  onOpenActiveJob,
+  onOpenJob,
   onDriverUpdated,
   onToast,
 }: DriverHomeScreenProps) {
@@ -243,7 +238,7 @@ export default function DriverHomeScreen({
           </div>
           <button
             type="button"
-            onClick={onOpenActiveJob}
+            onClick={onOpenJob}
             className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer light-preserve"
           >
             <Briefcase className="w-5 h-5 shrink-0" />
@@ -290,11 +285,11 @@ export default function DriverHomeScreen({
             </p>
             <button
               type="button"
-              onClick={onViewOffers}
+              onClick={onOpenJob}
               className="w-full min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer light-preserve"
             >
-              <Megaphone className="w-5 h-5 shrink-0" />
-              <span>{t.viewOffers}</span>
+              <Briefcase className="w-5 h-5 shrink-0" />
+              <span>{t.openJob}</span>
               <ChevronRight className="w-5 h-5 shrink-0 rtl:rotate-180" />
             </button>
           </div>

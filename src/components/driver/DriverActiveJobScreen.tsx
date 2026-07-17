@@ -1,26 +1,32 @@
-import { ArrowRight, Briefcase, ChevronRight, FolderOpen, MessageSquare } from "lucide-react";
+import { ArrowRight, Briefcase, ChevronRight, MessageSquare } from "lucide-react";
 import type { Language, Shipment } from "../../types";
+import type { DriverOfferView } from "../../lib/driverAlliance";
 import DriverActiveJobCard from "./DriverActiveJobCard";
 import DriverNextAction from "./DriverNextAction";
 import DriverStatusTimeline from "./DriverStatusTimeline";
+import DriverOffersScreen from "./DriverOffersScreen";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
 import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
 /**
- * Driver App V2 — the Job tab: a step-based experience for the ONE
- * active job (route, the driver's own agreed payment, current status,
- * progress steps, the single next action, and chat/documents shortcuts).
- * Status progression logic is untouched — DriverNextAction still submits
- * through the exact same forward-only workflow; this screen only changes
- * how it is presented. Earlier jobs stay reachable below as a compact
- * read-mostly list (tap → full details), so nothing the old Jobs list
- * offered is lost.
+ * Driver App V2 — the Job tab is the ONE operational center, in strict
+ * priority order:
+ *   1. the active/assigned job (step-based: summary, the single next
+ *      action — accept/decline included — journey progress, and the
+ *      shipment-chat shortcut),
+ *   2. new offers awaiting an answer,
+ *   3. submitted quotations awaiting MARAS's decision,
+ *   4. recently decided offers (read-only),
+ *   5. previous jobs, compact and secondary.
+ * Offer rendering lives in DriverOffersScreen (embedded, not a tab);
+ * status progression logic is untouched — this screen only presents it.
+ * Documents flow exclusively through the shipment chat (and the job
+ * details view); there is no separate documents section.
  */
 const LABELS: Record<Language, {
   title: string;
   progress: string;
   chat: string;
-  documents: string;
   previous: string;
   empty: string;
   emptySub: string;
@@ -29,37 +35,34 @@ const LABELS: Record<Language, {
   closedTag: string;
 }> = {
   en: {
-    title: "Active Job",
+    title: "Job",
     progress: "Journey progress",
-    chat: "Chat with MARAS",
-    documents: "Documents",
+    chat: "Shipment Chat",
     previous: "Previous jobs",
     empty: "No active job right now",
-    emptySub: "When MARAS assigns you a job, everything about it will appear here.",
+    emptySub: "Answer an offer below, or wait — when MARAS assigns you a job, everything about it will appear here.",
     loadOlder: "Load older jobs",
     loading: "Loading…",
     closedTag: "Read-only",
   },
   tr: {
-    title: "Aktif Sefer",
+    title: "Sefer",
     progress: "Yolculuk ilerlemesi",
-    chat: "MARAS ile mesajlaş",
-    documents: "Belgeler",
+    chat: "Sevkiyat Mesajları",
     previous: "Önceki seferler",
     empty: "Şu anda aktif sefer yok",
-    emptySub: "MARAS size bir sefer atadığında her şey burada görünecek.",
+    emptySub: "Aşağıdan bir teklifi cevaplayın — MARAS size bir sefer atadığında her şey burada görünecek.",
     loadOlder: "Daha eski seferleri yükle",
     loading: "Yükleniyor…",
     closedTag: "Salt okunur",
   },
   ar: {
-    title: "المهمة النشطة",
+    title: "المهمة",
     progress: "تقدم الرحلة",
-    chat: "محادثة مع MARAS",
-    documents: "المستندات",
+    chat: "محادثة الشحنة",
     previous: "المهام السابقة",
     empty: "لا توجد مهمة نشطة حالياً",
-    emptySub: "عندما تخصص لك MARAS مهمة، سيظهر كل شيء عنها هنا.",
+    emptySub: "أجب على عرض أدناه — وعندما تخصص لك MARAS مهمة، سيظهر كل شيء عنها هنا.",
     loadOlder: "تحميل مهام أقدم",
     loading: "جارٍ التحميل…",
     closedTag: "للقراءة فقط",
@@ -78,10 +81,15 @@ interface DriverActiveJobScreenProps {
   onDecline: (shipment: Shipment) => void;
   onOpenJob: (shipment: Shipment) => void;
   onOpenChat: (shipment: Shipment) => void;
-  onOpenDocuments: (shipment: Shipment) => void;
   hasMore: boolean;
   isLoadingMore: boolean;
   onLoadMore: () => void;
+  /** Offer sections (embedded — Offers is not a navigation tab). */
+  offers: DriverOfferView[];
+  highlightOfferId?: string | null;
+  onOpenOffer: (offerId: string) => void;
+  onRespondOffer: (offerId: string, action: "quote" | "reject", priceUsd?: number, note?: string) => Promise<boolean>;
+  onAskMaras: () => void;
 }
 
 export default function DriverActiveJobScreen({
@@ -96,10 +104,14 @@ export default function DriverActiveJobScreen({
   onDecline,
   onOpenJob,
   onOpenChat,
-  onOpenDocuments,
   hasMore,
   isLoadingMore,
   onLoadMore,
+  offers,
+  highlightOfferId = null,
+  onOpenOffer,
+  onRespondOffer,
+  onAskMaras,
 }: DriverActiveJobScreenProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const otherJobs = shipments.filter((s) => s.id !== activeJob?.id);
@@ -108,9 +120,9 @@ export default function DriverActiveJobScreen({
     <div className="space-y-5 animate-fade-in pb-4">
       <h2 className="text-2xl font-bold text-white text-start">{t.title}</h2>
 
+      {/* ── 1. The active/assigned job ── */}
       {activeJob ? (
         <div className="space-y-3">
-          {/* Summary: route, payment, status, chat/details shortcuts */}
           <DriverActiveJobCard
             shipment={activeJob}
             driverId={driverId}
@@ -118,8 +130,6 @@ export default function DriverActiveJobScreen({
             onOpenChat={() => onOpenChat(activeJob)}
             onOpenDetails={() => onOpenJob(activeJob)}
           />
-
-          {/* The ONE next action (accept/decline or the single forward step) */}
           <DriverNextAction
             shipment={activeJob}
             lang={lang}
@@ -128,51 +138,52 @@ export default function DriverActiveJobScreen({
             onAccept={() => onAccept(activeJob)}
             onDecline={() => onDecline(activeJob)}
           />
-
-          {/* Step progress */}
           <section className="bg-slate-900 border border-slate-800 rounded-3xl p-4">
             <h3 className="text-sm font-bold text-slate-300 text-start mb-3">{t.progress}</h3>
             <DriverStatusTimeline shipment={activeJob} lang={lang} />
           </section>
-
-          {/* Shortcuts */}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => onOpenChat(activeJob)}
-              className="min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
-            >
-              <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
-              <span>{t.chat}</span>
-              {(unreadByShipmentId[activeJob.id] || 0) > 0 && (
-                <span className="bg-orange-500 text-white text-xs font-bold rounded-full px-2 py-0.5 light-preserve">
-                  {unreadByShipmentId[activeJob.id]}
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => onOpenDocuments(activeJob)}
-              className="min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
-            >
-              <FolderOpen className="w-4 h-4 text-orange-500 shrink-0" />
-              <span>{t.documents}</span>
-            </button>
-          </div>
+          {/* One conversation shortcut — everything (documents, photos,
+              instructions) travels through the shipment chat. */}
+          <button
+            type="button"
+            onClick={() => onOpenChat(activeJob)}
+            className="w-full min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
+          >
+            <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
+            <span>{t.chat}</span>
+            {(unreadByShipmentId[activeJob.id] || 0) > 0 && (
+              <span className="bg-orange-500 text-white text-xs font-bold rounded-full px-2 py-0.5 light-preserve">
+                {unreadByShipmentId[activeJob.id]}
+              </span>
+            )}
+          </button>
         </div>
       ) : (
-        <div className="py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800">
-          <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto">
-            <Briefcase className="w-7 h-7 text-slate-600 shrink-0" />
+        offers.length === 0 && (
+          <div className="py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800">
+            <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto">
+              <Briefcase className="w-7 h-7 text-slate-600 shrink-0" />
+            </div>
+            <div>
+              <p className="text-base font-bold text-slate-200">{t.empty}</p>
+              <p className="text-sm text-slate-500 mt-1.5 leading-relaxed max-w-[260px] mx-auto">{t.emptySub}</p>
+            </div>
           </div>
-          <div>
-            <p className="text-base font-bold text-slate-200">{t.empty}</p>
-            <p className="text-sm text-slate-500 mt-1.5 leading-relaxed max-w-[260px] mx-auto">{t.emptySub}</p>
-          </div>
-        </div>
+        )
       )}
 
-      {/* Previous / other jobs — compact, tap for full details */}
+      {/* ── 2–4. Offers: new → submitted → recently decided ── */}
+      <DriverOffersScreen
+        lang={lang}
+        offers={offers}
+        hasActiveJob={!!activeJob}
+        highlightOfferId={highlightOfferId}
+        onOpenOffer={onOpenOffer}
+        onRespond={onRespondOffer}
+        onAskMaras={onAskMaras}
+      />
+
+      {/* ── 5. Previous jobs — compact and secondary ── */}
       {otherJobs.length > 0 && (
         <section className="space-y-2.5">
           <h3 className="text-sm font-bold text-slate-400 text-start">{t.previous}</h3>

@@ -32,10 +32,22 @@ describe("DriverOffersScreen — deliberately tiny", () => {
     expect(SOURCE).toContain("You can submit one price only. It cannot be changed later.");
   });
 
-  it("is localized in English, Turkish, and Arabic (Offers tab)", () => {
-    for (const needle of ['title: "Offers"', '"Teklifler"', '"العروض"']) {
+  it("is localized in English, Turkish, and Arabic (offer sections inside Job)", () => {
+    for (const needle of ['newOffers: "New offers"', '"Yeni teklifler"', '"عروض جديدة"']) {
       expect(SOURCE).toContain(needle);
     }
+  });
+
+  it("groups offers by what the driver must do: new first, then awaiting decision, then decided", () => {
+    expect(SOURCE).toContain("const newOffers = offers.filter(isPending);");
+    expect(SOURCE).toContain("const submittedOffers = offers.filter(isSubmitted);");
+    expect(SOURCE).toContain("const decidedOffers = offers.filter((o) => !isPending(o) && !isSubmitted(o));");
+  });
+
+  it("the collapsed card is a summary only — the full shipment details must be opened before answering", () => {
+    expect(SOURCE).toContain("View Full Shipment Details");
+    expect(SOURCE).toContain("Submit Your Price (USD)");
+    expect(SOURCE).toContain("Ask MARAS in Chat");
   });
 
   it("an answered offer can never be re-answered from the UI (quoted/rejected/closed render read-only states)", () => {
@@ -59,12 +71,25 @@ describe("DriverOffersScreen — deliberately tiny", () => {
     expect(SOURCE).toContain("This offer has expired.");
   });
 
-  it("navigation is the six-section bar with Offers as a first-class tab", () => {
+  it("navigation is the four-section bar; offers render INSIDE the Job section", () => {
     const NAV = read("driver/DriverBottomNavigation.tsx");
-    expect(NAV).toContain('const TABS: DriverTab[] = ["home", "offers", "job", "chat", "documents", "profile"];');
+    expect(NAV).toContain('const TABS: DriverTab[] = ["home", "job", "chat", "profile"];');
     const APP = read("DriverApplication.tsx");
-    expect(APP).toContain("activeTab === 'offers'");
-    expect(APP).toContain("hasActiveJob={!!activeJob}");
+    expect(APP).not.toContain("activeTab === 'offers'");
+    expect(APP).toContain("offers={allianceOffers}");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("<DriverOffersScreen");
+    expect(JOB).toContain("hasActiveJob={!!activeJob}");
+  });
+
+  it("an offer notification deep-links to the Job section and highlights a pending offer", () => {
+    const APP = read("DriverApplication.tsx");
+    expect(APP).toContain("const handleOpenNotification = (n: AppNotification) => {");
+    expect(APP).toContain("n.type === 'alliance_offer'");
+    expect(APP).toContain("setHighlightOfferId(pending ? pending.id : null);");
+    expect(APP).toContain("onOpenNotification={handleOpenNotification}");
+    const SCREEN = read("driver/DriverOffersScreen.tsx");
+    expect(SCREEN).toContain("highlightOfferId && offers.some((o) => o.id === highlightOfferId)");
   });
 });
 

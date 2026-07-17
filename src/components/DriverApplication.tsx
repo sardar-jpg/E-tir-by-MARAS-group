@@ -22,11 +22,9 @@ import { useDriverLocationReporting } from "../hooks/driver/useDriverLocationRep
 import DriverBottomNavigation, { type DriverTab } from "./driver/DriverBottomNavigation";
 import DriverHomeScreen from "./driver/DriverHomeScreen";
 import DriverActiveJobScreen from "./driver/DriverActiveJobScreen";
-import DriverDocumentsScreen from "./driver/DriverDocumentsScreen";
 import DriverJobDetails from "./driver/DriverJobDetails";
 import DriverChatScreen from "./driver/DriverChatScreen";
 import DriverAccountScreen from "./driver/DriverAccountScreen";
-import DriverOffersScreen from "./driver/DriverOffersScreen";
 import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
 import { CheckCircle2, Truck, WifiOff, Wifi } from "lucide-react";
@@ -48,10 +46,10 @@ const DRIVER_COMPOSER_MAX_HEIGHT_PX = 128;
 
 /**
  * Driver App V2 — DriverApplication is a data/state container only. All
- * rendering lives in the focused components under ./driver (six
- * sections: DriverHomeScreen, DriverOffersScreen, DriverActiveJobScreen
- * + DriverJobDetails, DriverChatScreen, DriverDocumentsScreen,
- * DriverAccountScreen — plus DriverBottomNavigation), and location
+ * rendering lives in the focused components under ./driver (four
+ * sections: DriverHomeScreen, DriverActiveJobScreen — which embeds the
+ * offer sections and opens DriverJobDetails — DriverChatScreen, and
+ * DriverAccountScreen, plus DriverBottomNavigation), and location
  * reporting lives in useDriverLocationReporting. Every server contract,
  * concurrency guard, status-transition rule, and chat-lock rule from
  * PR #111 and the chat safety/scalability phases is preserved here
@@ -228,6 +226,9 @@ export default function DriverApplication({
   // (server-scoped — a driver can never receive another driver's offers
   // or prices). Offers is a first-class navigation section in V2.
   const [allianceOffers, setAllianceOffers] = useState<DriverOfferView[]>([]);
+  // Notification deep-link target: the Job section expands this offer on
+  // arrival (set by tapping an offer notification; cleared on use).
+  const [highlightOfferId, setHighlightOfferId] = useState<string | null>(null);
 
   // Opening the Notifications screen marks every currently-visible unread
   // notification as read. Re-runs whenever the visible list changes (e.g.
@@ -1145,16 +1146,31 @@ export default function DriverApplication({
     setShowNotifications(false);
   };
 
-  const openJobDocuments = (shipment: Shipment) => {
-    setActiveShipment(shipment);
-    setActiveTab('documents');
-    setShowNotifications(false);
-  };
 
   const openJobChat = (shipment: Shipment) => {
     setActiveShipment(shipment);
     setActiveTab('chat');
     setShowNotifications(false);
+  };
+
+  // Notification deep-link routing, built ONLY on the existing
+  // notification contract (type + shipmentId). An offer notification
+  // opens the Job section and highlights the newest offer still awaiting
+  // an answer (the record itself carries no offer id — noted as a
+  // follow-up for the push-notification phase); a chat notification
+  // opens that shipment's thread; everything else lands on Job.
+  const handleOpenNotification = (n: AppNotification) => {
+    setShowNotifications(false);
+    if (n.type === 'chat' && n.shipmentId) {
+      const target = shipments.find(s => s.id === n.shipmentId);
+      if (target) { openJobChat(target); return; }
+    }
+    if (n.type === 'alliance_offer') {
+      const pending = allianceOffers.find(o => o.status === 'broadcast' && (o.myResponse.status === 'invited' || o.myResponse.status === 'viewed'));
+      setHighlightOfferId(pending ? pending.id : null);
+    }
+    setActiveShipment(null);
+    setActiveTab('job');
   };
 
   return (
@@ -1318,6 +1334,7 @@ export default function DriverApplication({
                   lang={lang}
                   title={t('notifications')}
                   onBack={() => setShowNotifications(false)}
+                  onOpenNotification={handleOpenNotification}
                 />
               </div>
             ) : activeTab === 'chat' ? (
@@ -1366,23 +1383,12 @@ export default function DriverApplication({
                     isReportingLocation={isReportingLocation}
                     pendingOffersCount={pendingOffersCount}
                     recentNotifications={myNotifications}
-                    onViewOffers={() => setActiveTab('offers')}
-                    onOpenActiveJob={() => { setActiveShipment(null); setActiveTab('job'); }}
+                    onOpenJob={() => { setActiveShipment(null); setActiveTab('job'); }}
                     onDriverUpdated={(updated) => {
                       setDrivers(prev => prev.map(d => d.id === updated.id ? updated : d));
                       fetchData();
                     }}
                     onToast={triggerToast}
-                  />
-                )}
-
-                {activeTab === 'offers' && (
-                  <DriverOffersScreen
-                    lang={lang}
-                    offers={allianceOffers}
-                    hasActiveJob={!!activeJob}
-                    onOpenOffer={handleOpenAllianceOffer}
-                    onRespond={handleRespondAllianceOffer}
                   />
                 )}
 
@@ -1399,10 +1405,14 @@ export default function DriverApplication({
                     onDecline={handleRejectAssignment}
                     onOpenJob={openJobDetails}
                     onOpenChat={openJobChat}
-                    onOpenDocuments={openJobDocuments}
                     hasMore={shipmentsHasMore}
                     isLoadingMore={shipmentsLoadingMore}
                     onLoadMore={handleLoadMoreShipments}
+                    offers={allianceOffers}
+                    highlightOfferId={highlightOfferId}
+                    onOpenOffer={(offerId) => { setHighlightOfferId(null); handleOpenAllianceOffer(offerId); }}
+                    onRespondOffer={handleRespondAllianceOffer}
+                    onAskMaras={() => { setActiveShipment(activeJob); setActiveTab('chat'); }}
                   />
                 )}
 
@@ -1419,21 +1429,6 @@ export default function DriverApplication({
                     onDecline={() => handleRejectAssignment(activeShipment)}
                     onBack={() => setActiveShipment(null)}
                     onOpenChat={() => openJobChat(activeShipment)}
-                  />
-                )}
-
-                {activeTab === 'documents' && (
-                  <DriverDocumentsScreen
-                    lang={lang}
-                    shipment={activeShipment ?? activeJob ?? shipments[0] ?? null}
-                    onSendDocumentViaChat={() => {
-                      const target = activeShipment ?? activeJob ?? shipments[0];
-                      if (target) openJobChat(target);
-                    }}
-                    canSendDocuments={(() => {
-                      const target = activeShipment ?? activeJob ?? shipments[0];
-                      return !!target && !isShipmentClosed(target.status, target.freightType);
-                    })()}
                   />
                 )}
 
@@ -1456,7 +1451,7 @@ export default function DriverApplication({
               </div>
             )}
 
-            {/* Bottom navigation — exactly Home, Offers, Job, Chat, Documents, Profile */}
+            {/* Bottom navigation — exactly Home, Job, Chat, Profile */}
             <DriverBottomNavigation
               activeTab={activeTab}
               lang={lang}

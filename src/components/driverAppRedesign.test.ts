@@ -35,19 +35,19 @@ const driverSources: Array<[string, string]> = [
   ["../hooks/driver/useDriverLocationReporting.ts", read("../hooks/driver/useDriverLocationReporting.ts")],
 ];
 
-describe("DriverBottomNavigation — exactly Home, Offers, Job, Chat, Documents, Profile", () => {
+describe("DriverBottomNavigation — exactly Home, Job, Chat, Profile", () => {
   const SOURCE = read("driver/DriverBottomNavigation.tsx");
 
-  it("declares exactly the six required sections, in order — nothing more", () => {
-    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "offers", "job", "chat", "documents", "profile"];');
-    expect(SOURCE).toContain('export type DriverTab = "home" | "offers" | "job" | "chat" | "documents" | "profile";');
+  it("declares exactly the four required sections, in order — nothing more", () => {
+    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "job", "chat", "profile"];');
+    expect(SOURCE).toContain('export type DriverTab = "home" | "job" | "chat" | "profile";');
     // Retired sections must not resurface as navigation items.
-    expect(SOURCE).not.toMatch(/"menu"|"notifications"|"jobs"|"account"/);
-    expect(SOURCE).toContain("grid-cols-6");
+    expect(SOURCE).not.toMatch(/"menu"|"notifications"|"jobs"|"account"|"offers"|"documents"/);
+    expect(SOURCE).toContain("grid-cols-4");
   });
 
   it("localizes every tab label in English, Turkish, and Arabic", () => {
-    for (const tab of ["home", "offers", "job", "chat", "documents", "profile"]) {
+    for (const tab of ["home", "job", "chat", "profile"]) {
       const entry = SOURCE.slice(SOURCE.indexOf(`${tab}: {`));
       expect(entry).toContain("en:");
       expect(entry).toContain("tr:");
@@ -55,7 +55,10 @@ describe("DriverBottomNavigation — exactly Home, Offers, Job, Chat, Documents,
     }
     expect(SOURCE).toContain("الرئيسية");
     expect(SOURCE).toContain("Ana Sayfa");
-    expect(SOURCE).toContain("العروض");
+  });
+
+  it("the Job tab carries the unseen-offers badge; Chat carries the unread badge", () => {
+    expect(SOURCE).toContain('tab === "chat" ? chatUnreadCount : tab === "job" ? pendingOffersCount : 0');
   });
 
   it("reserves the device safe-area inset so the bar never sits under a home indicator", () => {
@@ -225,20 +228,30 @@ describe("Plain language & Google Sign-In absence", () => {
   });
 });
 
-describe("Documents section — unified model, no category special-casing", () => {
-  const DOCS = read("driver/DriverDocumentsScreen.tsx");
-
-  it("groups and labels entirely through the shipmentDocuments registry", () => {
-    expect(DOCS).toContain("listDocumentCategories()");
-    expect(DOCS).toContain("getDocumentCategoryPolicy(");
-    // No category literal — CMR included — may appear in the code.
-    const codeOnly = DOCS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    expect(codeOnly).not.toMatch(/["'](cmr|invoice|packing_list|t1|tir_carnet|customs|delivery_proof|photo|other)["']/);
+describe("Documents flow through the shipment chat — no standalone driver documents UI", () => {
+  it("there is no DriverDocumentsScreen and no documents navigation anywhere in the driver app", () => {
+    expect(driverComponentFiles).not.toContain("DriverDocumentsScreen.tsx");
+    const APP = read("DriverApplication.tsx");
+    expect(APP).not.toContain("DriverDocumentsScreen");
+    expect(APP).not.toContain("'documents'");
   });
 
-  it("keeps the driver's only upload path as the chat attachment handoff — no second upload pipeline", () => {
-    expect(DOCS).toContain("onSendDocumentViaChat");
-    expect(DOCS).not.toContain("apiFetch(");
+  it("the Job screen offers one Shipment Chat shortcut, not a documents shortcut", () => {
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("Shipment Chat");
+    expect(JOB).not.toContain("onOpenDocuments");
+  });
+
+  it("chat renders shipment files recognizably: named download link plus inline image preview", () => {
+    const CHAT = read("driver/DriverChatScreen.tsx");
+    expect(CHAT).toContain('msg.type === "file"');
+    expect(CHAT).toContain("msg.fileUrl");
+    expect(CHAT).toContain("download={msg.fileName");
+  });
+
+  it("the job details view keeps the existing read-only shared-documents section (admin-published files stay reachable)", () => {
+    const DETAILS = read("driver/DriverJobDetails.tsx");
+    expect(DETAILS).toContain("DriverDocumentSection");
   });
 });
 
