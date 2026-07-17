@@ -34,6 +34,9 @@ import { apiFetch, safeGetItem, safeSetItem } from "../lib/api";
 import { canManageClients, canManageVendors, canViewCostStatements, canViewAuditLogs, canViewLogisticsAnalytics, canViewGpsTracking, canViewDriverRoster, canViewShipmentRegistry } from "../lib/adminAccess";
 import { accountDeletionCopy } from "../lib/accountDeletion";
 import { getAssignableDrivers, getCoreDriverSelectOptions } from "../lib/driverAccess";
+import { computeBusyDriverIds, resolveDriverAvailability } from "../lib/driverAlliance";
+import DriverAllianceOffers from "./admin/DriverAllianceOffers";
+import DriverRouteEditor from "./admin/DriverRouteEditor";
 import { resolveExportItems, resolveExportNotes } from "../lib/costStatementExportView";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
@@ -544,6 +547,32 @@ export default function AdminPanel({
     }
   };
 
+
+  // Driver Alliance Phase 1: card-level updates on the existing Driver
+  // Alliance page. Route edits save inside DriverRouteEditor; this merges
+  // the server's authoritative updated driver back into local state.
+  const handleAllianceDriverUpdated = (updated: Driver) => {
+    setDrivers(prev => prev.map(d => (d.id === updated.id ? updated : d)));
+  };
+
+  const handleToggleAllianceInactive = async (driver: Driver) => {
+    try {
+      const res = await apiFetch(`/api/drivers/${driver.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allianceInactive: !driver.allianceInactive }),
+      });
+      if (res.ok) {
+        handleAllianceDriverUpdated(await res.json());
+        triggerToast(driver.allianceInactive ? "Driver reactivated for alliance offers." : "Driver marked Inactive for alliance offers.");
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        triggerToast(errData.error || "Failed to update driver availability.");
+      }
+    } catch {
+      triggerToast("Could not reach the server.");
+    }
+  };
 
   // Vendor / Supplier Management States
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -3884,6 +3913,12 @@ MARAS Group etir Center`;
   // only. Used below to hide the Add/Edit affordances rather than show
   // controls that would just 403 on click.
   const resolvedAdminType = adminType || 'super';
+  // Driver Alliance Phase 1: availability chips on the driver cards are
+  // derived from real shipments via the same shared rule the server's
+  // matching uses (computeBusyDriverIds) — display only; the server
+  // re-derives this authoritatively at broadcast/assignment time.
+  const allianceBusyDriverIds = React.useMemo(() => computeBusyDriverIds(shipments), [shipments]);
+  const canManageAllianceUi = resolvedAdminType === 'super' || resolvedAdminType === 'operation';
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
@@ -4960,6 +4995,9 @@ MARAS Group etir Center`;
           see canViewDriverRoster (adminAccess.ts) for why this was missing. */}
       {activeTab === 'drivers' && canViewDriverRoster(resolvedAdminType) && (
         <div className="space-y-6">
+          {canManageAllianceUi && (
+            <DriverAllianceOffers adminName={adminEmail || "Operations"} onChanged={() => fetchData()} />
+          )}
           {drivers.some(d => d.status === "pending") && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
               <h3 className="text-sm font-bold text-amber-800 flex items-center gap-2">
@@ -5012,6 +5050,18 @@ MARAS Group etir Center`;
                       {driver.status === "rejected" && (
                         <span className="text-[9px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded uppercase">Rejected</span>
                       )}
+                      {driver.status === "approved" && (() => {
+                        const availability = resolveDriverAvailability(driver, allianceBusyDriverIds);
+                        return (
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase border ${
+                            availability === 'available' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                            availability === 'busy' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                            'bg-slate-100 text-slate-500 border-slate-200'
+                          }`}>
+                            {availability === 'available' ? 'Available' : availability === 'busy' ? 'Busy' : 'Inactive'}
+                          </span>
+                        );
+                      })()}
                       <span className="text-[10px] bg-slate-900 text-white font-mono px-2 py-0.5 rounded uppercase font-bold">{driver.truckNumber}</span>
                     </div>
                   </div>
@@ -5040,6 +5090,29 @@ MARAS Group etir Center`;
                     <Phone className="w-3.5 h-3.5 text-slate-400" />
                     <span>{driver.phone}</span>
                   </div>
+
+                  {/* Driver Alliance Phase 1: directional working routes +
+                      alliance Inactive switch, on the existing card. */}
+                  {canManageAllianceUi && driver.status !== "pending" && (
+                    <>
+                      <DriverRouteEditor
+                        driver={driver}
+                        onDriverUpdated={handleAllianceDriverUpdated}
+                        onError={(msg) => triggerToast(msg)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAllianceInactive(driver)}
+                        className={`w-full mt-2 py-1.5 text-[11px] font-bold rounded-lg border transition-colors cursor-pointer ${
+                          driver.allianceInactive
+                            ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-700'
+                            : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-500'
+                        }`}
+                      >
+                        {driver.allianceInactive ? 'Reactivate for offers' : 'Mark Inactive for offers'}
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-2 text-center text-xs">

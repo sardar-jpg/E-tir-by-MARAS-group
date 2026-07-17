@@ -151,6 +151,23 @@ export interface Shipment {
   iraqBorderBrokerPhone?: string;
 }
 
+/**
+ * Driver Alliance Phase 1: one directional working route for a driver.
+ * Direction matters — "Turkey → Iraq" and "Iraq → Turkey" are two
+ * different routes. Endpoints are free-form zone names (a country or a
+ * region label like "Europe"), matched case-insensitively against an
+ * offer's pickup/delivery country (see src/lib/driverAlliance.ts).
+ * Routes are managed by Operations/Super admins only — the server
+ * rejects a driver session writing them (PUT /api/drivers/:id).
+ */
+export interface DriverRoute {
+  id: string;
+  from: string;
+  to: string;
+  /** Inactive routes are kept but never match offers. */
+  active: boolean;
+}
+
 export interface Driver {
   id: string;
   name: string;
@@ -162,6 +179,29 @@ export interface Driver {
   activeShipmentsCount: number;
   completedShipmentsCount: number;
   truckType?: string;
+  /**
+   * Driver Alliance Phase 1: directional working routes (admin-managed;
+   * see DriverRoute above). Absent on drivers created before this field
+   * existed — treated as "no routes" (never matches any offer).
+   */
+  workingRoutes?: DriverRoute[];
+  /**
+   * Driver Alliance Phase 1: admin-set "Inactive" switch. An inactive
+   * driver never appears in alliance matching and never receives offers,
+   * regardless of whether they currently have an active job. Distinct
+   * from `status` below (registration approval) — an approved driver can
+   * still be marked alliance-inactive. Absent = active.
+   */
+  allianceInactive?: boolean;
+  /**
+   * Driver Quote Requests: the driver's OWN "Available for Offers"
+   * switch, editable from the driver app's Account screen (the one
+   * alliance field a driver session may write). Absent/true = available;
+   * false = the driver receives no quotation requests. Independent of
+   * `allianceInactive` (the Operations-side switch) — matching requires
+   * BOTH to be off.
+   */
+  availableForOffers?: boolean;
   latitude?: number;
   longitude?: number;
   lastUpdated?: string;
@@ -299,7 +339,13 @@ export interface AppNotification {
   // construction in chatVisibility.ts's routing helpers ahead of time, so
   // wiring up a real alert later can't accidentally forget to exclude
   // driver/client/public.
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration' | 'ai_alert';
+  // 'alliance_offer' / 'alliance_update' (Driver Alliance Phase 1):
+  // freight-offer lifecycle events. Offer-received/winner-selected/
+  // offer-cancelled notifications are addressed to a specific driver via
+  // recipientUserId (these events have no shipment yet, exactly like
+  // 'driver_registration' approvals); price-submitted/offer-rejected
+  // notifications have no recipient and therefore reach admins only.
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration' | 'ai_alert' | 'alliance_offer' | 'alliance_update';
   timestamp: string;
   read: boolean;
   // Session id of the user this notification should NOT be shown to (its
@@ -410,3 +456,152 @@ export interface CostStatement {
   truckNumber?: string;
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// Driver Alliance Phase 1 — controlled internal freight-offer system.
+// NOT an auction: one offer goes to matched available drivers, each
+// invited driver submits at most one USD price (or rejects), Operations
+// picks exactly one winner, and the winner becomes a normal shipment
+// through the EXISTING shipment workflow. All rules are enforced
+// server-side (server.ts /api/alliance routes); the pure decision logic
+// lives in src/lib/driverAlliance.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+export type AllianceOfferStatus =
+  /** Created but not yet sent to any driver. */
+  | 'draft'
+  /** Broadcast to matched drivers; quotes/rejections are being collected. */
+  | 'broadcast'
+  /** Operations picked one winning driver; a shipment was assigned/created. */
+  | 'winner_selected'
+  /** Cancelled by Operations before a winner was selected. */
+  | 'cancelled'
+  /**
+   * The quotation window closed (expiresAt passed) with no winner yet.
+   * DERIVED, never stored: documents keep 'broadcast' and the API
+   * resolves it via resolveOfferStatus at read time, so no scheduler is
+   * needed and Operations can still review quotes and select a winner
+   * after expiry — only new driver answers are blocked.
+   */
+  | 'expired';
+
+export interface AllianceOffer {
+  id: string;
+  status: AllianceOfferStatus;
+  pickupCountry: string;
+  pickupCity: string;
+  deliveryCountry: string;
+  deliveryCity: string;
+  /** One of TRUCK_TYPES ids — the existing simple truck taxonomy. */
+  truckType: string;
+  cargoDescription: string;
+  expectedLoadingDate: string;
+  notes?: string;
+  /** Freight mode shown to drivers and used for the created shipment ('land' | 'sea' | 'air'; default land). */
+  freightType?: string;
+  /** Optional route distance in km, shown to drivers when available. */
+  distanceKm?: number;
+  /**
+   * Quotation window length, chosen by Operations at creation (e.g. 2,
+   * 12, 24 hours). The countdown starts at BROADCAST, not creation —
+   * expiresAt below is stamped then.
+   */
+  expiresInHours: number;
+  /** Absolute expiry instant (broadcastAt + expiresInHours), set at broadcast. */
+  expiresAt?: string;
+  /**
+   * Optional existing shipment this offer is sourcing a driver for. When
+   * set, winner selection assigns THAT shipment; when absent, winner
+   * selection creates a new shipment through the same creation logic
+   * POST /api/shipments uses.
+   */
+  referenceShipmentId?: string;
+  /** The reference shipment's human number, captured at creation for the admin list. */
+  referenceShipmentNumber?: string;
+  /** Phase 1 is deliberately USD-only. The server rejects anything else. */
+  currency: 'USD';
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+  broadcastAt?: string;
+  /** Driver ids invited at broadcast time (route+truck+availability match). */
+  invitedDriverIds: string[];
+  winnerDriverId?: string;
+  winnerShipmentId?: string;
+  /** The assigned/created shipment's human number, for the admin list. */
+  winnerShipmentNumber?: string;
+  /**
+   * Set at winner selection, when every other (non-rejected) quotation
+   * is closed and its driver is told "Another driver has been selected.
+   * Thank you for your quotation."
+   */
+  closedAt?: string;
+}
+
+export type AllianceResponseStatus =
+  | 'invited'
+  | 'viewed'
+  | 'quoted'
+  | 'rejected'
+  /** Closed by the system because Operations selected another driver. */
+  | 'closed';
+
+/**
+ * One invited driver's participation in one offer. Document id is always
+ * `${offerId}_${driverId}` — a natural unique key, so a driver can never
+ * hold two responses to the same offer and concurrent submissions target
+ * the same document.
+ */
+export interface AllianceOfferResponse {
+  id: string;
+  offerId: string;
+  driverId: string;
+  driverName: string;
+  status: AllianceResponseStatus;
+  /** USD only; validated server-side (positive, finite, capped). */
+  priceUsd?: number;
+  note?: string;
+  /** Optional free-text reason the driver gave when rejecting. */
+  rejectReason?: string;
+  invitedAt: string;
+  viewedAt?: string;
+  respondedAt?: string;
+}
+
+export type AllianceAuditAction =
+  | 'offer_created'
+  | 'offer_broadcast'
+  | 'offer_viewed'
+  | 'price_submitted'
+  | 'offer_rejected'
+  | 'winner_selected'
+  | 'offer_cancelled';
+
+export interface AllianceAuditEntry {
+  id: string;
+  action: AllianceAuditAction;
+  offerId: string;
+  driverId?: string;
+  shipmentId?: string;
+  userId: string;
+  userName: string;
+  timestamp: string;
+}
+
+/**
+ * Driver Alliance Phase 1 — one-active-job lock. One document per driver
+ * (document id IS the driverId) claimed transactionally whenever a
+ * shipment is assigned to that driver (manual assignment, creation with
+ * a driver, or alliance winner selection) and released when the shipment
+ * reaches its closing status (Closed for Land, Completed for Sea/Air) or
+ * the driver declines the assignment. The claim transaction is what
+ * guarantees two concurrent requests can never give one driver two
+ * active shipments.
+ */
+export interface DriverActiveJobLock {
+  /** Same as the document id: the driver's id. */
+  driverId: string;
+  shipmentId: string;
+  claimedAt: string;
+}

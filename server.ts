@@ -310,6 +310,13 @@ let memoryStore: {
   // store, or every read/write against it silently no-ops in memory
   // fallback (no live Firestore credentials, e.g. local dev).
   adminNotificationPreferences: any[];
+  // Driver Alliance Phase 1 — same PR #44 lesson as pushTokens above:
+  // every collection this server reads/writes needs an entry here, or a
+  // memory-fallback access silently no-ops.
+  allianceOffers: AllianceOffer[];
+  allianceOfferResponses: AllianceOfferResponse[];
+  allianceAuditLogs: AllianceAuditEntry[];
+  driverActiveJobs: DriverActiveJobLock[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -334,6 +341,10 @@ function getMemoryStore() {
       adminNotificationPreferences: [],
       adminChatUnread: [],
       accountDeletionAudit: [],
+      allianceOffers: [],
+      allianceOfferResponses: [],
+      allianceAuditLogs: [],
+      driverActiveJobs: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -1864,14 +1875,39 @@ import {
   ChatChannel,
   ActivityLog,
   AppNotification,
-  ShipmentStatus, 
+  ShipmentStatus,
   Currency,
   DocumentCategory,
   LocationUpdate,
   Client,
   Vendor,
-  CostStatement
+  CostStatement,
+  DriverRoute,
+  AllianceOffer,
+  AllianceOfferResponse,
+  AllianceAuditAction,
+  AllianceAuditEntry,
+  DriverActiveJobLock
 } from "./src/types";
+import {
+  sanitizeWorkingRoutes,
+  computeBusyDriverIds,
+  isShipmentBusyingDriver,
+  matchDriversForOffer,
+  validateAllianceOfferInput,
+  validateQuotePriceUsd,
+  canBroadcastOffer,
+  canDriverRespondToOffer,
+  canSelectWinner,
+  canCancelOffer,
+  canSubmitResponse,
+  allianceResponseId,
+  buildDriverOfferView,
+  computeOfferExpiresAt,
+  isOfferExpired,
+  resolveOfferStatus,
+  summarizeResponses,
+} from "./src/lib/driverAlliance";
 
 // Augment Express's Request type so handlers can read req.session
 // and req.shipment (attached by requireShipmentAccess in startServer below).
@@ -2927,6 +2963,214 @@ async function seedDatabaseIfEmpty() {
 }
 
 // Helpers to write to Firestore
+// ═══════════════════════════════════════════════════════════════════
+// Driver Alliance Phase 1 — one-active-job lock + audit trail.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Thrown when an assignment would give a driver a second active
+ * shipment. A deliberate application-level rejection (the route answers
+ * 409 DRIVER_BUSY), never an infrastructure failure — same contract as
+ * ShipmentStatusTransitionError.
+ */
+class DriverBusyError extends Error {
+  readonly code = "DRIVER_BUSY";
+  readonly driverId: string;
+  constructor(driverId: string) {
+    super("This driver already has an active shipment. A driver can only carry one active job at a time.");
+    this.name = "DriverBusyError";
+    this.driverId = driverId;
+  }
+}
+
+/**
+ * If a claimed lock's shipment document doesn't exist yet, the claim is
+ * still honored for this long — POST /api/shipments claims the lock
+ * BEFORE writing the shipment document, so a concurrent claimer must not
+ * treat that in-flight window as a stale lock.
+ */
+/**
+ * Thrown by createShipmentRecord when the requested primary/additional
+ * driver is pending or rejected — the same 400 both callers previously
+ * produced inline.
+ */
+/**
+ * Driver Alliance Phase 1 — expected application-level rejection carrying
+ * its HTTP status (403 not-invited, 409 ALREADY_RESPONDED). Same contract
+ * as the other typed rejections: routes map it, nothing retries it.
+ */
+class AllianceRejectionError extends Error {
+  readonly httpStatus: number;
+  readonly code?: string;
+  constructor(httpStatus: number, message: string, code?: string) {
+    super(message);
+    this.name = "AllianceRejectionError";
+    this.httpStatus = httpStatus;
+    this.code = code;
+  }
+}
+
+class UnsafeDriverAssignmentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeDriverAssignmentError";
+  }
+}
+
+const DRIVER_JOB_CLAIM_GRACE_MS = 120_000;
+
+/** Every shipment currently making `driverId` Busy (primary assignment only). */
+async function fetchBusyingShipmentsForDriver(driverId: string): Promise<Shipment[]> {
+  let candidates: Shipment[] = [];
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    candidates = (getMemoryStore().shipments as Shipment[]).filter((s) => s.assignedDriverId === driverId);
+  } else {
+    try {
+      const q: FirebaseFirestore.Query = db.collection("shipments").where("assignedDriverId", "==", driverId);
+      const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore driver-shipments query timed out");
+      candidates = snapshot.docs.map((d) => d.data() as Shipment);
+    } catch (error) {
+      console.warn("Firestore driver-shipments query failed or timed out. Switching to robust Memory Fallback.", error);
+      useMemoryFallback = true;
+      scheduleFirestoreRecovery(30_000);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+      candidates = (getMemoryStore().shipments as Shipment[]).filter((s) => s.assignedDriverId === driverId);
+    }
+  }
+  return candidates.filter((s) => isShipmentBusyingDriver(s.status, s.freightType));
+}
+
+/**
+ * Claims the one-active-job lock for a driver before an assignment is
+ * committed. Two layers, both server-side:
+ *
+ *  1. A real-shipments pre-check (covers shipments that predate the lock
+ *     collection): any OTHER shipment currently busying this driver
+ *     rejects the claim outright.
+ *  2. The lock document itself (driverActiveJobs/{driverId}), written
+ *     inside a Firestore transaction — the serialization point that
+ *     guarantees two CONCURRENT assignment requests can never both
+ *     succeed for one driver: the transaction re-reads the lock, and a
+ *     second claimer either sees the first one's committed lock (and is
+ *     rejected) or aborts/retries per Firestore's transaction contract.
+ *     A lock whose shipment turned out closed/deleted is treated as
+ *     stale and overwritten (self-healing), except within the short
+ *     claim grace window above.
+ *
+ * On the memory fallback the check-and-set below is synchronous (no
+ * await between read and write), which is atomic under Node's
+ * single-threaded event loop — the same reasoning documented for
+ * InMemorySequenceCounter.
+ */
+async function claimDriverActiveJob(driverId: string, shipmentId: string): Promise<void> {
+  const busying = await fetchBusyingShipmentsForDriver(driverId);
+  if (busying.some((s) => s.id !== shipmentId)) {
+    throw new DriverBusyError(driverId);
+  }
+
+  const nowIso = new Date().toISOString();
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    const locks = getMemoryStore().driverActiveJobs;
+    const existing = locks.find((l) => l.driverId === driverId);
+    if (existing && existing.shipmentId !== shipmentId) {
+      const lockedShipment = (getMemoryStore().shipments as Shipment[]).find((s) => s.id === existing.shipmentId);
+      const stillActive = lockedShipment
+        ? isShipmentBusyingDriver(lockedShipment.status, lockedShipment.freightType)
+        : Date.now() - Date.parse(existing.claimedAt) < DRIVER_JOB_CLAIM_GRACE_MS;
+      if (stillActive) throw new DriverBusyError(driverId);
+      existing.shipmentId = shipmentId;
+      existing.claimedAt = nowIso;
+      return;
+    }
+    if (existing) {
+      existing.claimedAt = nowIso;
+      return;
+    }
+    locks.push({ driverId, shipmentId, claimedAt: nowIso });
+    return;
+  }
+
+  const lockRef = db.collection("driverActiveJobs").doc(driverId);
+  try {
+    await withTimeout(
+      db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(lockRef);
+        if (snap.exists) {
+          const lock = snap.data() as DriverActiveJobLock;
+          if (lock.shipmentId !== shipmentId) {
+            const lockedShipmentSnap = await tx.get(db!.collection("shipments").doc(lock.shipmentId));
+            const stillActive = lockedShipmentSnap.exists
+              ? isShipmentBusyingDriver(
+                  (lockedShipmentSnap.data() as Shipment).status,
+                  (lockedShipmentSnap.data() as Shipment).freightType
+                )
+              : Date.now() - Date.parse(lock.claimedAt) < DRIVER_JOB_CLAIM_GRACE_MS;
+            if (stillActive) throw new DriverBusyError(driverId);
+          }
+        }
+        tx.set(lockRef, { driverId, shipmentId, claimedAt: nowIso } satisfies DriverActiveJobLock);
+      }),
+      5000,
+      "Firestore driver-lock transaction timed out"
+    );
+  } catch (error) {
+    if (error instanceof DriverBusyError) throw error;
+    console.warn("Firestore driver-lock transaction failed or timed out. Switching to robust Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return claimDriverActiveJob(driverId, shipmentId);
+  }
+}
+
+/**
+ * Releases the one-active-job lock, but only if it still points at the
+ * given shipment — a lock already re-claimed for a newer shipment is
+ * never clobbered. Best-effort by design at its call sites (a failed
+ * release self-heals on the next claim via the staleness check above).
+ */
+async function releaseDriverActiveJob(driverId: string, shipmentId: string): Promise<void> {
+  if (!driverId) return;
+  try {
+    const lockRef = doc(db, "driverActiveJobs", driverId);
+    const snap = await getDoc(lockRef);
+    if (snap.exists() && (snap.data() as DriverActiveJobLock).shipmentId === shipmentId) {
+      await deleteDoc(lockRef);
+    }
+  } catch (err) {
+    console.warn("Driver active-job lock release failed (self-heals on next claim):", err);
+  }
+}
+
+/**
+ * Driver Alliance audit trail — one entry per important action, in its
+ * own collection (never mixed into shipment activity logs). Best-effort
+ * like logActivity: an audit write failure never fails the action.
+ */
+async function logAllianceAudit(
+  action: AllianceAuditAction,
+  refs: { offerId: string; driverId?: string; shipmentId?: string },
+  actor: { userId: string; userName: string }
+) {
+  const entry: AllianceAuditEntry = {
+    id: `aaudit-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    action,
+    offerId: refs.offerId,
+    ...(refs.driverId ? { driverId: refs.driverId } : {}),
+    ...(refs.shipmentId ? { shipmentId: refs.shipmentId } : {}),
+    userId: actor.userId,
+    userName: actor.userName,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await setDoc(doc(db, "allianceAuditLogs", entry.id), entry);
+  } catch (err) {
+    console.error("Error writing alliance audit entry: ", err);
+  }
+}
+
 async function logActivity(shipmentId: string, shipmentNumber: string, actor: string, actionEn: string, actionTr: string, actionAr: string) {
   const newLog: ActivityLog = {
     id: `log-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -2948,7 +3192,7 @@ async function logActivity(shipmentId: string, shipmentNumber: string, actor: st
 async function pushNotification(
   shipmentId: string,
   shipmentNumber: string,
-  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration',
+  type: 'assignment' | 'acceptance' | 'rejection' | 'status_update' | 'chat' | 'doc_upload' | 'delivery' | 'driver_registration' | 'alliance_offer' | 'alliance_update',
   titleEn: string, titleTr: string, titleAr: string,
   messageEn: string, messageTr: string, messageAr: string,
   // Session id to exclude from this notification's recipients, e.g. the
@@ -3761,172 +4005,199 @@ async function startServer() {
   });
 
   // 2. Create Shipment (Admin Only - writes to Firestore)
-  app.post("/api/shipments", requireFullAdmin, async (req, res) => {
-    try {
-      const data = req.body;
+  /**
+   * Driver Alliance Phase 1 refactor: the EXISTING shipment-creation
+   * logic, extracted verbatim from POST /api/shipments so alliance
+   * winner selection creates its shipment through the exact same code
+   * path (sequence allocation, assignment safety, one-active-job claim,
+   * timeline, notification, audit) — never a duplicated workflow.
+   * Throws UnsafeDriverAssignmentError (route answers 400) and
+   * DriverBusyError (route answers 409); both callers map them.
+   */
+  async function createShipmentRecord(data: any): Promise<Shipment> {
 
-      // Auto generate shipment number (MAR-Year-Count). BUG-15: this
-      // sequence number now comes from allocateNextShipmentSequence(),
-      // which allocates it atomically (Firestore transaction, or the
-      // single-threaded in-memory counter when Firestore is unavailable)
-      // instead of reading the collection size and incrementing in JS -
-      // that pattern let two concurrent create requests read the same
-      // count and hand out the same shipmentNumber/id.
-      const count = await allocateNextShipmentSequence();
-      const year = new Date().getFullYear();
-      const shipmentNumber = formatShipmentNumber(year, count);
-      const id = formatShipmentId(count);
+    // Auto generate shipment number (MAR-Year-Count). BUG-15: this
+    // sequence number now comes from allocateNextShipmentSequence(),
+    // which allocates it atomically (Firestore transaction, or the
+    // single-threaded in-memory counter when Firestore is unavailable)
+    // instead of reading the collection size and incrementing in JS -
+    // that pattern let two concurrent create requests read the same
+    // count and hand out the same shipmentNumber/id.
+    const count = await allocateNextShipmentSequence();
+    const year = new Date().getFullYear();
+    const shipmentNumber = formatShipmentNumber(year, count);
+    const id = formatShipmentId(count);
 
-      // Load drivers to find assignee
-      const driversCol = collection(db, "drivers");
-      const driversSnap = await getDocs(driversCol);
-      const driversList = driversSnap.docs.map(doc => doc.data() as Driver);
-      
-      const driver = driversList.find(d => d.id === data.assignedDriverId);
-      const assignedDriverName = driver ? driver.name : "Unassigned";
+    // Load drivers to find assignee
+    const driversCol = collection(db, "drivers");
+    const driversSnap = await getDocs(driversCol);
+    const driversList = driversSnap.docs.map(doc => doc.data() as Driver);
+    
+    const driver = driversList.find(d => d.id === data.assignedDriverId);
+    const assignedDriverName = driver ? driver.name : "Unassigned";
 
-      // Assignment safety: the client-side driver-select dropdowns already
-      // exclude pending/rejected drivers (getAssignableDrivers,
-      // src/lib/driverAccess.ts), but nothing stopped a direct API call
-      // from sending one anyway. Enforced here server-side, matching PR
-      // #80's driver-login hardening principle.
-      if (!isDriverAssignmentSafe(driver)) {
-        return res.status(400).json({ error: "Cannot assign a pending or rejected driver to a shipment." });
-      }
-      if (Array.isArray(data.additionalDrivers)) {
-        for (const ad of data.additionalDrivers) {
-          const adDriver = driversList.find(d => d.id === ad?.driverId);
-          if (!isDriverAssignmentSafe(adDriver)) {
-            return res.status(400).json({ error: "Cannot assign a pending or rejected driver as an additional driver." });
-          }
+    // Assignment safety: the client-side driver-select dropdowns already
+    // exclude pending/rejected drivers (getAssignableDrivers,
+    // src/lib/driverAccess.ts), but nothing stopped a direct API call
+    // from sending one anyway. Enforced here server-side, matching PR
+    // #80's driver-login hardening principle.
+    if (!isDriverAssignmentSafe(driver)) {
+      throw new UnsafeDriverAssignmentError("Cannot assign a pending or rejected driver to a shipment.");
+    }
+    if (Array.isArray(data.additionalDrivers)) {
+      for (const ad of data.additionalDrivers) {
+        const adDriver = driversList.find(d => d.id === ad?.driverId);
+        if (!isDriverAssignmentSafe(adDriver)) {
+          throw new UnsafeDriverAssignmentError("Cannot assign a pending or rejected driver as an additional driver.");
         }
       }
+    }
 
-      const initialStatus = data.status || (data.freightType === "sea" || data.freightType === "air" ? "Booking Confirmed" : (data.assignedDriverId ? "Assigned" : "New"));
-      const initialTimeline: LocationUpdate = {
+    const initialStatus = data.status || (data.freightType === "sea" || data.freightType === "air" ? "Booking Confirmed" : (data.assignedDriverId ? "Assigned" : "New"));
+    const initialTimeline: LocationUpdate = {
+      timestamp: new Date().toISOString(),
+      status: initialStatus as ShipmentStatus,
+      labelEn: data.freightType === "sea" || data.freightType === "air" ? "Booking Confirmed" : "Shipment Initialized",
+      labelTr: data.freightType === "sea" || data.freightType === "air" ? "Rezervasyon Onaylandı" : "Sevkiyat Oluşturuldu",
+      labelAr: data.freightType === "sea" || data.freightType === "air" ? "تم تأكيد الحجز" : "تم إنشاء الشحنة",
+      detailsEn: `Created for customer: ${data.companyName}`,
+      detailsTr: `Müşteri için oluşturuldu: ${data.companyName}`,
+      detailsAr: `تم إنشاؤها للعميل: ${data.companyName}`
+    };
+
+    const newShipment: Shipment = {
+      id,
+      shipmentNumber,
+      companyName: data.companyName || "",
+      loadingCountry: data.loadingCountry || "",
+      loadingCity: data.loadingCity || "",
+      loadingAddress: data.loadingAddress || "",
+      loadingContactNumber: data.loadingContactNumber || "",
+      deliveryCountry: data.deliveryCountry || "",
+      deliveryCity: data.deliveryCity || "",
+      deliveryAddress: data.deliveryAddress || "",
+      deliveryContactNumber: data.deliveryContactNumber || "",
+      cargoDescription: data.cargoDescription || "",
+      cargoWeight: Number(data.cargoWeight) || 0,
+      truckNumber: driver ? driver.truckNumber : (data.truckNumber || ""),
+      assignedDriverId: data.assignedDriverId || "",
+      assignedDriverName,
+      agreedAmount: Number(data.agreedAmount) || 0,
+      currency: (data.currency as Currency) || "USD",
+      internalNotes: data.internalNotes || "",
+      status: initialStatus as ShipmentStatus,
+      documents: [],
+      timeline: [initialTimeline],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      // Shipment-update lost-update race fix: new shipments always begin
+      // at revision 1 (see resolveStoredRevision, shipmentRevision.ts).
+      revision: INITIAL_SHIPMENT_REVISION,
+      isLinkShared: false,
+      shareToken: generateShareToken(),
+      shareIncludeDocuments: true,
+      shareIncludePhotos: true,
+      
+      // Add Sea & Air properties
+      freightType: data.freightType || "land",
+      shippingLine: data.shippingLine || "",
+      vesselName: data.vesselName || "",
+      containerNumber: data.containerNumber || "",
+      bookingNumber: data.bookingNumber || "",
+      billOfLadingNumber: data.billOfLadingNumber || "",
+      portOfLoading: data.portOfLoading || "",
+      portOfDischarge: data.portOfDischarge || "",
+      finalDestination: data.finalDestination || "",
+      etd: data.etd || "",
+      eta: data.eta || "",
+      numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : 0,
+      containerType: data.containerType || "",
+      airline: data.airline || "",
+      flightNumber: data.flightNumber || "",
+      airWaybillNumber: data.airWaybillNumber || "",
+      airportOfDeparture: data.airportOfDeparture || "",
+      airportOfArrival: data.airportOfArrival || "",
+      grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : 0,
+      chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : 0,
+      numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : 0,
+      additionalDrivers: data.additionalDrivers || [],
+      // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
+      // kept in sync with additionalDrivers on every write — see
+      // deriveAdditionalDriverIds (src/lib/driverVisibility.ts) for why.
+      additionalDriverIds: deriveAdditionalDriverIds(data.additionalDrivers),
+      additionalContainers: data.additionalContainers || [],
+      
+      // Broker details for land shipments
+      destinationBrokerId: data.destinationBrokerId || "",
+      destinationBrokerName: data.destinationBrokerName || "",
+      destinationBrokerPhone: data.destinationBrokerPhone || "",
+      iraqBorderBrokerId: data.iraqBorderBrokerId || "",
+      iraqBorderBrokerName: data.iraqBorderBrokerName || "",
+      iraqBorderBrokerPhone: data.iraqBorderBrokerPhone || "",
+    };
+
+    if (data.assignedDriverId && driver) {
+      // Driver Alliance Phase 1 — one-active-job rule: claim the
+      // driver's lock BEFORE the shipment document is written, so two
+      // concurrent creations (or a creation racing a manual
+      // reassignment / an alliance winner selection) can never give
+      // one driver two active shipments. A rejected claim throws
+      // DriverBusyError → 409 below, with no partial side effects.
+      await claimDriverActiveJob(driver.id, id);
+
+      // update driver stats
+      driver.activeShipmentsCount += 1;
+      await setDoc(doc(db, "drivers", driver.id), driver);
+      
+      newShipment.timeline.push({
         timestamp: new Date().toISOString(),
-        status: initialStatus as ShipmentStatus,
-        labelEn: data.freightType === "sea" || data.freightType === "air" ? "Booking Confirmed" : "Shipment Initialized",
-        labelTr: data.freightType === "sea" || data.freightType === "air" ? "Rezervasyon Onaylandı" : "Sevkiyat Oluşturuldu",
-        labelAr: data.freightType === "sea" || data.freightType === "air" ? "تم تأكيد الحجز" : "تم إنشاء الشحنة",
-        detailsEn: `Created for customer: ${data.companyName}`,
-        detailsTr: `Müşteri için oluşturuldu: ${data.companyName}`,
-        detailsAr: `تم إنشاؤها للعميل: ${data.companyName}`
-      };
+        status: "Assigned",
+        labelEn: "Driver Assigned",
+        labelTr: "Sürücü Atandı",
+        labelAr: "تم تعيين السائق",
+        detailsEn: `Assigned to driver ${driver.name} with vehicle ${driver.truckNumber}.`,
+        detailsTr: `${driver.name} sürücüsüne ${driver.truckNumber} plakalı araçla atandı.`,
+        detailsAr: `تم تعيينه للسائق ${driver.name} ومعه المركبة ${driver.truckNumber}.`
+      });
 
-      const newShipment: Shipment = {
+      await pushNotification(
         id,
         shipmentNumber,
-        companyName: data.companyName || "",
-        loadingCountry: data.loadingCountry || "",
-        loadingCity: data.loadingCity || "",
-        loadingAddress: data.loadingAddress || "",
-        loadingContactNumber: data.loadingContactNumber || "",
-        deliveryCountry: data.deliveryCountry || "",
-        deliveryCity: data.deliveryCity || "",
-        deliveryAddress: data.deliveryAddress || "",
-        deliveryContactNumber: data.deliveryContactNumber || "",
-        cargoDescription: data.cargoDescription || "",
-        cargoWeight: Number(data.cargoWeight) || 0,
-        truckNumber: driver ? driver.truckNumber : (data.truckNumber || ""),
-        assignedDriverId: data.assignedDriverId || "",
-        assignedDriverName,
-        agreedAmount: Number(data.agreedAmount) || 0,
-        currency: (data.currency as Currency) || "USD",
-        internalNotes: data.internalNotes || "",
-        status: initialStatus as ShipmentStatus,
-        documents: [],
-        timeline: [initialTimeline],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        // Shipment-update lost-update race fix: new shipments always begin
-        // at revision 1 (see resolveStoredRevision, shipmentRevision.ts).
-        revision: INITIAL_SHIPMENT_REVISION,
-        isLinkShared: false,
-        shareToken: generateShareToken(),
-        shareIncludeDocuments: true,
-        shareIncludePhotos: true,
-        
-        // Add Sea & Air properties
-        freightType: data.freightType || "land",
-        shippingLine: data.shippingLine || "",
-        vesselName: data.vesselName || "",
-        containerNumber: data.containerNumber || "",
-        bookingNumber: data.bookingNumber || "",
-        billOfLadingNumber: data.billOfLadingNumber || "",
-        portOfLoading: data.portOfLoading || "",
-        portOfDischarge: data.portOfDischarge || "",
-        finalDestination: data.finalDestination || "",
-        etd: data.etd || "",
-        eta: data.eta || "",
-        numberOfContainers: data.numberOfContainers !== undefined ? Number(data.numberOfContainers) : 0,
-        containerType: data.containerType || "",
-        airline: data.airline || "",
-        flightNumber: data.flightNumber || "",
-        airWaybillNumber: data.airWaybillNumber || "",
-        airportOfDeparture: data.airportOfDeparture || "",
-        airportOfArrival: data.airportOfArrival || "",
-        grossWeight: data.grossWeight !== undefined ? Number(data.grossWeight) : 0,
-        chargeableWeight: data.chargeableWeight !== undefined ? Number(data.chargeableWeight) : 0,
-        numberOfPackages: data.numberOfPackages !== undefined ? Number(data.numberOfPackages) : 0,
-        additionalDrivers: data.additionalDrivers || [],
-        // Phase 4 follow-up (Firestore scalability audit, PR #99 review):
-        // kept in sync with additionalDrivers on every write — see
-        // deriveAdditionalDriverIds (src/lib/driverVisibility.ts) for why.
-        additionalDriverIds: deriveAdditionalDriverIds(data.additionalDrivers),
-        additionalContainers: data.additionalContainers || [],
-        
-        // Broker details for land shipments
-        destinationBrokerId: data.destinationBrokerId || "",
-        destinationBrokerName: data.destinationBrokerName || "",
-        destinationBrokerPhone: data.destinationBrokerPhone || "",
-        iraqBorderBrokerId: data.iraqBorderBrokerId || "",
-        iraqBorderBrokerName: data.iraqBorderBrokerName || "",
-        iraqBorderBrokerPhone: data.iraqBorderBrokerPhone || "",
-      };
-
-      if (data.assignedDriverId && driver) {
-        // update driver stats
-        driver.activeShipmentsCount += 1;
-        await setDoc(doc(db, "drivers", driver.id), driver);
-        
-        newShipment.timeline.push({
-          timestamp: new Date().toISOString(),
-          status: "Assigned",
-          labelEn: "Driver Assigned",
-          labelTr: "Sürücü Atandı",
-          labelAr: "تم تعيين السائق",
-          detailsEn: `Assigned to driver ${driver.name} with vehicle ${driver.truckNumber}.`,
-          detailsTr: `${driver.name} sürücüsüne ${driver.truckNumber} plakalı araçla atandı.`,
-          detailsAr: `تم تعيينه للسائق ${driver.name} ومعه المركبة ${driver.truckNumber}.`
-        });
-
-        await pushNotification(
-          id,
-          shipmentNumber,
-          "assignment",
-          "New Assigned Shipment",
-          "Yeni Atanmış Sevkiyat",
-          "شحنة جديدة معينة",
-          `You have been assigned shipment ${shipmentNumber}.`,
-          `Size ${shipmentNumber} numaralı sevkiyat atandı.`,
-          `تم تعيين الشحنة ${shipmentNumber} لك.`
-        );
-      }
-
-      await setDoc(doc(db, "shipments", id), newShipment);
-
-      await logActivity(
-        id,
-        shipmentNumber,
-        "Admin Office",
-        `Created shipment ${shipmentNumber}`,
-        `${shipmentNumber} numaralı sevkiyat oluşturuldu`,
-        `تم إنشاء الشحنة بنجاح برقم ${shipmentNumber}`
+        "assignment",
+        "New Assigned Shipment",
+        "Yeni Atanmış Sevkiyat",
+        "شحنة جديدة معينة",
+        `You have been assigned shipment ${shipmentNumber}.`,
+        `Size ${shipmentNumber} numaralı sevkiyat atandı.`,
+        `تم تعيين الشحنة ${shipmentNumber} لك.`
       );
+    }
 
+    await setDoc(doc(db, "shipments", id), newShipment);
+
+    await logActivity(
+      id,
+      shipmentNumber,
+      "Admin Office",
+      `Created shipment ${shipmentNumber}`,
+      `${shipmentNumber} numaralı sevkiyat oluşturuldu`,
+      `تم إنشاء الشحنة بنجاح برقم ${shipmentNumber}`
+    );
+
+    return newShipment;
+  }
+
+  app.post("/api/shipments", requireFullAdmin, async (req, res) => {
+    try {
+      const newShipment = await createShipmentRecord(req.body);
       res.status(201).json(newShipment);
     } catch (err) {
+      if (err instanceof UnsafeDriverAssignmentError) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (err instanceof DriverBusyError) {
+        return res.status(409).json({ code: err.code, error: err.message });
+      }
       console.error(err);
       res.status(500).json({ error: "Failed to create shipment" });
     }
@@ -4388,10 +4659,35 @@ async function startServer() {
         return updated;
       }
 
+      // Driver Alliance Phase 1 — one-active-job rule: a manual
+      // reassignment to a driver who already carries an active shipment
+      // is rejected server-side BEFORE the write, with the same
+      // transactional lock POST /api/shipments and alliance winner
+      // selection use, so no pair of concurrent requests can ever give
+      // one driver two active shipments.
+      const isReassignment = newDriverId !== undefined && newDriverId && newDriverId !== oldDriverId;
+      if (isReassignment) {
+        try {
+          await claimDriverActiveJob(newDriverId, req.params.id);
+        } catch (err) {
+          if (err instanceof DriverBusyError) {
+            return res.status(409).json({ code: err.code, error: err.message });
+          }
+          throw err;
+        }
+      }
+
       let updatedShipment: Shipment;
       try {
         updatedShipment = await applyShipmentRevisionedUpdate(req.params.id, expectedRevision, buildUpdatedShipment);
       } catch (err) {
+        // The assignment write didn't commit — release the lock claimed
+        // just above so the driver isn't left reserved for a save that
+        // never happened (best-effort; a leftover lock self-heals via the
+        // staleness check on the next claim).
+        if (isReassignment) {
+          await releaseDriverActiveJob(newDriverId, req.params.id);
+        }
         if (err instanceof ShipmentRevisionConflictError) {
           // Stale save: no document was modified, and no notification/audit
           // side effect below ever runs for this request.
@@ -4471,6 +4767,18 @@ async function startServer() {
           });
         }
       }
+
+      // Driver Alliance Phase 1: the previous driver's one-active-job
+      // lock is released once the reassignment/unassignment committed.
+      // Best-effort like every other post-commit task — a failed release
+      // self-heals on the next claim.
+      if (newDriverId !== undefined && oldDriverId && oldDriverId !== newDriverId) {
+        sideEffectTasks.push({
+          name: "driver-active-job-release-old",
+          run: () => releaseDriverActiveJob(oldDriverId, req.params.id),
+        });
+      }
+
 
       // PR #111 review (Admin Status Override authorization correction): a
       // dedicated "status-update-notification" task used to fire here too
@@ -4676,6 +4984,23 @@ async function startServer() {
       // prior review round.
       const sideEffectTasks: ShipmentSideEffectTask[] = [];
 
+      // Driver Alliance Phase 1 — one-active-job lock release. The driver
+      // becomes Available again exactly at the freight mode's closing
+      // status (Closed for Land, Completed for Sea/Air — Delivered alone
+      // does NOT free them), and immediately when they decline an
+      // assignment (the Assigned→New exception is the only way
+      // requestedStatus can be "New" here). Best-effort post-commit task;
+      // a failed release self-heals on the next claim.
+      if (
+        updatedItem.assignedDriverId &&
+        (isShipmentClosed(requestedStatus, updatedItem.freightType) || requestedStatus === "New")
+      ) {
+        sideEffectTasks.push({
+          name: "driver-active-job-release",
+          run: () => releaseDriverActiveJob(updatedItem.assignedDriverId, updatedItem.id),
+        });
+      }
+
       if (requestedStatus === "Delivered" && updatedItem.assignedDriverId) {
         // Driver activeShipmentsCount is a derived, cached tally — not the
         // authoritative record (same reasoning as PUT /api/shipments/:id's
@@ -4865,7 +5190,7 @@ async function startServer() {
       // it reads unambiguously as an override, not a normal progression
       // entry, in the audit trail. Runs strictly post-commit — never on a
       // rejected/unauthorized attempt above.
-      const sideEffectFailures = await runShipmentUpdateSideEffects([
+      const overrideSideEffectTasks: ShipmentSideEffectTask[] = [
         {
           name: "audit-log",
           run: () => logActivity(
@@ -4877,7 +5202,17 @@ async function startServer() {
             `تصحيح إداري: تم تصحيح حالة الشحنة رقم ${updatedItem.shipmentNumber} من "${capturedPreviousStatus}" إلى "${requestedStatus}". السبب: ${reason}`
           ),
         },
-      ]);
+      ];
+      // Driver Alliance Phase 1 — an administrative correction that lands
+      // on the closing status frees the driver exactly like the normal
+      // closing transition does.
+      if (updatedItem.assignedDriverId && isShipmentClosed(requestedStatus, updatedItem.freightType)) {
+        overrideSideEffectTasks.push({
+          name: "driver-active-job-release",
+          run: () => releaseDriverActiveJob(updatedItem.assignedDriverId, updatedItem.id),
+        });
+      }
+      const sideEffectFailures = await runShipmentUpdateSideEffects(overrideSideEffectTasks);
       for (const failure of sideEffectFailures) {
         console.error(
           `[status-override] post-commit side effect "${failure.name}" failed for shipment ${updatedItem.id} (${updatedItem.shipmentNumber}) — the override itself already succeeded and is not retried.`,
@@ -7331,7 +7666,30 @@ async function startServer() {
       if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update driver profiles." });
       }
-      const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl } = req.body;
+      const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl, workingRoutes, allianceInactive, availableForOffers } = req.body;
+
+      // Driver Alliance Phase 1: working routes and the alliance
+      // Inactive switch are ADMIN-managed fields. A driver session
+      // writing them is rejected outright (never silently ignored) —
+      // matching happens server-side off these fields, so letting a
+      // driver edit their own routes would let them steer which offers
+      // they receive. availableForOffers is deliberately NOT in this
+      // guard: it is the driver's OWN "Available for Offers" switch (the
+      // own-profile check above already scopes it to their own record).
+      if (req.session!.role === "driver" && (workingRoutes !== undefined || allianceInactive !== undefined)) {
+        return res.status(403).json({ error: "Working routes and availability status are managed by MARAS Operations." });
+      }
+      if (availableForOffers !== undefined && typeof availableForOffers !== "boolean") {
+        return res.status(400).json({ error: "availableForOffers must be true or false." });
+      }
+      let sanitizedRoutes: DriverRoute[] | undefined;
+      if (workingRoutes !== undefined) {
+        const routeResult = sanitizeWorkingRoutes(workingRoutes);
+        if (!routeResult.ok) {
+          return res.status(400).json({ error: routeResult.error });
+        }
+        sanitizedRoutes = routeResult.routes;
+      }
       const dRef = doc(db, "drivers", req.params.id);
       const dDoc = await getDoc(dRef);
       
@@ -7369,6 +7727,9 @@ async function startServer() {
       if (longitude !== undefined) updatedDriver.longitude = longitude;
       if (lastUpdated !== undefined) updatedDriver.lastUpdated = lastUpdated;
       if (avatarUrl !== undefined) updatedDriver.avatarUrl = avatarUrl;
+      if (sanitizedRoutes !== undefined) updatedDriver.workingRoutes = sanitizedRoutes;
+      if (allianceInactive !== undefined) updatedDriver.allianceInactive = allianceInactive === true;
+      if (availableForOffers !== undefined) updatedDriver.availableForOffers = availableForOffers;
 
       await setDoc(dRef, updatedDriver);
 
@@ -7407,6 +7768,606 @@ async function startServer() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to update driver" });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Driver Alliance Phase 1 — /api/alliance/offers routes.
+  //
+  // A controlled internal freight-offer system, NOT an auction: Super/
+  // Operations admins create an offer, broadcast it to automatically
+  // matched Available drivers (route + truck type, never a driver with
+  // an active job), each invited driver privately quotes one USD price
+  // or rejects, and Operations selects exactly ONE winner — which flows
+  // into the EXISTING shipment workflow (createShipmentRecord /
+  // applyNarrowShipmentUpdate + the one-active-job lock). Every rule is
+  // enforced here server-side; the UI merely mirrors them. Drivers only
+  // ever see their own offers/responses (buildDriverOfferView).
+  // ═══════════════════════════════════════════════════════════════════
+
+  /** Dual-mode (Firestore / memory-fallback) equality query on an alliance collection. */
+  async function fetchAllianceDocs<T>(colName: "allianceOffers" | "allianceOfferResponses", field: string, value: string): Promise<T[]> {
+    if (useMemoryFallback || !db) {
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+      return (getMemoryStore()[colName] as any[]).filter((d) => d[field] === value) as T[];
+    }
+    try {
+      const q: FirebaseFirestore.Query = db.collection(colName).where(field, "==", value);
+      const snapshot: FirebaseFirestore.QuerySnapshot = await withTimeout(q.get(), 5000, "Firestore alliance query timed out");
+      return snapshot.docs.map((d) => d.data() as T);
+    } catch (error) {
+      console.warn("Firestore alliance query failed or timed out. Switching to robust Memory Fallback.", error);
+      useMemoryFallback = true;
+      scheduleFirestoreRecovery(30_000);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+      return (getMemoryStore()[colName] as any[]).filter((d) => d[field] === value) as T[];
+    }
+  }
+
+  async function loadAllianceOffer(offerId: string): Promise<AllianceOffer | null> {
+    const snap = await getDoc(doc(db, "allianceOffers", offerId));
+    return snap.exists() ? (snap.data() as AllianceOffer) : null;
+  }
+
+  /**
+   * Transactionally applies a driver's one-and-only answer to their own
+   * response document. The (offerId, driverId) natural key plus this
+   * transaction guarantee a double-tap or two concurrent submissions can
+   * never record two answers or overwrite an existing one (the second
+   * request is rejected with ALREADY_RESPONDED). Memory fallback uses a
+   * synchronous check-and-set — atomic under Node's single-threaded
+   * event loop, same reasoning as the driver active-job lock.
+   */
+  async function submitAllianceResponseOnce(
+    offerId: string,
+    driverId: string,
+    mutate: (current: AllianceOfferResponse) => AllianceOfferResponse
+  ): Promise<AllianceOfferResponse> {
+    const responseId = allianceResponseId(offerId, driverId);
+    if (useMemoryFallback || !db) {
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+      const store = getMemoryStore().allianceOfferResponses;
+      const idx = store.findIndex((r) => r.id === responseId);
+      if (idx === -1) throw new AllianceRejectionError(403, "You were not invited to this offer.");
+      if (!canSubmitResponse(store[idx].status)) {
+        throw new AllianceRejectionError(409, "You have already answered this offer.", "ALREADY_RESPONDED");
+      }
+      store[idx] = mutate(store[idx]);
+      return store[idx];
+    }
+    const ref = db.collection("allianceOfferResponses").doc(responseId);
+    try {
+      return await withTimeout(
+        db.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists) throw new AllianceRejectionError(403, "You were not invited to this offer.");
+          const current = snap.data() as AllianceOfferResponse;
+          if (!canSubmitResponse(current.status)) {
+            throw new AllianceRejectionError(409, "You have already answered this offer.", "ALREADY_RESPONDED");
+          }
+          const next = mutate(current);
+          tx.set(ref, cleanUndefined(next));
+          return next;
+        }),
+        5000,
+        "Firestore alliance response transaction timed out"
+      );
+    } catch (error) {
+      if (error instanceof AllianceRejectionError) throw error;
+      console.warn("Firestore alliance response transaction failed or timed out. Switching to robust Memory Fallback.", error);
+      useMemoryFallback = true;
+      scheduleFirestoreRecovery(30_000);
+      if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+      return submitAllianceResponseOnce(offerId, driverId, mutate);
+    }
+  }
+
+  function allianceActorName(req: express.Request): string {
+    const fromBody = typeof req.body?.actorName === "string" ? req.body.actorName.trim() : "";
+    return fromBody || req.session!.id;
+  }
+
+  // Create Offer (Super/Operations only — requireFullAdmin rejects
+  // Accounts admins and every non-admin role with 403).
+  app.post("/api/alliance/offers", requireFullAdmin, async (req, res) => {
+    try {
+      const input = validateAllianceOfferInput(req.body);
+      if (!input.ok || !input.offer) {
+        return res.status(400).json({ error: input.error });
+      }
+      let referenceShipmentNumber: string | undefined;
+      if (input.offer.referenceShipmentId) {
+        const shipSnap = await getDoc(doc(db, "shipments", input.offer.referenceShipmentId));
+        if (!shipSnap.exists()) {
+          return res.status(400).json({ error: "Reference shipment not found." });
+        }
+        const ship = shipSnap.data() as Shipment;
+        if (ship.assignedDriverId) {
+          return res.status(400).json({ error: "The reference shipment already has an assigned driver." });
+        }
+        referenceShipmentNumber = ship.shipmentNumber;
+      }
+      const nowIso = new Date().toISOString();
+      const offer: AllianceOffer = {
+        id: `aoffer-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+        status: "draft",
+        ...input.offer,
+        referenceShipmentNumber,
+        createdById: req.session!.id,
+        createdByName: allianceActorName(req),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        invitedDriverIds: [],
+      };
+      await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(offer));
+      await logAllianceAudit("offer_created", { offerId: offer.id }, { userId: req.session!.id, userName: allianceActorName(req) });
+      res.status(201).json(offer);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to create offer" });
+    }
+  });
+
+  // List Offers. Admins (Super/Operations): all offers. Drivers: ONLY
+  // offers they were invited to, in sanitized form. Everyone else: 403.
+  app.get("/api/alliance/offers", requireAuth, async (req, res) => {
+    try {
+      if (req.session!.role === "driver") {
+        const driverId = req.session!.id;
+        const responses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "driverId", driverId);
+        const views = [];
+        for (const response of responses) {
+          const offer = await loadAllianceOffer(response.offerId);
+          if (offer) views.push(buildDriverOfferView(offer, response));
+        }
+        views.sort((a, b) => (b.broadcastAt || "").localeCompare(a.broadcastAt || ""));
+        return res.json({ items: views });
+      }
+      if (req.session!.role === "admin" && (req.session!.adminType === "super" || req.session!.adminType === "operation")) {
+        const snap = await getDocs(collection(db, "allianceOffers"));
+        // One grouped read of ALL responses so each list row can show
+        // its Waiting/Quoted/Rejected counts without N queries.
+        const respSnap = await getDocs(collection(db, "allianceOfferResponses"));
+        const responsesByOffer = new Map<string, AllianceOfferResponse[]>();
+        for (const rDoc of respSnap.docs) {
+          const r = rDoc.data() as AllianceOfferResponse;
+          const list = responsesByOffer.get(r.offerId) || [];
+          list.push(r);
+          responsesByOffer.set(r.offerId, list);
+        }
+        // Expiry is derived at read time (no scheduler): a broadcast
+        // offer past expiresAt is reported as "expired".
+        const offers = snap.docs.map((d: any) => {
+          const o = d.data() as AllianceOffer;
+          return {
+            ...o,
+            status: resolveOfferStatus(o),
+            responseSummary: summarizeResponses(responsesByOffer.get(o.id) || []),
+          };
+        });
+        offers.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+        return res.json({ items: offers.slice(0, 200) });
+      }
+      return res.status(403).json({ error: "You do not have permission to view Driver Alliance offers." });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load offers" });
+    }
+  });
+
+  // Offer detail. Admin (Super/Operations): full offer + all responses.
+  // Driver: sanitized own view only.
+  app.get("/api/alliance/offers/:id", requireAuth, async (req, res) => {
+    try {
+      const offer = await loadAllianceOffer(req.params.id);
+      if (!offer) return res.status(404).json({ error: "Offer not found" });
+      if (req.session!.role === "driver") {
+        const respSnap = await getDoc(doc(db, "allianceOfferResponses", allianceResponseId(offer.id, req.session!.id)));
+        if (!respSnap.exists()) {
+          return res.status(403).json({ error: "Drivers only see their own offers." });
+        }
+        return res.json(buildDriverOfferView(offer, respSnap.data() as AllianceOfferResponse));
+      }
+      if (req.session!.role === "admin" && (req.session!.adminType === "super" || req.session!.adminType === "operation")) {
+        const responses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
+        responses.sort((a, b) => (a.invitedAt || "").localeCompare(b.invitedAt || ""));
+        return res.json({ offer: { ...offer, status: resolveOfferStatus(offer) }, responses });
+      }
+      return res.status(403).json({ error: "You do not have permission to view Driver Alliance offers." });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load offer" });
+    }
+  });
+
+  // Broadcast: automatic matching (route + truck type + Available) and
+  // invitation fan-out. A driver with an active job is NEVER invited.
+  app.post("/api/alliance/offers/:id/broadcast", requireFullAdmin, async (req, res) => {
+    try {
+      const offer = await loadAllianceOffer(req.params.id);
+      if (!offer) return res.status(404).json({ error: "Offer not found" });
+      if (!canBroadcastOffer(offer.status)) {
+        return res.status(409).json({ error: "Only a draft offer can be broadcast." });
+      }
+
+      const driversSnap = await getDocs(collection(db, "drivers"));
+      const drivers = driversSnap.docs.map((d: any) => d.data() as Driver);
+      const shipmentsSnap = await getDocs(collection(db, "shipments"));
+      const busyDriverIds = computeBusyDriverIds(shipmentsSnap.docs.map((d: any) => d.data() as Shipment));
+      const matched = matchDriversForOffer(drivers, offer, busyDriverIds);
+
+      const nowIso = new Date().toISOString();
+      const updatedOffer: AllianceOffer = {
+        ...offer,
+        status: "broadcast",
+        broadcastAt: nowIso,
+        // The quotation window opens now: expiry counts from broadcast,
+        // not creation (a draft can sit for days without burning time).
+        expiresAt: computeOfferExpiresAt(nowIso, offer.expiresInHours || 24),
+        updatedAt: nowIso,
+        invitedDriverIds: matched.map((d) => d.id),
+      };
+      await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(updatedOffer));
+
+      for (const driver of matched) {
+        const response: AllianceOfferResponse = {
+          id: allianceResponseId(offer.id, driver.id),
+          offerId: offer.id,
+          driverId: driver.id,
+          driverName: driver.name,
+          status: "invited",
+          invitedAt: nowIso,
+        };
+        await setDoc(doc(db, "allianceOfferResponses", response.id), response);
+        await pushNotification(
+          "", "",
+          "alliance_offer",
+          "New Transport Offer",
+          "Yeni Taşıma Teklifi",
+          "عرض نقل جديد",
+          `MARAS is requesting a price for ${offer.pickupCity}, ${offer.pickupCountry} → ${offer.deliveryCity}, ${offer.deliveryCountry}. Open the app to quote.`,
+          `MARAS, ${offer.pickupCity}, ${offer.pickupCountry} → ${offer.deliveryCity}, ${offer.deliveryCountry} için fiyat istiyor. Teklif vermek için uygulamayı açın.`,
+          `تطلب MARAS سعراً للنقل من ${offer.pickupCity}، ${offer.pickupCountry} إلى ${offer.deliveryCity}، ${offer.deliveryCountry}. افتح التطبيق لتقديم سعرك.`,
+          undefined,
+          undefined,
+          driver.id
+        );
+      }
+
+      await logAllianceAudit("offer_broadcast", { offerId: offer.id }, { userId: req.session!.id, userName: allianceActorName(req) });
+      res.json({ offer: updatedOffer, invitedCount: matched.length });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to broadcast offer" });
+    }
+  });
+
+  // Driver marks the offer as seen (audited; idempotent).
+  app.post("/api/alliance/offers/:id/viewed", requireAuth, async (req, res) => {
+    try {
+      if (req.session!.role !== "driver") {
+        return res.status(403).json({ error: "Only drivers can mark an offer as viewed." });
+      }
+      const driverId = req.session!.id;
+      const respRef = doc(db, "allianceOfferResponses", allianceResponseId(req.params.id, driverId));
+      const respSnap = await getDoc(respRef);
+      if (!respSnap.exists()) {
+        return res.status(403).json({ error: "You were not invited to this offer." });
+      }
+      const response = respSnap.data() as AllianceOfferResponse;
+      if (!response.viewedAt) {
+        const updated: AllianceOfferResponse = {
+          ...response,
+          viewedAt: new Date().toISOString(),
+          status: response.status === "invited" ? "viewed" : response.status,
+        };
+        await setDoc(respRef, cleanUndefined(updated));
+        await logAllianceAudit("offer_viewed", { offerId: req.params.id, driverId }, { userId: driverId, userName: response.driverName });
+        return res.json(updated);
+      }
+      res.json(response);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to record view" });
+    }
+  });
+
+  // Driver answers: EITHER a single USD quote (optional note) OR a
+  // rejection. Nothing else — no chat, no bidding, no renegotiation; a
+  // recorded answer can never be changed (ALREADY_RESPONDED).
+  app.post("/api/alliance/offers/:id/respond", requireAuth, async (req, res) => {
+    try {
+      if (req.session!.role !== "driver") {
+        return res.status(403).json({ error: "Only invited drivers can answer an offer." });
+      }
+      const driverId = req.session!.id;
+      const offer = await loadAllianceOffer(req.params.id);
+      if (!offer) return res.status(404).json({ error: "Offer not found" });
+      if (!canDriverRespondToOffer(offer.status)) {
+        return res.status(409).json({ code: "OFFER_NOT_OPEN", error: "This offer is no longer open for answers." });
+      }
+      // Expiration: once the quotation window closes, no more answers —
+      // enforced here regardless of what the driver's UI showed.
+      if (isOfferExpired(offer)) {
+        return res.status(409).json({ code: "OFFER_EXPIRED", error: "This offer has expired. Quotations can no longer be submitted." });
+      }
+
+      const action = req.body?.action;
+      const nowIso = new Date().toISOString();
+      let priceUsd: number | undefined;
+      let note: string | undefined;
+      let rejectReason: string | undefined;
+      if (action === "quote") {
+        const price = validateQuotePriceUsd(req.body?.priceUsd, req.body?.currency);
+        if (!price.ok) return res.status(400).json({ error: price.error });
+        priceUsd = price.priceUsd;
+        note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 500) : undefined;
+        if (note === "") note = undefined;
+      } else if (action === "reject") {
+        rejectReason = typeof req.body?.rejectReason === "string" ? req.body.rejectReason.trim().slice(0, 500) : undefined;
+        if (rejectReason === "") rejectReason = undefined;
+      } else {
+        return res.status(400).json({ error: "action must be either \"quote\" or \"reject\"." });
+      }
+
+      const updated = await submitAllianceResponseOnce(offer.id, driverId, (current) => ({
+        ...current,
+        status: action === "quote" ? "quoted" : "rejected",
+        priceUsd,
+        note,
+        rejectReason,
+        respondedAt: nowIso,
+        viewedAt: current.viewedAt || nowIso,
+      }));
+
+      if (action === "quote") {
+        await logAllianceAudit("price_submitted", { offerId: offer.id, driverId }, { userId: driverId, userName: updated.driverName });
+        await pushNotification(
+          "", "",
+          "alliance_update",
+          "Alliance Price Submitted",
+          "İttifak Fiyatı Gönderildi",
+          "تم تقديم سعر التحالف",
+          `${updated.driverName} quoted ${priceUsd} USD for ${offer.pickupCity} → ${offer.deliveryCity}.`,
+          `${updated.driverName}, ${offer.pickupCity} → ${offer.deliveryCity} için ${priceUsd} USD teklif verdi.`,
+          `قدّم ${updated.driverName} سعر ${priceUsd} دولار للنقل ${offer.pickupCity} → ${offer.deliveryCity}.`,
+          driverId
+        );
+      } else {
+        await logAllianceAudit("offer_rejected", { offerId: offer.id, driverId }, { userId: driverId, userName: updated.driverName });
+        await pushNotification(
+          "", "",
+          "alliance_update",
+          "Alliance Offer Rejected",
+          "İttifak Teklifi Reddedildi",
+          "تم رفض عرض التحالف",
+          `${updated.driverName} declined the offer ${offer.pickupCity} → ${offer.deliveryCity}.${rejectReason ? ` Reason: ${rejectReason}` : ""}`,
+          `${updated.driverName}, ${offer.pickupCity} → ${offer.deliveryCity} teklifini reddetti.${rejectReason ? ` Neden: ${rejectReason}` : ""}`,
+          `رفض ${updated.driverName} عرض النقل ${offer.pickupCity} → ${offer.deliveryCity}.${rejectReason ? ` السبب: ${rejectReason}` : ""}`,
+          driverId
+        );
+      }
+
+      res.json(buildDriverOfferView({ ...offer }, updated));
+    } catch (err) {
+      if (err instanceof AllianceRejectionError) {
+        return res.status(err.httpStatus).json({ ...(err.code ? { code: err.code } : {}), error: err.message });
+      }
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to record your answer" });
+    }
+  });
+
+  // Winner selection: exactly ONE driver, who must have quoted. The
+  // selected offer becomes an assigned shipment through the EXISTING
+  // workflow: createShipmentRecord (the extracted POST /api/shipments
+  // logic) for standalone offers, or assignment of the referenced
+  // shipment. Both paths claim the one-active-job lock — a winner who
+  // meanwhile got another active shipment is rejected (409 DRIVER_BUSY).
+  app.post("/api/alliance/offers/:id/select-winner", requireFullAdmin, async (req, res) => {
+    try {
+      const offer = await loadAllianceOffer(req.params.id);
+      if (!offer) return res.status(404).json({ error: "Offer not found" });
+      if (!canSelectWinner(offer.status)) {
+        return res.status(409).json({ error: "A winner can only be selected while the offer is open." });
+      }
+      const driverId = typeof req.body?.driverId === "string" ? req.body.driverId : "";
+      if (!driverId) return res.status(400).json({ error: "driverId is required." });
+
+      const respSnap = await getDoc(doc(db, "allianceOfferResponses", allianceResponseId(offer.id, driverId)));
+      if (!respSnap.exists()) return res.status(400).json({ error: "That driver was not invited to this offer." });
+      const response = respSnap.data() as AllianceOfferResponse;
+      if (response.status !== "quoted" || typeof response.priceUsd !== "number") {
+        return res.status(400).json({ error: "Only a driver who submitted a price can be selected." });
+      }
+
+      const driverSnap = await getDoc(doc(db, "drivers", driverId));
+      if (!driverSnap.exists()) return res.status(400).json({ error: "Driver not found." });
+      const driver = driverSnap.data() as Driver;
+
+      let shipmentId: string;
+      let shipmentNumber: string;
+      if (offer.referenceShipmentId) {
+        // Assign the existing referenced shipment through the same lock +
+        // narrow-update machinery every other assignment uses.
+        const refSnap = await getDoc(doc(db, "shipments", offer.referenceShipmentId));
+        if (!refSnap.exists()) return res.status(400).json({ error: "Reference shipment not found." });
+        const refShipment = refSnap.data() as Shipment;
+        if (refShipment.assignedDriverId && refShipment.assignedDriverId !== driverId) {
+          return res.status(409).json({ error: "The reference shipment already has an assigned driver." });
+        }
+        await claimDriverActiveJob(driverId, refShipment.id);
+        const updated = await applyNarrowShipmentUpdate(refShipment.id, (current) => ({
+          ...current,
+          assignedDriverId: driverId,
+          assignedDriverName: driver.name,
+          truckNumber: driver.truckNumber || current.truckNumber,
+          agreedAmount: response.priceUsd!,
+          currency: "USD",
+          status: current.status === "New" ? "Assigned" : current.status,
+          timeline: [
+            ...current.timeline,
+            {
+              timestamp: new Date().toISOString(),
+              status: current.status === "New" ? ("Assigned" as ShipmentStatus) : current.status,
+              labelEn: "Driver Assigned",
+              labelTr: "Sürücü Atandı",
+              labelAr: "تم تعيين السائق",
+              detailsEn: `Assigned to driver ${driver.name} via Driver Alliance offer.`,
+              detailsTr: `Driver Alliance teklifi ile ${driver.name} sürücüsüne atandı.`,
+              detailsAr: `تم التعيين للسائق ${driver.name} عبر عرض تحالف السائقين.`,
+            },
+          ],
+          updatedAt: new Date().toISOString(),
+        }));
+        shipmentId = updated.id;
+        shipmentNumber = updated.shipmentNumber;
+        await pushNotification(
+          shipmentId,
+          shipmentNumber,
+          "assignment",
+          "New Assigned Shipment",
+          "Yeni Atanmış Sevkiyat",
+          "شحنة جديدة معينة",
+          `You have been assigned shipment ${shipmentNumber}.`,
+          `Size ${shipmentNumber} numaralı sevkiyat atandı.`,
+          `تم تعيين الشحنة ${shipmentNumber} لك.`
+        );
+      } else {
+        const created = await createShipmentRecord({
+          companyName: "",
+          loadingCountry: offer.pickupCountry,
+          loadingCity: offer.pickupCity,
+          deliveryCountry: offer.deliveryCountry,
+          deliveryCity: offer.deliveryCity,
+          cargoDescription: offer.cargoDescription,
+          loadingDate: offer.expectedLoadingDate,
+          truckNumber: driver.truckNumber || "",
+          assignedDriverId: driverId,
+          agreedAmount: response.priceUsd,
+          currency: "USD",
+          freightType: "land",
+          internalNotes: `Created from Driver Alliance offer ${offer.id}.${offer.notes ? ` Offer notes: ${offer.notes}` : ""}`,
+        });
+        shipmentId = created.id;
+        shipmentNumber = created.shipmentNumber;
+      }
+
+      const nowIso = new Date().toISOString();
+      const updatedOffer: AllianceOffer = {
+        ...offer,
+        status: "winner_selected",
+        winnerDriverId: driverId,
+        winnerShipmentId: shipmentId,
+        winnerShipmentNumber: shipmentNumber,
+        // closedAt marks the moment every other quotation was closed
+        // (see the loop below) — selection and closing are one action.
+        closedAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(updatedOffer));
+
+      // Close every other quotation: non-winning drivers who hadn't
+      // already rejected get their response marked "closed" and the
+      // fixed courtesy message. The winner's identity and price are
+      // never included.
+      const allResponses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
+      for (const other of allResponses) {
+        if (other.driverId === driverId || other.status === "rejected" || other.status === "closed") continue;
+        await setDoc(
+          doc(db, "allianceOfferResponses", other.id),
+          cleanUndefined({ ...other, status: "closed" as const })
+        );
+        await pushNotification(
+          "", "",
+          "alliance_update",
+          "Transport Offer Closed",
+          "Taşıma Teklifi Kapandı",
+          "تم إغلاق عرض النقل",
+          "Another driver has been selected. Thank you for your quotation.",
+          "Başka bir sürücü seçildi. Fiyat teklifiniz için teşekkür ederiz.",
+          "تم اختيار سائق آخر. شكراً لك على تقديم سعرك.",
+          undefined,
+          undefined,
+          other.driverId
+        );
+      }
+
+      await pushNotification(
+        shipmentId,
+        shipmentNumber,
+        "alliance_update",
+        "You Won the Transport Offer",
+        "Taşıma Teklifini Kazandınız",
+        "لقد فزت بعرض النقل",
+        `MARAS selected your price of ${response.priceUsd} USD. Shipment ${shipmentNumber} is now assigned to you.`,
+        `MARAS, ${response.priceUsd} USD fiyatınızı seçti. ${shipmentNumber} numaralı sevkiyat size atandı.`,
+        `اختارت MARAS سعرك ${response.priceUsd} دولار. تم تعيين الشحنة ${shipmentNumber} لك.`,
+        undefined,
+        undefined,
+        driverId
+      );
+      await logAllianceAudit(
+        "winner_selected",
+        { offerId: offer.id, driverId, shipmentId },
+        { userId: req.session!.id, userName: allianceActorName(req) }
+      );
+      res.json({ offer: updatedOffer, shipmentId, shipmentNumber });
+    } catch (err) {
+      if (err instanceof DriverBusyError) {
+        return res.status(409).json({ code: err.code, error: err.message });
+      }
+      if (err instanceof UnsafeDriverAssignmentError) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to select winner" });
+    }
+  });
+
+  // Cancel: allowed while draft/broadcast only — never after a winner
+  // was selected. Invited drivers who haven't rejected are notified.
+  app.post("/api/alliance/offers/:id/cancel", requireFullAdmin, async (req, res) => {
+    try {
+      const offer = await loadAllianceOffer(req.params.id);
+      if (!offer) return res.status(404).json({ error: "Offer not found" });
+      if (!canCancelOffer(offer.status)) {
+        return res.status(409).json({ error: "This offer can no longer be cancelled." });
+      }
+      const nowIso = new Date().toISOString();
+      const updatedOffer: AllianceOffer = { ...offer, status: "cancelled", updatedAt: nowIso };
+      await setDoc(doc(db, "allianceOffers", offer.id), cleanUndefined(updatedOffer));
+
+      const responses = await fetchAllianceDocs<AllianceOfferResponse>("allianceOfferResponses", "offerId", offer.id);
+      for (const response of responses) {
+        if (response.status === "rejected") continue;
+        await pushNotification(
+          "", "",
+          "alliance_update",
+          "Transport Offer Cancelled",
+          "Taşıma Teklifi İptal Edildi",
+          "تم إلغاء عرض النقل",
+          `The offer ${offer.pickupCity} → ${offer.deliveryCity} was cancelled by MARAS.`,
+          `${offer.pickupCity} → ${offer.deliveryCity} teklifi MARAS tarafından iptal edildi.`,
+          `تم إلغاء عرض النقل ${offer.pickupCity} → ${offer.deliveryCity} من قبل MARAS.`,
+          undefined,
+          undefined,
+          response.driverId
+        );
+      }
+      await logAllianceAudit("offer_cancelled", { offerId: offer.id }, { userId: req.session!.id, userName: allianceActorName(req) });
+      res.json({ offer: updatedOffer });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to cancel offer" });
     }
   });
 

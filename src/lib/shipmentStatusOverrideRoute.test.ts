@@ -136,8 +136,14 @@ describe("audit entry: clearly labeled administrative correction, reason recorde
   });
 
   it("the audit log runs strictly post-commit, via runShipmentUpdateSideEffects", () => {
+    // Driver Alliance Phase 1: the tasks are now built in a local array
+    // first (the alliance lock-release task joins the audit-log task when
+    // the correction lands on the closing status), so the needle matches
+    // the call itself rather than an inline array literal. The ordering
+    // guarantee this test exists for is unchanged: the side effects run
+    // only after the committed transaction.
     const commitIndex = OVERRIDE_ROUTE.indexOf("await applyNarrowShipmentUpdate(shipmentId");
-    const sideEffectIndex = OVERRIDE_ROUTE.indexOf("await runShipmentUpdateSideEffects([", commitIndex);
+    const sideEffectIndex = OVERRIDE_ROUTE.indexOf("await runShipmentUpdateSideEffects(", commitIndex);
     expect(sideEffectIndex).toBeGreaterThan(commitIndex);
   });
 });

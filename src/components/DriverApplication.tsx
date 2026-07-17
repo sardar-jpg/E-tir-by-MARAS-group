@@ -17,6 +17,7 @@ import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useDriverActiveJob } from "../hooks/driver/useDriverActiveJob";
+import type { DriverOfferView } from "../lib/driverAlliance";
 import { useDriverLocationReporting } from "../hooks/driver/useDriverLocationReporting";
 import DriverBottomNavigation, { type DriverTab } from "./driver/DriverBottomNavigation";
 import DriverHomeScreen from "./driver/DriverHomeScreen";
@@ -24,6 +25,7 @@ import DriverJobsScreen from "./driver/DriverJobsScreen";
 import DriverJobDetails from "./driver/DriverJobDetails";
 import DriverChatScreen from "./driver/DriverChatScreen";
 import DriverAccountScreen from "./driver/DriverAccountScreen";
+import DriverOffersScreen from "./driver/DriverOffersScreen";
 import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
 import { CheckCircle2, Truck, WifiOff, Wifi } from "lucide-react";
@@ -220,6 +222,12 @@ export default function DriverApplication({
 
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
   const [showNotifications, setShowNotifications] = useState(false);
+  // Driver Alliance Phase 1: this driver's own sanitized offer views
+  // (server-scoped — a driver can never receive another driver's offers
+  // or prices). The offers screen is an overlay from Home; the four-tab
+  // navigation is untouched.
+  const [allianceOffers, setAllianceOffers] = useState<DriverOfferView[]>([]);
+  const [showOffers, setShowOffers] = useState(false);
 
   // Opening the Notifications screen marks every currently-visible unread
   // notification as read. Re-runs whenever the visible list changes (e.g.
@@ -558,6 +566,15 @@ export default function DriverApplication({
           }
         }
         setNotifications(list);
+      }
+
+      // Driver Alliance Phase 1: refresh this driver's own offers. Kept
+      // on the same poll cadence as everything else — an offer answer is
+      // never time-critical enough to need its own faster loop.
+      const resOffers = await apiFetch("/api/alliance/offers");
+      if (resOffers.ok) {
+        const offersPage = await safeJson(resOffers);
+        setAllianceOffers(offersPage.items || []);
       }
 
     } catch (e) {
@@ -1074,6 +1091,54 @@ export default function DriverApplication({
     [shipments]
   );
 
+  // Offers awaiting this driver's answer (invited/viewed on a live offer).
+  const pendingOffersCount = useMemo(
+    () => allianceOffers.filter(o => o.status === 'broadcast' && (o.myResponse.status === 'invited' || o.myResponse.status === 'viewed')).length,
+    [allianceOffers]
+  );
+
+  // Audited "Offer Viewed" ping — fire-and-forget, idempotent server-side.
+  const handleOpenAllianceOffer = (offerId: string) => {
+    apiFetch(`/api/alliance/offers/${offerId}/viewed`, { method: "POST" }).catch(() => {});
+  };
+
+  // One answer only: a USD quote (optional note) or a rejection. The
+  // server enforces every rule (invited-only, offer still open, no second
+  // answer); a rejection here just surfaces the server's message.
+  const handleRespondAllianceOffer = async (
+    offerId: string,
+    action: "quote" | "reject",
+    priceUsd?: number,
+    note?: string
+  ): Promise<boolean> => {
+    try {
+      const res = await apiFetch(`/api/alliance/offers/${offerId}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // For a rejection the screen's one optional text field is the
+        // reject reason, not a quote note.
+        body: JSON.stringify(action === "quote" ? { action, priceUsd, note, currency: "USD" } : { action, rejectReason: note }),
+      });
+      const body: any = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setAllianceOffers(prev => prev.map(o => (o.id === offerId ? body : o)));
+        triggerToast(
+          action === "quote"
+            ? (lang === 'tr' ? "✅ Fiyatınız MARAS'a gönderildi." : lang === 'ar' ? "✅ تم إرسال سعرك إلى MARAS." : "✅ Your price was sent to MARAS.")
+            : (lang === 'tr' ? "Teklifi reddettiniz." : lang === 'ar' ? "رفضت العرض." : "You rejected the offer.")
+        );
+        return true;
+      }
+      triggerToast(`❌ ${body?.error || (lang === 'tr' ? "İşlem başarısız oldu." : lang === 'ar' ? "فشلت العملية." : "The action failed. Please try again.")}`);
+      fetchData();
+      return false;
+    } catch (e) {
+      console.error(e);
+      triggerToast("❌ Could not reach the server. Please check your connection and try again.");
+      return false;
+    }
+  };
+
   const openJobDetails = (shipment: Shipment) => {
     setActiveShipment(shipment);
     setActiveTab('jobs');
@@ -1249,6 +1314,16 @@ export default function DriverApplication({
                   onBack={() => setShowNotifications(false)}
                 />
               </div>
+            ) : showOffers ? (
+              <div className="flex-1 overflow-y-auto bg-slate-950 p-4">
+                <DriverOffersScreen
+                  lang={lang}
+                  offers={allianceOffers}
+                  onBack={() => setShowOffers(false)}
+                  onOpenOffer={handleOpenAllianceOffer}
+                  onRespond={handleRespondAllianceOffer}
+                />
+              </div>
             ) : activeTab === 'chat' ? (
               <div className="flex-1 min-h-0 bg-slate-950">
                 <DriverChatScreen
@@ -1299,6 +1374,8 @@ export default function DriverApplication({
                     onOpenChat={openJobChat}
                     onOpenDetails={openJobDetails}
                     onViewJobs={() => setActiveTab('jobs')}
+                    pendingOffersCount={pendingOffersCount}
+                    onOpenOffers={() => setShowOffers(true)}
                   />
                 )}
 
@@ -1357,6 +1434,7 @@ export default function DriverApplication({
               chatUnreadCount={totalUnreadChat}
               onSelect={(tab) => {
                 setShowNotifications(false);
+                setShowOffers(false);
                 if (tab === 'jobs' && activeTab === 'jobs') {
                   // Re-tapping Jobs from details returns to the list.
                   setActiveShipment(null);
