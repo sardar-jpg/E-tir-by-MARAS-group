@@ -35,18 +35,19 @@ const driverSources: Array<[string, string]> = [
   ["../hooks/driver/useDriverLocationReporting.ts", read("../hooks/driver/useDriverLocationReporting.ts")],
 ];
 
-describe("DriverBottomNavigation — exactly Home, Jobs, Chat, Account", () => {
+describe("DriverBottomNavigation — exactly Home, Job, Chat, Profile", () => {
   const SOURCE = read("driver/DriverBottomNavigation.tsx");
 
-  it("declares exactly the four required tabs, in order", () => {
-    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "jobs", "chat", "account"];');
-    expect(SOURCE).toContain('export type DriverTab = "home" | "jobs" | "chat" | "account";');
-    // The old fifth/sixth sections must not resurface.
-    expect(SOURCE).not.toMatch(/"menu"|"profile"|"notifications"/);
+  it("declares exactly the four required sections, in order — nothing more", () => {
+    expect(SOURCE).toContain('const TABS: DriverTab[] = ["home", "job", "chat", "profile"];');
+    expect(SOURCE).toContain('export type DriverTab = "home" | "job" | "chat" | "profile";');
+    // Retired sections must not resurface as navigation items.
+    expect(SOURCE).not.toMatch(/"menu"|"notifications"|"jobs"|"account"|"offers"|"documents"/);
+    expect(SOURCE).toContain("grid-cols-4");
   });
 
   it("localizes every tab label in English, Turkish, and Arabic", () => {
-    for (const tab of ["home", "jobs", "chat", "account"]) {
+    for (const tab of ["home", "job", "chat", "profile"]) {
       const entry = SOURCE.slice(SOURCE.indexOf(`${tab}: {`));
       expect(entry).toContain("en:");
       expect(entry).toContain("tr:");
@@ -54,6 +55,10 @@ describe("DriverBottomNavigation — exactly Home, Jobs, Chat, Account", () => {
     }
     expect(SOURCE).toContain("الرئيسية");
     expect(SOURCE).toContain("Ana Sayfa");
+  });
+
+  it("the Job tab carries the unseen-offers badge; Chat carries the unread badge", () => {
+    expect(SOURCE).toContain('tab === "chat" ? chatUnreadCount : tab === "job" ? pendingOffersCount : 0');
   });
 
   it("reserves the device safe-area inset so the bar never sits under a home indicator", () => {
@@ -152,7 +157,7 @@ describe("Privacy — driver surfaces never reference customer/internal fields",
   });
 
   it("driver payment surfaces resolve the amount through resolveDriverAgreedAmount only", () => {
-    for (const file of ["driver/DriverActiveJobCard.tsx", "driver/DriverJobsScreen.tsx", "driver/DriverJobDetails.tsx"]) {
+    for (const file of ["driver/DriverActiveJobCard.tsx", "driver/DriverJobDetails.tsx"]) {
       const source = read(file);
       expect(source).toContain("resolveDriverAgreedAmount");
       // Never reads the raw field off the shipment directly.
@@ -216,10 +221,102 @@ describe("Plain language & Google Sign-In absence", () => {
     }
   });
 
-  it("closed chat shows a plain-language read-only banner", () => {
+  it("closed chat shows the read-only notice in all three languages, and the composer branch is lock-gated", () => {
     const CHAT = read("driver/DriverChatScreen.tsx");
-    expect(CHAT).toContain("new messages can't be sent");
+    expect(CHAT).toContain("This job is closed. The conversation is now read-only.");
+    expect(CHAT).toContain("İş kapatıldı. Görüşme artık salt okunur.");
+    expect(CHAT).toContain("تم إغلاق العمل. أصبحت المحادثة للقراءة فقط.");
     expect(CHAT).toContain("{isChatClosed ? (");
+  });
+});
+
+describe("Documents flow through the shipment chat — no standalone driver documents UI", () => {
+  it("there is no DriverDocumentsScreen and no documents navigation anywhere in the driver app", () => {
+    expect(driverComponentFiles).not.toContain("DriverDocumentsScreen.tsx");
+    const APP = read("DriverApplication.tsx");
+    expect(APP).not.toContain("DriverDocumentsScreen");
+    expect(APP).not.toContain("'documents'");
+  });
+
+  it("the Job screen offers one Shipment Chat shortcut, not a documents shortcut", () => {
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("Shipment Chat");
+    expect(JOB).not.toContain("onOpenDocuments");
+  });
+
+  it("chat renders shipment files recognizably: named download link plus inline image preview", () => {
+    const CHAT = read("driver/DriverChatScreen.tsx");
+    expect(CHAT).toContain('msg.type === "file"');
+    expect(CHAT).toContain("msg.fileUrl");
+    expect(CHAT).toContain("download={msg.fileName");
+  });
+
+  it("the job details view keeps the existing read-only shared-documents section (admin-published files stay reachable)", () => {
+    const DETAILS = read("driver/DriverJobDetails.tsx");
+    expect(DETAILS).toContain("DriverDocumentSection");
+  });
+});
+
+describe("Profile section — routes read-only, availability switch lives on Home", () => {
+  const ACCOUNT = read("driver/DriverAccountScreen.tsx");
+  const HOME = read("driver/DriverHomeScreen.tsx");
+
+  it("shows registered routes read-only (managed by Operations); the driver UI never writes workingRoutes", () => {
+    expect(ACCOUNT).toContain("workingRoutes");
+    expect(ACCOUNT).toContain("routesManaged");
+    expect(ACCOUNT).not.toContain("workingRoutes:");
+  });
+
+  it("the interactive Available-for-Offers switch is on Home; Profile only displays the status", () => {
+    expect(HOME).toContain("availableForOffers: !offersEnabled");
+    expect(ACCOUNT).not.toContain("availableForOffers: !offersEnabled");
+    expect(ACCOUNT).toContain("driver?.availableForOffers !== false");
+  });
+});
+
+describe("Shipment-chat lifecycle — chat exists only after the driver accepts the job", () => {
+  const APP = read("DriverApplication.tsx");
+
+  it("thread list, unread badges, auto-select, deep-links, and openJobChat are all gated by isDriverChatAvailable", () => {
+    expect(APP).toContain('import { isDriverChatAvailable } from "../lib/driverJobFlow";');
+    expect(APP).toContain("shipments.filter(s => isDriverChatAvailable(s.status)).sort");
+    expect(APP).toContain("chatAvailableShipmentIds.has(n.shipmentId)");
+    expect(APP).toContain("activeJob && isDriverChatAvailable(activeJob.status)");
+    expect(APP).toContain("if (!isDriverChatAvailable(shipment.status)) {");
+    expect(APP).toContain("target && isDriverChatAvailable(target.status)");
+  });
+
+  it("the Chat tab with no accepted job shows the informational empty state with an Open Job action — no conversation is created", () => {
+    expect(APP).toContain("activeTab === 'chat' && chatJobs.length === 0");
+    expect(APP).toContain("<DriverChatEmptyState");
+    const EMPTY = read("driver/DriverChatEmptyState.tsx");
+    expect(EMPTY).toContain("Shipment chat becomes available after you accept an assigned job.");
+    expect(EMPTY).toContain("تعمل محادثة الشحنة بعد قبول العمل.");
+    expect(EMPTY).toContain("Sevkiyat mesajlaşması, atanan bir işi kabul etmenizden sonra açılır.");
+    expect(EMPTY).toContain("onOpenJob");
+    // No support contact, no customer chat, no general chat — the CODE
+    // may not offer any of them (the doc comment naming the rule is fine).
+    const emptyCodeOnly = EMPTY.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(emptyCodeOnly).not.toMatch(/support|customer|tel:/i);
+  });
+
+  it("job surfaces hide chat affordances before acceptance (card button, screen shortcut, document handoff)", () => {
+    const CARD = read("driver/DriverActiveJobCard.tsx");
+    expect(CARD).toContain("const chatAvailable = isDriverChatAvailable(s.status);");
+    expect(CARD).toContain("{chatAvailable && (");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("isDriverChatAvailable(activeJob.status) ? (");
+    expect(JOB).toContain("chatAfterAccept");
+    const DETAILS = read("driver/DriverJobDetails.tsx");
+    expect(DETAILS).toContain("canSendDocuments={!closed && isDriverChatAvailable(s.status)}");
+  });
+
+  it("there is no chat action during the offer stage", () => {
+    const OFFERS = read("driver/DriverOffersScreen.tsx");
+    expect(OFFERS).not.toContain("Ask MARAS");
+    expect(OFFERS).not.toContain("onAskMaras");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).not.toContain("onAskMaras");
   });
 });
 

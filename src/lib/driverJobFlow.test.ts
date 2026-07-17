@@ -9,6 +9,7 @@ import {
   getDriverNextAction,
   localizeNextActionLabel,
   countUnreadChatForShipment,
+  isDriverChatAvailable,
 } from "./driverJobFlow";
 import { LAND_STATUS_SEQUENCE } from "./shipmentStatusTransitions";
 
@@ -147,6 +148,30 @@ describe("getDriverNextAction — one legal forward action, no free-form list", 
   it("offers no action at Delivered — but that is a chat-lock question, not answered here", () => {
     expect(getDriverNextAction("Delivered")).toBeNull();
     expect(getDriverNextAction("Delivered", "sea")).toBeNull();
+  });
+});
+
+describe("isDriverChatAvailable — shipment chat exists only after acceptance", () => {
+  it("no conversation during the pre-acceptance states: New (back with dispatch) and Assigned (awaiting accept/decline)", () => {
+    expect(isDriverChatAvailable("New")).toBe(false);
+    expect(isDriverChatAvailable("Assigned")).toBe(false);
+  });
+
+  it("available from acceptance through the whole operational Land workflow", () => {
+    for (const status of ["Accepted", "Loading", "Loaded", "In Transit", "Border Crossing", "Customs Clearance", "Arrived", "Delivered"] as const) {
+      expect(isDriverChatAvailable(status)).toBe(true);
+    }
+  });
+
+  it("stays available (read-only history) after the terminal statuses — closing never hides the conversation", () => {
+    expect(isDriverChatAvailable("Closed")).toBe(true);
+    expect(isDriverChatAvailable("Completed")).toBe(true);
+  });
+
+  it("sea/air operational statuses are chat-available (their sequences have no separate accept step)", () => {
+    for (const status of ["Booking Confirmed", "Loaded on Vessel", "Out for Delivery"] as const) {
+      expect(isDriverChatAvailable(status)).toBe(true);
+    }
   });
 });
 

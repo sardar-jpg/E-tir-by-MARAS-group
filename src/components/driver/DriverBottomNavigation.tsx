@@ -2,32 +2,33 @@ import { Home, Briefcase, MessageSquare, User } from "lucide-react";
 import type { Language } from "../../types";
 
 /**
- * feature/driver-app-comprehensive-redesign — the Driver App's bottom
- * navigation has exactly four sections: Home, Jobs, Chat, Account. The
- * old separate Menu and Profile tabs are merged into Account. Chat is
- * always reachable (the Chat screen owns picking a job thread); the
- * unread badge surfaces new MARAS messages. Labels are localized, layout
- * uses only logical utilities (grid order follows the document direction,
- * so Arabic mirrors automatically), and the bar reserves the device
+ * Driver App V2 — the bottom navigation has exactly four sections:
+ * Home, Job, Chat, Profile. Nothing else may be added here. Job is the
+ * single operational center (offers, the assigned/active job, previous
+ * jobs); its badge surfaces offers awaiting an answer. Chat is always
+ * reachable (the Chat screen owns picking a job thread); its badge
+ * surfaces new MARAS messages. Labels are localized, layout uses only
+ * logical utilities (grid order follows the document direction, so
+ * Arabic mirrors automatically), and the bar reserves the device
  * safe-area inset so it never sits under a home indicator.
  */
-export type DriverTab = "home" | "jobs" | "chat" | "account";
+export type DriverTab = "home" | "job" | "chat" | "profile";
 
 const NAV_LABELS: Record<DriverTab, Record<Language, string>> = {
   home: { en: "Home", tr: "Ana Sayfa", ar: "الرئيسية" },
-  jobs: { en: "Jobs", tr: "Seferler", ar: "المهام" },
+  job: { en: "Job", tr: "Sefer", ar: "المهمة" },
   chat: { en: "Chat", tr: "Mesajlar", ar: "الدردشة" },
-  account: { en: "Account", tr: "Hesap", ar: "حسابي" },
+  profile: { en: "Profile", tr: "Profil", ar: "الملف" },
 };
 
 const NAV_ICONS: Record<DriverTab, typeof Home> = {
   home: Home,
-  jobs: Briefcase,
+  job: Briefcase,
   chat: MessageSquare,
-  account: User,
+  profile: User,
 };
 
-const TABS: DriverTab[] = ["home", "jobs", "chat", "account"];
+const TABS: DriverTab[] = ["home", "job", "chat", "profile"];
 
 interface DriverBottomNavigationProps {
   activeTab: DriverTab;
@@ -35,6 +36,8 @@ interface DriverBottomNavigationProps {
   lang: Language;
   /** Unread MARAS chat messages across all of this driver's jobs. */
   chatUnreadCount?: number;
+  /** Transport offers still awaiting this driver's answer — shown on Job. */
+  pendingOffersCount?: number;
 }
 
 export default function DriverBottomNavigation({
@@ -42,6 +45,7 @@ export default function DriverBottomNavigation({
   onSelect,
   lang,
   chatUnreadCount = 0,
+  pendingOffersCount = 0,
 }: DriverBottomNavigationProps) {
   return (
     <nav
@@ -52,6 +56,7 @@ export default function DriverBottomNavigation({
         const Icon = NAV_ICONS[tab];
         const isActive = activeTab === tab;
         const label = NAV_LABELS[tab][lang] ?? NAV_LABELS[tab].en;
+        const badge = tab === "chat" ? chatUnreadCount : tab === "job" ? pendingOffersCount : 0;
         return (
           <button
             key={tab}
@@ -64,9 +69,9 @@ export default function DriverBottomNavigation({
           >
             <span className="relative">
               <Icon className="w-6 h-6 shrink-0" strokeWidth={isActive ? 2.5 : 2} />
-              {tab === "chat" && chatUnreadCount > 0 && (
+              {badge > 0 && (
                 <span className="absolute -top-1.5 -end-2 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-[18px] text-center light-preserve">
-                  {chatUnreadCount > 9 ? "9+" : chatUnreadCount}
+                  {badge > 9 ? "9+" : badge}
                 </span>
               )}
             </span>

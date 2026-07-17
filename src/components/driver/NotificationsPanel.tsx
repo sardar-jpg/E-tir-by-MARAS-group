@@ -12,9 +12,18 @@ interface NotificationsPanelProps {
   lang: Language;
   title: string;
   onBack: () => void;
+  /**
+   * Deep-link: tapping a notification jumps to the screen it is about
+   * (an offer notification opens the Job section and highlights the
+   * offer; a chat notification opens that shipment's thread). Uses the
+   * EXISTING notification contract only — the record's type and
+   * shipmentId — so a future push-notification tap can reuse the same
+   * routing.
+   */
+  onOpenNotification?: (n: AppNotification) => void;
 }
 
-export default function NotificationsPanel({ notifications, lang, title, onBack }: NotificationsPanelProps) {
+export default function NotificationsPanel({ notifications, lang, title, onBack, onOpenNotification }: NotificationsPanelProps) {
   const t = LABELS[lang] ?? LABELS.en;
   return (
     <div className="space-y-3 animate-fade-in">
@@ -30,9 +39,16 @@ export default function NotificationsPanel({ notifications, lang, title, onBack 
       </div>
       <div className="space-y-2">
         {notifications.map((n) => (
-          <div key={n.id} className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl space-y-1 text-start">
+          <button
+            key={n.id}
+            type="button"
+            onClick={() => onOpenNotification?.(n)}
+            className="w-full p-3.5 bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-2xl space-y-1 text-start transition-colors cursor-pointer active:scale-[0.99]"
+          >
             <div className="flex items-center justify-between">
-              <span className="bg-orange-500/10 border border-orange-500/20 text-orange-400 text-xs font-bold px-2 py-0.5 rounded-lg">#{n.shipmentNumber}</span>
+              {n.shipmentNumber ? (
+                <span className="bg-orange-500/10 border border-orange-500/20 text-orange-400 text-xs font-bold px-2 py-0.5 rounded-lg">#{n.shipmentNumber}</span>
+              ) : <span />}
               <span className="text-xs text-slate-500">{new Date(n.timestamp).toLocaleDateString()}</span>
             </div>
             <p className="font-bold text-slate-200 text-sm">
@@ -41,7 +57,7 @@ export default function NotificationsPanel({ notifications, lang, title, onBack 
             <p className="text-sm text-slate-400 leading-snug">
               {lang === 'en' ? n.messageEn : (lang === 'tr' ? n.messageTr : n.messageAr)}
             </p>
-          </div>
+          </button>
         ))}
         {notifications.length === 0 && (
           <div className="py-14 text-center space-y-3">
