@@ -1,6 +1,7 @@
 import { ArrowRight, FileText, MessageSquare, Phone } from "lucide-react";
 import type { Language, Shipment } from "../../types";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber } from "../../lib/driverVisibility";
+import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import { getStatusChipClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
 
 /**
@@ -61,6 +62,8 @@ export default function DriverActiveJobCard({
   const agreedAmount = resolveDriverAgreedAmount(s, driverId);
   const truckNumber = resolveDriverTruckNumber(s, driverId);
   const callContact = resolveDriverCallContact(s);
+  // Shipment chat exists only after the driver accepts the job.
+  const chatAvailable = isDriverChatAvailable(s.status);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.35)]">
@@ -117,16 +120,18 @@ export default function DriverActiveJobCard({
         </div>
       </div>
 
-      {/* Secondary actions */}
-      <div className={`grid gap-2 ${callContact ? "grid-cols-3" : "grid-cols-2"}`}>
-        <button
-          type="button"
-          onClick={onOpenChat}
-          className="min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer"
-        >
-          <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
-          <span>{t.chat}</span>
-        </button>
+      {/* Secondary actions — Chat appears only once the job is accepted */}
+      <div className={`grid gap-2 ${chatAvailable && callContact ? "grid-cols-3" : chatAvailable || callContact ? "grid-cols-2" : "grid-cols-1"}`}>
+        {chatAvailable && (
+          <button
+            type="button"
+            onClick={onOpenChat}
+            className="min-h-[52px] rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+          >
+            <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
+            <span>{t.chat}</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={onOpenDetails}

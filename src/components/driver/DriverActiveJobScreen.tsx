@@ -6,6 +6,7 @@ import DriverNextAction from "./DriverNextAction";
 import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverOffersScreen from "./DriverOffersScreen";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
+import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import { getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
 /**
@@ -27,6 +28,7 @@ const LABELS: Record<Language, {
   title: string;
   progress: string;
   chat: string;
+  chatAfterAccept: string;
   previous: string;
   empty: string;
   emptySub: string;
@@ -38,6 +40,7 @@ const LABELS: Record<Language, {
     title: "Job",
     progress: "Journey progress",
     chat: "Shipment Chat",
+    chatAfterAccept: "Shipment chat opens after you accept the job.",
     previous: "Previous jobs",
     empty: "No active job right now",
     emptySub: "Answer an offer below, or wait — when MARAS assigns you a job, everything about it will appear here.",
@@ -49,6 +52,7 @@ const LABELS: Record<Language, {
     title: "Sefer",
     progress: "Yolculuk ilerlemesi",
     chat: "Sevkiyat Mesajları",
+    chatAfterAccept: "Sevkiyat sohbeti, işi kabul etmenizden sonra açılır.",
     previous: "Önceki seferler",
     empty: "Şu anda aktif sefer yok",
     emptySub: "Aşağıdan bir teklifi cevaplayın — MARAS size bir sefer atadığında her şey burada görünecek.",
@@ -60,6 +64,7 @@ const LABELS: Record<Language, {
     title: "المهمة",
     progress: "تقدم الرحلة",
     chat: "محادثة الشحنة",
+    chatAfterAccept: "تعمل محادثة الشحنة بعد قبول العمل.",
     previous: "المهام السابقة",
     empty: "لا توجد مهمة نشطة حالياً",
     emptySub: "أجب على عرض أدناه — وعندما تخصص لك MARAS مهمة، سيظهر كل شيء عنها هنا.",
@@ -89,7 +94,6 @@ interface DriverActiveJobScreenProps {
   highlightOfferId?: string | null;
   onOpenOffer: (offerId: string) => void;
   onRespondOffer: (offerId: string, action: "quote" | "reject", priceUsd?: number, note?: string) => Promise<boolean>;
-  onAskMaras: () => void;
 }
 
 export default function DriverActiveJobScreen({
@@ -111,7 +115,6 @@ export default function DriverActiveJobScreen({
   highlightOfferId = null,
   onOpenOffer,
   onRespondOffer,
-  onAskMaras,
 }: DriverActiveJobScreenProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const otherJobs = shipments.filter((s) => s.id !== activeJob?.id);
@@ -143,20 +146,27 @@ export default function DriverActiveJobScreen({
             <DriverStatusTimeline shipment={activeJob} lang={lang} />
           </section>
           {/* One conversation shortcut — everything (documents, photos,
-              instructions) travels through the shipment chat. */}
-          <button
-            type="button"
-            onClick={() => onOpenChat(activeJob)}
-            className="w-full min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
-          >
-            <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
-            <span>{t.chat}</span>
-            {(unreadByShipmentId[activeJob.id] || 0) > 0 && (
-              <span className="bg-orange-500 text-white text-xs font-bold rounded-full px-2 py-0.5 light-preserve">
-                {unreadByShipmentId[activeJob.id]}
-              </span>
-            )}
-          </button>
+              instructions) travels through the shipment chat. The
+              conversation exists only after acceptance; before it, a
+              short note says when it opens (kept after closure so the
+              read-only history stays reachable). */}
+          {isDriverChatAvailable(activeJob.status) ? (
+            <button
+              type="button"
+              onClick={() => onOpenChat(activeJob)}
+              className="w-full min-h-[56px] rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-600 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
+            >
+              <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
+              <span>{t.chat}</span>
+              {(unreadByShipmentId[activeJob.id] || 0) > 0 && (
+                <span className="bg-orange-500 text-white text-xs font-bold rounded-full px-2 py-0.5 light-preserve">
+                  {unreadByShipmentId[activeJob.id]}
+                </span>
+              )}
+            </button>
+          ) : (
+            <p className="text-sm text-slate-500 text-start px-1">{t.chatAfterAccept}</p>
+          )}
         </div>
       ) : (
         offers.length === 0 && (
@@ -180,7 +190,6 @@ export default function DriverActiveJobScreen({
         highlightOfferId={highlightOfferId}
         onOpenOffer={onOpenOffer}
         onRespond={onRespondOffer}
-        onAskMaras={onAskMaras}
       />
 
       {/* ── 5. Previous jobs — compact and secondary ── */}

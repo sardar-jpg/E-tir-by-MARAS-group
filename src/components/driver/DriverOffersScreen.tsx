@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  ArrowRight, Check, CheckCircle2, Clock, DollarSign, FileText, MapPin,
-  MessageSquare, Truck, X,
+  ArrowRight, Check, CheckCircle2, Clock, DollarSign, FileText, X,
 } from "lucide-react";
 import type { Language } from "../../types";
 import { TRUCK_TYPES } from "../../types";
@@ -16,14 +15,16 @@ import { MAX_QUOTE_PRICE_USD } from "../../lib/driverAlliance";
  * rejected / expired / closed), all read-only once decided.
  *
  * The collapsed card shows only the pricing-relevant summary (route,
- * cargo, truck type, loading date, expiry); the driver must open View
- * Full Shipment Details to see every driver-safe field before the two
- * allowed answers appear — Submit Your Price (USD, behind an explicit
- * confirmation, never editable) or Reject (optional reason). No chat
- * threads are created here; Ask MARAS simply opens the Chat section.
- * A driver with an active job sees no answer controls at all (the
- * server enforces the rule regardless). No competitor information of
- * any kind ever renders.
+ * cargo, loading date, expiry); the driver opens Shipment Details to see
+ * the simple operational fields — From, To, Cargo, Loading Date, MARAS
+ * Notes, Offer Expiry (addresses and weight join this list once the
+ * offer contract carries them) — before the two allowed answers appear:
+ * Submit Price (USD, behind an explicit confirmation, never editable) or
+ * Reject (optional reason). There is NO chat during the offer stage —
+ * the shipment conversation exists only after the driver accepts an
+ * assigned job. A driver with an active job sees no answer controls at
+ * all (the server enforces the rule regardless). No competitor
+ * information of any kind ever renders.
  */
 const LABELS: Record<Language, {
   newOffers: string;
@@ -33,19 +34,13 @@ const LABELS: Record<Language, {
   pausedBanner: string;
   viewDetails: string;
   hideDetails: string;
-  route: string;
   from: string;
   to: string;
-  freight: string;
-  freightNames: Record<string, string>;
-  distance: string;
   cargo: string;
   truck: string;
-  timing: string;
   loading: string;
   expires: string;
   note: string;
-  askMaras: string;
   yourPrice: string;
   pricePlaceholder: string;
   notePlaceholder: string;
@@ -74,28 +69,22 @@ const LABELS: Record<Language, {
     decidedOffers: "Recently decided",
     empty: "No transport offers right now. New offers from MARAS will appear here.",
     pausedBanner: "You have an active job. New offers are paused until it is finished.",
-    viewDetails: "View Full Shipment Details",
+    viewDetails: "Shipment Details",
     hideDetails: "Hide details",
-    route: "Route",
-    from: "Loading",
-    to: "Unloading",
-    freight: "Freight type",
-    freightNames: { land: "Land", sea: "Sea", air: "Air" },
-    distance: "Distance",
+    from: "From",
+    to: "To",
     cargo: "Cargo",
-    truck: "Truck type",
-    timing: "Dates",
+    truck: "Truck",
     loading: "Loading date",
     expires: "Offer expires",
-    note: "Note from MARAS",
-    askMaras: "Ask MARAS in Chat",
+    note: "MARAS notes",
     yourPrice: "Your price (USD)",
     pricePlaceholder: "e.g. 3800",
     notePlaceholder: "Optional note to MARAS…",
     reasonPlaceholder: "Optional reason…",
     reject: "Reject",
     confirmReject: "Confirm Reject",
-    submitPrice: "Submit Your Price (USD)",
+    submitPrice: "Submit Price (USD)",
     confirmTitle: (p) => `Send ${p} USD?`,
     confirmWarning: "You can submit one price only. It cannot be changed later.",
     confirmSend: "Yes, Send Price",
@@ -117,28 +106,22 @@ const LABELS: Record<Language, {
     decidedOffers: "Son kararlar",
     empty: "Şu anda taşıma teklifi yok. MARAS'tan gelen yeni teklifler burada görünecek.",
     pausedBanner: "Aktif bir seferiniz var. Yeni teklifler sefer bitene kadar durduruldu.",
-    viewDetails: "Tüm Sevkiyat Detaylarını Gör",
+    viewDetails: "Sevkiyat Detayları",
     hideDetails: "Detayları gizle",
-    route: "Güzergah",
-    from: "Yükleme",
-    to: "Boşaltma",
-    freight: "Taşıma türü",
-    freightNames: { land: "Karayolu", sea: "Denizyolu", air: "Havayolu" },
-    distance: "Mesafe",
+    from: "Nereden",
+    to: "Nereye",
     cargo: "Yük",
-    truck: "Araç tipi",
-    timing: "Tarihler",
+    truck: "Araç",
     loading: "Yükleme tarihi",
     expires: "Teklifin bitişi",
-    note: "MARAS notu",
-    askMaras: "MARAS'a Mesajdan Sor",
+    note: "MARAS notları",
     yourPrice: "Fiyatınız (USD)",
     pricePlaceholder: "örn. 3800",
     notePlaceholder: "MARAS'a isteğe bağlı not…",
     reasonPlaceholder: "İsteğe bağlı neden…",
     reject: "Reddet",
     confirmReject: "Reddetmeyi Onayla",
-    submitPrice: "Fiyatınızı Gönderin (USD)",
+    submitPrice: "Fiyatı Gönder (USD)",
     confirmTitle: (p) => `${p} USD gönderilsin mi?`,
     confirmWarning: "Yalnızca bir fiyat gönderebilirsiniz. Daha sonra değiştirilemez.",
     confirmSend: "Evet, Fiyatı Gönder",
@@ -160,28 +143,22 @@ const LABELS: Record<Language, {
     decidedOffers: "آخر القرارات",
     empty: "لا توجد عروض نقل حالياً. ستظهر هنا العروض الجديدة من MARAS.",
     pausedBanner: "لديك مهمة نشطة. العروض الجديدة متوقفة حتى انتهائها.",
-    viewDetails: "عرض تفاصيل الشحنة كاملة",
+    viewDetails: "تفاصيل الشحنة",
     hideDetails: "إخفاء التفاصيل",
-    route: "المسار",
-    from: "التحميل",
-    to: "التفريغ",
-    freight: "نوع الشحن",
-    freightNames: { land: "بري", sea: "بحري", air: "جوي" },
-    distance: "المسافة",
+    from: "من",
+    to: "إلى",
     cargo: "الحمولة",
-    truck: "نوع الشاحنة",
-    timing: "التواريخ",
+    truck: "الشاحنة",
     loading: "تاريخ التحميل",
     expires: "ينتهي العرض",
-    note: "ملاحظة من MARAS",
-    askMaras: "اسأل MARAS في الدردشة",
+    note: "ملاحظات MARAS",
     yourPrice: "سعرك (دولار أمريكي)",
     pricePlaceholder: "مثال: 3800",
     notePlaceholder: "ملاحظة اختيارية إلى MARAS…",
     reasonPlaceholder: "سبب اختياري…",
     reject: "رفض",
     confirmReject: "تأكيد الرفض",
-    submitPrice: "أرسل سعرك (دولار)",
+    submitPrice: "أرسل السعر (دولار)",
     confirmTitle: (p) => `إرسال ${p} دولار؟`,
     confirmWarning: "يمكنك إرسال سعر واحد فقط، ولا يمكن تغييره لاحقاً.",
     confirmSend: "نعم، أرسل السعر",
@@ -214,8 +191,6 @@ interface DriverOffersScreenProps {
   highlightOfferId?: string | null;
   onOpenOffer: (offerId: string) => void;
   onRespond: (offerId: string, action: "quote" | "reject", priceUsd?: number, note?: string) => Promise<boolean>;
-  /** Opens the Chat section so the driver can ask before pricing. */
-  onAskMaras: () => void;
 }
 
 export default function DriverOffersScreen({
@@ -225,7 +200,6 @@ export default function DriverOffersScreen({
   highlightOfferId = null,
   onOpenOffer,
   onRespond,
-  onAskMaras,
 }: DriverOffersScreenProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const [openOfferId, setOpenOfferId] = useState<string | null>(null);
@@ -326,17 +300,13 @@ export default function DriverOffersScreen({
 
           <p className="text-sm text-slate-300 font-semibold truncate">{o.cargoDescription}</p>
 
-          <div className="flex items-center gap-2 flex-wrap text-sm text-slate-300">
-            <span className="inline-flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1">
-              <Truck className="w-4 h-4 text-slate-500 shrink-0" />
-              <span className="font-semibold">{truckTypeLabel(o.truckType, lang)}</span>
-            </span>
-            {o.expectedLoadingDate && (
+          {o.expectedLoadingDate && (
+            <div className="flex items-center gap-2 flex-wrap text-sm text-slate-300">
               <span className="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1 font-semibold">
                 {t.loading}: {o.expectedLoadingDate}
               </span>
-            )}
-          </div>
+            </div>
+          )}
 
           {o.expiresAt && pending && (
             <p className="text-sm font-semibold text-amber-400/90 flex items-center gap-1.5">
@@ -381,55 +351,31 @@ export default function DriverOffersScreen({
         {/* ── Full shipment details (every driver-safe field) ── */}
         {isOpen && (
           <div className="px-4 pb-4 space-y-3">
+            {/* The simple operational fields, in the confirmed order.
+                Loading address, delivery address, and weight are NOT in
+                the offer contract yet — they render here automatically
+                once the contract carries them (no placeholders, no
+                invented values). */}
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 text-start text-sm">
-              <p className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5" /> {t.route}
-              </p>
               <p className="text-slate-300"><span className="text-slate-500">{t.from}:</span> <span className="font-semibold">{o.pickupCity}, {o.pickupCountry}</span></p>
               <p className="text-slate-300"><span className="text-slate-500">{t.to}:</span> <span className="font-semibold">{o.deliveryCity}, {o.deliveryCountry}</span></p>
-              <p className="text-slate-300"><span className="text-slate-500">{t.freight}:</span> <span className="font-semibold">{t.freightNames[o.freightType || "land"] || t.freightNames.land}</span></p>
-              {typeof o.distanceKm === "number" && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.distance}:</span> <span className="font-semibold">{o.distanceKm.toLocaleString()} km</span></p>
-              )}
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 text-start text-sm">
-              <p className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                <Truck className="w-3.5 h-3.5" /> {t.cargo}
-              </p>
-              <p className="text-slate-300 font-semibold leading-snug">{o.cargoDescription}</p>
-              <p className="text-slate-300"><span className="text-slate-500">{t.truck}:</span> <span className="font-semibold">{truckTypeLabel(o.truckType, lang)}</span></p>
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 text-start text-sm">
-              <p className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5" /> {t.timing}
-              </p>
+              <p className="text-slate-300"><span className="text-slate-500">{t.cargo}:</span> <span className="font-semibold">{o.cargoDescription}</span></p>
               {o.expectedLoadingDate && (
                 <p className="text-slate-300"><span className="text-slate-500">{t.loading}:</span> <span className="font-semibold">{o.expectedLoadingDate}</span></p>
+              )}
+              {o.notes && (
+                <p className="text-slate-300"><span className="text-slate-500">{t.note}:</span> <span className="font-semibold">{o.notes}</span></p>
               )}
               {o.expiresAt && (
                 <p className="text-slate-300"><span className="text-slate-500">{t.expires}:</span> <span className="font-semibold">{new Date(o.expiresAt).toLocaleString()}</span></p>
               )}
             </div>
 
-            {o.notes && (
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 text-start text-sm">
-                <p className="text-xs font-bold text-slate-500 mb-1.5">{t.note}</p>
-                <p className="text-slate-300 font-semibold leading-snug">{o.notes}</p>
-              </div>
-            )}
-
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-bold text-slate-500 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1">{t.usdOnly}</span>
-              <button
-                type="button"
-                onClick={onAskMaras}
-                className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 text-sm font-bold text-slate-300 hover:text-white bg-slate-950 border border-slate-700 rounded-2xl transition-all cursor-pointer active:scale-95"
-              >
-                <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
-                <span>{t.askMaras}</span>
-              </button>
+              {/* Truck type: small reference only — matching already
+                  guaranteed it fits this driver's registered truck. */}
+              <span className="text-xs text-slate-500">{t.truck}: {truckTypeLabel(o.truckType, lang)}</span>
             </div>
 
             {/* ── Answer controls — only while still answerable ── */}

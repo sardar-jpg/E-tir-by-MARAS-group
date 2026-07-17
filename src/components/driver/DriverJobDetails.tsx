@@ -13,6 +13,7 @@ import {
 import type { Language, Shipment } from "../../types";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber } from "../../lib/driverVisibility";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
+import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import DriverNextAction from "./DriverNextAction";
 import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverDocumentSection from "./DriverDocumentSection";
@@ -347,7 +348,7 @@ export default function DriverJobDetails({
         <DriverDocumentSection
           documents={s.documents || []}
           lang={lang}
-          canSendDocuments={!closed}
+          canSendDocuments={!closed && isDriverChatAvailable(s.status)}
           onSendDocumentViaChat={onOpenChat}
         />
       </Section>

@@ -17,6 +17,7 @@ import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useDriverActiveJob } from "../hooks/driver/useDriverActiveJob";
+import { isDriverChatAvailable } from "../lib/driverJobFlow";
 import type { DriverOfferView } from "../lib/driverAlliance";
 import { useDriverLocationReporting } from "../hooks/driver/useDriverLocationReporting";
 import DriverBottomNavigation, { type DriverTab } from "./driver/DriverBottomNavigation";
@@ -24,6 +25,7 @@ import DriverHomeScreen from "./driver/DriverHomeScreen";
 import DriverActiveJobScreen from "./driver/DriverActiveJobScreen";
 import DriverJobDetails from "./driver/DriverJobDetails";
 import DriverChatScreen from "./driver/DriverChatScreen";
+import DriverChatEmptyState from "./driver/DriverChatEmptyState";
 import DriverAccountScreen from "./driver/DriverAccountScreen";
 import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
@@ -166,17 +168,28 @@ export default function DriverApplication({
     [myNotifications, loggedInDriverId]
   );
 
+  // Shipment-chat lifecycle: the ids the DRIVER may see a conversation
+  // for — accepted jobs only (isDriverChatAvailable, driverJobFlow.ts).
+  // Pre-acceptance (New/Assigned) shipments never surface chat threads,
+  // shortcuts, or badges, even if Operations already wrote messages;
+  // those messages simply become visible once the driver accepts.
+  const chatAvailableShipmentIds = useMemo(
+    () => new Set(shipments.filter(s => isDriverChatAvailable(s.status)).map(s => s.id)),
+    [shipments]
+  );
+
   // Unread MARAS chat messages per shipment (per-user read state) — the
-  // Jobs-screen badges and the Chat tab badge both read from this one map.
+  // Job-screen badges and the Chat tab badge both read from this one map.
+  // Gated to chat-available jobs so no badge appears before acceptance.
   const unreadChatByShipmentId = useMemo(() => {
     const map: Record<string, number> = {};
     for (const n of myNotifications) {
-      if (n.type === "chat" && !isNotificationReadForUser(n, loggedInDriverId || "")) {
+      if (n.type === "chat" && chatAvailableShipmentIds.has(n.shipmentId) && !isNotificationReadForUser(n, loggedInDriverId || "")) {
         map[n.shipmentId] = (map[n.shipmentId] || 0) + 1;
       }
     }
     return map;
-  }, [myNotifications, loggedInDriverId]);
+  }, [myNotifications, loggedInDriverId, chatAvailableShipmentIds]);
   const totalUnreadChat = useMemo(
     () => Object.values(unreadChatByShipmentId).reduce((sum, c) => sum + c, 0),
     [unreadChatByShipmentId]
@@ -256,9 +269,10 @@ export default function DriverApplication({
     }
   }, [activeTab, activeShipment?.id, myNotifications, markNotificationsRead, loggedInDriverId]);
 
-  // Entering Chat with no thread selected opens the active job's thread.
+  // Entering Chat with no thread selected opens the active job's thread —
+  // only once that job is accepted (chat-available).
   useEffect(() => {
-    if (activeTab === 'chat' && !activeShipment && activeJob) {
+    if (activeTab === 'chat' && !activeShipment && activeJob && isDriverChatAvailable(activeJob.status)) {
       setActiveShipment(activeJob);
     }
   }, [activeTab, activeShipment, activeJob]);
@@ -1086,9 +1100,12 @@ export default function DriverApplication({
     return currentDriver ? currentDriver.name : "Driver";
   };
 
-  // Jobs for the chat thread selector, most recently updated first.
+  // Jobs for the chat thread selector: ONLY accepted jobs (the shipment
+  // chat does not exist for the driver before acceptance), most recently
+  // updated first. Closed jobs stay listed — their history remains
+  // readable, read-only.
   const chatJobs = useMemo(
-    () => [...shipments].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
+    () => shipments.filter(s => isDriverChatAvailable(s.status)).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
     [shipments]
   );
 
@@ -1148,6 +1165,12 @@ export default function DriverApplication({
 
 
   const openJobChat = (shipment: Shipment) => {
+    // Lifecycle guard: no conversation exists before acceptance — any
+    // stray caller lands on the job details instead.
+    if (!isDriverChatAvailable(shipment.status)) {
+      openJobDetails(shipment);
+      return;
+    }
     setActiveShipment(shipment);
     setActiveTab('chat');
     setShowNotifications(false);
@@ -1163,7 +1186,7 @@ export default function DriverApplication({
     setShowNotifications(false);
     if (n.type === 'chat' && n.shipmentId) {
       const target = shipments.find(s => s.id === n.shipmentId);
-      if (target) { openJobChat(target); return; }
+      if (target && isDriverChatAvailable(target.status)) { openJobChat(target); return; }
     }
     if (n.type === 'alliance_offer') {
       const pending = allianceOffers.find(o => o.status === 'broadcast' && (o.myResponse.status === 'invited' || o.myResponse.status === 'viewed'));
@@ -1337,6 +1360,13 @@ export default function DriverApplication({
                   onOpenNotification={handleOpenNotification}
                 />
               </div>
+            ) : activeTab === 'chat' && chatJobs.length === 0 ? (
+              <div className="flex-1 min-h-0 bg-slate-950">
+                <DriverChatEmptyState
+                  lang={lang}
+                  onOpenJob={() => { setActiveShipment(null); setActiveTab('job'); }}
+                />
+              </div>
             ) : activeTab === 'chat' ? (
               <div className="flex-1 min-h-0 bg-slate-950">
                 <DriverChatScreen
@@ -1412,7 +1442,6 @@ export default function DriverApplication({
                     highlightOfferId={highlightOfferId}
                     onOpenOffer={(offerId) => { setHighlightOfferId(null); handleOpenAllianceOffer(offerId); }}
                     onRespondOffer={handleRespondAllianceOffer}
-                    onAskMaras={() => { setActiveShipment(activeJob); setActiveTab('chat'); }}
                   />
                 )}
 

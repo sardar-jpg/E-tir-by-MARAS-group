@@ -221,9 +221,11 @@ describe("Plain language & Google Sign-In absence", () => {
     }
   });
 
-  it("closed chat shows a plain-language read-only banner", () => {
+  it("closed chat shows the read-only notice in all three languages, and the composer branch is lock-gated", () => {
     const CHAT = read("driver/DriverChatScreen.tsx");
-    expect(CHAT).toContain("new messages can't be sent");
+    expect(CHAT).toContain("This job is closed. The conversation is now read-only.");
+    expect(CHAT).toContain("İş kapatıldı. Görüşme artık salt okunur.");
+    expect(CHAT).toContain("تم إغلاق العمل. أصبحت المحادثة للقراءة فقط.");
     expect(CHAT).toContain("{isChatClosed ? (");
   });
 });
@@ -269,6 +271,52 @@ describe("Profile section — routes read-only, availability switch lives on Hom
     expect(HOME).toContain("availableForOffers: !offersEnabled");
     expect(ACCOUNT).not.toContain("availableForOffers: !offersEnabled");
     expect(ACCOUNT).toContain("driver?.availableForOffers !== false");
+  });
+});
+
+describe("Shipment-chat lifecycle — chat exists only after the driver accepts the job", () => {
+  const APP = read("DriverApplication.tsx");
+
+  it("thread list, unread badges, auto-select, deep-links, and openJobChat are all gated by isDriverChatAvailable", () => {
+    expect(APP).toContain('import { isDriverChatAvailable } from "../lib/driverJobFlow";');
+    expect(APP).toContain("shipments.filter(s => isDriverChatAvailable(s.status)).sort");
+    expect(APP).toContain("chatAvailableShipmentIds.has(n.shipmentId)");
+    expect(APP).toContain("activeJob && isDriverChatAvailable(activeJob.status)");
+    expect(APP).toContain("if (!isDriverChatAvailable(shipment.status)) {");
+    expect(APP).toContain("target && isDriverChatAvailable(target.status)");
+  });
+
+  it("the Chat tab with no accepted job shows the informational empty state with an Open Job action — no conversation is created", () => {
+    expect(APP).toContain("activeTab === 'chat' && chatJobs.length === 0");
+    expect(APP).toContain("<DriverChatEmptyState");
+    const EMPTY = read("driver/DriverChatEmptyState.tsx");
+    expect(EMPTY).toContain("Shipment chat becomes available after you accept an assigned job.");
+    expect(EMPTY).toContain("تعمل محادثة الشحنة بعد قبول العمل.");
+    expect(EMPTY).toContain("Sevkiyat mesajlaşması, atanan bir işi kabul etmenizden sonra açılır.");
+    expect(EMPTY).toContain("onOpenJob");
+    // No support contact, no customer chat, no general chat — the CODE
+    // may not offer any of them (the doc comment naming the rule is fine).
+    const emptyCodeOnly = EMPTY.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(emptyCodeOnly).not.toMatch(/support|customer|tel:/i);
+  });
+
+  it("job surfaces hide chat affordances before acceptance (card button, screen shortcut, document handoff)", () => {
+    const CARD = read("driver/DriverActiveJobCard.tsx");
+    expect(CARD).toContain("const chatAvailable = isDriverChatAvailable(s.status);");
+    expect(CARD).toContain("{chatAvailable && (");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("isDriverChatAvailable(activeJob.status) ? (");
+    expect(JOB).toContain("chatAfterAccept");
+    const DETAILS = read("driver/DriverJobDetails.tsx");
+    expect(DETAILS).toContain("canSendDocuments={!closed && isDriverChatAvailable(s.status)}");
+  });
+
+  it("there is no chat action during the offer stage", () => {
+    const OFFERS = read("driver/DriverOffersScreen.tsx");
+    expect(OFFERS).not.toContain("Ask MARAS");
+    expect(OFFERS).not.toContain("onAskMaras");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).not.toContain("onAskMaras");
   });
 });
 

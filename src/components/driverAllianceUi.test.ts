@@ -44,10 +44,20 @@ describe("DriverOffersScreen — deliberately tiny", () => {
     expect(SOURCE).toContain("const decidedOffers = offers.filter((o) => !isPending(o) && !isSubmitted(o));");
   });
 
-  it("the collapsed card is a summary only — the full shipment details must be opened before answering", () => {
-    expect(SOURCE).toContain("View Full Shipment Details");
-    expect(SOURCE).toContain("Submit Your Price (USD)");
-    expect(SOURCE).toContain("Ask MARAS in Chat");
+  it("the collapsed card is a summary only — Shipment Details must be opened before answering", () => {
+    expect(SOURCE).toContain('viewDetails: "Shipment Details"');
+    expect(SOURCE).toContain('submitPrice: "Submit Price (USD)"');
+    // No chat during the offer stage, and no long button text.
+    expect(SOURCE).not.toContain("Ask MARAS");
+    expect(SOURCE).not.toContain("View Full Shipment Details");
+  });
+
+  it("offer details keep only the simple confirmed fields — no speculative logistics fields", () => {
+    for (const banned of ["pallet", "Pallet", "dimension", "Dimension", "volume", "Volume", "packaging", "dangerous", "Dangerous", "temperature", "Temperature", "borderCrossing"]) {
+      expect(SOURCE).not.toContain(banned);
+    }
+    // Truck type stays as small reference text only; freight-mode display is gone.
+    expect(SOURCE).not.toContain("freightNames");
   });
 
   it("an answered offer can never be re-answered from the UI (quoted/rejected/closed render read-only states)", () => {
@@ -62,11 +72,10 @@ describe("DriverOffersScreen — deliberately tiny", () => {
     expect(SOURCE).toContain("pausedBanner");
   });
 
-  it("shows the required card facts (truck type, loading date, expiry, distance when available) and the fixed lost/expired messages", () => {
+  it("shows the required card facts (route, cargo, loading date, expiry) and the fixed lost/expired messages", () => {
     expect(SOURCE).toContain("truckTypeLabel");
     expect(SOURCE).toContain("expectedLoadingDate");
     expect(SOURCE).toContain("expiresAt");
-    expect(SOURCE).toContain("distanceKm");
     expect(SOURCE).toContain("Another driver has been selected. Thank you for your quotation.");
     expect(SOURCE).toContain("This offer has expired.");
   });

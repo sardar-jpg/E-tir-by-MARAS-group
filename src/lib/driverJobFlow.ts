@@ -65,6 +65,21 @@ export function getDriverJobGroup(
   return "active";
 }
 
+/**
+ * Shipment-chat lifecycle rule for the DRIVER side: the conversation
+ * exists for the driver only once they have ACCEPTED the assigned job —
+ * never during the offer stage, never merely because Operations selected
+ * them. "New" (back with dispatch) and "Assigned" (awaiting the driver's
+ * accept/decline) are the two pre-acceptance states; everything after
+ * them — including Delivered and the terminal Closed/Completed — keeps
+ * the conversation VISIBLE. Whether it is also WRITABLE is a separate,
+ * existing rule (isShipmentClosed → read-only), so closing a job never
+ * hides history, it only locks the composer.
+ */
+export function isDriverChatAvailable(status: ShipmentStatus): boolean {
+  return status !== "New" && status !== "Assigned";
+}
+
 type JobLike = Pick<Shipment, "id" | "status" | "freightType" | "updatedAt">;
 
 /**
