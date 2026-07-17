@@ -596,7 +596,7 @@ export default function AdminPanel({
     if (s.status === 'Delivered' || s.status === 'Closed' || s.status === 'Arrived') {
       return 100;
     }
-    if (s.status === 'New') {
+    if (s.status === 'New' || s.status === 'Waiting for Driver Quotes') {
       return 0;
     }
 
@@ -675,7 +675,7 @@ export default function AdminPanel({
       };
     }
 
-    if (s.status === 'New') {
+    if (s.status === 'New' || s.status === 'Waiting for Driver Quotes') {
       return {
         colorClass: 'bg-slate-400',
         textColorClass: 'text-slate-600 font-bold',
@@ -1196,6 +1196,12 @@ MARAS Group etir Center`;
 
   // Form states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  // Driver Alliance order linking: when Create Order was opened FROM the
+  // alliance flow, hand the freshly created Order's id back so the
+  // alliance auto-selects it and continues — one Order, one MAR
+  // reference, generated once by the existing workflow.
+  const [allianceReturnPending, setAllianceReturnPending] = useState(false);
+  const [alliancePreselectedOrderId, setAlliancePreselectedOrderId] = useState<string | null>(null);
   // fix/prevent-duplicate-shipment-creation: in-flight guard for
   // handleCreateShipment — a double-click, repeated Enter, or repeated
   // submit event must never fire more than one POST /api/shipments.
@@ -1708,7 +1714,7 @@ MARAS Group etir Center`;
       const prevStatus = prevShipmentsMapRef.current[s.id];
       if (prevStatus && prevStatus !== s.status) {
         // Did we transit from 'Pending' (or equivalents like 'New', 'Assigned', 'Accepted') to 'In Transit'?
-        const isPriorPending = prevStatus === "Pending" || prevStatus === "New" || prevStatus === "Assigned" || prevStatus === "Accepted" || prevStatus === "Loading" || prevStatus === "Loaded";
+        const isPriorPending = prevStatus === "Pending" || prevStatus === "New" || prevStatus === "Waiting for Driver Quotes" || prevStatus === "Assigned" || prevStatus === "Accepted" || prevStatus === "Loading" || prevStatus === "Loaded";
         const isNowTransit = s.status === "In Transit";
 
         if (isPriorPending && isNowTransit) {
@@ -3418,11 +3424,16 @@ MARAS Group etir Center`;
         body: JSON.stringify(payload)
       });
       if (res.ok) {
+        const created = await res.json().catch(() => null);
         setIsCreateOpen(false);
         setNewShipmentData(createEmptyShipmentForm());
         setUseCustomPOL(false);
         setUseCustomPOD(false);
         triggerToast(t('createSuccess'));
+        if (allianceReturnPending && created?.id) {
+          setAlliancePreselectedOrderId(created.id);
+        }
+        setAllianceReturnPending(false);
         fetchData();
       } else {
         let msg = "Failed to create shipment.";
@@ -3766,7 +3777,7 @@ MARAS Group etir Center`;
     .slice(0, 8); // Top 8 routes for professional spacing
 
   // Shipment Analytics (Pending, Active, Completed)
-  const pendingCountVal = shipments.filter(s => ['New', 'Assigned', 'Accepted', 'Booking Confirmed', 'Container Released'].includes(s.status)).length;
+  const pendingCountVal = shipments.filter(s => ['New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Booking Confirmed', 'Container Released'].includes(s.status)).length;
   const completedCountVal = shipments.filter(s => ['Arrived', 'Delivered', 'Closed', 'Completed'].includes(s.status)).length;
   const activeCountVal = shipments.length - pendingCountVal - completedCountVal;
 
@@ -4713,7 +4724,7 @@ MARAS Group etir Center`;
                   ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
                     ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -4791,7 +4802,7 @@ MARAS Group etir Center`;
                   ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
                     ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -4891,6 +4902,7 @@ MARAS Group etir Center`;
                         <div className="space-y-1">
                           <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
                             s.status === 'New' ? 'bg-slate-100 text-slate-700/80' :
+                            s.status === 'Waiting for Driver Quotes' ? 'bg-sky-100 text-sky-800' :
                             s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-800' :
                             s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
                           }`}>
@@ -4996,7 +5008,19 @@ MARAS Group etir Center`;
       {activeTab === 'drivers' && canViewDriverRoster(resolvedAdminType) && (
         <div className="space-y-6">
           {canManageAllianceUi && (
-            <DriverAllianceOffers adminName={adminEmail || "Operations"} onChanged={() => fetchData()} />
+            <DriverAllianceOffers
+              adminName={adminEmail || "Operations"}
+              onChanged={() => fetchData()}
+              shipments={shipments}
+              drivers={drivers}
+              onCreateNewOrder={() => {
+                setAllianceReturnPending(true);
+                setNewShipmentData(createEmptyShipmentForm());
+                setIsCreateOpen(true);
+              }}
+              preselectedOrderId={alliancePreselectedOrderId}
+              onPreselectedConsumed={() => setAlliancePreselectedOrderId(null)}
+            />
           )}
           {drivers.some(d => d.status === "pending") && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">

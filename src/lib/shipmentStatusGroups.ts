@@ -25,7 +25,7 @@ export interface ShipmentStatusGroup {
 }
 
 export const SHIPMENT_STATUS_GROUPS: ShipmentStatusGroup[] = [
-  { key: "new", statuses: ["New"] },
+  { key: "new", statuses: ["New", "Waiting for Driver Quotes"] },
   { key: "assigned", statuses: ["Assigned", "Accepted"] },
   { key: "transit", statuses: ["Loading", "Loaded", "In Transit", "Border Crossing", "Customs Clearance"] },
   { key: "delivered", statuses: ["Arrived", "Delivered", "Closed"] },

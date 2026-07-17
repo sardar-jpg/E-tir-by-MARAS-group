@@ -209,7 +209,10 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
       ? ['Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
       : ['New', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed'];
 
-  const currentStepIndex = statusSteps.indexOf(shipment.status) >= 0 ? statusSteps.indexOf(shipment.status) : 0;
+  // 'Waiting for Driver Quotes' is an internal MARAS sourcing stage — the
+  // customer-facing view presents it as the 'New' stage (same position).
+  const publicStatus = shipment.status === 'Waiting for Driver Quotes' ? 'New' : shipment.status;
+  const currentStepIndex = statusSteps.indexOf(publicStatus) >= 0 ? statusSteps.indexOf(publicStatus) : 0;
   const progressPercent = Math.round((currentStepIndex / (statusSteps.length - 1)) * 100);
 
   // Resolve vector cities
@@ -285,7 +288,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     return (map as any)[statusString] || "Corridor tracking operational.";
   };
 
-  const currentStatusDesc = getStatusDesc(shipment.status);
+  const currentStatusDesc = getStatusDesc(publicStatus);
 
   // Layout components
   return (
@@ -407,7 +410,7 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
  
               <div className="bg-orange-600/10 text-orange-400 border border-orange-500/20 px-4 py-2 rounded-xl text-center">
                 <span className="text-[9px] font-bold block uppercase tracking-wider leading-none text-slate-400">{t('status')}</span>
-                <strong className="text-xs font-black uppercase mt-0.5 block whitespace-nowrap">{shipment.status}</strong>
+                <strong className="text-xs font-black uppercase mt-0.5 block whitespace-nowrap">{publicStatus}</strong>
               </div>
             </div>
           </div>

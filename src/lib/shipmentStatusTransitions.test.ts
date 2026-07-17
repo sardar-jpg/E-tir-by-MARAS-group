@@ -18,6 +18,8 @@ import {
   MAX_STATUS_OVERRIDE_REASON_LENGTH,
   getShipmentStatusLabel,
   SHIPMENT_STATUS_LABELS,
+  WAITING_FOR_DRIVER_QUOTES,
+  normalizeStatusForSequence,
 } from "./shipmentStatusTransitions";
 import { applyNarrowShipmentUpdateMemory } from "./shipmentRevision";
 import type { ShipmentStatus } from "../types";
@@ -526,5 +528,55 @@ describe("getShipmentStatusLabel / SHIPMENT_STATUS_LABELS", () => {
 
   it("falls back to the 'In Transit' label for an unknown status", () => {
     expect(getShipmentStatusLabel("Nonexistent")).toEqual(SHIPMENT_STATUS_LABELS['In Transit']);
+  });
+});
+
+/**
+ * Driver Alliance order-linking lifecycle: "Waiting for Driver Quotes" is
+ * the alliance-controlled stage between "New" (Draft) and "Assigned"
+ * (Driver Selected). It lives OUTSIDE the manual sequences: the alliance
+ * broadcast/cancel/winner endpoints are the only writers, and for every
+ * sequence-position decision it counts as "New".
+ */
+describe("'Waiting for Driver Quotes' — alliance-controlled stage", () => {
+  it("occupies the same sequence position as 'New' (Draft) and is not part of any manual sequence", () => {
+    expect(normalizeStatusForSequence(WAITING_FOR_DRIVER_QUOTES)).toBe("New");
+    expect(normalizeStatusForSequence("Loading")).toBe("Loading");
+    expect(LAND_STATUS_SEQUENCE).not.toContain(WAITING_FOR_DRIVER_QUOTES);
+    expect(SEA_STATUS_SEQUENCE).not.toContain(WAITING_FOR_DRIVER_QUOTES);
+    expect(AIR_STATUS_SEQUENCE).not.toContain(WAITING_FOR_DRIVER_QUOTES);
+  });
+
+  it("a waiting Order's next manual status is 'Assigned' — the lifecycle continues exactly where 'New' would", () => {
+    expect(getAllowedNextShipmentStatuses(WAITING_FOR_DRIVER_QUOTES, "road")).toEqual(["Assigned"]);
+    expect(validateShipmentStatusTransition(WAITING_FOR_DRIVER_QUOTES, "Assigned", "road").ok).toBe(true);
+  });
+
+  it("can never be REQUESTED through the manual status route — it is set only by the alliance broadcast", () => {
+    const result = validateShipmentStatusTransition("New", WAITING_FOR_DRIVER_QUOTES, "road");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("alliance-controlled");
+  });
+
+  it("can never be set through the Admin Status Override either — but correcting OUT of it back to 'New' works", () => {
+    const into = validateShipmentStatusOverride("New", WAITING_FOR_DRIVER_QUOTES, "road");
+    expect(into.ok).toBe(false);
+    expect(into.reason).toBe("alliance-controlled");
+    expect(new ShipmentStatusOverrideError("New", WAITING_FOR_DRIVER_QUOTES, "alliance-controlled").message).toContain("Driver Alliance");
+    // Escape hatch: an authorized admin can correct a stuck waiting Order back to Draft.
+    expect(validateShipmentStatusOverride(WAITING_FOR_DRIVER_QUOTES, "New", "road").ok).toBe(true);
+  });
+
+  it("is not a closed status, has a translated label, and counts as pre-transit like 'New'", () => {
+    expect(isShipmentClosed(WAITING_FOR_DRIVER_QUOTES, "road")).toBe(false);
+    expect(SHIPMENT_STATUS_LABELS[WAITING_FOR_DRIVER_QUOTES]).toEqual({
+      en: "Waiting for Driver Quotes",
+      tr: "Sürücü Teklifleri Bekleniyor",
+      ar: "بانتظار عروض أسعار السائقين",
+    });
+    // The next lifecycle stage is 'Assigned' — reached via winner
+    // selection (no driver is assigned during sourcing, so no driver can
+    // ever actually submit it).
+    expect(getDriverSubmittableNextStatus(WAITING_FOR_DRIVER_QUOTES, "road")).toBe("Assigned");
   });
 });

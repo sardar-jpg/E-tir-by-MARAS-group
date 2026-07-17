@@ -54,6 +54,25 @@ export function resolveFreightMode(freightType: string | null | undefined): Frei
   return "land";
 }
 
+/**
+ * Driver Alliance order-linking lifecycle: the one status that exists
+ * OUTSIDE the manual sequences below. "Waiting for Driver Quotes" is the
+ * Land-only stage between "New" (Draft — Order created, nothing sent) and
+ * "Assigned" (Driver Selected). It is ALLIANCE-CONTROLLED: the server sets
+ * it automatically when a quote request is broadcast, reverts it to "New"
+ * when the request is cancelled, and moves it to "Assigned" on winner
+ * selection. It is deliberately NOT part of LAND_STATUS_SEQUENCE so the
+ * manual status controls (driver progression, admin milestone dropdown,
+ * status override) can never set it by hand — for every sequence-position
+ * decision it counts as "New" (see normalizeStatusForSequence).
+ */
+export const WAITING_FOR_DRIVER_QUOTES: ShipmentStatus = "Waiting for Driver Quotes";
+
+/** Sequence-position view of a status: the alliance-controlled waiting stage sits at "New"'s position in the Land workflow. */
+export function normalizeStatusForSequence(status: ShipmentStatus): ShipmentStatus {
+  return status === WAITING_FOR_DRIVER_QUOTES ? "New" : status;
+}
+
 export const LAND_STATUS_SEQUENCE: ShipmentStatus[] = [
   "New",
   "Assigned",
@@ -128,6 +147,7 @@ export interface ShipmentStatusLabel {
  */
 export const SHIPMENT_STATUS_LABELS: Record<string, ShipmentStatusLabel> = {
   'New': { en: "Initialized", tr: "Oluşturuldu", ar: "تم التأسيس" },
+  'Waiting for Driver Quotes': { en: "Waiting for Driver Quotes", tr: "Sürücü Teklifleri Bekleniyor", ar: "بانتظار عروض أسعار السائقين" },
   'Assigned': { en: "Assigned", tr: "Sürücü Atandı", ar: "تم التعيين" },
   'Accepted': { en: "Shipment Accepted", tr: "Sevkiyat Kabul Edildi", ar: "تم قبول الشحنة" },
   'Loading': { en: "Loading Started", tr: "Yükleme Başladı", ar: "بدء التحميل" },
@@ -199,7 +219,7 @@ export function getAllowedNextShipmentStatuses(
   freightType?: string | null
 ): ShipmentStatus[] {
   const sequence = getStatusSequenceForFreightMode(resolveFreightMode(freightType));
-  const currentIndex = sequence.indexOf(currentStatus);
+  const currentIndex = sequence.indexOf(normalizeStatusForSequence(currentStatus));
   if (currentIndex === -1 || currentIndex === sequence.length - 1) {
     return [];
   }
@@ -211,7 +231,11 @@ export type ShipmentStatusTransitionRejectionReason =
   | "wrong-freight-workflow"
   | "same-status"
   | "backward"
-  | "skipped-stage";
+  | "skipped-stage"
+  // "Waiting for Driver Quotes" requested through a manual status control —
+  // that stage is set and cleared exclusively by the Driver Alliance
+  // broadcast/cancel/winner endpoints, never by hand.
+  | "alliance-controlled";
 
 export interface ShipmentStatusTransitionResult {
   ok: boolean;
@@ -241,6 +265,9 @@ export function validateShipmentStatusTransition(
 ): ShipmentStatusTransitionResult {
   const allowedNextStatuses = getAllowedNextShipmentStatuses(currentStatus, freightType);
 
+  if (requestedStatus === WAITING_FOR_DRIVER_QUOTES) {
+    return { ok: false, allowedNextStatuses, reason: "alliance-controlled" };
+  }
   if (!ALL_KNOWN_STATUSES.has(requestedStatus)) {
     return { ok: false, allowedNextStatuses, reason: "unknown-status" };
   }
@@ -251,7 +278,7 @@ export function validateShipmentStatusTransition(
     return { ok: false, allowedNextStatuses, reason: "wrong-freight-workflow" };
   }
 
-  const currentIndex = sequence.indexOf(currentStatus);
+  const currentIndex = sequence.indexOf(normalizeStatusForSequence(currentStatus));
   if (currentIndex === -1) {
     // currentStatus isn't part of this freight mode's sequence at all — a
     // pre-existing data inconsistency, not something to guess a decision
@@ -372,7 +399,11 @@ export function isDriverAssignmentRejection(currentStatus: ShipmentStatus, reque
 export type ShipmentStatusOverrideRejectionReason =
   | "unknown-status"
   | "wrong-freight-workflow"
-  | "terminal-locked";
+  | "terminal-locked"
+  // Same rule as the normal transition route: the alliance-controlled
+  // waiting stage can never be set by hand, not even as a correction.
+  // Correcting OUT of it (back to "New", etc.) remains allowed.
+  | "alliance-controlled";
 
 export interface ShipmentStatusOverrideResult {
   ok: boolean;
@@ -386,6 +417,9 @@ export function validateShipmentStatusOverride(
 ): ShipmentStatusOverrideResult {
   if (isShipmentClosed(currentStatus, freightType)) {
     return { ok: false, reason: "terminal-locked" };
+  }
+  if (requestedStatus === WAITING_FOR_DRIVER_QUOTES) {
+    return { ok: false, reason: "alliance-controlled" };
   }
   if (!ALL_KNOWN_STATUSES.has(requestedStatus)) {
     return { ok: false, reason: "unknown-status" };
@@ -416,7 +450,9 @@ export class ShipmentStatusOverrideError extends Error {
     super(
       reason === "terminal-locked"
         ? `This shipment is already ${currentStatus} and cannot be reopened.`
-        : `"${requestedStatus}" is not a valid status for this shipment's workflow.`
+        : reason === "alliance-controlled"
+          ? `"${requestedStatus}" is managed by the Driver Alliance workflow and cannot be set manually.`
+          : `"${requestedStatus}" is not a valid status for this shipment's workflow.`
     );
     this.name = "ShipmentStatusOverrideError";
     this.currentStatus = currentStatus;

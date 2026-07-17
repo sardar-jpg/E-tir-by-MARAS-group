@@ -81,7 +81,6 @@ describe("one-active-job rule — claim on every assignment path, release at the
     expect(region('app.put("/api/shipments/:id", requireFullAdmin', 40000)).toContain("await claimDriverActiveJob(newDriverId, req.params.id);");
     const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
     expect(winner).toContain("await claimDriverActiveJob(driverId, refShipment.id);");
-    expect(winner).toContain("await createShipmentRecord({");
   });
 
   it("a busy driver yields 409 DRIVER_BUSY on every path — never a silent success", () => {
@@ -234,12 +233,32 @@ describe("storage & workflow reuse", () => {
     }
   });
 
-  it("winner selection reuses the EXISTING shipment workflow — the extracted createShipmentRecord and applyNarrowShipmentUpdate — never a parallel shipment writer", () => {
-    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
-    expect(winner).toContain("createShipmentRecord({");
+  it("winner selection ALWAYS updates the linked Order — it never creates a shipment and never allocates a number (single MAR reference for the whole lifecycle)", () => {
+    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 8000);
     expect(winner).toContain("applyNarrowShipmentUpdate(refShipment.id");
-    // No shipment-number allocation outside the shared creation path.
+    expect(winner).not.toContain("createShipmentRecord(");
     expect(winner).not.toContain("allocateNextShipmentSequence");
+    // Legacy offers without a linked Order can no longer produce a winner.
+    expect(winner).toContain('"LEGACY_OFFER_UNLINKED"');
+  });
+
+  it("offer creation REQUIRES a linked, MAR-numbered, unassigned, open Order and derives every operational field from it", () => {
+    const create = region('app.post("/api/alliance/offers", requireFullAdmin', 3500);
+    expect(create).toContain("isValidMarReference(order.shipmentNumber)");
+    expect(create).toContain("order.assignedDriverId");
+    expect(create).toContain("isShipmentClosed(order.status, order.freightType)");
+    expect(create).toContain("...buildOfferFromOrder(order)");
+  });
+
+  it("broadcast refuses to send with zero matched drivers", () => {
+    const broadcast = region('app.post("/api/alliance/offers/:id/broadcast"', 4000);
+    expect(broadcast).toContain('"NO_MATCHING_DRIVERS"');
+  });
+
+  it("driver chat posting is rejected server-side before job acceptance (the same isDriverChatAvailable rule the app uses)", () => {
+    const chat = region('app.post("/api/shipments/:id/chat"', 4000);
+    expect(chat).toContain("!isDriverChatAvailable(req.shipment.status)");
+    expect(chat).toContain("Shipment chat becomes available after you accept the assigned job.");
   });
 
   it("POST /api/shipments itself now delegates to the same extracted creator (single source of creation logic)", () => {
@@ -251,5 +270,43 @@ describe("storage & workflow reuse", () => {
     const types = readFileSync(join(__dirname, "..", "types.ts"), "utf-8");
     expect(types).toContain("closedAt?: string;");
     expect(region('app.post("/api/alliance/offers/:id/select-winner"', 7000)).toContain("closedAt: nowIso");
+  });
+});
+
+/**
+ * Order-status lifecycle (Driver Alliance order linking): the linked Order
+ * moves New (Draft) → "Waiting for Driver Quotes" on broadcast, back to
+ * "New" on cancel, and forward to "Assigned" on winner selection — always
+ * the SAME record, same MAR reference. The waiting stage is alliance-
+ * controlled: the manual status routes reject it (see
+ * shipmentStatusTransitions.test.ts for the pure rules).
+ */
+describe("Order status lifecycle — Waiting for Driver Quotes", () => {
+  it("broadcast stamps the linked Order 'New' → 'Waiting for Driver Quotes' (guarded, timeline entry, same record)", () => {
+    const broadcast = region('app.post("/api/alliance/offers/:id/broadcast"', 6500);
+    expect(broadcast).toContain('await applyNarrowShipmentUpdate(updatedOffer.referenceShipmentId');
+    expect(broadcast).toContain('if (current.status !== "New" || current.assignedDriverId) return current;');
+    expect(broadcast).toContain('status: "Waiting for Driver Quotes" as ShipmentStatus');
+    expect(broadcast).toContain("Sürücü Teklifleri Bekleniyor");
+    // Never creates anything: the broadcast region has no shipment creation.
+    expect(broadcast).not.toContain("createShipmentRecord(");
+  });
+
+  it("cancel releases the linked Order back to 'New' (Draft) — only from the waiting stage and never once assigned", () => {
+    const cancel = region('app.post("/api/alliance/offers/:id/cancel"', 6000);
+    expect(cancel).toContain('if (current.status !== "Waiting for Driver Quotes" || current.assignedDriverId) return current;');
+    expect(cancel).toContain('status: "New" as ShipmentStatus');
+    expect(cancel).toContain("Quote Request Cancelled");
+  });
+
+  it("winner selection moves the Order forward to 'Assigned' from either pre-assignment stage", () => {
+    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
+    expect(winner).toContain('current.status === "New" || current.status === "Waiting for Driver Quotes" ? "Assigned" : current.status');
+  });
+
+  it("an Order already out for quotes cannot back a second parallel request", () => {
+    const create = region('app.post("/api/alliance/offers", requireFullAdmin', 3800);
+    expect(create).toContain('if (order.status === "Waiting for Driver Quotes")');
+    expect(create).toContain("already has an open quote request");
   });
 });

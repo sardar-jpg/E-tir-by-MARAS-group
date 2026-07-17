@@ -192,6 +192,21 @@ export function matchDriversForOffer(
   );
 }
 
+// ── MAR reference (the ONE operational number) ──────────────────────
+
+/**
+ * The single official operational reference format used everywhere in
+ * the system: MAR-<year>-<number> (formatShipmentNumber,
+ * shipmentNumbering.ts — e.g. MAR-2026-1042). Every alliance quote
+ * request must link to an Order carrying a valid MAR reference; the
+ * alliance never mints any number of its own.
+ */
+export const MAR_REFERENCE_PATTERN = /^MAR-\d{4}-\d{4,}$/;
+
+export function isValidMarReference(value: unknown): value is string {
+  return typeof value === "string" && MAR_REFERENCE_PATTERN.test(value.trim());
+}
+
 // ── Offer validation (USD ONLY) ─────────────────────────────────────
 
 export const MAX_OFFER_TEXT_LENGTH = 500;
@@ -206,53 +221,44 @@ export const MAX_OFFER_DISTANCE_KM = 50_000;
 export interface OfferInputResult {
   ok: boolean;
   error?: string;
-  offer?: Pick<
-    AllianceOffer,
-    | "pickupCountry"
-    | "pickupCity"
-    | "deliveryCountry"
-    | "deliveryCity"
-    | "truckType"
-    | "cargoDescription"
-    | "expectedLoadingDate"
-    | "notes"
-    | "freightType"
-    | "distanceKm"
-    | "expiresInHours"
-    | "referenceShipmentId"
-    | "currency"
-  >;
+  /**
+   * Alliance-SPECIFIC inputs only. Everything operational (route,
+   * addresses, cargo, weight, loading date) comes from the linked Order
+   * via buildOfferFromOrder below — the Order is the source of truth,
+   * and an alliance request can never exist without one.
+   */
+  input?: {
+    orderId: string;
+    truckType: string;
+    expiresInHours: number;
+    notes?: string;
+    currency: "USD";
+  };
 }
 
 /**
- * Validates an offer-creation body. Phase 1 is USD-only by design: a
- * request naming any other currency is rejected outright rather than
- * coerced, so a future multi-currency phase is a deliberate change, not
- * an accident.
+ * Validates an offer-creation body: the linked Order id plus the
+ * alliance-specific settings ONLY. USD-only by design: a request naming
+ * any other currency is rejected outright rather than coerced.
  */
 export function validateAllianceOfferInput(body: any): OfferInputResult {
   const text = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  const pickupCountry = text(body?.pickupCountry);
-  const pickupCity = text(body?.pickupCity);
-  const deliveryCountry = text(body?.deliveryCountry);
-  const deliveryCity = text(body?.deliveryCity);
+  // orderId is the request-body name for the Order link (stored as
+  // referenceShipmentId); referenceShipmentId is accepted as an alias
+  // for backward compatibility with earlier callers.
+  const orderId = text(body?.orderId) || text(body?.referenceShipmentId);
   const truckType = text(body?.truckType);
-  const cargoDescription = text(body?.cargoDescription);
-  const expectedLoadingDate = text(body?.expectedLoadingDate);
   const notes = text(body?.notes);
-  const referenceShipmentId = text(body?.referenceShipmentId);
-  const freightTypeRaw = text(body?.freightType).toLowerCase();
 
   if (body?.currency !== undefined && body.currency !== "USD") {
     return { ok: false, error: "Driver Alliance offers are USD only." };
   }
-  if (!pickupCountry || !deliveryCountry) return { ok: false, error: "Pickup and delivery country are required." };
-  if (!pickupCity || !deliveryCity) return { ok: false, error: "Pickup and delivery city are required." };
+  if (!orderId) {
+    return { ok: false, error: "A quote request must be linked to an existing MARAS Order. Select or create the Order first." };
+  }
   if (!TRUCK_TYPES.some((t) => t.id === truckType)) return { ok: false, error: "A valid truck type is required." };
-  if (!cargoDescription) return { ok: false, error: "Cargo description is required." };
-  if (!expectedLoadingDate) return { ok: false, error: "Expected loading date is required." };
-  if (freightTypeRaw && !OFFER_FREIGHT_TYPES.includes(freightTypeRaw as any)) {
-    return { ok: false, error: "Freight type must be land, sea, or air." };
+  if (notes.length > MAX_OFFER_TEXT_LENGTH) {
+    return { ok: false, error: `Notes are limited to ${MAX_OFFER_TEXT_LENGTH} characters.` };
   }
   const expiresInHoursRaw = body?.expiresInHours;
   const expiresInHours =
@@ -264,44 +270,73 @@ export function validateAllianceOfferInput(body: any): OfferInputResult {
   if (!Number.isInteger(expiresInHours) || expiresInHours < 1 || expiresInHours > MAX_OFFER_EXPIRY_HOURS) {
     return { ok: false, error: `An offer expiry between 1 and ${MAX_OFFER_EXPIRY_HOURS} hours is required (e.g. 2, 12, or 24).` };
   }
-  let distanceKm: number | undefined;
-  if (body?.distanceKm !== undefined && body.distanceKm !== null && body.distanceKm !== "") {
-    const d = typeof body.distanceKm === "number" ? body.distanceKm : Number(body.distanceKm);
-    if (!Number.isFinite(d) || d <= 0 || d > MAX_OFFER_DISTANCE_KM) {
-      return { ok: false, error: "Distance must be a positive number of kilometers." };
-    }
-    distanceKm = Math.round(d);
-  }
-  for (const [label, value] of [
-    ["Pickup country", pickupCountry],
-    ["Pickup city", pickupCity],
-    ["Delivery country", deliveryCountry],
-    ["Delivery city", deliveryCity],
-    ["Cargo description", cargoDescription],
-    ["Notes", notes],
-  ] as const) {
-    if (value.length > MAX_OFFER_TEXT_LENGTH) {
-      return { ok: false, error: `${label} is limited to ${MAX_OFFER_TEXT_LENGTH} characters.` };
-    }
-  }
 
   return {
     ok: true,
-    offer: {
-      pickupCountry,
-      pickupCity,
-      deliveryCountry,
-      deliveryCity,
+    input: {
+      orderId,
       truckType,
-      cargoDescription,
-      expectedLoadingDate,
-      notes: notes || undefined,
-      freightType: freightTypeRaw || "land",
-      distanceKm,
       expiresInHours,
-      referenceShipmentId: referenceShipmentId || undefined,
+      notes: notes || undefined,
       currency: "USD",
     },
+  };
+}
+
+/**
+ * Derives every operational offer field from the linked Order (the
+ * Shipment record). These are SNAPSHOTS for historical accuracy — the
+ * Order is always the authoritative value, and the MAR reference
+ * (order.shipmentNumber) is the one user-visible operational number for
+ * the entire lifecycle. Customer identity (companyName, contact
+ * numbers) is deliberately never copied: nothing here can leak it to a
+ * driver even indirectly.
+ */
+export function buildOfferFromOrder(
+  order: Pick<
+    Shipment,
+    | "id"
+    | "shipmentNumber"
+    | "loadingCountry"
+    | "loadingCity"
+    | "loadingAddress"
+    | "deliveryCountry"
+    | "deliveryCity"
+    | "deliveryAddress"
+    | "cargoDescription"
+    | "cargoWeight"
+    | "loadingDate"
+    | "freightType"
+  >
+): Pick<
+  AllianceOffer,
+  | "referenceShipmentId"
+  | "referenceShipmentNumber"
+  | "pickupCountry"
+  | "pickupCity"
+  | "deliveryCountry"
+  | "deliveryCity"
+  | "cargoDescription"
+  | "expectedLoadingDate"
+  | "loadingAddress"
+  | "deliveryAddress"
+  | "weightKg"
+  | "freightType"
+> {
+  return {
+    referenceShipmentId: order.id,
+    referenceShipmentNumber: order.shipmentNumber,
+    pickupCountry: order.loadingCountry || "",
+    pickupCity: order.loadingCity || "",
+    deliveryCountry: order.deliveryCountry || "",
+    deliveryCity: order.deliveryCity || "",
+    cargoDescription: order.cargoDescription || "",
+    expectedLoadingDate: order.loadingDate || "",
+    loadingAddress: order.loadingAddress || undefined,
+    deliveryAddress: order.deliveryAddress || undefined,
+    // Kilograms — the project's existing convention (Shipment.cargoWeight "in kg").
+    weightKg: typeof order.cargoWeight === "number" && order.cargoWeight > 0 ? order.cargoWeight : undefined,
+    freightType: order.freightType || "land",
   };
 }
 
@@ -444,6 +479,10 @@ export interface DriverOfferView {
   notes?: string;
   freightType?: string;
   distanceKm?: number;
+  loadingAddress?: string;
+  deliveryAddress?: string;
+  /** Kilograms (Shipment.cargoWeight convention). */
+  weightKg?: number;
   expiresAt?: string;
   currency: "USD";
   broadcastAt?: string;
@@ -486,6 +525,9 @@ export function buildDriverOfferView(
     notes: offer.notes,
     freightType: offer.freightType,
     distanceKm: offer.distanceKm,
+    loadingAddress: offer.loadingAddress,
+    deliveryAddress: offer.deliveryAddress,
+    weightKg: offer.weightKg,
     expiresAt: offer.expiresAt,
     currency: "USD",
     broadcastAt: offer.broadcastAt,

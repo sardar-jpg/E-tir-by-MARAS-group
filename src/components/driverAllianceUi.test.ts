@@ -143,6 +143,50 @@ describe("Admin Driver Alliance page enhancements", () => {
   });
 });
 
+describe("Order-linked quote requests (Admin)", () => {
+  const OFFERS = read("admin/DriverAllianceOffers.tsx");
+
+  it("creation starts from exactly two options: Link to Existing Order or Create New Order (the existing workflow)", () => {
+    expect(OFFERS).toContain("Link to Existing Order");
+    expect(OFFERS).toContain("Create New Order");
+    expect(OFFERS).toContain("onCreateNewOrder?.()");
+    // No second Order form: creation posts only the link + alliance settings.
+    expect(OFFERS).toContain("orderId: selectedOrder.id");
+    expect(OFFERS).not.toContain("pickupCity:");
+    expect(OFFERS).not.toContain("cargoDescription:");
+  });
+
+  it("the Order search covers MAR reference, customer, origin, and destination — eligible Orders only", () => {
+    expect(OFFERS).toContain("[s.shipmentNumber, s.companyName, s.loadingCity, s.loadingCountry, s.deliveryCity, s.deliveryCountry]");
+    expect(OFFERS).toContain("isValidMarReference(s.shipmentNumber) && !s.assignedDriverId && !isShipmentClosed(s.status, s.freightType)");
+  });
+
+  it("the pre-send preview uses the same pure matching helpers as the server, warns that the customer is hidden, and blocks zero-match sends", () => {
+    expect(OFFERS).toContain("matchDriversForOffer(");
+    expect(OFFERS).toContain("computeBusyDriverIds(shipments)");
+    expect(OFFERS).toContain("Customer / company name is never shown to drivers.");
+    expect(OFFERS).toContain("Hidden from drivers");
+    expect(OFFERS).toContain("disabled={isBusy || matchedCount === 0}");
+  });
+
+  it("AdminPanel reuses the EXISTING Create Order modal and hands the new Order back to the alliance flow", () => {
+    const PANEL = read("AdminPanel.tsx");
+    expect(PANEL).toContain("setAllianceReturnPending(true);");
+    expect(PANEL).toContain("setAlliancePreselectedOrderId(created.id);");
+    expect(PANEL).toContain("preselectedOrderId={alliancePreselectedOrderId}");
+  });
+});
+
+describe("Order fields reach the driver offer", () => {
+  it("loading address, delivery address, and weight (kg) render in the driver offer details when present — never as placeholders", () => {
+    const SCREEN = read("driver/DriverOffersScreen.tsx");
+    expect(SCREEN).toContain("{o.loadingAddress && (");
+    expect(SCREEN).toContain("{o.deliveryAddress && (");
+    expect(SCREEN).toContain('typeof o.weightKg === "number"');
+    expect(SCREEN).toContain("kg");
+  });
+});
+
 describe("Driver 'Available for Offers' switch", () => {
   it("lives on the Home screen and saves through the driver's own PUT /api/drivers/:id", () => {
     const HOME = read("driver/DriverHomeScreen.tsx");

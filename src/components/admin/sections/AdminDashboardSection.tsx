@@ -770,6 +770,7 @@ export default function AdminDashboardSection({
                         <div className="space-y-1">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-black uppercase border tracking-wider leading-none ${
                             shipment.status === 'New' ? 'bg-slate-50 text-slate-600 border-slate-200' :
+                            shipment.status === 'Waiting for Driver Quotes' ? 'bg-sky-50 text-sky-700 border-sky-200' :
                             shipment.status === 'Assigned' ? 'bg-amber-50 text-amber-700 border-amber-200' :
                             shipment.status === 'Accepted' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
                             shipment.status === 'Arrived' || shipment.status === 'Delivered' ? 'bg-green-50 text-green-800 border-green-200' :

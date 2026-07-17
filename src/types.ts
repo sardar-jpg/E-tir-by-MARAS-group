@@ -4,6 +4,13 @@ export type UserRole = 'admin' | 'driver' | 'client';
 
 export type ShipmentStatus =
   | 'New'
+  // Alliance-controlled pre-assignment stage (Land only): set automatically
+  // when a Driver Alliance quote request is broadcast for the Order, and
+  // cleared automatically (back to 'New' on cancel, forward to 'Assigned'
+  // on winner selection). Never set through the manual status controls —
+  // see shipmentStatusTransitions.ts. Occupies the same lifecycle position
+  // as 'New': not dispatched, no driver, no chat.
+  | 'Waiting for Driver Quotes'
   | 'Assigned'
   | 'Accepted'
   | 'Loading'
@@ -540,14 +547,30 @@ export interface AllianceOffer {
   /** Absolute expiry instant (broadcastAt + expiresInHours), set at broadcast. */
   expiresAt?: string;
   /**
-   * Optional existing shipment this offer is sourcing a driver for. When
-   * set, winner selection assigns THAT shipment; when absent, winner
-   * selection creates a new shipment through the same creation logic
-   * POST /api/shipments uses.
+   * THE linked MARAS Order (a Shipment record) this quote request
+   * sources a driver for. REQUIRED on every offer created since order
+   * linking (server-enforced); optional in the type only because legacy
+   * offers predate the rule (those can no longer be broadcast or win —
+   * see server.ts). Winner selection always assigns THIS order; no new
+   * shipment or operational number is ever created by the alliance.
    */
   referenceShipmentId?: string;
-  /** The reference shipment's human number, captured at creation for the admin list. */
+  /**
+   * The linked Order's MAR reference (MAR-0000-0000) — the ONE
+   * user-visible operational number for the whole lifecycle. Snapshot of
+   * the order's shipmentNumber; the Order remains authoritative.
+   */
   referenceShipmentNumber?: string;
+  /**
+   * Order-data snapshots copied at request creation for historical
+   * accuracy (the linked Order is ALWAYS the authoritative value; these
+   * exist so an offer still reads correctly if the order is later
+   * edited). Never includes customer identity.
+   */
+  loadingAddress?: string;
+  deliveryAddress?: string;
+  /** Cargo weight snapshot — kilograms, the project's existing unit convention (Shipment.cargoWeight). */
+  weightKg?: number;
   /** Phase 1 is deliberately USD-only. The server rejects anything else. */
   currency: 'USD';
   createdById: string;

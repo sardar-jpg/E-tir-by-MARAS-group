@@ -152,8 +152,9 @@ describe("getDriverNextAction — one legal forward action, no free-form list", 
 });
 
 describe("isDriverChatAvailable — shipment chat exists only after acceptance", () => {
-  it("no conversation during the pre-acceptance states: New (back with dispatch) and Assigned (awaiting accept/decline)", () => {
+  it("no conversation during the pre-acceptance states: New (Draft), Waiting for Driver Quotes (alliance sourcing), and Assigned (awaiting accept/decline)", () => {
     expect(isDriverChatAvailable("New")).toBe(false);
+    expect(isDriverChatAvailable("Waiting for Driver Quotes")).toBe(false);
     expect(isDriverChatAvailable("Assigned")).toBe(false);
   });
 
