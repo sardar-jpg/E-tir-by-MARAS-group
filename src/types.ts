@@ -31,15 +31,39 @@ export type ShipmentStatus =
 
 export type Currency = 'USD' | 'IQD' | 'TRY' | 'EUR';
 
+/**
+ * Unified Shipment Documents model — category ids.
+ *
+ * Every shipment document is one record in the shipment's `documents`
+ * collection, and `category` is nothing more than a metadata label from
+ * this list. CMR is deliberately NOT a special object anywhere in the
+ * codebase: no route, screen, or rule may branch on `=== 'cmr'`. All
+ * per-category behavior (driver read/upload direction, client
+ * visibility, public-share gating, display label) lives in ONE place —
+ * the DOCUMENT_CATEGORY_POLICIES registry in src/lib/shipmentDocuments.ts.
+ * Adding a category later = add the id here + one registry entry; no
+ * structural change anywhere else.
+ */
 export type DocumentCategory =
   | 'cmr'
-  | 'invoice'
+  | 'invoice'          // Commercial Invoice
   | 'packing_list'
-  | 'customs'
-  | 'delivery_proof'
+  | 't1'               // T1 transit declaration
+  | 'tir_carnet'       // TIR Carnet
+  | 'customs'          // Customs Document
+  | 'delivery_proof'   // Delivery Note / POD
   | 'photo'
   | 'other';
 
+/**
+ * One shipment document. Uploadable today by Admin and Driver sessions
+ * (and by future internal employee roles — the model carries plain
+ * uploader metadata, not a role enum, so no structural change is needed).
+ * The optional fields are the unified-model metadata added by the
+ * documents-architecture cleanup: they are populated on records created
+ * from now on and simply absent on older stored records (no migration —
+ * every reader treats them as optional).
+ */
 export interface ShipmentDocument {
   id: string;
   name: string;
@@ -48,6 +72,12 @@ export interface ShipmentDocument {
   uploadedBy: string;
   uploadedAt: string;
   isSharedExternally: boolean;
+  /** Owning shipment id (also implicit from the embedding shipment record). */
+  shipmentId?: string;
+  /** MIME type or file extension supplied at upload time. */
+  fileType?: string;
+  /** Optional free-text note from the uploader. */
+  notes?: string;
 }
 
 export interface LocationUpdate {

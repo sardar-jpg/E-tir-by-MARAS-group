@@ -65,6 +65,7 @@ import {
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
+import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
 import { addReaderToNotification, canMarkNotificationRead, buildDriverClientNotificationQueryScopes } from "./src/lib/notificationAccess";
 import {
@@ -5541,14 +5542,15 @@ async function startServer() {
         return res.status(403).json({ error: "You do not have permission to post to this channel." });
       }
 
-      // Driver App Simplification / CMR Read-Only Review: removing the
-      // CMR option from the driver-facing upload UI (DriverApplication.tsx,
-      // FileUploadModal.tsx) only stops the app's own UI from offering it —
-      // this endpoint can be called directly, so the same rule has to be
-      // enforced here too. A driver session may never attach a 'cmr'
-      // category file/document to chat; CMR is admin-published only.
+      // Removing an upload option from the driver-facing UI only stops the
+      // app's own UI from offering it — this endpoint can be called
+      // directly, so the category policy has to be enforced here too. A
+      // driver session may only attach categories the registry flags
+      // driverUploadable (DOCUMENT_CATEGORY_POLICIES,
+      // src/lib/shipmentDocuments.ts); admin-published categories are
+      // rejected regardless of what the client sent.
       if (req.session!.role === "driver" && !canDriverUploadDocumentCategory(fileCategory)) {
-        return res.status(403).json({ error: "Drivers cannot upload CMR documents. CMR documents must be sent by Admin." });
+        return res.status(403).json({ error: "This document category is published by MARAS Admin and cannot be uploaded by drivers." });
       }
 
       const { sender, senderName } = await resolveChatSenderIdentity(req);
@@ -5643,9 +5645,13 @@ async function startServer() {
         const docId = `doc-${Date.now()}`;
         const newDoc = {
           id: docId,
+          shipmentId,
           name: fileName || "unnamed_document.bin",
           url: fileUrl,
-          category: fileCategory || "other",
+          // Unified documents model: a recognizable category id (any
+          // case/spacing) is stored canonically; anything else files
+          // under 'other' — never an unclassifiable string.
+          category: coerceDocumentCategoryForStorage(fileCategory),
           uploadedBy: senderName || (sender === "admin" ? "Admin" : sender === "client" ? "Client" : "Driver"),
           uploadedAt: new Date().toISOString(),
           // PR #46: new documents default internal-only — an admin opts one
@@ -5802,16 +5808,18 @@ async function startServer() {
       // to Owner only; superseded by the explicit "same permissions" rule
       // covering documents/uploads).
       const shipmentId = req.params.id;
-      const { name, url, category, uploadedBy, isSharedExternally } = req.body;
+      const { name, url, category, uploadedBy, isSharedExternally, fileType, notes } = req.body;
 
-      // Driver App Simplification / CMR Read-Only Review: this route skips
-      // the chat trail and files a document directly (see the comment
-      // above), so it's the more direct of the two upload paths a driver
-      // session can reach — the same CMR-upload block as /chat applies
-      // here too. CMR is admin-published only; a driver may still view one
-      // (isDocumentVisibleToDriver), just never create one.
+      // This route skips the chat trail and files a document directly (see
+      // the comment above), so it's the more direct of the two upload paths
+      // a driver session can reach — the same category policy as /chat
+      // applies here too: only registry categories flagged driverUploadable
+      // (DOCUMENT_CATEGORY_POLICIES, src/lib/shipmentDocuments.ts) may be
+      // driver-originated. An admin-published category can still be VIEWED
+      // by the driver when its policy says so (isDocumentVisibleToDriver),
+      // just never created by one.
       if (req.session!.role === "driver" && !canDriverUploadDocumentCategory(category)) {
-        return res.status(403).json({ error: "Drivers cannot upload CMR documents. CMR documents must be sent by Admin." });
+        return res.status(403).json({ error: "This document category is published by MARAS Admin and cannot be uploaded by drivers." });
       }
 
       const sDocRef = doc(db, "shipments", shipmentId);
@@ -5824,11 +5832,20 @@ async function startServer() {
       const docId = `doc-${Date.now()}`;
       const newDoc = {
         id: docId,
+        shipmentId,
         name: name || "document.bin",
         url: url || "#",
-        category: (category as DocumentCategory) || "other",
+        // Unified documents model: a recognizable category id (any
+        // case/spacing) is stored canonically; anything else files under
+        // 'other' — never an unclassifiable string (the old unvalidated
+        // cast let arbitrary body strings straight into storage).
+        category: coerceDocumentCategoryForStorage(category),
         uploadedBy: uploadedBy || "Admin",
         uploadedAt: new Date().toISOString(),
+        // Optional unified-model metadata; omitted entirely when not
+        // provided (Firestore rejects undefined fields in array elements).
+        ...(typeof fileType === "string" && fileType.trim() ? { fileType: fileType.trim().slice(0, 120) } : {}),
+        ...(typeof notes === "string" && notes.trim() ? { notes: notes.trim().slice(0, 500) } : {}),
         // PR #46: internal-only by default — see resolveNewDocumentSharedExternally.
         isSharedExternally: resolveNewDocumentSharedExternally(isSharedExternally)
       };
