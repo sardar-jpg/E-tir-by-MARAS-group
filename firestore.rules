@@ -2,27 +2,24 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // SECURITY MODEL: only the server's own dedicated Firebase Auth account
-    // (created once, in Firebase Console > Authentication, never exposed to
-    // end users) may read or write anything. No other signed-in user, and
-    // no anonymous/unauthenticated request, can touch this database.
+    // SECURITY MODEL: deny ALL direct client access to Firestore.
     //
-    // Real authorization for *humans* (which admin can do what, which
-    // driver can see which shipment, etc.) is enforced in the Express
-    // server itself (see server.ts requireAuth/requireRole middleware) —
-    // this rule's only job is to make sure NOTHING can reach Firestore
-    // except through that server.
+    // Every legitimate read/write goes through the Express backend (server.ts)
+    // and the operational scripts (scripts/*.ts), all of which use the Firebase
+    // Admin SDK authenticating via Application Default Credentials. The Admin SDK
+    // is a trusted-server identity and BYPASSES these rules entirely, so this
+    // deny-all rule does not affect the app's own access — it only guarantees
+    // that no end-user, anonymous, or other signed-in client can read or write
+    // this database directly, even if they know a collection or document path.
     //
-    // Previously every collection here had `allow read: if true`, which
-    // meant anyone on the internet could read the entire database
-    // (including plaintext passwords) with no login at all. That hole is
-    // closed below.
-    function isServerAccount() {
-      return request.auth != null && request.auth.uid == "mQadHKcpmgbLIAwQaz8AqrAytIo2";
-    }
+    // Verified in audit/firebase-full-environment-hardening (PR #121): the repo
+    // contains ZERO firebase/firestore client-SDK usage. The web/mobile apps use
+    // firebase/auth only for identity and reach all data via the Express API.
+    // This replaces the previous single-hardcoded-UID rule, which is no longer
+    // load-bearing now that the server uses the Admin SDK.
 
     match /{document=**} {
-      allow read, write: if isServerAccount();
+      allow read, write: if false;
     }
   }
 }

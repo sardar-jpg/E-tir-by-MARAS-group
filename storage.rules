@@ -2,24 +2,23 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // Same security model as firestore.rules: only the server's own
-    // dedicated Firebase Auth account may read or write anything in
-    // Storage. End users never talk to Storage directly — every upload
-    // and every file URL goes through the Express server (see
-    // /api/upload and /api/uploads/:id in server.ts), which serves files
-    // back over HTTP after checking the requester's own session/role.
+    // SECURITY MODEL: deny ALL direct client access to Storage.
     //
-    // Without this file, a fresh Firebase project defaults to denying all
-    // Storage access, which would make every upload silently fail. This
-    // rule grants access to exactly one specific account (matching
-    // firestore.rules) rather than leaving Storage's defaults unconfigured
-    // or, worse, wide open.
-    function isServerAccount() {
-      return request.auth != null && request.auth.uid == "mQadHKcpmgbLIAwQaz8AqrAytIo2";
-    }
+    // Every upload and every file read goes through the Express backend
+    // (server.ts /api/upload and the file-serving routes), which uses the
+    // Firebase Admin SDK authenticating via Application Default Credentials. The
+    // Admin SDK is a trusted-server identity and BYPASSES these rules entirely,
+    // so this deny-all rule does not affect the app's own access — it only
+    // guarantees that no file is readable or writable directly, even by someone
+    // who knows its Firebase Storage URL.
+    //
+    // Verified in audit/firebase-full-environment-hardening (PR #121): the repo
+    // contains ZERO firebase/storage client-SDK usage. This replaces the previous
+    // single-hardcoded-UID rule, which is no longer load-bearing now that the
+    // server uses the Admin SDK.
 
     match /{allPaths=**} {
-      allow read, write: if isServerAccount();
+      allow read, write: if false;
     }
   }
 }
