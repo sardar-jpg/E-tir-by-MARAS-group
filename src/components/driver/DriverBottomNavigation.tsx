@@ -50,7 +50,7 @@ export default function DriverBottomNavigation({
   return (
     <nav
       aria-label={lang === "tr" ? "Ana gezinme" : lang === "ar" ? "التنقل الرئيسي" : "Main navigation"}
-      className="grid grid-cols-4 bg-slate-950 border-t border-slate-800 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0 select-none"
+      className="grid grid-cols-4 gap-1 px-2 bg-slate-950 border-t border-slate-800/60 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0 select-none"
     >
       {TABS.map((tab) => {
         const Icon = NAV_ICONS[tab];
@@ -76,7 +76,7 @@ export default function DriverBottomNavigation({
               )}
             </span>
             <span className={`text-[11px] leading-none ${isActive ? "font-bold" : "font-medium"}`}>{label}</span>
-            <span className={`h-1 w-8 rounded-full ${isActive ? "bg-orange-500" : "bg-transparent"}`} />
+            <span className={`h-[3px] w-6 rounded-full transition-all duration-150 ${isActive ? "bg-orange-500" : "bg-transparent"}`} />
           </button>
         );
       })}

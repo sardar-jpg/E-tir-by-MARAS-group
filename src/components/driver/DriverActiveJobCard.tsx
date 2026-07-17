@@ -1,8 +1,9 @@
-import { ArrowRight, FileText, MessageSquare, Phone } from "lucide-react";
+import { FileText, MessageSquare, Phone } from "lucide-react";
+import RouteBlock from "./RouteBlock";
 import type { Language, Shipment } from "../../types";
 import { resolveDriverAgreedAmount, resolveDriverTruckNumber } from "../../lib/driverVisibility";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
-import { BTN_SECONDARY, CARD, INNER_CARD, getStatusChipClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
+import { BTN_SECONDARY, CHIP_META, HERO_CARD, INNER_CARD, getStatusChipClasses, getStatusRailClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
 
 /**
  * feature/driver-app-comprehensive-redesign — the Home screen's active-job
@@ -66,12 +67,13 @@ export default function DriverActiveJobCard({
   const chatAvailable = isDriverChatAvailable(s.status);
 
   return (
-    <div className={`${CARD} p-4 space-y-4 shadow-[0_8px_30px_rgba(0,0,0,0.35)]`}>
-      {/* Shipment number + status */}
+    <div className={`${HERO_CARD} ${getStatusRailClasses(s.status, s.freightType)} p-5 space-y-4`}>
+      {/* Reference + status — the MAR number is quiet metadata; the
+          status chip carries the phase color the rail already signals. */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-base font-bold text-white selectable truncate">#{s.shipmentNumber}</span>
-          <span className="text-xs font-semibold text-slate-500 bg-slate-950 border border-slate-800 rounded-lg px-2 py-0.5 shrink-0">
+          <span className="text-sm font-bold text-slate-300 tabular-nums selectable truncate">#{s.shipmentNumber}</span>
+          <span className={`${CHIP_META} shrink-0`}>
             {localizeFreightType(s.freightType, lang)}
           </span>
         </div>
@@ -80,43 +82,37 @@ export default function DriverActiveJobCard({
         </span>
       </div>
 
-      {/* Route */}
-      <div className={`${INNER_CARD} p-3.5`}>
-        <div className="flex items-center gap-3">
-          <div className="flex-1 min-w-0 text-start">
-            <p className="text-xs text-slate-500 font-medium">{t.from}</p>
-            <p className="text-base font-bold text-slate-200 truncate mt-0.5">{s.loadingCity || "—"}</p>
-            <p className="text-xs text-slate-500 truncate">{s.loadingCountry}</p>
-          </div>
-          <ArrowRight className="w-5 h-5 text-orange-500 shrink-0 rtl:rotate-180" />
-          <div className="flex-1 min-w-0 text-end">
-            <p className="text-xs text-slate-500 font-medium">{t.to}</p>
-            <p className="text-base font-bold text-slate-200 truncate mt-0.5">{s.deliveryCity || "—"}</p>
-            <p className="text-xs text-slate-500 truncate">{s.deliveryCountry}</p>
-          </div>
-        </div>
-        {s.loadingDate && (
-          <p className="text-xs text-slate-500 mt-2.5 pt-2.5 border-t border-slate-800 text-start">
-            {t.loadingDate}: <span className="font-semibold text-slate-300">{s.loadingDate}</span>
-          </p>
-        )}
-      </div>
+      {/* THE route — display type, the loudest element on the card */}
+      <RouteBlock
+        size="hero"
+        fromCity={s.loadingCity}
+        fromCountry={s.loadingCountry}
+        toCity={s.deliveryCity}
+        toCountry={s.deliveryCountry}
+      />
+      {s.loadingDate && (
+        <p className="text-xs text-slate-500 text-start">
+          {t.loadingDate}: <span className="font-semibold text-slate-300 tabular-nums">{s.loadingDate}</span>
+        </p>
+      )}
 
-      {/* Payment + truck */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="bg-slate-950 rounded-2xl border border-slate-800 p-3 text-start">
-          <p className="text-xs text-slate-500 font-medium">{t.payment}</p>
+      {/* Payment (display figure) + truck plate */}
+      <div className={`${INNER_CARD} p-4 flex items-center justify-between gap-3`}>
+        <div className="min-w-0 text-start">
+          <p className="text-[11px] font-semibold text-slate-500">{t.payment}</p>
           {agreedAmount !== null ? (
-            <p className="text-lg font-bold text-orange-500 mt-0.5">
-              {agreedAmount.toLocaleString()} <span className="text-sm">{s.currency || "USD"}</span>
+            <p className="text-[26px] leading-8 font-extrabold text-white tracking-tight tabular-nums mt-0.5">
+              {agreedAmount.toLocaleString()} <span className="text-sm font-bold text-slate-400">{s.currency || "USD"}</span>
             </p>
           ) : (
-            <p className="text-base font-semibold text-slate-500 mt-0.5">—</p>
+            <p className="text-lg font-bold text-slate-600 mt-0.5">—</p>
           )}
         </div>
-        <div className="bg-slate-950 rounded-2xl border border-slate-800 p-3 text-start">
-          <p className="text-xs text-slate-500 font-medium">{t.truck}</p>
-          <p className="text-base font-bold text-slate-200 mt-1 break-all">{truckNumber || "—"}</p>
+        <div className="shrink-0 text-end">
+          <p className="text-[11px] font-semibold text-slate-500">{t.truck}</p>
+          <p className="text-sm font-bold text-slate-200 bg-slate-900 border border-slate-700/60 rounded-lg px-2.5 py-1 mt-1 tabular-nums break-all">
+            {truckNumber || "—"}
+          </p>
         </div>
       </div>
 
@@ -128,7 +124,7 @@ export default function DriverActiveJobCard({
             onClick={onOpenChat}
             className={BTN_SECONDARY}
           >
-            <MessageSquare className="w-4 h-4 text-orange-500 shrink-0" />
+            <MessageSquare className="w-5 h-5 text-slate-400 shrink-0" />
             <span>{t.chat}</span>
           </button>
         )}
@@ -137,7 +133,7 @@ export default function DriverActiveJobCard({
           onClick={onOpenDetails}
           className={BTN_SECONDARY}
         >
-          <FileText className="w-4 h-4 text-orange-500 shrink-0" />
+          <FileText className="w-5 h-5 text-slate-400 shrink-0" />
           <span>{t.details}</span>
         </button>
         {callContact && (
@@ -145,7 +141,7 @@ export default function DriverActiveJobCard({
             href={`tel:${callContact}`}
             className={BTN_SECONDARY}
           >
-            <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
+            <Phone className="w-5 h-5 text-emerald-400 shrink-0" />
             <span>{t.call}</span>
           </a>
         )}

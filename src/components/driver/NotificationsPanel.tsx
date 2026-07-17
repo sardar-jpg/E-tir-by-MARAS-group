@@ -31,7 +31,7 @@ export default function NotificationsPanel({ notifications, lang, title, onBack,
         <h3 className="font-bold text-slate-200 text-base text-start">{title}</h3>
         <button
           onClick={onBack}
-          className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 text-sm text-slate-300 hover:text-white font-bold bg-slate-900 border border-slate-800 rounded-2xl cursor-pointer"
+          className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 text-sm text-slate-300 hover:text-white font-bold bg-slate-900 border border-slate-800/60 rounded-2xl cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4 rtl:rotate-180" />
           <span>{t.back}</span>

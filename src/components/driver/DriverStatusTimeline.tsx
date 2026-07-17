@@ -36,7 +36,7 @@ export default function DriverStatusTimeline({ shipment, lang }: DriverStatusTim
               <span
                 className={`w-7 h-7 rounded-full border-2 flex items-center justify-center shrink-0 text-[11px] font-bold ${
                   isCurrent
-                    ? "bg-orange-500 border-orange-500 text-white light-preserve"
+                    ? "bg-sky-400 border-sky-400 text-slate-950 light-preserve"
                     : isDone
                     ? "bg-emerald-500/15 border-emerald-500/60 text-emerald-400"
                     : "bg-slate-950 border-slate-700 text-slate-600"
@@ -52,7 +52,7 @@ export default function DriverStatusTimeline({ shipment, lang }: DriverStatusTim
               <p
                 className={`text-sm leading-7 ${
                   isCurrent
-                    ? "font-bold text-orange-500"
+                    ? "font-bold text-sky-400"
                     : isDone
                     ? "font-semibold text-slate-300"
                     : "font-medium text-slate-600"

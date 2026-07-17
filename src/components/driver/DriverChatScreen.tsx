@@ -207,8 +207,8 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                 onClick={() => onSelectJob(job)}
                 className={`relative shrink-0 px-3 min-h-[44px] rounded-2xl border text-sm font-bold transition-colors cursor-pointer ${
                   isActive
-                    ? "bg-orange-500/10 border-orange-500/50 text-orange-400"
-                    : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-600"
+                    ? "bg-slate-800 border-slate-600 text-white"
+                    : "bg-slate-900 border-slate-800/60 text-slate-400 hover:border-slate-600"
                 }`}
               >
                 #{job.shipmentNumber}
@@ -280,14 +280,14 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                 </div>
               )}
               <div className={`flex flex-col max-w-[85%] ${isMe ? "ms-auto items-end" : "me-auto items-start"}`}>
-                <span className={`text-xs font-semibold mb-1 ${isMe ? "text-slate-500" : "text-orange-400"}`}>
+                <span className={`text-xs font-semibold mb-1 ${isMe ? "text-slate-500" : "text-slate-400"}`}>
                   {isMe ? t.you : `${t.maras} · ${msg.senderName}`}
                 </span>
                 <div
                   className={`p-3 rounded-2xl text-sm leading-relaxed break-words max-w-full ${
                     isMe
-                      ? "bg-orange-600 text-white rounded-se-none light-preserve"
-                      : "bg-slate-900 border border-slate-800 text-slate-200 rounded-ss-none"
+                      ? "bg-orange-600 text-white rounded-se-md light-preserve"
+                      : "bg-slate-900 border border-slate-800/50 text-slate-200 rounded-ss-md"
                   }`}
                 >
                   {msg.type === "file" ? (
@@ -299,7 +299,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                         download={msg.fileName || "document"}
                         className="font-bold underline cursor-pointer flex items-center gap-1.5 break-all"
                       >
-                        <FileText className={`w-4 h-4 shrink-0 ${isMe ? "text-white" : "text-orange-400"}`} />
+                        <FileText className={`w-4 h-4 shrink-0 ${isMe ? "text-white" : "text-slate-300"}`} />
                         <span>{msg.fileName}</span>
                       </a>
                       {((msg.fileCategory === "photo" || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)/i)) && msg.fileUrl && msg.fileUrl !== "#") && (
