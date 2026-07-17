@@ -66,6 +66,7 @@ import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canVi
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
+import { isDriverChatAvailable } from "./src/lib/driverJobFlow";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
 import { addReaderToNotification, canMarkNotificationRead, buildDriverClientNotificationQueryScopes } from "./src/lib/notificationAccess";
 import {
@@ -1904,6 +1905,8 @@ import {
   canSubmitResponse,
   allianceResponseId,
   buildDriverOfferView,
+  buildOfferFromOrder,
+  isValidMarReference,
   computeOfferExpiresAt,
   isOfferExpired,
   resolveOfferStatus,
@@ -5553,6 +5556,15 @@ async function startServer() {
         return res.status(403).json({ error: "This document category is published by MARAS Admin and cannot be uploaded by drivers." });
       }
 
+      // Shipment-chat lifecycle (server-side): the conversation exists
+      // for the DRIVER only after they accept the assigned job — the
+      // same isDriverChatAvailable rule the app uses. Admin/client
+      // posting is unaffected; the closing-status read-only lock below
+      // stays the other end of the lifecycle.
+      if (req.session!.role === "driver" && req.shipment && !isDriverChatAvailable(req.shipment.status)) {
+        return res.status(403).json({ error: "Shipment chat becomes available after you accept the assigned job." });
+      }
+
       const { sender, senderName } = await resolveChatSenderIdentity(req);
 
       // BUG-03: which audience (driver_admin, client_admin, or
@@ -7889,27 +7901,37 @@ async function startServer() {
   app.post("/api/alliance/offers", requireFullAdmin, async (req, res) => {
     try {
       const input = validateAllianceOfferInput(req.body);
-      if (!input.ok || !input.offer) {
+      if (!input.ok || !input.input) {
         return res.status(400).json({ error: input.error });
       }
-      let referenceShipmentNumber: string | undefined;
-      if (input.offer.referenceShipmentId) {
-        const shipSnap = await getDoc(doc(db, "shipments", input.offer.referenceShipmentId));
-        if (!shipSnap.exists()) {
-          return res.status(400).json({ error: "Reference shipment not found." });
-        }
-        const ship = shipSnap.data() as Shipment;
-        if (ship.assignedDriverId) {
-          return res.status(400).json({ error: "The reference shipment already has an assigned driver." });
-        }
-        referenceShipmentNumber = ship.shipmentNumber;
+      // Order-linking rule: EVERY quote request belongs to exactly one
+      // existing MARAS Order (a Shipment record) carrying the one
+      // official MAR reference. The Order is the source of truth — all
+      // operational fields below are derived from it, never typed into
+      // the alliance separately. No alliance action ever mints a number.
+      const orderSnap = await getDoc(doc(db, "shipments", input.input.orderId));
+      if (!orderSnap.exists()) {
+        return res.status(400).json({ error: "Linked Order not found. Select an existing Order or create one first." });
+      }
+      const order = orderSnap.data() as Shipment;
+      if (!isValidMarReference(order.shipmentNumber)) {
+        return res.status(400).json({ error: "The linked Order has no valid MAR reference." });
+      }
+      if (order.assignedDriverId) {
+        return res.status(400).json({ error: "The linked Order already has an assigned driver." });
+      }
+      if (isShipmentClosed(order.status, order.freightType)) {
+        return res.status(400).json({ error: "The linked Order is already closed." });
       }
       const nowIso = new Date().toISOString();
       const offer: AllianceOffer = {
         id: `aoffer-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
         status: "draft",
-        ...input.offer,
-        referenceShipmentNumber,
+        truckType: input.input.truckType,
+        expiresInHours: input.input.expiresInHours,
+        notes: input.input.notes,
+        currency: input.input.currency,
+        ...buildOfferFromOrder(order),
         createdById: req.session!.id,
         createdByName: allianceActorName(req),
         createdAt: nowIso,
@@ -8015,6 +8037,12 @@ async function startServer() {
       const shipmentsSnap = await getDocs(collection(db, "shipments"));
       const busyDriverIds = computeBusyDriverIds(shipmentsSnap.docs.map((d: any) => d.data() as Shipment));
       const matched = matchDriversForOffer(drivers, offer, busyDriverIds);
+      if (matched.length === 0) {
+        return res.status(409).json({
+          code: "NO_MATCHING_DRIVERS",
+          error: "No available drivers match this Order's route and truck type. Adjust driver routes/availability and try again.",
+        });
+      }
 
       const nowIso = new Date().toISOString();
       const updatedOffer: AllianceOffer = {
@@ -8208,73 +8236,63 @@ async function startServer() {
       if (!driverSnap.exists()) return res.status(400).json({ error: "Driver not found." });
       const driver = driverSnap.data() as Driver;
 
-      let shipmentId: string;
-      let shipmentNumber: string;
-      if (offer.referenceShipmentId) {
-        // Assign the existing referenced shipment through the same lock +
-        // narrow-update machinery every other assignment uses.
-        const refSnap = await getDoc(doc(db, "shipments", offer.referenceShipmentId));
-        if (!refSnap.exists()) return res.status(400).json({ error: "Reference shipment not found." });
-        const refShipment = refSnap.data() as Shipment;
-        if (refShipment.assignedDriverId && refShipment.assignedDriverId !== driverId) {
-          return res.status(409).json({ error: "The reference shipment already has an assigned driver." });
-        }
-        await claimDriverActiveJob(driverId, refShipment.id);
-        const updated = await applyNarrowShipmentUpdate(refShipment.id, (current) => ({
-          ...current,
-          assignedDriverId: driverId,
-          assignedDriverName: driver.name,
-          truckNumber: driver.truckNumber || current.truckNumber,
-          agreedAmount: response.priceUsd!,
-          currency: "USD",
-          status: current.status === "New" ? "Assigned" : current.status,
-          timeline: [
-            ...current.timeline,
-            {
-              timestamp: new Date().toISOString(),
-              status: current.status === "New" ? ("Assigned" as ShipmentStatus) : current.status,
-              labelEn: "Driver Assigned",
-              labelTr: "Sürücü Atandı",
-              labelAr: "تم تعيين السائق",
-              detailsEn: `Assigned to driver ${driver.name} via Driver Alliance offer.`,
-              detailsTr: `Driver Alliance teklifi ile ${driver.name} sürücüsüne atandı.`,
-              detailsAr: `تم التعيين للسائق ${driver.name} عبر عرض تحالف السائقين.`,
-            },
-          ],
-          updatedAt: new Date().toISOString(),
-        }));
-        shipmentId = updated.id;
-        shipmentNumber = updated.shipmentNumber;
-        await pushNotification(
-          shipmentId,
-          shipmentNumber,
-          "assignment",
-          "New Assigned Shipment",
-          "Yeni Atanmış Sevkiyat",
-          "شحنة جديدة معينة",
-          `You have been assigned shipment ${shipmentNumber}.`,
-          `Size ${shipmentNumber} numaralı sevkiyat atandı.`,
-          `تم تعيين الشحنة ${shipmentNumber} لك.`
-        );
-      } else {
-        const created = await createShipmentRecord({
-          companyName: "",
-          loadingCountry: offer.pickupCountry,
-          loadingCity: offer.pickupCity,
-          deliveryCountry: offer.deliveryCountry,
-          deliveryCity: offer.deliveryCity,
-          cargoDescription: offer.cargoDescription,
-          loadingDate: offer.expectedLoadingDate,
-          truckNumber: driver.truckNumber || "",
-          assignedDriverId: driverId,
-          agreedAmount: response.priceUsd,
-          currency: "USD",
-          freightType: "land",
-          internalNotes: `Created from Driver Alliance offer ${offer.id}.${offer.notes ? ` Offer notes: ${offer.notes}` : ""}`,
+      // Single-MAR rule: winner selection ALWAYS updates the linked
+      // Order (assignedDriver, agreed USD amount, truck, timeline) via
+      // the same lock + narrow-update machinery every other assignment
+      // uses. It never creates a shipment and never allocates a number —
+      // the Order's existing MAR reference stays the one operational
+      // reference through selection, acceptance, and delivery. Legacy
+      // offers created before order linking carry no Order and can no
+      // longer produce a winner (history stays readable; cancel works).
+      if (!offer.referenceShipmentId) {
+        return res.status(409).json({
+          code: "LEGACY_OFFER_UNLINKED",
+          error: "This request predates Order linking and has no linked Order. Create a new quote request from an Order instead.",
         });
-        shipmentId = created.id;
-        shipmentNumber = created.shipmentNumber;
       }
+      const refSnap = await getDoc(doc(db, "shipments", offer.referenceShipmentId));
+      if (!refSnap.exists()) return res.status(400).json({ error: "Linked Order not found." });
+      const refShipment = refSnap.data() as Shipment;
+      if (refShipment.assignedDriverId && refShipment.assignedDriverId !== driverId) {
+        return res.status(409).json({ error: "The linked Order already has an assigned driver." });
+      }
+      await claimDriverActiveJob(driverId, refShipment.id);
+      const updated = await applyNarrowShipmentUpdate(refShipment.id, (current) => ({
+        ...current,
+        assignedDriverId: driverId,
+        assignedDriverName: driver.name,
+        truckNumber: driver.truckNumber || current.truckNumber,
+        agreedAmount: response.priceUsd!,
+        currency: "USD",
+        status: current.status === "New" ? "Assigned" : current.status,
+        timeline: [
+          ...current.timeline,
+          {
+            timestamp: new Date().toISOString(),
+            status: current.status === "New" ? ("Assigned" as ShipmentStatus) : current.status,
+            labelEn: "Driver Assigned",
+            labelTr: "Sürücü Atandı",
+            labelAr: "تم تعيين السائق",
+            detailsEn: `Assigned to driver ${driver.name} via Driver Alliance quote request.`,
+            detailsTr: `Driver Alliance fiyat talebi ile ${driver.name} sürücüsüne atandı.`,
+            detailsAr: `تم التعيين للسائق ${driver.name} عبر طلب تسعير تحالف السائقين.`,
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      }));
+      const shipmentId = updated.id;
+      const shipmentNumber = updated.shipmentNumber;
+      await pushNotification(
+        shipmentId,
+        shipmentNumber,
+        "assignment",
+        "New Assigned Shipment",
+        "Yeni Atanmış Sevkiyat",
+        "شحنة جديدة معينة",
+        `You have been assigned shipment ${shipmentNumber}.`,
+        `Size ${shipmentNumber} numaralı sevkiyat atandı.`,
+        `تم تعيين الشحنة ${shipmentNumber} لك.`
+      );
 
       const nowIso = new Date().toISOString();
       const updatedOffer: AllianceOffer = {

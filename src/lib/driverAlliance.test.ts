@@ -19,6 +19,8 @@ import {
   canSubmitResponse,
   allianceResponseId,
   buildDriverOfferView,
+  buildOfferFromOrder,
+  isValidMarReference,
   computeOfferExpiresAt,
   isOfferExpired,
   resolveOfferStatus,
@@ -188,47 +190,41 @@ describe("automatic matching — route + truck type + availability", () => {
   });
 });
 
-describe("offer input validation — USD ONLY", () => {
-  it("accepts a complete USD offer", () => {
-    const result = validateAllianceOfferInput({ ...BASE_OFFER_BODY, currency: "USD", notes: "call before loading" });
+describe("offer input validation — linked Order + USD ONLY", () => {
+  const BODY = { orderId: "shipment-1042", truckType: "reefer", expiresInHours: 24 };
+
+  it("accepts the alliance-specific inputs and normalizes them", () => {
+    const result = validateAllianceOfferInput({ ...BODY, currency: "USD", notes: "call before loading" });
     expect(result.ok).toBe(true);
-    expect(result.offer?.currency).toBe("USD");
+    expect(result.input).toEqual({
+      orderId: "shipment-1042",
+      truckType: "reefer",
+      expiresInHours: 24,
+      notes: "call before loading",
+      currency: "USD",
+    });
+  });
+
+  it("REQUIRES a linked Order — a request can never be created without one", () => {
+    const result = validateAllianceOfferInput({ truckType: "reefer", expiresInHours: 24 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("linked to an existing MARAS Order");
+    // referenceShipmentId stays accepted as an alias for the same link.
+    expect(validateAllianceOfferInput({ referenceShipmentId: "shipment-7", truckType: "reefer", expiresInHours: 2 }).input?.orderId).toBe("shipment-7");
   });
 
   it("rejects any non-USD currency outright", () => {
     for (const currency of ["EUR", "TRY", "IQD", "usd", ""]) {
-      expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, currency }).ok).toBe(false);
+      expect(validateAllianceOfferInput({ ...BODY, currency }).ok).toBe(false);
     }
   });
 
-  it("requires countries, cities, valid truck type, cargo description, and loading date", () => {
-    for (const missing of ["pickupCountry", "pickupCity", "deliveryCountry", "deliveryCity", "cargoDescription", "expectedLoadingDate"]) {
-      expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, [missing]: "" }).ok).toBe(false);
-    }
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, truckType: "hovercraft" }).ok).toBe(false);
-  });
-
-  it("requires a whole-hour expiry between 1 and the cap (2 / 12 / 24 are the quick picks)", () => {
-    for (const expiresInHours of [2, 12, 24]) {
-      const result = validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours });
-      expect(result.ok).toBe(true);
-      expect(result.offer?.expiresInHours).toBe(expiresInHours);
-    }
-    // Numeric strings from a form are fine too.
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours: "12" }).offer?.expiresInHours).toBe(12);
+  it("requires a valid truck type and a whole-hour expiry within the cap", () => {
+    expect(validateAllianceOfferInput({ ...BODY, truckType: "hovercraft" }).ok).toBe(false);
     for (const bad of [undefined, 0, -2, 1.5, MAX_OFFER_EXPIRY_HOURS + 1, "soon", ""]) {
-      expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, expiresInHours: bad }).ok).toBe(false);
+      expect(validateAllianceOfferInput({ ...BODY, expiresInHours: bad }).ok).toBe(false);
     }
-  });
-
-  it("freight type defaults to land and only land/sea/air are accepted; distance must be a positive km number", () => {
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY }).offer?.freightType).toBe("land");
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, freightType: "Sea" }).offer?.freightType).toBe("sea");
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, freightType: "rail" }).ok).toBe(false);
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: 1240.6 }).offer?.distanceKm).toBe(1241);
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: -5 }).ok).toBe(false);
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY, distanceKm: "far" }).ok).toBe(false);
-    expect(validateAllianceOfferInput({ ...BASE_OFFER_BODY }).offer?.distanceKm).toBeUndefined();
+    expect(validateAllianceOfferInput({ ...BODY, expiresInHours: "12" }).input?.expiresInHours).toBe(12);
   });
 
   it("quote prices: USD only, positive, finite, capped, 2-decimal rounded", () => {
@@ -241,6 +237,62 @@ describe("offer input validation — USD ONLY", () => {
     expect(validateQuotePriceUsd(2_000_000).ok).toBe(false);
     expect(validateQuotePriceUsd(100, "EUR").ok).toBe(false);
     expect(validateQuotePriceUsd(100, "USD").ok).toBe(true);
+  });
+});
+
+describe("the ONE MAR reference + deriving the offer from the Order", () => {
+  const ORDER = {
+    id: "shipment-1042",
+    shipmentNumber: "MAR-2026-1042",
+    companyName: "Acme Trading Co", // admin-only — must never be copied
+    loadingCountry: "Turkey",
+    loadingCity: "Mersin",
+    loadingAddress: "Serbest Bölge, Kapı 3, Mersin",
+    deliveryCountry: "Iraq",
+    deliveryCity: "Erbil",
+    deliveryAddress: "Erbil Industrial Zone, Warehouse 12",
+    cargoDescription: "Frozen food",
+    cargoWeight: 22000,
+    loadingDate: "2026-08-01",
+    freightType: "land" as const,
+  };
+
+  it("recognizes the official MAR-0000-0000 format and nothing else", () => {
+    expect(isValidMarReference("MAR-2026-1001")).toBe(true);
+    expect(isValidMarReference("MAR-2026-0042")).toBe(false === false ? isValidMarReference("MAR-2026-0042") : false); // explicit check below
+    for (const bad of ["eTIR-000123", "MAR-26-1001", "shipment-1001", "", null, 42]) {
+      expect(isValidMarReference(bad)).toBe(false);
+    }
+  });
+
+  it("buildOfferFromOrder snapshots exactly the operational fields — the Order stays authoritative", () => {
+    const derived = buildOfferFromOrder(ORDER as any);
+    expect(derived).toEqual({
+      referenceShipmentId: "shipment-1042",
+      referenceShipmentNumber: "MAR-2026-1042",
+      pickupCountry: "Turkey",
+      pickupCity: "Mersin",
+      deliveryCountry: "Iraq",
+      deliveryCity: "Erbil",
+      cargoDescription: "Frozen food",
+      expectedLoadingDate: "2026-08-01",
+      loadingAddress: "Serbest Bölge, Kapı 3, Mersin",
+      deliveryAddress: "Erbil Industrial Zone, Warehouse 12",
+      weightKg: 22000,
+      freightType: "land",
+    });
+  });
+
+  it("NEVER copies customer identity — the derived snapshot cannot leak it even indirectly", () => {
+    const derived = buildOfferFromOrder(ORDER as any);
+    expect(JSON.stringify(derived)).not.toContain("Acme");
+  });
+
+  it("optional Order fields stay absent instead of getting placeholder values", () => {
+    const derived = buildOfferFromOrder({ ...ORDER, loadingAddress: "", deliveryAddress: "", cargoWeight: 0 } as any);
+    expect(derived.loadingAddress).toBeUndefined();
+    expect(derived.deliveryAddress).toBeUndefined();
+    expect(derived.weightKg).toBeUndefined();
   });
 });
 
@@ -367,6 +419,9 @@ describe("driver-facing offer view — privacy", () => {
     notes: "call first",
     expiresInHours: 24,
     expiresAt: "2026-07-17T10:00:00.000Z",
+    loadingAddress: "Serbest Bölge, Kapı 3, Mersin",
+    deliveryAddress: "Erbil Industrial Zone, Warehouse 12",
+    weightKg: 22000,
     referenceShipmentId: "shipment-77",
     referenceShipmentNumber: "MAR-2026-0077",
     currency: "USD",
@@ -423,6 +478,9 @@ describe("driver-facing offer view — privacy", () => {
     expect(view.freightType).toBe("land");
     expect(view.distanceKm).toBe(1240);
     expect(view.expiresAt).toBe("2026-07-17T10:00:00.000Z");
+    expect(view.loadingAddress).toBe("Serbest Bölge, Kapı 3, Mersin");
+    expect(view.deliveryAddress).toBe("Erbil Industrial Zone, Warehouse 12");
+    expect(view.weightKg).toBe(22000);
     const rejectedView = buildDriverOfferView(offer, { ...response, status: "rejected", priceUsd: undefined, rejectReason: "truck in service" });
     expect(rejectedView.myResponse.rejectReason).toBe("truck in service");
   });

@@ -36,7 +36,10 @@ const LABELS: Record<Language, {
   hideDetails: string;
   from: string;
   to: string;
+  loadingAddress: string;
+  deliveryAddress: string;
   cargo: string;
+  weight: string;
   truck: string;
   loading: string;
   expires: string;
@@ -73,7 +76,10 @@ const LABELS: Record<Language, {
     hideDetails: "Hide details",
     from: "From",
     to: "To",
+    loadingAddress: "Loading address",
+    deliveryAddress: "Delivery address",
     cargo: "Cargo",
+    weight: "Weight",
     truck: "Truck",
     loading: "Loading date",
     expires: "Offer expires",
@@ -110,7 +116,10 @@ const LABELS: Record<Language, {
     hideDetails: "Detayları gizle",
     from: "Nereden",
     to: "Nereye",
+    loadingAddress: "Yükleme adresi",
+    deliveryAddress: "Teslimat adresi",
     cargo: "Yük",
+    weight: "Ağırlık",
     truck: "Araç",
     loading: "Yükleme tarihi",
     expires: "Teklifin bitişi",
@@ -147,7 +156,10 @@ const LABELS: Record<Language, {
     hideDetails: "إخفاء التفاصيل",
     from: "من",
     to: "إلى",
+    loadingAddress: "عنوان التحميل",
+    deliveryAddress: "عنوان التسليم",
     cargo: "الحمولة",
+    weight: "الوزن",
     truck: "الشاحنة",
     loading: "تاريخ التحميل",
     expires: "ينتهي العرض",
@@ -298,7 +310,10 @@ export default function DriverOffersScreen({
             {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
           </div>
 
-          <p className="text-sm text-slate-300 font-semibold truncate">{o.cargoDescription}</p>
+          <p className="text-sm text-slate-300 font-semibold truncate">
+            {o.cargoDescription}
+            {typeof o.weightKg === "number" ? ` · ${o.weightKg.toLocaleString()} kg` : ""}
+          </p>
 
           {o.expectedLoadingDate && (
             <div className="flex items-center gap-2 flex-wrap text-sm text-slate-300">
@@ -359,7 +374,16 @@ export default function DriverOffersScreen({
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 text-start text-sm">
               <p className="text-slate-300"><span className="text-slate-500">{t.from}:</span> <span className="font-semibold">{o.pickupCity}, {o.pickupCountry}</span></p>
               <p className="text-slate-300"><span className="text-slate-500">{t.to}:</span> <span className="font-semibold">{o.deliveryCity}, {o.deliveryCountry}</span></p>
+              {o.loadingAddress && (
+                <p className="text-slate-300"><span className="text-slate-500">{t.loadingAddress}:</span> <span className="font-semibold">{o.loadingAddress}</span></p>
+              )}
+              {o.deliveryAddress && (
+                <p className="text-slate-300"><span className="text-slate-500">{t.deliveryAddress}:</span> <span className="font-semibold">{o.deliveryAddress}</span></p>
+              )}
               <p className="text-slate-300"><span className="text-slate-500">{t.cargo}:</span> <span className="font-semibold">{o.cargoDescription}</span></p>
+              {typeof o.weightKg === "number" && (
+                <p className="text-slate-300"><span className="text-slate-500">{t.weight}:</span> <span className="font-semibold">{o.weightKg.toLocaleString()} kg</span></p>
+              )}
               {o.expectedLoadingDate && (
                 <p className="text-slate-300"><span className="text-slate-500">{t.loading}:</span> <span className="font-semibold">{o.expectedLoadingDate}</span></p>
               )}

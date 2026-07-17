@@ -1196,6 +1196,12 @@ MARAS Group etir Center`;
 
   // Form states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  // Driver Alliance order linking: when Create Order was opened FROM the
+  // alliance flow, hand the freshly created Order's id back so the
+  // alliance auto-selects it and continues — one Order, one MAR
+  // reference, generated once by the existing workflow.
+  const [allianceReturnPending, setAllianceReturnPending] = useState(false);
+  const [alliancePreselectedOrderId, setAlliancePreselectedOrderId] = useState<string | null>(null);
   // fix/prevent-duplicate-shipment-creation: in-flight guard for
   // handleCreateShipment — a double-click, repeated Enter, or repeated
   // submit event must never fire more than one POST /api/shipments.
@@ -3418,11 +3424,16 @@ MARAS Group etir Center`;
         body: JSON.stringify(payload)
       });
       if (res.ok) {
+        const created = await res.json().catch(() => null);
         setIsCreateOpen(false);
         setNewShipmentData(createEmptyShipmentForm());
         setUseCustomPOL(false);
         setUseCustomPOD(false);
         triggerToast(t('createSuccess'));
+        if (allianceReturnPending && created?.id) {
+          setAlliancePreselectedOrderId(created.id);
+        }
+        setAllianceReturnPending(false);
         fetchData();
       } else {
         let msg = "Failed to create shipment.";
@@ -4996,7 +5007,19 @@ MARAS Group etir Center`;
       {activeTab === 'drivers' && canViewDriverRoster(resolvedAdminType) && (
         <div className="space-y-6">
           {canManageAllianceUi && (
-            <DriverAllianceOffers adminName={adminEmail || "Operations"} onChanged={() => fetchData()} />
+            <DriverAllianceOffers
+              adminName={adminEmail || "Operations"}
+              onChanged={() => fetchData()}
+              shipments={shipments}
+              drivers={drivers}
+              onCreateNewOrder={() => {
+                setAllianceReturnPending(true);
+                setNewShipmentData(createEmptyShipmentForm());
+                setIsCreateOpen(true);
+              }}
+              preselectedOrderId={alliancePreselectedOrderId}
+              onPreselectedConsumed={() => setAlliancePreselectedOrderId(null)}
+            />
           )}
           {drivers.some(d => d.status === "pending") && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">

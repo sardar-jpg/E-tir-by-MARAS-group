@@ -81,7 +81,6 @@ describe("one-active-job rule — claim on every assignment path, release at the
     expect(region('app.put("/api/shipments/:id", requireFullAdmin', 40000)).toContain("await claimDriverActiveJob(newDriverId, req.params.id);");
     const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
     expect(winner).toContain("await claimDriverActiveJob(driverId, refShipment.id);");
-    expect(winner).toContain("await createShipmentRecord({");
   });
 
   it("a busy driver yields 409 DRIVER_BUSY on every path — never a silent success", () => {
@@ -234,12 +233,32 @@ describe("storage & workflow reuse", () => {
     }
   });
 
-  it("winner selection reuses the EXISTING shipment workflow — the extracted createShipmentRecord and applyNarrowShipmentUpdate — never a parallel shipment writer", () => {
-    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 7000);
-    expect(winner).toContain("createShipmentRecord({");
+  it("winner selection ALWAYS updates the linked Order — it never creates a shipment and never allocates a number (single MAR reference for the whole lifecycle)", () => {
+    const winner = region('app.post("/api/alliance/offers/:id/select-winner"', 8000);
     expect(winner).toContain("applyNarrowShipmentUpdate(refShipment.id");
-    // No shipment-number allocation outside the shared creation path.
+    expect(winner).not.toContain("createShipmentRecord(");
     expect(winner).not.toContain("allocateNextShipmentSequence");
+    // Legacy offers without a linked Order can no longer produce a winner.
+    expect(winner).toContain('"LEGACY_OFFER_UNLINKED"');
+  });
+
+  it("offer creation REQUIRES a linked, MAR-numbered, unassigned, open Order and derives every operational field from it", () => {
+    const create = region('app.post("/api/alliance/offers", requireFullAdmin', 3500);
+    expect(create).toContain("isValidMarReference(order.shipmentNumber)");
+    expect(create).toContain("order.assignedDriverId");
+    expect(create).toContain("isShipmentClosed(order.status, order.freightType)");
+    expect(create).toContain("...buildOfferFromOrder(order)");
+  });
+
+  it("broadcast refuses to send with zero matched drivers", () => {
+    const broadcast = region('app.post("/api/alliance/offers/:id/broadcast"', 4000);
+    expect(broadcast).toContain('"NO_MATCHING_DRIVERS"');
+  });
+
+  it("driver chat posting is rejected server-side before job acceptance (the same isDriverChatAvailable rule the app uses)", () => {
+    const chat = region('app.post("/api/shipments/:id/chat"', 4000);
+    expect(chat).toContain("!isDriverChatAvailable(req.shipment.status)");
+    expect(chat).toContain("Shipment chat becomes available after you accept the assigned job.");
   });
 
   it("POST /api/shipments itself now delegates to the same extracted creator (single source of creation logic)", () => {
