@@ -15,8 +15,13 @@ const DriverApplication = lazy(() => import("./components/DriverApplication"));
 const ClientDashboard = lazy(() => import("./components/ClientDashboard"));
 import PublicTracking from "./components/PublicTracking";
 import LoginPage from "./components/LoginPage";
-import PrivacyPolicyModal from "./components/PrivacyPolicyModal";
-import TermsModal from "./components/TermsModal";
+// Perf: the two legal modals are the only consumers of the motion
+// animation stack — loading them lazily keeps that entire library out of
+// the initial entry chunk. They stay mounted exactly as before (the
+// chunk simply arrives asynchronously right after startup), so open/close
+// behavior, exit animations, and visuals are unchanged.
+const PrivacyPolicyModal = lazy(() => import("./components/PrivacyPolicyModal"));
+const TermsModal = lazy(() => import("./components/TermsModal"));
 import { auth, googleSignIn, logoutGoogle, initAuth } from "./googleAuth";
 import { Ship, Globe, X, Send, Paperclip, FileUp, LogOut, Check, CheckCheck, FolderArchive, Image as ImageIcon, FileText } from "lucide-react";
 import { apiFetch } from "./lib/api";
@@ -980,8 +985,10 @@ export default function App() {
     return (
       <>
         <PublicTracking lang={lang} tokenFromUrl={urlToken} onViewPrivacy={() => setIsPrivacyOpen(true)} onViewTerms={() => setIsTermsOpen(true)} isMobile={false} />
-        <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
-        <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+        <Suspense fallback={null}>
+          <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
+          <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+        </Suspense>
       </>
     );
   }
@@ -1030,8 +1037,10 @@ export default function App() {
           onViewTerms={() => setIsTermsOpen(true)}
         />
 
-        <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
-        <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+        <Suspense fallback={null}>
+          <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
+          <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+        </Suspense>
       </>
     );
   }
@@ -1664,8 +1673,10 @@ export default function App() {
         </div>
       </footer>
 
-      <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
-      <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+      <Suspense fallback={null}>
+        <PrivacyPolicyModal isOpen={isPrivacyOpen} onClose={() => setIsPrivacyOpen(false)} lang={lang} />
+        <TermsModal isOpen={isTermsOpen} onClose={() => setIsTermsOpen(false)} lang={lang} />
+      </Suspense>
 
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-[200] max-w-sm bg-slate-900 border border-slate-700/80 p-4 rounded-2xl shadow-[0_20px_40px_-5px_rgba(0,0,0,0.5)] flex items-center gap-3 animate-slide-in text-white text-xs font-bold leading-normal">
