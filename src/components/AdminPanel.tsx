@@ -42,7 +42,7 @@ import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmo
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
-import { formatUnreadBadge } from "../lib/chatUnreadAccess";
+import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
@@ -255,6 +255,12 @@ interface AdminPanelProps {
   // client_admin message/notification lands on the right audience's
   // thread instead of defaulting to driver_admin.
   onSelectShipmentChat: (shipment: Shipment, channel?: ChatChannel) => void;
+  /** fix/admin-mobile-chat-correctness: App.tsx's chat drawer publishes a
+      monotonic event here every time the server CONFIRMS one of its seen
+      calls, so this panel can drop that shipment+channel from
+      unreadChatMessages immediately — the drawer used to tell nobody and
+      every badge stayed stale until the next ~12s poll. */
+  chatSeenEvent?: { shipmentId: string; channel: ChatChannel; seq: number } | null;
   openDetailsId: string | null;
   setOpenDetailsId: (id: string | null) => void;
   gmailUser?: any;
@@ -281,6 +287,7 @@ interface AdminPanelProps {
 export default function AdminPanel({
   lang,
   onSelectShipmentChat,
+  chatSeenEvent = null,
   openDetailsId,
   setOpenDetailsId,
   gmailUser = null,
@@ -330,6 +337,26 @@ export default function AdminPanel({
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
+  // fix/admin-mobile-chat-correctness: every server-CONFIRMED seen scope
+  // this session applied locally, with when it was confirmed
+  // (client clock). Used by applyUnreadPollResponse to stop an unread
+  // poll response that was FETCHED before the seen succeeded from
+  // resurrecting the just-cleared badge when it lands afterwards. Kept
+  // small: scopes older than a minute can no longer race any in-flight
+  // poll (12s cadence) and are pruned on each append.
+  const confirmedSeenScopesRef = React.useRef<ConfirmedSeenScope[]>([]);
+  const recordConfirmedSeen = React.useCallback((shipmentId: string, channel: ChatChannel) => {
+    const now = Date.now();
+    confirmedSeenScopesRef.current = [
+      ...confirmedSeenScopesRef.current.filter((s) => now - s.confirmedAt < 60_000),
+      { shipmentId, channel, confirmedAt: now },
+    ];
+    // The confirmed drop itself: shipment badge, channel badge, bottom-nav
+    // badge, and bell dropdown all derive from this one array — including
+    // channel-less legacy messages whose audience resolves to this
+    // channel, mirroring exactly what the server just deleted.
+    setUnreadChatMessages((prev) => dropSeenUnreadMessages(prev, shipmentId, channel));
+  }, []);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
   const chatDropdownRef = React.useRef<HTMLDivElement>(null);
   // PR #36: ✨ MARAS AI header drawer — UI-only state, no backend calls.
@@ -342,6 +369,17 @@ export default function AdminPanel({
   // Set by the Shipment Details modal's chat shortcut buttons to preselect
   // a shipment + channel when navigating into the Chat Center tab.
   const [chatCenterFocus, setChatCenterFocus] = useState<ChatCenterFocus | null>(null);
+
+  // fix/admin-mobile-chat-correctness: App.tsx's chat drawer confirmed a
+  // seen call server-side — apply the same immediate badge drop the Chat
+  // Center's own onChannelRead path gets. seq is monotonic, so repeated
+  // confirmations of the same scope re-fire (each one may follow newly
+  // arrived messages).
+  useEffect(() => {
+    if (!chatSeenEvent) return;
+    recordConfirmedSeen(chatSeenEvent.shipmentId, chatSeenEvent.channel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatSeenEvent?.seq]);
 
   // Desktop sidebar collapse (icons-only vs icon+label), persisted across
   // sessions. safeGetItem/safeSetItem (src/lib/api.ts) already fall back to
@@ -1406,6 +1444,11 @@ MARAS Group etir Center`;
       const resClients = await apiFetch("/api/clients");
       const resVendors = await apiFetch("/api/vendors");
       const resNotifs = await apiFetch("/api/notifications");
+      // fix/admin-mobile-chat-correctness: the issue time is compared
+      // against confirmedSeenScopesRef when the response is applied — a
+      // response fetched BEFORE a seen call succeeded must not resurrect
+      // the badge that seen already cleared (applyUnreadPollResponse).
+      const unreadRequestIssuedAt = Date.now();
       const resUnreadChat = await apiFetch("/api/chat/unread");
 
       // Admin Data Fetch / AdminType Access Review (PR #58): the server now
@@ -1464,7 +1507,10 @@ MARAS Group etir Center`;
       if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
       
       if (resUnreadChat.ok) {
-        setUnreadChatMessages(await safeJson(resUnreadChat));
+        const fetchedUnread: ChatMessage[] = await safeJson(resUnreadChat);
+        setUnreadChatMessages(
+          applyUnreadPollResponse(fetchedUnread, confirmedSeenScopesRef.current, unreadRequestIssuedAt)
+        );
       }
 
       if (resNotifs.ok) {
@@ -6469,18 +6515,21 @@ MARAS Group etir Center`;
           <ChatCenter
             lang={lang}
             isRtl={isRtl}
+            isMobile={isMobileMode}
             shipments={shipments}
             unreadChatMessages={unreadChatMessages}
             onOpenFullChat={onSelectShipmentChat}
             focus={chatCenterFocus}
             onFocusHandled={() => setChatCenterFocus(null)}
             onChannelRead={(shipmentId, channel) => {
-              // feature/admin-mobile-ui correction pass: optimistic local
-              // drop so every badge sourced from unreadChatMessages
-              // (shipment row, bottom nav, notification bell) updates
-              // immediately — the next ~12s poll (fetchData) reconciles
-              // against the server's per-admin state regardless.
-              setUnreadChatMessages((prev) => prev.filter((m) => !(m.shipmentId === shipmentId && m.channel === channel)));
+              // fix/admin-mobile-chat-correctness: server-CONFIRMED drop
+              // (ChatCenter only calls this after /chat/seen answered OK)
+              // — now via recordConfirmedSeen so (a) channel-less legacy
+              // messages whose audience resolves to this channel are
+              // dropped too, mirroring the server's own clear, and (b)
+              // the scope is remembered so an in-flight ~12s poll fetched
+              // before the seen can't resurrect the badge when it lands.
+              recordConfirmedSeen(shipmentId, channel);
             }}
           />
         </React.Suspense>

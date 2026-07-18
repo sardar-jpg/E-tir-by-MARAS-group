@@ -224,3 +224,119 @@ export function buildUnreadClearFilters(adminId: string, shipmentId: string, cha
   if (channelFilter) filters.push({ field: "channel", op: "==", value: channelFilter });
   return filters;
 }
+
+// ── Legacy channel-less records (fix/admin-mobile-chat-correctness) ──
+//
+// Every chat message written before the BUG-03 channel partition — and
+// every demo seed message — has NO `channel` field, so its adminChatUnread
+// record (backfill script / seed fan-out) has none either. A Firestore
+// equality filter never matches an absent field, and every admin UI path
+// marks seen with an explicit channel, so those records could never be
+// cleared: they accumulated forever as stale badge counts (the reported
+// 21/37), attached to messages the channel-filtered thread views don't
+// even display. The helpers below make them clearable — deterministically
+// and narrowly.
+
+/**
+ * The audience a legacy channel-less message deterministically belongs
+ * to. Safety rules (approved audit correction):
+ *  - driver-sent  → driver_admin (a driver can only ever write there)
+ *  - client-sent  → client_admin (a client can only ever write there)
+ *  - admin-sent   → AMBIGUOUS. internal_staff has required an explicit
+ *    channel on every write since it was introduced
+ *    (resolveOutgoingChatChannel returns null for an admin without one),
+ *    so a channel-less admin message predates the partition and lived in
+ *    the old merged driver/client thread — nothing in its metadata proves
+ *    which audience it was for, and it must NEVER be silently cleared by
+ *    opening Driver, Customer, or Internal.
+ */
+export type LegacyUnreadAudience = ChatChannel | "ambiguous_legacy_admin_message";
+
+export function resolveLegacyUnreadAudience(message: Pick<ChatMessage, "sender">): LegacyUnreadAudience {
+  if (message.sender === "driver") return "driver_admin";
+  if (message.sender === "client") return "client_admin";
+  return "ambiguous_legacy_admin_message";
+}
+
+/**
+ * Out of the records already scoped by the query to EXACTLY this
+ * adminId + shipmentId, the ids of channel-less records whose message
+ * audience deterministically resolves to `requestedChannel`. Records that
+ * carry a channel are never touched here (the channel-scoped query
+ * already handles them); ambiguous legacy admin messages are never
+ * returned. Defense in depth: adminId/shipmentId are re-verified per
+ * record even though the caller's query already scoped them — same
+ * convention as selectUnreadMessagesFromRecords above.
+ */
+export function selectChannellessClearableRecordIds(
+  records: AdminChatUnreadRecord[],
+  adminId: string,
+  shipmentId: string,
+  requestedChannel: ChatChannel
+): string[] {
+  return records
+    .filter(
+      (r) =>
+        r.adminId === adminId &&
+        r.shipmentId === shipmentId &&
+        r.channel === undefined &&
+        resolveLegacyUnreadAudience(r.message) === requestedChannel
+    )
+    .map((r) => r.id);
+}
+
+/**
+ * Client-side mirror of what a CONFIRMED seen call just deleted
+ * server-side: drops this shipment+channel's messages from the local
+ * unread array — including channel-less legacy messages whose audience
+ * resolves to that channel — so the shipment badge, the channel badge,
+ * and the global badge (all derived from this one array) update
+ * immediately. Must only ever be applied after the server answered OK
+ * (shouldConfirmChannelRead) — a failed seen must leave badges unchanged.
+ */
+export function dropSeenUnreadMessages(
+  messages: ChatMessage[],
+  shipmentId: string,
+  channel: ChatChannel
+): ChatMessage[] {
+  return messages.filter((m) => {
+    if (m.shipmentId !== shipmentId) return true;
+    if (m.channel === channel) return false;
+    if (m.channel === undefined && resolveLegacyUnreadAudience(m) === channel) return false;
+    return true;
+  });
+}
+
+/**
+ * One shipment+channel scope this admin's seen call confirmed, with the
+ * client-clock time the confirmation arrived — see
+ * applyUnreadPollResponse below.
+ */
+export interface ConfirmedSeenScope {
+  shipmentId: string;
+  channel: ChatChannel;
+  confirmedAt: number;
+}
+
+/**
+ * Anti-resurrection guard for the ~12s unread poll: a response FETCHED
+ * BEFORE a seen call succeeded can land AFTER the local optimistic drop
+ * and put the cleared badge right back until the next poll. The poll
+ * response is re-filtered through every scope confirmed AFTER that
+ * request was issued — those records are already deleted server-side, so
+ * this converges on server truth rather than diverging from it. Scopes
+ * confirmed before the request was issued are NOT re-applied (the server
+ * response already reflects them, and a genuinely new message in that
+ * scope must be allowed to appear).
+ */
+export function applyUnreadPollResponse(
+  fetched: ChatMessage[],
+  confirmedScopes: ConfirmedSeenScope[],
+  requestIssuedAt: number
+): ChatMessage[] {
+  const applicable = confirmedScopes.filter((s) => s.confirmedAt >= requestIssuedAt);
+  return applicable.reduce(
+    (msgs, scope) => dropSeenUnreadMessages(msgs, scope.shipmentId, scope.channel),
+    fetched
+  );
+}
