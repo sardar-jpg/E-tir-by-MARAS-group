@@ -35,16 +35,23 @@ describe("extractServerUid / isDenyAllRules", () => {
     expect(extractServerUid(DENY_ALL)).toBeNull();
   });
 
-  it("deny-all means the deny rule present AND no UID grant", () => {
+  it("deny-all means EVERY active allow statement is the canonical rule and no UID grant exists", () => {
     expect(isDenyAllRules(DENY_ALL)).toBe(true);
     expect(isDenyAllRules(rulesWithUid("abc"))).toBe(false);
+    expect(isDenyAllRules(DENY_ALL.replace("allow read, write: if false;", "allow read, write: if false;\nallow get: if false;"))).toBe(false);
   });
 });
 
-describe("assessRulesPosture — the H-3 regression guard", () => {
-  it("accepts the hardened posture: both files deny-all", () => {
+describe("assessRulesPosture — the H-3 regression guard (structural allow-statement scan)", () => {
+  it("accepts the hardened posture: canonical deny-all only, in both files", () => {
     const check = assessRulesPosture(DENY_ALL, DENY_ALL);
     expect(check.problems).toEqual([]);
+  });
+
+  it("accepts formatting and whitespace variations of the canonical deny-all", () => {
+    const spaced = DENY_ALL.replace("allow read, write: if false;", "allow   read ,write :   if  false ;");
+    const multiline = DENY_ALL.replace("allow read, write: if false;", "allow read,\n          write:\n          if false;");
+    expect(assessRulesPosture(spaced, multiline).problems).toEqual([]);
   });
 
   it("FAILS if legacy hardcoded server-UID authorization returns to either file", () => {
@@ -54,27 +61,54 @@ describe("assessRulesPosture — the H-3 regression guard", () => {
     expect(st.problems.some((p) => p.includes("storage.rules") && p.includes("legacy hardcoded server-UID"))).toBe(true);
   });
 
-  it("FAILS on broad client grants: if true, bare allow, any-signed-in-user", () => {
-    const ifTrue = DENY_ALL.replace("if false", "if true");
-    expect(assessRulesPosture(ifTrue, DENY_ALL).problems.some((p) => p.includes("unconditional grant"))).toBe(true);
+  it("FAILS on ANY allow statement beyond the canonical deny-all — not just known-bad patterns", () => {
+    // Deny-all present but a second conditional grant added: the exact
+    // review scenario — no blacklist pattern would catch a custom claim.
+    const adminClaim = DENY_ALL.replace(
+      "allow read, write: if false;",
+      "allow read, write: if false;\n        allow read: if request.auth.token.admin == true;"
+    );
+    const c1 = assessRulesPosture(adminClaim, DENY_ALL);
+    expect(c1.problems.some((p) => p.includes("firestore.rules") && p.includes("other than the canonical deny-all") && p.includes("request.auth.token.admin"))).toBe(true);
 
-    const bare = DENY_ALL.replace("allow read, write: if false;", "allow read, write;");
-    expect(assessRulesPosture(DENY_ALL, bare).problems.some((p) => p.includes("bare allow"))).toBe(true);
+    // Even a harmless-looking EXTRA denial is a posture violation: the
+    // contract is "exactly the canonical rule and nothing else".
+    const extraDeny = DENY_ALL.replace(
+      "allow read, write: if false;",
+      "allow read, write: if false;\n        allow get: if false;"
+    );
+    expect(assessRulesPosture(DENY_ALL, extraDeny).problems.some((p) => p.includes("storage.rules") && p.includes('"allow get: if false;"'))).toBe(true);
 
-    const anyUser = DENY_ALL.replace("if false", "if request.auth != null");
-    expect(assessRulesPosture(anyUser, DENY_ALL).problems.some((p) => p.includes("any-signed-in-user"))).toBe(true);
+    // Nested permissive allow inside a deeper match block.
+    const nested = DENY_ALL.replace(
+      "match /{document=**} {\n        allow read, write: if false;\n      }",
+      "match /{document=**} {\n        allow read, write: if false;\n        match /public/{doc} {\n          allow list: if true;\n        }\n      }"
+    );
+    expect(assessRulesPosture(nested, DENY_ALL).problems.some((p) => p.includes("allow list: if true;"))).toBe(true);
+
+    // The old blacklist cases still fail structurally: if true, bare
+    // allow, any-signed-in-user.
+    for (const bad of ["allow read, write: if true;", "allow read, write;", "allow read, write: if request.auth != null;"]) {
+      const mutated = DENY_ALL.replace("allow read, write: if false;", bad);
+      const check = assessRulesPosture(mutated, DENY_ALL);
+      expect(check.problems.some((p) => p.includes("other than the canonical deny-all"))).toBe(true);
+      expect(check.problems.some((p) => p.includes("missing the explicit deny-all"))).toBe(true);
+    }
   });
 
-  it("FAILS when the explicit deny-all rule is missing entirely", () => {
+  it("FAILS when no active deny-all rule exists at all", () => {
     const empty = "rules_version = '2'; service cloud.firestore { match /databases/{d}/documents { } }";
     expect(assessRulesPosture(empty, DENY_ALL).problems.some((p) => p.includes("missing the explicit deny-all"))).toBe(true);
   });
 
   it("comments can neither trigger nor satisfy the checks", () => {
-    // A deny-all mentioned only in a comment must NOT count as deny-all…
+    // A permissive allow inside a comment must NOT fail the check…
+    const permissiveInComment = DENY_ALL + `\n// example of what must never exist: allow read: if request.auth.token.admin == true;`;
+    expect(assessRulesPosture(permissiveInComment, DENY_ALL).problems).toEqual([]);
+    // …a deny-all that exists ONLY in a comment must NOT pass…
     const commentOnly = `// allow read, write: if false;\nservice cloud.firestore { match /databases/{d}/documents { match /{document=**} { allow read, write: if true; } } }`;
     const check = assessRulesPosture(commentOnly, DENY_ALL);
-    expect(check.problems.some((p) => p.includes("unconditional grant"))).toBe(true);
+    expect(check.problems.some((p) => p.includes("other than the canonical deny-all"))).toBe(true);
     expect(check.problems.some((p) => p.includes("missing the explicit deny-all"))).toBe(true);
     // …and a UID mentioned only in a comment must not trigger the legacy alarm.
     const uidInComment = DENY_ALL + `\n// historical note: request.auth.uid == "old-uid" was the pre-#121 model`;
