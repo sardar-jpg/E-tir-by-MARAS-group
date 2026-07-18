@@ -1,9 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { extractServerUid, isDenyAllRules, checkRulesUids } from "./firebaseRulesUid";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { extractServerUid, isDenyAllRules, assessRulesPosture } from "./firebaseRulesUid";
+
+const ROOT = join(__dirname, "..", "..");
 
 const rulesWithUid = (uid: string) => `
-  function isServerAccount() {
-    return request.auth != null && request.auth.uid == "${uid}";
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == "${uid}";
+      }
+    }
   }
 `;
 
@@ -18,97 +26,131 @@ const DENY_ALL = `
   }
 `;
 
-const NON_PROD = { isProduction: false, strictPersistence: true };
-const PROD_STRICT = { isProduction: true, strictPersistence: true };
-
-describe("extractServerUid", () => {
-  it("extracts the UID from a rules-style request.auth.uid check", () => {
+describe("extractServerUid / isDenyAllRules", () => {
+  it("extracts a UID from a rules-style request.auth.uid check", () => {
     expect(extractServerUid(rulesWithUid("abc123"))).toBe("abc123");
   });
 
   it("returns null when no UID check is present", () => {
-    expect(extractServerUid("service cloud.firestore { match /{document=**} { allow read: if true; } }")).toBeNull();
-  });
-});
-
-describe("checkRulesUids", () => {
-  it("matches when both rule files use the same UID and no env var is set", () => {
-    const result = checkRulesUids(rulesWithUid("same-uid"), rulesWithUid("same-uid"), undefined, NON_PROD);
-    expect(result.rulesMatch).toBe(true);
-    expect(result.problems).toEqual([]);
-    expect(result.warnings.some(w => w.includes("SERVER_FIREBASE_UID is not set"))).toBe(true);
+    expect(extractServerUid(DENY_ALL)).toBeNull();
   });
 
-  it("reports a problem when firestore.rules and storage.rules disagree", () => {
-    const result = checkRulesUids(rulesWithUid("uid-a"), rulesWithUid("uid-b"), undefined, NON_PROD);
-    expect(result.rulesMatch).toBe(false);
-    expect(result.problems.some(p => p.includes("different UIDs"))).toBe(true);
-  });
-
-  it("reports a problem when a rules file has no UID at all", () => {
-    const result = checkRulesUids("no uid here", rulesWithUid("uid-a"), undefined, NON_PROD);
-    expect(result.firestoreUid).toBeNull();
-    expect(result.problems.some(p => p.includes("firestore.rules"))).toBe(true);
-  });
-
-  it("passes cleanly when SERVER_FIREBASE_UID matches the rules UID", () => {
-    const result = checkRulesUids(rulesWithUid("same-uid"), rulesWithUid("same-uid"), "same-uid", NON_PROD);
-    expect(result.problems).toEqual([]);
-    expect(result.warnings).toEqual([]);
-  });
-
-  it("warns (not errors) on a SERVER_FIREBASE_UID mismatch outside production", () => {
-    const result = checkRulesUids(rulesWithUid("real-uid"), rulesWithUid("real-uid"), "fake-uid", NON_PROD);
-    expect(result.problems).toEqual([]);
-    expect(result.warnings.some(w => w.includes('does not match'))).toBe(true);
-  });
-
-  it("errors on a SERVER_FIREBASE_UID mismatch in production with strict persistence", () => {
-    const result = checkRulesUids(rulesWithUid("real-uid"), rulesWithUid("real-uid"), "fake-uid", PROD_STRICT);
-    expect(result.problems.some(p => p.includes("does not match"))).toBe(true);
-    expect(result.warnings).toEqual([]);
-  });
-
-  it("warns instead of comparing when SERVER_FIREBASE_UID is set but the rules already disagree", () => {
-    const result = checkRulesUids(rulesWithUid("uid-a"), rulesWithUid("uid-b"), "uid-a", NON_PROD);
-    expect(result.warnings.some(w => w.includes("disagree on the UID"))).toBe(true);
-  });
-
-  it("treats both-deny-all rules as valid with NO blocking problems (server-mediated)", () => {
-    const result = checkRulesUids(DENY_ALL, DENY_ALL, undefined, PROD_STRICT);
-    expect(result.problems).toEqual([]);
-    expect(result.firestoreUid).toBeNull();
-    expect(result.storageUid).toBeNull();
-    expect(result.warnings.some(w => w.includes("deny-all"))).toBe(true);
-    // The "SERVER_FIREBASE_UID is not set" warning must NOT fire for deny-all —
-    // there is no UID to confirm.
-    expect(result.warnings.some(w => w.includes("SERVER_FIREBASE_UID is not set"))).toBe(false);
-  });
-
-  it("does not block even in production+strict when both rules are deny-all", () => {
-    const result = checkRulesUids(DENY_ALL, DENY_ALL, "any-uid", PROD_STRICT);
-    expect(result.problems).toEqual([]);
-  });
-
-  it("warns on a mixed state: one file deny-all, the other UID-based", () => {
-    const result = checkRulesUids(DENY_ALL, rulesWithUid("uid-a"), undefined, NON_PROD);
-    expect(result.warnings.some(w => w.includes("different modes"))).toBe(true);
-  });
-
-  it("still blocks a file that is neither deny-all nor UID-bearing", () => {
-    const result = checkRulesUids("garbage rules with no uid and no deny", rulesWithUid("uid-a"), undefined, NON_PROD);
-    expect(result.problems.some(p => p.includes("firestore.rules"))).toBe(true);
-  });
-});
-
-describe("isDenyAllRules", () => {
-  it("detects an explicit deny-all rule set", () => {
+  it("deny-all means the deny rule present AND no UID grant", () => {
     expect(isDenyAllRules(DENY_ALL)).toBe(true);
-  });
-  it("returns false for UID-based rules", () => {
     expect(isDenyAllRules(rulesWithUid("abc"))).toBe(false);
   });
-  it("returns false for allow-all rules", () => {
-    expect(isDenyAllRules("allow read, write: if true;")).toBe(false);
+});
+
+describe("assessRulesPosture — the H-3 regression guard", () => {
+  it("accepts the hardened posture: both files deny-all", () => {
+    const check = assessRulesPosture(DENY_ALL, DENY_ALL);
+    expect(check.problems).toEqual([]);
+  });
+
+  it("FAILS if legacy hardcoded server-UID authorization returns to either file", () => {
+    const fs = assessRulesPosture(rulesWithUid("legacy-uid-1"), DENY_ALL);
+    expect(fs.problems.some((p) => p.includes("firestore.rules") && p.includes("legacy hardcoded server-UID"))).toBe(true);
+    const st = assessRulesPosture(DENY_ALL, rulesWithUid("legacy-uid-2"));
+    expect(st.problems.some((p) => p.includes("storage.rules") && p.includes("legacy hardcoded server-UID"))).toBe(true);
+  });
+
+  it("FAILS on broad client grants: if true, bare allow, any-signed-in-user", () => {
+    const ifTrue = DENY_ALL.replace("if false", "if true");
+    expect(assessRulesPosture(ifTrue, DENY_ALL).problems.some((p) => p.includes("unconditional grant"))).toBe(true);
+
+    const bare = DENY_ALL.replace("allow read, write: if false;", "allow read, write;");
+    expect(assessRulesPosture(DENY_ALL, bare).problems.some((p) => p.includes("bare allow"))).toBe(true);
+
+    const anyUser = DENY_ALL.replace("if false", "if request.auth != null");
+    expect(assessRulesPosture(anyUser, DENY_ALL).problems.some((p) => p.includes("any-signed-in-user"))).toBe(true);
+  });
+
+  it("FAILS when the explicit deny-all rule is missing entirely", () => {
+    const empty = "rules_version = '2'; service cloud.firestore { match /databases/{d}/documents { } }";
+    expect(assessRulesPosture(empty, DENY_ALL).problems.some((p) => p.includes("missing the explicit deny-all"))).toBe(true);
+  });
+
+  it("comments can neither trigger nor satisfy the checks", () => {
+    // A deny-all mentioned only in a comment must NOT count as deny-all…
+    const commentOnly = `// allow read, write: if false;\nservice cloud.firestore { match /databases/{d}/documents { match /{document=**} { allow read, write: if true; } } }`;
+    const check = assessRulesPosture(commentOnly, DENY_ALL);
+    expect(check.problems.some((p) => p.includes("unconditional grant"))).toBe(true);
+    expect(check.problems.some((p) => p.includes("missing the explicit deny-all"))).toBe(true);
+    // …and a UID mentioned only in a comment must not trigger the legacy alarm.
+    const uidInComment = DENY_ALL + `\n// historical note: request.auth.uid == "old-uid" was the pre-#121 model`;
+    expect(assessRulesPosture(uidInComment, DENY_ALL).problems).toEqual([]);
+  });
+});
+
+describe("the REAL rules files ship the hardened posture (browser/client access denied)", () => {
+  const firestoreRules = readFileSync(join(ROOT, "firestore.rules"), "utf-8");
+  const storageRules = readFileSync(join(ROOT, "storage.rules"), "utf-8");
+
+  it("firestore.rules and storage.rules are deny-all with no UID and no permissive grant", () => {
+    const check = assessRulesPosture(firestoreRules, storageRules);
+    expect(check.problems).toEqual([]);
+    expect(extractServerUid(firestoreRules)).toBeNull();
+    expect(extractServerUid(storageRules)).toBeNull();
+  });
+
+  it("no production source uses the Firestore/Storage client SDK — firebase/auth (identity) only", () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const p = join(dir, entry);
+        if (statSync(p).isDirectory()) { walk(p); continue; }
+        if (!/\.(ts|tsx)$/.test(entry) || entry.endsWith(".test.ts") || entry.endsWith(".test.tsx")) continue;
+        const src = readFileSync(p, "utf-8");
+        if (/from\s+["']firebase\/(firestore|storage|database)["']/.test(src)) offenders.push(p);
+      }
+    };
+    walk(join(ROOT, "src"));
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe("Maps key delivery is role-scoped and never public (H-4 repo side)", () => {
+  const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
+  const routeAt = SERVER.indexOf('app.get("/api/maps-key"');
+  const ROUTE = SERVER.slice(routeAt, routeAt + 900);
+
+  it("the maps-key route allows only clients and GPS-permitted admins; drivers get 403", () => {
+    expect(routeAt).toBeGreaterThan(-1);
+    expect(ROUTE).toContain('session.role === "client"');
+    expect(ROUTE).toContain('session.role === "admin" && canViewGpsTracking(session.adminType');
+    expect(ROUTE).toContain("403");
+  });
+
+  it("GOOGLE_MAPS_PLATFORM_KEY has exactly two reads: the gated route and the server-side distance-matrix call — never share/public payloads, never copied to Firestore", () => {
+    const occurrences = SERVER.split("GOOGLE_MAPS_PLATFORM_KEY").length - 1;
+    expect(occurrences).toBe(2);
+    // The old startup write of the key into a Firestore configs document
+    // (nothing ever read it) must stay gone.
+    expect(SERVER).not.toContain('doc("google_maps")');
+    // The distance-matrix usage is server-side only: within that route
+    // region the key is used to CALL Google, never placed in a response.
+    const dmAt = SERVER.indexOf('app.get("/api/shipments/:id/distance-matrix"');
+    const routeAt2 = SERVER.indexOf('app.get("/api/maps-key"');
+    const dmRegion = SERVER.slice(dmAt, routeAt2 > dmAt ? SERVER.indexOf('app.put("/api/shipments/:id"', dmAt) : dmAt + 20000);
+    expect(dmRegion).not.toMatch(/res\.json\([^)]*mapsKey/);
+    // The public share view builder exposes an explicit allowlist that
+    // contains no key-like field at all.
+    const SHARE_LIB = readFileSync(join(ROOT, "src", "lib", "publicShareView.ts"), "utf-8");
+    expect(SHARE_LIB).not.toContain("maps");
+    expect(SHARE_LIB).not.toContain("GOOGLE_MAPS_PLATFORM_KEY");
+  });
+
+  it("only the two real map surfaces fetch the key (admin tracking map, client shipment map)", () => {
+    const consumers: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const p = join(dir, entry);
+        if (statSync(p).isDirectory()) { walk(p); continue; }
+        if (!/\.(ts|tsx)$/.test(entry) || entry.includes(".test.")) continue;
+        if (readFileSync(p, "utf-8").includes("maps-key")) consumers.push(entry);
+      }
+    };
+    walk(join(ROOT, "src"));
+    expect(consumers.sort()).toEqual(["ClientShipmentMap.tsx", "TrackingMap.tsx"]);
   });
 });

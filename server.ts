@@ -64,7 +64,7 @@ import {
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
 import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError } from "./src/lib/costStatementMath";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
@@ -3063,17 +3063,12 @@ async function seedDatabaseIfEmpty() {
     console.error("Error reading/seeding vendors: ", err);
   }
 
-  // 8. Propagate Google Maps API key
-  try {
-    const mapsKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || "";
-    if (mapsKey) {
-      console.log("Syncing active Google Maps API key into Firestore config collection...");
-      await db.collection("configs").doc("google_maps").set({ key: mapsKey });
-      console.log("Successfully seeded Google Maps key config.");
-    }
-  } catch (err) {
-    console.error("Error propagating Google Maps key to Firestore: ", err);
-  }
+  // 8. (Removed — PR #135, audit finding H-4.) The Maps key used to be
+  // copied into a Firestore `configs/google_maps` document at startup, but
+  // nothing anywhere read that document — it was a pointless duplicate of
+  // a credential into the database. The key now lives only in the
+  // environment: served to map-rendering roles via GET /api/maps-key and
+  // used server-side by the distance-matrix route.
 
   console.log("Firestore seeding check completed with comprehensive logs.");
 }
@@ -7015,7 +7010,23 @@ async function startServer() {
     }
   });
 
+  // PR #135 (Stage 2 PR 2, audit finding H-4): the Maps JS key is
+  // browser-served BY DESIGN (its real protection is the HTTP-referrer
+  // restriction in Google Cloud Console — see
+  // docs/FIREBASE_MAPS_SECURITY_VERIFICATION.md), but it is still only
+  // handed to sessions whose UI actually renders a Google map: the admin
+  // GPS Tracking Map (canViewGpsTracking — super/operation) and the
+  // client shipment map. Drivers and accounts-type admins have no map
+  // surface and get 403. The public share view never receives the key
+  // (PublicTracking renders no Google map).
   app.get("/api/maps-key", requireAuth, (req, res) => {
+    const session = req.session!;
+    const allowed =
+      session.role === "client" ||
+      (session.role === "admin" && canViewGpsTracking(session.adminType as AdminType));
+    if (!allowed) {
+      return res.status(403).json({ error: "Map access is not available for this account." });
+    }
     res.json({
       key: process.env.GOOGLE_MAPS_PLATFORM_KEY || ""
     });
