@@ -48,6 +48,9 @@ import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttent
 import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
+import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
+import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
+import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -95,6 +98,21 @@ const fetch = apiFetch;
 // (src/lib/marasAiIntents.ts), so every suggestion is a prompt the
 // backend genuinely knows how to collect system data for. Selecting one
 // only populates the prompt — the employee still presses Send.
+// PR #133: customize-bar labels for the Executive Dashboard sections.
+// "Active" pseudo-status for the shipment list filter: everything that is
+// still open (not Delivered/Closed/Completed) — the same rule the executive
+// Open Shipments Value KPI uses (isOpenShipmentStatus), so the KPI and the
+// list it opens can never disagree.
+const ACTIVE_FILTER_LABEL: Record<string, string> = { en: 'Active', tr: 'Aktif', ar: 'نشطة' };
+
+const DASHBOARD_SECTION_LABELS: Record<string, { en: string; tr: string; ar: string }> = {
+  executive_brief: { en: 'Executive Brief', tr: 'Yönetici Brifingi', ar: 'الموجز التنفيذي' },
+  operations: { en: 'Operations', tr: 'Operasyon', ar: 'العمليات' },
+  financial: { en: 'Executive Financial Overview', tr: 'Yönetici Finansal Genel Bakış', ar: 'النظرة المالية التنفيذية' },
+  financial_alerts: { en: 'Financial Alerts', tr: 'Finansal Uyarılar', ar: 'تنبيهات مالية' },
+  analytics: { en: 'Logistics Analytics', tr: 'Lojistik Analitiği', ar: 'تحليلات لوجستية' },
+};
+
 const MARAS_AI_SUGGESTION_ICONS: Record<string, typeof Ship> = {
   delayed_shipments: Clock,
   todays_operations: Calendar,
@@ -532,6 +550,41 @@ export default function AdminPanel({
   // links, saved navigation state) but always redirects to Dashboard
   // with the analytics section expanded.
   const [isDashboardAnalyticsOpen, setIsDashboardAnalyticsOpen] = useState(false);
+  // PR #133 — per-admin Executive Dashboard personalization: section
+  // visibility + order, persisted per user (adminDashboardLayouts).
+  // Rendering intersects this with the viewer's PERMITTED sections, so
+  // a saved layout can never widen access.
+  const [dashboardLayout, setDashboardLayout] = useState<DashboardLayout>(DEFAULT_DASHBOARD_LAYOUT);
+  const [isDashboardCustomizeOpen, setIsDashboardCustomizeOpen] = useState(false);
+  const [draggedDashboardSection, setDraggedDashboardSection] = useState<DashboardSectionId | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/admin/dashboard/layout");
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled && data.layout) setDashboardLayout(normalizeDashboardLayout(data.layout));
+        }
+      } catch { /* default layout is fine */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const permittedDashboardSections = React.useMemo(() => {
+    const effectiveType = adminType || 'super'; // same fallback resolvedAdminType uses below
+    const allowed = new Set<DashboardSectionId>(['executive_brief', 'operations']);
+    if (canViewCostStatements(effectiveType)) { allowed.add('financial'); allowed.add('financial_alerts'); }
+    if (canViewLogisticsAnalytics(effectiveType)) allowed.add('analytics');
+    return allowed;
+  }, [adminType]);
+  const saveDashboardLayout = (next: DashboardLayout) => {
+    setDashboardLayout(next);
+    void apiFetch("/api/admin/dashboard/layout", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ layout: next }),
+    }).catch(() => {});
+  };
   useEffect(() => {
     if (activeTab === 'reports') {
       setIsDashboardAnalyticsOpen(true);
@@ -4224,7 +4277,8 @@ MARAS Group etir Center`;
       (s.airline || "").toLowerCase().includes(q) ||
       (s.bookingNumber || "").toLowerCase().includes(q);
 
-    const matchStatus = statusFilter === "all" || s.status === statusFilter;
+    const matchStatus = statusFilter === "all"
+      || (statusFilter === "active" ? isOpenShipmentStatus(s.status) : s.status === statusFilter);
     const fType = s.freightType || "land";
     const matchType = typeFilter === "all" || fType === typeFilter;
     
@@ -5111,21 +5165,60 @@ MARAS Group etir Center`;
         )
       )}
 
-      {/* 1. Dashboard Overview Tab — unified (PR #132): MARAS AI Brief
-          first, then the existing dashboard, then the Logistics Analytics
-          sections (formerly the separate Reports tab), collapsible on
-          mobile so the first screen stays light. */}
-      {activeTab === 'dashboard' && isMobileMode && (
-        <div className="mb-3">
-          <MarasAiBriefCard
-            lang={lang}
-            isMobileMode={isMobileMode}
-            isSuper={resolvedAdminType === 'super'}
-            onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
-          />
-        </div>
-      )}
-      {activeTab === 'dashboard' && isMobileMode && (
+      {/* 1. Dashboard Overview Tab — the Executive Control Center
+          (PR #132 + #133): section stack driven by the viewer's saved
+          per-user layout, intersected with role permissions. Order and
+          visibility are personal (adminDashboardLayouts); business
+          numbers are all deterministic backend data — MARAS AI only
+          explains. */}
+      {activeTab === 'dashboard' && (
+        <div className={isMobileMode ? '' : 'lg:mx-4'}>
+          <div className="flex justify-end mb-2">
+            <button
+              onClick={() => setIsDashboardCustomizeOpen(!isDashboardCustomizeOpen)}
+              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-orange-300 cursor-pointer"
+            >
+              {lang === 'tr' ? 'Özelleştir' : (lang === 'ar' ? 'تخصيص' : 'Customize')}
+            </button>
+          </div>
+          {isDashboardCustomizeOpen && (
+            <div className="mb-3 p-3 rounded-xl border border-slate-200 bg-white space-y-1.5">
+              {dashboardLayout.order.map((sectionId) => (
+                <div
+                  key={sectionId}
+                  draggable
+                  onDragStart={() => setDraggedDashboardSection(sectionId)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => { if (draggedDashboardSection) saveDashboardLayout(reorderDashboardSection(dashboardLayout, draggedDashboardSection, sectionId)); setDraggedDashboardSection(null); }}
+                  className="flex items-center justify-between gap-2 p-2 rounded-lg border border-slate-200 bg-slate-50 cursor-grab"
+                >
+                  <label className="flex items-center gap-2 text-[11px] font-bold text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!dashboardLayout.hidden.includes(sectionId)}
+                      onChange={() => saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))}
+                    />
+                    <span>{DASHBOARD_SECTION_LABELS[sectionId][lang]}</span>
+                  </label>
+                  <span className="flex gap-1">
+                    <button onClick={() => saveDashboardLayout(moveDashboardSection(dashboardLayout, sectionId, 'up'))} className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-black cursor-pointer">↑</button>
+                    <button onClick={() => saveDashboardLayout(moveDashboardSection(dashboardLayout, sectionId, 'down'))} className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-black cursor-pointer">↓</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {visibleOrderedSections(dashboardLayout, permittedDashboardSections).map((sectionId) => (
+            <div key={sectionId} className="mb-3">
+              {sectionId === 'executive_brief' && (
+                <MarasAiBriefCard
+                  lang={lang}
+                  isMobileMode={isMobileMode}
+                  isSuper={resolvedAdminType === 'super'}
+                  onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
+                />
+              )}
+              {sectionId === 'operations' && (isMobileMode ? (
         <MobileDashboard
           lang={lang}
           isRtl={isRtl}
@@ -5146,18 +5239,7 @@ MARAS Group etir Center`;
           canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
           onOpenNotifications={() => setIsNotifOpen(true)}
         />
-      )}
-      {activeTab === 'dashboard' && !isMobileMode && (
-        <div className="mb-4 lg:mx-4">
-          <MarasAiBriefCard
-            lang={lang}
-            isMobileMode={isMobileMode}
-            isSuper={resolvedAdminType === 'super'}
-            onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
-          />
-        </div>
-      )}
-      {activeTab === 'dashboard' && !isMobileMode && (
+              ) : (
         <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
           <AdminDashboardSection
             lang={lang}
@@ -5209,6 +5291,52 @@ MARAS Group etir Center`;
             canViewLogisticsAnalytics={canViewLogisticsAnalytics(resolvedAdminType)}
           />
         </React.Suspense>
+              ))}
+              {sectionId === 'financial' && canViewCostStatements(resolvedAdminType) && (
+                <ExecutiveFinancialSection
+                  lang={lang}
+                  onOpenShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
+                />
+              )}
+              {sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType) && (
+                <FinancialAlertsCard lang={lang} onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)} />
+              )}
+              {sectionId === 'analytics' && canViewLogisticsAnalytics(resolvedAdminType) && (
+                <div>
+                  <button
+                    onClick={() => setIsDashboardAnalyticsOpen(!isDashboardAnalyticsOpen)}
+                    className="w-full flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer mb-3"
+                  >
+                    <span className="text-sm font-black text-slate-900 flex items-center gap-2">
+                      <BarChart3 className="w-4 h-4 text-orange-500" />
+                      <span>{t('reports')}</span>
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">
+                      {(isDashboardAnalyticsOpen || !isMobileMode) ? '−' : '+'}
+                    </span>
+                  </button>
+                  {(isDashboardAnalyticsOpen || !isMobileMode) && (
+                    <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+                      <AdminReportsSection
+                        lang={lang}
+                        t={t}
+                        isMobileMode={isMobileMode}
+                        totalShipmentsCount={totalShipmentsCount}
+                        statusData={statusData}
+                        currencyChartData={currencyChartData}
+                        totalCompleted30d={totalCompleted30d}
+                        avgDailyCompleted={avgDailyCompleted}
+                        peakFormattedDay={peakFormattedDay}
+                        performanceAnalyticsData={performanceAnalyticsData}
+                        shipmentsHasMore={shipmentsHasMore}
+                      />
+                    </React.Suspense>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* 2. Shipments Registry Tab */}
@@ -5270,10 +5398,10 @@ MARAS Group etir Center`;
 
               <div className="flex items-center gap-1.5 overflow-x-auto -mx-3 px-3 pb-0.5">
                 {(typeFilter === 'sea'
-                  ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                  ? ['all', 'active', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
-                    ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    ? ['all', 'active', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                    : ['all', 'active', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -5282,7 +5410,7 @@ MARAS Group etir Center`;
                       statusFilter === st ? 'bg-orange-100 text-orange-800' : 'bg-slate-100 text-slate-500'
                     }`}
                   >
-                    {st === "all" ? t('allStatuses') : st}
+                    {st === "all" ? t('allStatuses') : st === "active" ? (ACTIVE_FILTER_LABEL[lang] || ACTIVE_FILTER_LABEL.en) : st}
                   </button>
                 ))}
               </div>
@@ -5348,10 +5476,10 @@ MARAS Group etir Center`;
 
                 {/* Dynamically list candidate statuses depending on freight type */}
                 {(typeFilter === 'sea'
-                  ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                  ? ['all', 'active', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
-                    ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    ? ['all', 'active', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                    : ['all', 'active', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -5362,7 +5490,7 @@ MARAS Group etir Center`;
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}
                   >
-                    {st === "all" ? t('allStatuses') : st}
+                    {st === "all" ? t('allStatuses') : st === "active" ? (ACTIVE_FILTER_LABEL[lang] || ACTIVE_FILTER_LABEL.en) : st}
                   </button>
                 ))}
               </div>
@@ -5778,45 +5906,6 @@ MARAS Group etir Center`;
                 </div>
               </form>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* PR #132: Logistics Analytics — formerly the separate Reports tab,
-          now a Dashboard section (same lazy component, same computed
-          data, same canViewLogisticsAnalytics gate). Collapsible on
-          mobile (progressive disclosure); always expanded on desktop.
-          The old 'reports' navigation redirects here. */}
-      {activeTab === 'dashboard' && canViewLogisticsAnalytics(resolvedAdminType) && (
-        <div className={`mt-4 ${isMobileMode ? '' : 'lg:mx-4'}`}>
-          <button
-            onClick={() => setIsDashboardAnalyticsOpen(!isDashboardAnalyticsOpen)}
-            className="w-full flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer mb-3"
-          >
-            <span className="text-sm font-black text-slate-900 flex items-center gap-2">
-              <BarChart3 className="w-4 h-4 text-orange-500" />
-              <span>{t('reports')}</span>
-            </span>
-            <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">
-              {(isDashboardAnalyticsOpen || !isMobileMode) ? '−' : '+'}
-            </span>
-          </button>
-          {(isDashboardAnalyticsOpen || !isMobileMode) && (
-            <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
-              <AdminReportsSection
-                lang={lang}
-                t={t}
-                isMobileMode={isMobileMode}
-                totalShipmentsCount={totalShipmentsCount}
-                statusData={statusData}
-                currencyChartData={currencyChartData}
-                totalCompleted30d={totalCompleted30d}
-                avgDailyCompleted={avgDailyCompleted}
-                peakFormattedDay={peakFormattedDay}
-                performanceAnalyticsData={performanceAnalyticsData}
-                shipmentsHasMore={shipmentsHasMore}
-              />
-            </React.Suspense>
           )}
         </div>
       )}
