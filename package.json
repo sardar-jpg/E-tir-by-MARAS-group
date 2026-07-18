@@ -15,7 +15,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "hash-password": "tsx scripts/hash-password.ts",
-    "check-firebase-readiness": "tsx scripts/check-firebase-readiness.ts"
+    "check-firebase-readiness": "tsx scripts/check-firebase-readiness.ts",
+    "check-production-config": "tsx scripts/check-production-config.ts"
   },
   "dependencies": {
     "@capacitor-firebase/authentication": "^8.3.0",
