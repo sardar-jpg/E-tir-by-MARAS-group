@@ -39,6 +39,7 @@ import {
   GENERIC_LOGIN_ERROR,
 } from "./src/lib/auth";
 import { assessProductionConfig } from "./src/lib/productionConfig";
+import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, shouldRecordSchedulerTimeout, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
@@ -3622,7 +3623,12 @@ async function startServer() {
     const snap = await getDoc(lockRef);
     const now = Date.now();
     const current = snap.exists() ? snap.data() : null;
-    if (current?.expiresAt && new Date(current.expiresAt).getTime() > now) return false;
+    if (!canTakeOverAuditLock(current as { expiresAt?: string } | null, now)) return false;
+    if (current?.expiresAt && current?.holder) {
+      // Stale-lock recovery: a crashed run's lock is taken over once its
+      // TTL passes. Holder is a run id — never a secret.
+      console.warn(`[audit] taking over expired lock previously held by ${current.holder}`);
+    }
     await setDoc(lockRef, {
       id: "lock",
       holder: runId,
@@ -3642,21 +3648,26 @@ async function startServer() {
     } catch { /* lock expiry handles a failed release */ }
   }
 
-  async function runAudit(trigger: AuditRunTrigger, actor: string): Promise<{ ok: boolean; error?: string; run?: AuditRunRecord }> {
-    if (auditRunning) return { ok: false, error: "An audit is already running in this instance." };
+  async function runAudit(trigger: AuditRunTrigger, actor: string): Promise<{ ok: boolean; error?: string; run?: AuditRunRecord; reason?: "locked" }> {
+    if (auditRunning) return { ok: false, reason: "locked", error: "An audit is already running in this instance." };
     const runId = `audit-run-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
     auditRunning = true;
     try {
       const ctx = await withTimeout(loadAuditContext(), 30_000, "Audit context load timed out");
-      // Automatic triggers skip when a fresh successful run already exists
-      // (Cloud Run can start many instances; the scheduler drives cadence).
-      if ((trigger === "startup" || trigger === "interval") && ctx.environment.lastSuccessfulRunAt) {
-        const age = Date.now() - new Date(ctx.environment.lastSuccessfulRunAt).getTime();
-        if (age < AUDIT_MIN_GAP_MS) return { ok: true };
+      // Best-effort automatic triggers skip when a fresh successful run
+      // already exists (Cloud Run can boot many instances in a burst).
+      // The authoritative scheduler and explicit manual triggers never
+      // skip here — recovering from a stale audit is exactly their job.
+      if (shouldSkipAutomaticRun(trigger, ctx.environment.lastSuccessfulRunAt, Date.now(), AUDIT_MIN_GAP_MS)) {
+        console.log(`[audit] ${trigger} trigger skipped — a fresh successful run already exists.`);
+        return { ok: true };
       }
-      if (!(await acquireAuditLock(runId))) return { ok: false, error: "Another audit run holds the lock." };
+      if (!(await acquireAuditLock(runId))) {
+        console.warn(`[audit] ${trigger} trigger skipped — another run holds the lock.`);
+        return { ok: false, reason: "locked", error: "Another audit run holds the lock." };
+      }
       try {
         const { detections, ruleResults } = runAuditRules(AUDIT_RULES, ctx);
         const existing = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
@@ -3693,6 +3704,17 @@ async function startServer() {
           ...(run.ok ? { lastSuccessfulRunAt: run.finishedAt, lastSuccessfulRunId: runId } : { lastFailedRunAt: run.finishedAt, lastFailedRunId: runId }),
           lastRunSummary: summary,
         }, { merge: true });
+        // External-scheduler health state: terminal outcomes recorded HERE
+        // (not in the endpoint) so a run that outlives the HTTP deadline
+        // still persists its real result — a later success supersedes the
+        // endpoint's stale lastTimedOutAt. Scheduler-triggered runs only:
+        // manual/startup/interval runs must never affect scheduler health.
+        if (trigger === "scheduler") {
+          await setDoc(doc(db, "auditState", "scheduler"), {
+            id: "scheduler",
+            ...(run.ok ? { lastSuccessfulRunAt: run.finishedAt } : { lastFailedRunAt: run.finishedAt }),
+          }, { merge: true }).catch(() => {});
+        }
         // Run-record retention (findings are NEVER pruned).
         const runs = (await getDocs(collection(db, "auditRuns"))).docs.map((d) => d.data() as AuditRunRecord)
           .sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
@@ -3722,6 +3744,13 @@ async function startServer() {
           };
           await setDoc(doc(db, "notifications", alertNotif.id), alertNotif);
         }
+        // Secret-safe observability: one grep-able line per finished run
+        // (counts and ids only), plus an explicit partial-failure warning
+        // so an isolated rule crash never passes silently.
+        console.log(summarizeRunForLog(run));
+        if (run.failedRuleCount > 0) {
+          console.warn(`[audit] ${run.failedRuleCount} rule(s) failed in isolation this run — remaining rules were unaffected (see auditRuns/${runId}).`);
+        }
         await logActivity("", "MARAS AI Audit", actor,
           `Audit ${trigger} completed: ${rec.createdCount} new, ${rec.reopenedCount} reopened, ${rec.autoResolvedCount} auto-resolved, ${run.failedRuleCount} failed rule(s).`,
           `Denetim (${trigger}) tamamlandı: ${rec.createdCount} yeni, ${rec.reopenedCount} yeniden açıldı, ${rec.autoResolvedCount} otomatik çözüldü.`,
@@ -3740,6 +3769,9 @@ async function startServer() {
       };
       await setDoc(doc(db, "auditRuns", runId), failedRun).catch(() => {});
       await setDoc(doc(db, "auditState", "summary"), { id: "summary", lastFailedRunAt: failedRun.finishedAt, lastFailedRunId: runId }, { merge: true }).catch(() => {});
+      if (trigger === "scheduler") {
+        await setDoc(doc(db, "auditState", "scheduler"), { id: "scheduler", lastFailedRunAt: failedRun.finishedAt }, { merge: true }).catch(() => {});
+      }
       await logActivity("", "MARAS AI Audit", actor, `Audit ${trigger} FAILED: ${message}`, `Denetim (${trigger}) BAŞARISIZ: ${message}`, `فشل التدقيق (${trigger}): ${message}`).catch(() => {});
       return { ok: false, error: message };
     } finally {
@@ -9791,18 +9823,120 @@ async function startServer() {
    * instances aren't guaranteed alive, so this endpoint — not the
    * in-process interval — is the correctness mechanism for cadence.
    */
-  app.post("/api/audit/scheduler-run", async (req, res) => {
-    const configured = (process.env.AUDIT_SCHEDULER_TOKEN || "").trim();
-    const provided = String(req.headers["x-audit-token"] || "");
-    if (!configured) return res.status(403).json({ error: "Scheduler runs are not enabled on this server." });
-    const a = Buffer.from(configured);
-    const b = Buffer.from(provided);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(403).json({ error: "Invalid scheduler token." });
+  // PR #136 (Stage 2 PR 3, audit finding H-2): the AUTHORITATIVE recurring
+  // audit trigger — the in-process timers above are best-effort only.
+  // Registered with app.all so unsupported methods get an explicit 405
+  // (instead of falling through to the SPA catch-all). Auth decisions are
+  // pure and unit-tested (evaluateSchedulerAuth: constant-time compare;
+  // malformed and wrong tokens share one response so nothing is leaked).
+  // NOTHING in this handler may ever log or return a token value.
+  app.all("/api/audit/scheduler-run", async (req, res) => {
+    try {
+      if (req.method !== "POST") {
+        res.setHeader("Allow", "POST");
+        return res.status(405).json({ error: "Method not allowed — use POST." });
+      }
+      const auth = evaluateSchedulerAuth(process.env.AUDIT_SCHEDULER_TOKEN, req.headers["x-audit-token"]);
+      if (auth === "disabled") {
+        return res.status(403).json({ error: "Scheduler runs are not enabled on this server." });
+      }
+      if (auth !== "ok") {
+        // One shared response for missing, malformed, and wrong tokens —
+        // an unauthenticated caller learns nothing about which it was.
+        console.warn("[audit-scheduler] rejected invocation (missing/invalid token).");
+        return res.status(403).json({ error: "Invalid scheduler token." });
+      }
+      console.log("[audit-scheduler] authorized invocation received.");
+
+      // Persisted scheduler operational state (auditState/scheduler):
+      // written ONLY here, so manual/startup/interval runs can never make
+      // the external scheduler look healthy. Timestamps only — no token
+      // or token-derived value ever lands in this document.
+      const schedulerStateRef = doc(db, "auditState", "scheduler");
+      const invokedAtMs = Date.now();
+      await setDoc(schedulerStateRef, { id: "scheduler", lastTriggeredAt: new Date(invokedAtMs).toISOString() }, { merge: true }).catch(() => {});
+
+      // Cloud Scheduler retries after slow/non-2xx attempts; a fire landing
+      // right after a success is acknowledged as a duplicate, not re-run.
+      // PR #136 review issue 1: the dedup source is the SCHEDULER-ONLY
+      // persisted state — never auditState/summary, which manual/startup/
+      // interval runs also update and which could otherwise suppress the
+      // authoritative external run.
+      const schedulerStateSnap = await getDoc(schedulerStateRef);
+      const schedulerLastSuccessAt = schedulerStateSnap.exists() ? (schedulerStateSnap.data()?.lastSuccessfulRunAt || null) : null;
+      if (isDuplicateSchedulerFire(schedulerLastSuccessAt, invokedAtMs)) {
+        console.log("[audit-scheduler] duplicate fire inside the dedup window — acknowledged without re-running.");
+        return res.json({ ok: true, outcome: "deduplicated", deduplicated: true });
+      }
+
+      // HTTP REQUEST DEADLINE — not a cancellation. If the deadline
+      // expires we answer 504 and the original audit keeps executing in
+      // the background; its distributed lock is released only through
+      // runAudit's own finally path, and any Cloud Scheduler retry that
+      // arrives while that lock is still valid gets the 409 "locked"
+      // outcome below — so a timed-out run can never be overlapped by
+      // its own retry. Genuinely abandoned runs are recovered via the
+      // existing lock-TTL takeover.
+      const SCHEDULER_DEADLINE_SENTINEL = "scheduler-run-http-deadline";
+      let result: Awaited<ReturnType<typeof runAudit>>;
+      try {
+        result = await withTimeout(runAudit("scheduler", "scheduler"), SCHEDULER_HTTP_DEADLINE_MS, SCHEDULER_DEADLINE_SENTINEL);
+      } catch (err) {
+        if (err instanceof Error && err.message === SCHEDULER_DEADLINE_SENTINEL) {
+          console.warn(`[audit-scheduler] run exceeded the ${SCHEDULER_HTTP_DEADLINE_MS}ms HTTP deadline — 504 returned; the run continues in the background and its lock guards against retry overlap.`);
+          // PR #136 review issue 2 (timeout/success ordering race): if the
+          // run we launched already persisted its success while the race
+          // settled, writing lastTimedOutAt NOW would shadow that real
+          // success with a newer timeout and falsely flip health to
+          // "failing". Re-read the scheduler state and record the timeout
+          // marker only when no success has landed since this invocation.
+          const raceSnap = await getDoc(schedulerStateRef).catch(() => null);
+          const successSinceInvocation = raceSnap?.exists() ? (raceSnap.data()?.lastSuccessfulRunAt || null) : null;
+          if (shouldRecordSchedulerTimeout(successSinceInvocation, invokedAtMs)) {
+            await setDoc(schedulerStateRef, { id: "scheduler", lastTimedOutAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+          } else {
+            console.log("[audit-scheduler] the run completed successfully while the deadline settled — timeout marker suppressed.");
+          }
+          return res.status(504).json({ error: "Audit run exceeded the scheduler deadline.", outcome: "timed_out" });
+        }
+        throw err;
+      }
+
+      if (!result.ok) {
+        if (result.reason === "locked") {
+          // Another run (possibly a previously timed-out one still
+          // finishing) holds the lock — a retry outcome, not a failure:
+          // it must NOT mark the scheduler as failing.
+          return res.status(409).json({ error: result.error || "Another audit run holds the lock.", outcome: "locked" });
+        }
+        // Terminal success/failure timestamps are persisted by runAudit
+        // itself (scheduler-triggered runs only) so a run that outlives
+        // the HTTP deadline still records its real outcome — a later
+        // success always supersedes stale timeout metadata.
+        return res.status(500).json({ error: result.error || "Audit failed.", outcome: "failed" });
+      }
+
+      // Observable, secret-free result: ids, duration, and counts only.
+      res.json({
+        ok: true,
+        outcome: "succeeded",
+        run: result.run
+          ? {
+              id: result.run.id,
+              durationMs: result.run.durationMs,
+              createdCount: result.run.createdCount,
+              reopenedCount: result.run.reopenedCount,
+              autoResolvedCount: result.run.autoResolvedCount,
+              failedRuleCount: result.run.failedRuleCount,
+              openTotalAfter: result.run.openTotalAfter,
+            }
+          : undefined,
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[audit-scheduler] invocation failed:", err);
+      res.status(500).json({ error: "Scheduler run failed." });
     }
-    const result = await runAudit("scheduler", "scheduler");
-    if (!result.ok) return res.status(409).json({ error: result.error || "Audit failed." });
-    res.json({ ok: true });
   });
 
   /**
@@ -9818,6 +9952,15 @@ async function startServer() {
       const visible = filterFindingsForViewer(findings, adminType);
       const stateSnap = await getDoc(doc(db, "auditState", "summary"));
       const state = stateSnap.exists() ? stateSnap.data() : {};
+      // External-scheduler health (PR #136): derived from the PERSISTED
+      // auditState/scheduler document (survives instance restarts), so
+      // only scheduler-triggered runs count — manual/startup/interval
+      // runs never make the external scheduler look healthy. Safe
+      // operational metadata only: a configured boolean + timestamps;
+      // never the token or anything derived from it.
+      const schedulerSnap = await getDoc(doc(db, "auditState", "scheduler"));
+      const schedulerState = (schedulerSnap.exists() ? schedulerSnap.data() : null) as SchedulerState | null;
+      const schedulerConfigured = !!(process.env.AUDIT_SCHEDULER_TOKEN || "").trim();
       res.json({
         summary: summarizeFindings(visible),
         // Recommended-priority triage row — deterministic, derived at
@@ -9828,6 +9971,7 @@ async function startServer() {
         lastFailedRunAt: state?.lastFailedRunAt || null,
         rulesVersion: state?.rulesVersion || null,
         running: auditRunning,
+        scheduler: assessSchedulerHealth(schedulerConfigured, schedulerState, Date.now()),
       });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
