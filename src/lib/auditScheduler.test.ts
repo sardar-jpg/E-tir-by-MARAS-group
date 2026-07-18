@@ -7,7 +7,10 @@ import {
   isDuplicateSchedulerFire,
   canTakeOverAuditLock,
   summarizeRunForLog,
+  assessSchedulerHealth,
   SCHEDULER_DUPLICATE_WINDOW_MS,
+  EXPECTED_SCHEDULER_CADENCE_MS,
+  SCHEDULER_HTTP_DEADLINE_MS,
 } from "./auditScheduler";
 
 const ROOT = join(__dirname, "..", "..");
@@ -106,10 +109,58 @@ describe("observability is secret-safe", () => {
   });
 });
 
+describe("scheduler health — persisted-state decision table", () => {
+  const CAD = EXPECTED_SCHEDULER_CADENCE_MS;
+
+  it("missing token → not_configured (regardless of any persisted history)", () => {
+    expect(assessSchedulerHealth(false, { lastSuccessfulRunAt: iso(1000) }, NOW).status).toBe("not_configured");
+    expect(assessSchedulerHealth(false, null, NOW).configured).toBe(false);
+  });
+
+  it("configured but never run → never_run (a bare trigger with no terminal outcome still counts)", () => {
+    expect(assessSchedulerHealth(true, null, NOW).status).toBe("never_run");
+    expect(assessSchedulerHealth(true, { lastTriggeredAt: iso(1000) }, NOW).status).toBe("never_run");
+  });
+
+  it("recent successful scheduler run → healthy", () => {
+    const h = assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(CAD) }, NOW);
+    expect(h.status).toBe("healthy");
+    expect(h.expectedCadenceMs).toBe(CAD);
+    expect(h.lastSuccessfulRunAt).toBe(iso(CAD));
+  });
+
+  it("old successful scheduler run (≥ 2× cadence) → stale", () => {
+    expect(assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(2 * CAD) }, NOW).status).toBe("stale");
+    expect(assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(2 * CAD - 1) }, NOW).status).toBe("healthy");
+  });
+
+  it("newer failed run than last success → failing; newer TIMED-OUT run → failing", () => {
+    expect(assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(60_000), lastFailedRunAt: iso(10_000) }, NOW).status).toBe("failing");
+    expect(assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(60_000), lastTimedOutAt: iso(10_000) }, NOW).status).toBe("failing");
+    // Failure with no success ever recorded is failing too.
+    expect(assessSchedulerHealth(true, { lastFailedRunAt: iso(10_000) }, NOW).status).toBe("failing");
+  });
+
+  it("a LATER success supersedes earlier failure/timeout metadata → healthy again", () => {
+    const h = assessSchedulerHealth(true, {
+      lastFailedRunAt: iso(60_000), lastTimedOutAt: iso(50_000), lastSuccessfulRunAt: iso(10_000),
+    }, NOW);
+    expect(h.status).toBe("healthy");
+  });
+
+  it("health carries safe operational metadata only — no token-shaped field can exist", () => {
+    const h = assessSchedulerHealth(true, { lastSuccessfulRunAt: iso(1000) }, NOW);
+    expect(Object.keys(h).sort()).toEqual([
+      "configured", "expectedCadenceMs", "lastFailedRunAt", "lastSuccessfulRunAt", "lastTimedOutAt", "lastTriggeredAt", "status",
+    ]);
+    expect(JSON.stringify(h)).not.toContain(TOKEN);
+  });
+});
+
 describe("server wiring — scheduler is the authoritative trigger (H-2)", () => {
   const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
   const at = SERVER.indexOf('app.all("/api/audit/scheduler-run"');
-  const SCHED = SERVER.slice(at, at + 2800);
+  const SCHED = SERVER.slice(at, at + 6500);
 
   it("unsupported methods are rejected with 405 + Allow header; the route never falls to the SPA catch-all", () => {
     expect(at).toBeGreaterThan(-1);
@@ -133,5 +184,49 @@ describe("server wiring — scheduler is the authoritative trigger (H-2)", () =>
     // The success response exposes counts/ids only.
     expect(SCHED).toContain("failedRuleCount: result.run.failedRuleCount");
     expect(SCHED).not.toContain("AUDIT_SCHEDULER_TOKEN}");
+  });
+
+  it("HTTP deadline: withTimeout wraps the scheduler run; expiry → 504 + persisted lastTimedOutAt + secret-free log; lock NOT released early", () => {
+    expect(SCHED).toContain("withTimeout(runAudit(\"scheduler\", \"scheduler\"), SCHEDULER_HTTP_DEADLINE_MS");
+    expect(SCHED).toContain("504");
+    expect(SCHED).toContain('outcome: "timed_out"');
+    expect(SCHED).toContain("lastTimedOutAt: new Date().toISOString()");
+    // The timeout branch must not touch the lock: release happens only in
+    // runAudit's own finally path (retry overlap is blocked by the lock).
+    expect(SCHED).not.toContain("releaseAuditLock");
+    // The timeout log is a fixed string with the deadline number only —
+    // no token material.
+    expect(SCHED).toContain("the run continues in the background and its lock guards against retry overlap");
+    // Deadline stays under Cloud Scheduler's 120s attempt deadline.
+    expect(SCHEDULER_HTTP_DEADLINE_MS).toBeLessThan(120_000);
+  });
+
+  it("outcomes are distinguished: succeeded / failed(500) / locked(409, no failure marker) / deduplicated / timed_out", () => {
+    expect(SCHED).toContain('outcome: "succeeded"');
+    expect(SCHED).toContain('outcome: "failed"');
+    expect(SCHED).toContain('outcome: "locked"');
+    expect(SCHED).toContain('outcome: "deduplicated"');
+    expect(SCHED).toContain('res.status(500).json({ error: result.error || "Audit failed.", outcome: "failed" })');
+    expect(SCHED).toContain('result.reason === "locked"');
+    // A locked retry (e.g. during a still-valid lock after a 504) never
+    // writes a failure marker — only runAudit's terminal paths do.
+    const lockedBranch = SCHED.slice(SCHED.indexOf('result.reason === "locked"'), SCHED.indexOf('outcome: "locked"'));
+    expect(lockedBranch).not.toContain("lastFailedRunAt");
+  });
+
+  it("terminal scheduler outcomes persist inside runAudit (scheduler-triggered only), so manual/startup/interval runs never touch scheduler health", () => {
+    const runAuditAt = SERVER.indexOf("async function runAudit(");
+    const RUN = SERVER.slice(runAuditAt, SERVER.indexOf("const auditStartupTimer"));
+    expect(RUN).toContain('if (trigger === "scheduler")');
+    expect(RUN).toContain('setDoc(doc(db, "auditState", "scheduler")');
+    // Success and failure paths both gated on the scheduler trigger.
+    expect(RUN.split('if (trigger === "scheduler")').length - 1).toBe(2);
+    // The admin summary exposes health from the PERSISTED doc through the
+    // pure assessor — configured presence boolean only, never the token.
+    const SUMMARY = SERVER.slice(SERVER.indexOf('app.get("/api/admin/audit/summary"'), SERVER.indexOf('app.get("/api/admin/audit/findings"'));
+    expect(SUMMARY).toContain('getDoc(doc(db, "auditState", "scheduler"))');
+    expect(SUMMARY).toContain("assessSchedulerHealth(schedulerConfigured, schedulerState, Date.now())");
+    expect(SUMMARY).toContain('!!(process.env.AUDIT_SCHEDULER_TOKEN || "").trim()');
+    expect(SUMMARY).not.toContain("${");
   });
 });

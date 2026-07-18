@@ -19,6 +19,18 @@ import crypto from "crypto";
  */
 export const SCHEDULER_DUPLICATE_WINDOW_MS = 60_000;
 
+/**
+ * HTTP deadline for a scheduler-triggered run. This is a REQUEST deadline,
+ * not a cancellation: when it expires the endpoint answers 504 and the
+ * original audit keeps executing in the background, releasing its
+ * distributed lock only through runAudit's own finally path. Kept under
+ * Cloud Scheduler's 120s attempt deadline so we control the response.
+ */
+export const SCHEDULER_HTTP_DEADLINE_MS = 110_000;
+
+/** Documented external cadence (cron 0 *\/3 * * * — every 3 hours). */
+export const EXPECTED_SCHEDULER_CADENCE_MS = 3 * 60 * 60 * 1000;
+
 export type SchedulerAuthResult =
   /** token configured and the provided header matches (constant-time) */
   | "ok"
@@ -84,6 +96,76 @@ export function canTakeOverAuditLock(
   if (!current?.expiresAt) return true;
   const expiresAt = new Date(current.expiresAt).getTime();
   return !Number.isFinite(expiresAt) || expiresAt <= nowMs;
+}
+
+/**
+ * Persisted scheduler operational state (auditState/scheduler document).
+ * Written ONLY by the external scheduler endpoint, so manual, startup,
+ * and in-process interval runs can never make the external scheduler
+ * look healthy. Survives Cloud Run instance restarts by construction —
+ * health is derived from THIS persisted state, never from memory.
+ * Timestamps only; no token or token-derived value may ever live here.
+ */
+export interface SchedulerState {
+  lastTriggeredAt?: string | null;
+  lastSuccessfulRunAt?: string | null;
+  lastFailedRunAt?: string | null;
+  lastTimedOutAt?: string | null;
+}
+
+export type SchedulerHealthStatus = "not_configured" | "never_run" | "healthy" | "stale" | "failing";
+
+export interface SchedulerHealth {
+  configured: boolean;
+  status: SchedulerHealthStatus;
+  expectedCadenceMs: number;
+  lastTriggeredAt: string | null;
+  lastSuccessfulRunAt: string | null;
+  lastFailedRunAt: string | null;
+  lastTimedOutAt: string | null;
+}
+
+const ts = (iso: string | null | undefined): number => {
+  if (!iso) return 0;
+  const v = new Date(iso).getTime();
+  return Number.isFinite(v) ? v : 0;
+};
+
+/**
+ * Health decision table (external scheduler ONLY — see SchedulerState):
+ *   not_configured  no AUDIT_SCHEDULER_TOKEN
+ *   never_run       configured, but no terminal scheduler outcome persisted
+ *                   (success, failure, or timeout) — a bare trigger with no
+ *                   outcome yet still counts as never_run
+ *   failing         the newest terminal outcome is a failure or timeout
+ *                   (i.e. failure/timeout newer than the last success);
+ *                   a LATER success flips back to healthy/stale
+ *   stale           last success older than 2 × the expected cadence
+ *   healthy         last success within the allowed window
+ */
+export function assessSchedulerHealth(
+  configured: boolean,
+  state: SchedulerState | null | undefined,
+  nowMs: number,
+  expectedCadenceMs: number = EXPECTED_SCHEDULER_CADENCE_MS
+): SchedulerHealth {
+  const base = {
+    configured,
+    expectedCadenceMs,
+    lastTriggeredAt: state?.lastTriggeredAt || null,
+    lastSuccessfulRunAt: state?.lastSuccessfulRunAt || null,
+    lastFailedRunAt: state?.lastFailedRunAt || null,
+    lastTimedOutAt: state?.lastTimedOutAt || null,
+  };
+  if (!configured) return { ...base, status: "not_configured" };
+
+  const success = ts(state?.lastSuccessfulRunAt);
+  const badness = Math.max(ts(state?.lastFailedRunAt), ts(state?.lastTimedOutAt));
+  if (success === 0 && badness === 0) return { ...base, status: "never_run" };
+  if (badness > success) return { ...base, status: "failing" };
+  const age = nowMs - success;
+  if (age >= 2 * expectedCadenceMs) return { ...base, status: "stale" };
+  return { ...base, status: "healthy" };
 }
 
 /**
