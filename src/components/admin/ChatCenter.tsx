@@ -45,15 +45,24 @@ const CHANNEL_FILE_CATEGORIES: DocumentCategory[] = [...INTERNAL_FILE_CATEGORIES
  * real visible height; falls back to null (callers use 100dvh) where the
  * API doesn't exist.
  */
-function useVisualViewportHeight(enabled: boolean): number | null {
-  const [height, setHeight] = useState<number | null>(null);
+interface VisualViewportMetrics {
+  height: number;
+  /** How far iOS has panned the visual viewport down from the layout
+      viewport's top (keyboard open) — the overlay translates by this so
+      header/tabs/composer stay inside the VISIBLE area instead of being
+      scrolled away with the page. */
+  offsetTop: number;
+}
+
+function useVisualViewportMetrics(enabled: boolean): VisualViewportMetrics | null {
+  const [metrics, setMetrics] = useState<VisualViewportMetrics | null>(null);
   useEffect(() => {
     if (!enabled || typeof window === 'undefined' || !window.visualViewport) {
-      setHeight(null);
+      setMetrics(null);
       return;
     }
     const vv = window.visualViewport;
-    const update = () => setHeight(Math.round(vv.height));
+    const update = () => setMetrics({ height: Math.round(vv.height), offsetTop: Math.round(vv.offsetTop) });
     update();
     vv.addEventListener('resize', update);
     vv.addEventListener('scroll', update);
@@ -62,7 +71,7 @@ function useVisualViewportHeight(enabled: boolean): number | null {
       vv.removeEventListener('scroll', update);
     };
   }, [enabled]);
-  return enabled ? height : null;
+  return enabled ? metrics : null;
 }
 
 // feature/chat-ui-ux-phase2: auto-growing composer bounds — one line at
@@ -355,8 +364,54 @@ export default function ChatCenter({
   // fix/admin-mobile-chat-correctness: in-app image viewer target — image
   // attachments never navigate the WebView to the raw file URL.
   const [lightboxTarget, setLightboxTarget] = useState<ImageLightboxTarget | null>(null);
-  // Keyboard-aware height for the mobile full-screen conversation.
-  const visualViewportHeight = useVisualViewportHeight(isMobile && Boolean(selectedShipmentId));
+  // Keyboard-aware size/offset for the mobile full-screen conversation.
+  const visualViewport = useVisualViewportMetrics(isMobile && Boolean(selectedShipmentId));
+
+  // fix/admin-mobile-chat-keyboard-ux: while the mobile conversation is
+  // open, the PAGE BEHIND it must not scroll at all — on a real iPhone,
+  // focusing the composer made WebKit scroll the underlying document to
+  // "reveal" the input, which visually dumped the admin back onto the
+  // shipment list behind the overlay. Locking the body (classic
+  // position:fixed technique, scroll position preserved and restored)
+  // removes the only scrollable thing WebKit could move; combined with
+  // the visualViewport translate below, the conversation stays exactly
+  // where it is with the keyboard open.
+  useEffect(() => {
+    if (!isMobile || !selectedShipmentId) return;
+    const scrollY = window.scrollY;
+    const body = document.body;
+    const prev = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      overflow: body.style.overflow,
+    };
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.left = '0';
+    body.style.right = '0';
+    body.style.overflow = 'hidden';
+    return () => {
+      body.style.position = prev.position;
+      body.style.top = prev.top;
+      body.style.left = prev.left;
+      body.style.right = prev.right;
+      body.style.overflow = prev.overflow;
+      window.scrollTo(0, scrollY);
+    };
+  }, [isMobile, selectedShipmentId]);
+
+  // fix/admin-mobile-chat-keyboard-ux: when the keyboard opens/closes the
+  // thread RESIZES (height style below) rather than the page moving — and
+  // if the admin was reading the latest messages, keep them pinned to the
+  // bottom through the resize instead of stranding the view mid-history.
+  useEffect(() => {
+    if (!isMobile) return;
+    if (!isNearBottomRef.current) return;
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [visualViewport?.height, isMobile]);
 
   // Shortcut buttons (Shipment Details modal) preselect a shipment + channel.
   useEffect(() => {
@@ -691,6 +746,10 @@ export default function ChatCenter({
       });
       if (res.ok) {
         const msg = await res.json();
+        // fix/admin-mobile-chat-keyboard-ux: sending always follows your
+        // own message to the bottom (smooth, via the length effect) —
+        // never leaves the view parked at an older scroll position.
+        isNearBottomRef.current = true;
         setChannelMessages((prev) => [...prev, msg]);
         setInternalMessageText('');
         resetInternalAttachment();
@@ -821,7 +880,7 @@ export default function ChatCenter({
       {/* Thread: the ONE scrollable region — flex-1 min-h-0 so it always
           fills exactly the space between tabs and composer (no fixed-height
           box, no dead space around a short/empty conversation). */}
-      <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto px-3 py-3 lg:p-5 bg-slate-50/50">
+      <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pt-3 pb-2 lg:p-5 bg-slate-50/50">
         {isLoadingMessages ? (
           <p className="text-xs text-slate-400 text-center py-10">{label.loading}</p>
         ) : pollError && !hasLoadedMessagesOnce ? (
@@ -852,7 +911,12 @@ export default function ChatCenter({
             <p className="text-xs text-slate-400">{label.noMessages}</p>
           </div>
         ) : (
-          <>
+          /* fix/admin-mobile-chat-keyboard-ux: min-h-full + justify-end
+             anchors a short conversation to the BOTTOM of the scroll area
+             — the newest message sits right above the composer with no
+             dead space, like WhatsApp/Telegram/iMessage. Long
+             conversations overflow and scroll exactly as before. */
+          <div className="min-h-full flex flex-col justify-end">
             {pollError && (
               /* fix/chat-safety-reliability-phase1: messages we already
                  have stay fully visible — this is just a heads-up that the
@@ -907,7 +971,7 @@ export default function ChatCenter({
                       </span>
                     </div>
                   )}
-                  <div className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                  <div className={`flex flex-col max-w-[82%] lg:max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
                     {!isGrouped && (
                       <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
                     )}
@@ -980,13 +1044,13 @@ export default function ChatCenter({
                           </a>
                         )}
                         {msg.text && (
-                          <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                          <div className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed lg:text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
                             {msg.text}
                           </div>
                         )}
                       </div>
                     ) : (
-                      <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                      <div className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed lg:text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
                         {msg.text}
                       </div>
                     )}
@@ -1008,7 +1072,7 @@ export default function ChatCenter({
               );
             })}
             <div ref={messagesEndRef} />
-          </>
+          </div>
         )}
       </div>
 
@@ -1093,6 +1157,16 @@ export default function ChatCenter({
                   e.preventDefault();
                   handleSendInternalMessage();
                 }
+              }}
+              onFocus={() => {
+                // fix/admin-mobile-chat-keyboard-ux: once the iOS keyboard
+                // finishes animating in (~250ms), keep the newest messages
+                // visible in the shrunken thread.
+                if (!isMobile) return;
+                setTimeout(() => {
+                  const el = messagesContainerRef.current;
+                  if (el && isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+                }, 300);
               }}
               placeholder={activeChannel === 'internal_staff' ? label.internalInputPlaceholder : label.messagePlaceholder}
               maxLength={MAX_CHAT_TEXT_LENGTH}
@@ -1188,8 +1262,12 @@ export default function ChatCenter({
           (the on-screen keyboard shrinks it), 100dvh otherwise. */}
       {isMobile && selectedShipment && (
         <div
-          className="fixed inset-x-0 top-0 z-[70] bg-white flex flex-col lg:hidden"
-          style={{ height: visualViewportHeight ? `${visualViewportHeight}px` : '100dvh' }}
+          className="fixed inset-x-0 top-0 z-[70] bg-white flex flex-col lg:hidden overscroll-none"
+          style={{
+            height: visualViewport ? `${visualViewport.height}px` : '100dvh',
+            transform: visualViewport && visualViewport.offsetTop > 0 ? `translateY(${visualViewport.offsetTop}px)` : undefined,
+            transition: 'height 150ms ease-out',
+          }}
           dir={isRtl ? 'rtl' : 'ltr'}
         >
           {conversationPane}
