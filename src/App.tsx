@@ -31,6 +31,7 @@ import { isShipmentClosed } from "./lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
 import { encodePageCursor } from "./lib/pagination";
 import { isValidLocalSessionFastPath } from "./lib/localSessionFastPath";
+import ImageLightbox from "./components/ImageLightbox";
 import { onAuthStateChanged } from "firebase/auth";
 
 interface AppSession {
@@ -576,6 +577,17 @@ export default function App() {
   const chatNewestCursorRef = useRef<string | null>(null);
   const [chatMessageText, setChatMessageText] = useState("");
   const [activeDetailsId, setActiveDetailsId] = useState<string | null>(null);
+  // fix/admin-mobile-chat-correctness: every admin chat entry path must
+  // sync badges the moment the server CONFIRMS a seen call — this drawer
+  // previously told nobody, so AdminPanel's unreadChatMessages (the one
+  // array every badge derives from) stayed stale until the next ~12s
+  // poll. Monotonic seq so AdminPanel's effect fires on every
+  // confirmation, including repeats of the same shipment+channel.
+  const [adminChatSeenEvent, setAdminChatSeenEvent] = useState<{ shipmentId: string; channel: ChatChannel; seq: number } | null>(null);
+  // fix/admin-mobile-chat-correctness: in-app image viewer target for this
+  // drawer's image attachments (shared ImageLightbox component) — image
+  // taps must never navigate the WebView to the raw file URL.
+  const [drawerLightbox, setDrawerLightbox] = useState<{ url: string; name: string } | null>(null);
 
   const openShipmentChat = (shipment: Shipment, channel?: ChatChannel) => {
     setChatChannel(channel || 'driver_admin');
@@ -759,22 +771,35 @@ export default function App() {
               chatNewestCursorRef.current = encodePageCursor({ ts: newest.timestamp, id: newest.id });
             }
 
-            // feature/admin-mobile-ui correction pass: `status` is no
-            // longer per-admin truth (another admin reading first already
-            // flips it to 'seen' globally) — gating this call on
-            // `status !== 'seen'` meant a second admin opening the same
-            // drawer could skip calling /chat/seen entirely and never get
-            // added to that message's readByAdminIds, leaving their own
-            // unread badge stuck forever. The server-side write is
-            // idempotent, so just call whenever there's a message from
-            // the other party at all.
-            const hasMessageFromOtherParty = data.some((m: any) => m.sender !== 'admin');
-            if (hasMessageFromOtherParty) {
-              await apiFetch(`/api/shipments/${chatShipment.id}/chat/seen`, {
+            // fix/admin-mobile-chat-correctness: the old gate here
+            // (`data.some(m => m.sender !== 'admin')`) only looked at the
+            // FETCHED PAGE — an unread record whose message isn't in the
+            // current page (older than the latest 50, or a legacy
+            // channel-less message the channel-filtered view doesn't even
+            // display) never triggered a seen call at all, so its badge
+            // could never clear from this drawer. Opening the thread IS
+            // reading it: call seen unconditionally on the initial load,
+            // and again whenever a poll tick actually delivered new
+            // messages. The server-side write/delete is idempotent and
+            // strictly scoped (adminId + shipmentId + channel), so the
+            // extra call is safe; on OK confirmation, publish the event
+            // AdminPanel uses to drop these messages from the shared
+            // unreadChatMessages array immediately (every badge derives
+            // from it). A failed seen publishes nothing — badges must
+            // never clear locally on a server failure.
+            if (!cursor || data.length > 0) {
+              const seenRes = await apiFetch(`/api/shipments/${chatShipment.id}/chat/seen`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ viewer: "admin", channel: chatChannel })
               });
+              if (!cancelled && seenRes.ok) {
+                setAdminChatSeenEvent((prev) => ({
+                  shipmentId: chatShipment.id,
+                  channel: chatChannel,
+                  seq: (prev?.seq ?? 0) + 1,
+                }));
+              }
             }
           }
         } catch (e) {
@@ -1150,6 +1175,7 @@ export default function App() {
             <AdminPanel
               lang={lang}
               onSelectShipmentChat={(sh, channel) => openShipmentChat(sh, channel)}
+              chatSeenEvent={adminChatSeenEvent}
               openDetailsId={activeDetailsId}
               setOpenDetailsId={setActiveDetailsId}
               gmailUser={gmailUser}
@@ -1317,39 +1343,63 @@ export default function App() {
                             <span className="absolute inset-0 rounded-2xl rounded-tr-none border border-emerald-400 bg-emerald-500/5 animate-pulse pointer-events-none" />
                           )}
                           
-                          {msg.type === 'file' ? (
+                          {msg.type === 'file' ? (() => {
+                            // fix/admin-mobile-chat-correctness: image
+                            // attachments open the shared in-app
+                            // ImageLightbox — never an <a> that navigates
+                            // the WebView to the raw file URL. Non-image
+                            // files keep the explicit download anchor.
+                            const isImageMsg = (msg.fileCategory === 'photo' || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)$/i)) && msg.fileUrl && msg.fileUrl !== '#';
+                            return (
                             <div className="space-y-2">
                               <span className={`${isAdmin ? 'bg-slate-900 text-slate-400' : 'bg-orange-800 text-orange-200'} text-[10px] font-mono font-bold px-1.5 py-0.5 rounded uppercase block w-max`}>
                                 {msg.fileCategory}
                               </span>
-                              <a 
-                                href={msg.fileUrl || "#"} 
-                                download={msg.fileName || "document.bin"}
-                                onClick={(e) => {
-                                  if (!msg.fileUrl || msg.fileUrl === "#") {
-                                    e.preventDefault();
-                                    alert("Document specimen offline preview active.");
-                                  }
-                                }}
-                                className="font-bold underline cursor-pointer flex items-center gap-1 hover:text-orange-200 break-all"
-                              >
-                                <FileUp className="w-3.5 h-3.5 shrink-0 inline" />
-                                <span>{msg.fileName}</span>
-                              </a>
-                              
-                              {/* Rich inline image preview if file category is photo or looks like an image */}
-                              {((msg.fileCategory === 'photo' || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)/i)) && msg.fileUrl && msg.fileUrl !== '#') && (
-                                <div className="mt-2 rounded-lg overflow-hidden border border-slate-700 max-w-[180px]">
-                                  <img 
-                                    src={msg.fileUrl} 
-                                    alt={msg.fileName} 
-                                    className="w-full h-auto object-cover max-h-[120px]" 
+                              {isImageMsg ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setDrawerLightbox({ url: msg.fileUrl, name: msg.fileName || 'attachment' })}
+                                  className="font-bold underline cursor-pointer flex items-center gap-1 hover:text-orange-200 break-all text-left bg-transparent border-0 p-0 text-inherit"
+                                >
+                                  <FileUp className="w-3.5 h-3.5 shrink-0 inline" />
+                                  <span>{msg.fileName}</span>
+                                </button>
+                              ) : (
+                                <a
+                                  href={msg.fileUrl || "#"}
+                                  download={msg.fileName || "document.bin"}
+                                  onClick={(e) => {
+                                    if (!msg.fileUrl || msg.fileUrl === "#") {
+                                      e.preventDefault();
+                                      alert("Document specimen offline preview active.");
+                                    }
+                                  }}
+                                  className="font-bold underline cursor-pointer flex items-center gap-1 hover:text-orange-200 break-all"
+                                >
+                                  <FileUp className="w-3.5 h-3.5 shrink-0 inline" />
+                                  <span>{msg.fileName}</span>
+                                </a>
+                              )}
+
+                              {/* Rich inline image preview — tap opens the in-app viewer */}
+                              {isImageMsg && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDrawerLightbox({ url: msg.fileUrl, name: msg.fileName || 'attachment' })}
+                                  aria-label={msg.fileName || 'attachment'}
+                                  className="mt-2 block rounded-lg overflow-hidden border border-slate-700 max-w-[180px] cursor-zoom-in p-0 bg-transparent"
+                                >
+                                  <img
+                                    src={msg.fileUrl}
+                                    alt={msg.fileName}
+                                    className="w-full h-auto object-cover max-h-[120px]"
                                     referrerPolicy="no-referrer"
                                   />
-                                </div>
+                                </button>
                               )}
                             </div>
-                          ) : (
+                            );
+                          })() : (
                             <p>{msg.text}</p>
                           )}
                         </div>
@@ -1646,6 +1696,18 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* fix/admin-mobile-chat-correctness: shared in-app image viewer for
+          the drawer's image attachments — replaces raw-URL navigation. */}
+      <ImageLightbox
+        target={drawerLightbox}
+        onClose={() => setDrawerLightbox(null)}
+        labels={{
+          close: lang === 'tr' ? 'Kapat' : lang === 'ar' ? 'إغلاق' : 'Close',
+          share: lang === 'tr' ? 'Paylaş' : lang === 'ar' ? 'مشاركة' : 'Share',
+          download: lang === 'tr' ? 'İndir' : lang === 'ar' ? 'تنزيل' : 'Download',
+        }}
+      />
 
       {/* CORE STATS FOOTER BRANDING.
           feature/admin-mobile-ui correction pass: hidden on mobile — it

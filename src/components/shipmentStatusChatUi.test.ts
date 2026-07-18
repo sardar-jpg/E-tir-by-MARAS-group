@@ -209,13 +209,19 @@ describe("admin/ChatCenter.tsx — internal_staff composer", () => {
   });
 
   it("renders a read-only banner instead of the composer once closed", () => {
-    expect(SOURCE).toContain("activeChannel === 'internal_staff' && isSelectedShipmentClosed &&");
-    expect(SOURCE).toContain("activeChannel === 'internal_staff' && !isSelectedShipmentClosed &&");
+    // fix/admin-mobile-chat-correctness: the composer now serves every
+    // channel this surface may compose in (internal everywhere; all
+    // channels on mobile — canComposeInActiveChannel), so the closed
+    // lock is pinned on that composability flag: wherever a composer
+    // COULD render, the closed state must swap it for the banner.
+    expect(SOURCE).toContain("canComposeInActiveChannel = activeChannel === 'internal_staff' || isMobile");
+    expect(SOURCE).toContain("canComposeInActiveChannel && isSelectedShipmentClosed &&");
+    expect(SOURCE).toContain("canComposeInActiveChannel && !isSelectedShipmentClosed &&");
   });
 
   it("handleSendInternalMessage is guarded by isLocked, and reports a specific (not generic) error on SHIPMENT_CHAT_CLOSED", () => {
     const fnStart = SOURCE.indexOf("const handleSendInternalMessage = async () => {");
-    const fnRegion = SOURCE.slice(fnStart, fnStart + 3900);
+    const fnRegion = SOURCE.slice(fnStart, fnStart + 4800);
     expect(fnRegion).toContain("isLocked: isSelectedShipmentClosed");
     expect(fnRegion).toContain("closedBody?.code === 'SHIPMENT_CHAT_CLOSED'");
     expect(fnRegion).toContain("setInternalSendError('closed');");

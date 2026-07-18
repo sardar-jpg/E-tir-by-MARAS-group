@@ -10,7 +10,12 @@ import {
   planUnreadFanout,
   selectUnreadMessagesFromRecords,
   buildUnreadClearFilters,
+  resolveLegacyUnreadAudience,
+  selectChannellessClearableRecordIds,
+  dropSeenUnreadMessages,
+  applyUnreadPollResponse,
   type AdminChatUnreadRecord,
+  type ConfirmedSeenScope,
 } from "./chatUnreadAccess";
 import { applyMemoryFilters, paginateDescending, walkAllDescendingPages, type PageCursor, type DescendingPageFetchResult } from "./pagination";
 import type { ChatMessage } from "../types";
@@ -417,5 +422,132 @@ describe("formatUnreadBadge", () => {
   it("caps display at 99+ above 99", () => {
     expect(formatUnreadBadge(100)).toBe("99+");
     expect(formatUnreadBadge(500)).toBe("99+");
+  });
+});
+
+// ── fix/admin-mobile-chat-correctness: legacy channel-less records ──
+
+const legacyRecord = (
+  id: string,
+  adminId: string,
+  shipmentId: string,
+  sender: "driver" | "client" | "admin",
+  channel?: ChatMessage["channel"]
+): AdminChatUnreadRecord => ({
+  id,
+  adminId,
+  messageId: id.split("__")[1] || id,
+  shipmentId,
+  ...(channel ? { channel } : {}),
+  timestamp: "2026-05-31T10:00:00Z",
+  message: {
+    id: id.split("__")[1] || id,
+    shipmentId,
+    sender,
+    senderName: sender,
+    senderId: sender === "admin" ? "some-other-admin" : undefined,
+    type: "text",
+    text: "hello",
+    timestamp: "2026-05-31T10:00:00Z",
+    ...(channel ? { channel } : {}),
+  } as ChatMessage,
+  createdAt: "2026-05-31T10:00:00Z",
+});
+
+describe("resolveLegacyUnreadAudience — deterministic audience of a channel-less message", () => {
+  it("driver-sent resolves to driver_admin, client-sent to client_admin", () => {
+    expect(resolveLegacyUnreadAudience({ sender: "driver" })).toBe("driver_admin");
+    expect(resolveLegacyUnreadAudience({ sender: "client" })).toBe("client_admin");
+  });
+
+  it("admin-sent is AMBIGUOUS — never silently attributed to any channel", () => {
+    expect(resolveLegacyUnreadAudience({ sender: "admin" })).toBe("ambiguous_legacy_admin_message");
+  });
+});
+
+describe("selectChannellessClearableRecordIds — what a channel-scoped seen may additionally clear", () => {
+  const admin = "admin-a";
+  const ship = "shipment-1001";
+  const records: AdminChatUnreadRecord[] = [
+    legacyRecord("admin-a__m1", admin, ship, "driver"),            // channel-less driver → driver_admin
+    legacyRecord("admin-a__m2", admin, ship, "client"),            // channel-less client → client_admin
+    legacyRecord("admin-a__m3", admin, ship, "admin"),             // channel-less admin → ambiguous
+    legacyRecord("admin-a__m4", admin, ship, "driver", "driver_admin"), // HAS channel — not this helper's job
+    legacyRecord("admin-b__m1", "admin-b", ship, "driver"),        // another admin
+    legacyRecord("admin-a__m5", admin, "shipment-9999", "driver"), // another shipment
+  ];
+
+  it("a channel-less DRIVER record clears only from driver_admin", () => {
+    expect(selectChannellessClearableRecordIds(records, admin, ship, "driver_admin")).toEqual(["admin-a__m1"]);
+    expect(selectChannellessClearableRecordIds(records, admin, ship, "client_admin")).toEqual(["admin-a__m2"]);
+  });
+
+  it("a channel-less CLIENT record never clears from driver_admin or internal_staff", () => {
+    expect(selectChannellessClearableRecordIds(records, admin, ship, "internal_staff")).toEqual([]);
+  });
+
+  it("an ambiguous legacy admin record is never cleared from ANY channel", () => {
+    for (const ch of ["driver_admin", "client_admin", "internal_staff"] as const) {
+      expect(selectChannellessClearableRecordIds(records, admin, ship, ch)).not.toContain("admin-a__m3");
+    }
+  });
+
+  it("never touches another admin's records or another shipment's records", () => {
+    const ids = selectChannellessClearableRecordIds(records, admin, ship, "driver_admin");
+    expect(ids).not.toContain("admin-b__m1");
+    expect(ids).not.toContain("admin-a__m5");
+  });
+
+  it("records that already carry a channel are left to the channel-scoped query (never re-selected here)", () => {
+    expect(selectChannellessClearableRecordIds(records, admin, ship, "driver_admin")).not.toContain("admin-a__m4");
+  });
+});
+
+describe("dropSeenUnreadMessages — the confirmed local badge drop (shipment, channel, and global badges share this array)", () => {
+  const msgs: ChatMessage[] = [
+    { id: "m1", shipmentId: "s1", sender: "driver", senderName: "D", type: "text", text: "a", timestamp: "t", channel: "driver_admin" } as ChatMessage,
+    { id: "m2", shipmentId: "s1", sender: "driver", senderName: "D", type: "text", text: "b", timestamp: "t" } as ChatMessage, // channel-less legacy driver
+    { id: "m3", shipmentId: "s1", sender: "client", senderName: "C", type: "text", text: "c", timestamp: "t", channel: "client_admin" } as ChatMessage,
+    { id: "m4", shipmentId: "s2", sender: "driver", senderName: "D", type: "text", text: "d", timestamp: "t", channel: "driver_admin" } as ChatMessage,
+    { id: "m5", shipmentId: "s1", sender: "admin", senderName: "A", type: "text", text: "e", timestamp: "t" } as ChatMessage, // ambiguous legacy admin
+  ];
+
+  it("a successful driver_admin seen drops that channel's messages AND channel-less driver messages — nothing else", () => {
+    const after = dropSeenUnreadMessages(msgs, "s1", "driver_admin");
+    expect(after.map((m) => m.id)).toEqual(["m3", "m4", "m5"]);
+  });
+
+  it("one shipment/channel read never clears another shipment's or channel's unread", () => {
+    const after = dropSeenUnreadMessages(msgs, "s1", "client_admin");
+    expect(after.map((m) => m.id)).toEqual(["m1", "m2", "m4", "m5"]);
+  });
+
+  it("an ambiguous legacy admin message is not silently cleared by any channel read", () => {
+    for (const ch of ["driver_admin", "client_admin", "internal_staff"] as const) {
+      expect(dropSeenUnreadMessages(msgs, "s1", ch).map((m) => m.id)).toContain("m5");
+    }
+  });
+});
+
+describe("applyUnreadPollResponse — a stale poll response cannot resurrect a cleared badge", () => {
+  const fetched: ChatMessage[] = [
+    { id: "m1", shipmentId: "s1", sender: "driver", senderName: "D", type: "text", text: "a", timestamp: "t", channel: "driver_admin" } as ChatMessage,
+    { id: "m2", shipmentId: "s2", sender: "client", senderName: "C", type: "text", text: "b", timestamp: "t", channel: "client_admin" } as ChatMessage,
+  ];
+
+  it("drops messages in a scope whose seen was CONFIRMED AFTER the request was issued (the response predates the deletion)", () => {
+    const scopes: ConfirmedSeenScope[] = [{ shipmentId: "s1", channel: "driver_admin", confirmedAt: 1_000 }];
+    const applied = applyUnreadPollResponse(fetched, scopes, 500);
+    expect(applied.map((m) => m.id)).toEqual(["m2"]);
+  });
+
+  it("does NOT re-apply a scope confirmed BEFORE the request was issued — a genuinely new message may appear again", () => {
+    const scopes: ConfirmedSeenScope[] = [{ shipmentId: "s1", channel: "driver_admin", confirmedAt: 1_000 }];
+    const applied = applyUnreadPollResponse(fetched, scopes, 2_000);
+    expect(applied.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("with no confirmed scopes, the server response is applied verbatim (server-authoritative)", () => {
+    expect(applyUnreadPollResponse(fetched, [], 0)).toEqual(fetched);
   });
 });

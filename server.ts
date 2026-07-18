@@ -99,6 +99,7 @@ import {
   selectUnreadMessagesFromRecords,
   buildAdminChatUnreadRecordId,
   buildUnreadClearFilters,
+  selectChannellessClearableRecordIds,
   type AdminChatUnreadRecord,
 } from "./src/lib/chatUnreadAccess";
 import { buildSeenScopeFilters, planSeenWrites, type SeenWrite } from "./src/lib/chatSeenPlan";
@@ -5443,6 +5444,34 @@ async function startServer() {
         const unreadClearFilters = buildUnreadClearFilters(viewerAdminId, shipmentId, channelFilter);
         const unreadRecordsToClear = await fetchAllMatchingDescending("adminChatUnread", unreadClearFilters);
         unreadRecordIdsToClear = unreadRecordsToClear.map((r: any) => r.id as string);
+
+        // fix/admin-mobile-chat-correctness: legacy channel-less records
+        // (pre-BUG-03 / demo messages have no `channel` field, so their
+        // fan-out records have none either) can never match the
+        // channel == X equality filter above — they were permanently
+        // stranded, showing as stale badge counts no seen call could
+        // clear. When a channel WAS requested, additionally clear the
+        // channel-less records — still scoped to EXACTLY this
+        // adminId + shipmentId (the same already-deployed composite
+        // index) — whose message audience resolves DETERMINISTICALLY to
+        // that channel (driver-sent → driver_admin, client-sent →
+        // client_admin; an ambiguous legacy admin-sent message is never
+        // silently cleared — see resolveLegacyUnreadAudience). A
+        // channel-less seen call (channelFilter null) already matched
+        // them via the unrestricted query above — nothing extra to do.
+        if (channelFilter) {
+          const shipmentScopedRecords = await fetchAllMatchingDescending(
+            "adminChatUnread",
+            buildUnreadClearFilters(viewerAdminId, shipmentId, null)
+          );
+          const legacyIds = selectChannellessClearableRecordIds(
+            shipmentScopedRecords as AdminChatUnreadRecord[],
+            viewerAdminId,
+            shipmentId,
+            channelFilter
+          );
+          unreadRecordIdsToClear = Array.from(new Set([...unreadRecordIdsToClear, ...legacyIds]));
+        }
       }
 
       // Combined into one atomic operation (commitSeenWritesAndUnreadClears)

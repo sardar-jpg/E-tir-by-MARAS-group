@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, Check, CheckCheck, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
-import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment } from '../../lib/chatCenterView';
+import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment, countUnreadForChannel } from '../../lib/chatCenterView';
 import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
+import ImageLightbox, { type ImageLightboxTarget } from '../ImageLightbox';
 import { MAX_CHAT_TEXT_LENGTH } from '../../lib/chatMessageValidation';
 import {
   canSubmitChatMessage,
@@ -29,6 +30,41 @@ const INTERNAL_FILE_CATEGORIES: DocumentCategory[] = [
   'other',
 ];
 
+// fix/admin-mobile-chat-correctness: the mobile Chat Center composes in
+// the driver/customer channels too (one mobile chat experience — no
+// hand-off to the desktop drawer), where photo attachments are a normal
+// part of the workflow, so 'photo' joins the offered categories there.
+const CHANNEL_FILE_CATEGORIES: DocumentCategory[] = [...INTERNAL_FILE_CATEGORIES, 'photo'];
+
+/**
+ * fix/admin-mobile-chat-correctness: keyboard-aware height for the mobile
+ * full-screen conversation. On iOS the on-screen keyboard shrinks the
+ * VISUAL viewport but neither `100vh` nor `100dvh` (both track the layout
+ * viewport / collapsing toolbar only), so a dvh-sized panel leaves the
+ * composer hidden behind the keyboard. window.visualViewport reports the
+ * real visible height; falls back to null (callers use 100dvh) where the
+ * API doesn't exist.
+ */
+function useVisualViewportHeight(enabled: boolean): number | null {
+  const [height, setHeight] = useState<number | null>(null);
+  useEffect(() => {
+    if (!enabled || typeof window === 'undefined' || !window.visualViewport) {
+      setHeight(null);
+      return;
+    }
+    const vv = window.visualViewport;
+    const update = () => setHeight(Math.round(vv.height));
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, [enabled]);
+  return enabled ? height : null;
+}
+
 // feature/chat-ui-ux-phase2: auto-growing composer bounds — one line at
 // rest, up to ~5-6 lines before the textarea scrolls internally instead of
 // pushing the rest of the panel off-screen.
@@ -49,6 +85,14 @@ export interface ChatCenterFocus {
 interface ChatCenterProps {
   lang: Language;
   isRtl: boolean;
+  /** fix/admin-mobile-chat-correctness: on mobile the Chat Center IS the
+      one chat experience — a selected shipment opens as a full-screen,
+      keyboard-aware conversation that can compose in every permitted
+      channel, and the "Continue in full chat" hand-off to the desktop
+      drawer is not rendered (two competing mobile chat UIs was one of
+      the audited defects). Desktop (lg) keeps the two-pane layout and
+      the drawer hand-off unchanged. */
+  isMobile: boolean;
   shipments: Shipment[];
   unreadChatMessages: ChatMessage[];
   onOpenFullChat: (shipment: Shipment, channel?: ChatChannel) => void;
@@ -91,6 +135,10 @@ const LABELS: Record<Language, {
   retryNow: string;
   sentStatus: string;
   seenStatus: string;
+  close: string;
+  share: string;
+  download: string;
+  messagePlaceholder: string;
   category: Record<DocumentCategory, string>;
 }> = {
   en: {
@@ -121,6 +169,10 @@ const LABELS: Record<Language, {
     retryNow: 'Retry now',
     sentStatus: 'Sent',
     seenStatus: 'Seen',
+    close: 'Close',
+    share: 'Share',
+    download: 'Download',
+    messagePlaceholder: 'Type a message…',
     category: {
       cmr: 'CMR',
       invoice: 'Invoice',
@@ -161,6 +213,10 @@ const LABELS: Record<Language, {
     retryNow: 'Şimdi tekrar dene',
     sentStatus: 'Gönderildi',
     seenStatus: 'Görüldü',
+    close: 'Kapat',
+    share: 'Paylaş',
+    download: 'İndir',
+    messagePlaceholder: 'Bir mesaj yazın…',
     category: {
       cmr: 'CMR',
       invoice: 'Fatura',
@@ -201,6 +257,10 @@ const LABELS: Record<Language, {
     retryNow: 'إعادة المحاولة الآن',
     sentStatus: 'تم الإرسال',
     seenStatus: 'تمت المشاهدة',
+    close: 'إغلاق',
+    share: 'مشاركة',
+    download: 'تنزيل',
+    messagePlaceholder: 'اكتب رسالة…',
     category: {
       cmr: 'CMR',
       invoice: 'فاتورة',
@@ -218,6 +278,7 @@ const LABELS: Record<Language, {
 export default function ChatCenter({
   lang,
   isRtl,
+  isMobile,
   shipments,
   unreadChatMessages,
   onOpenFullChat,
@@ -291,6 +352,11 @@ export default function ChatCenter({
   // cases in section 2/7 of the phase-1 requirements need different copy.
   const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send' | 'closed'>('');
   const internalFileInputRef = useRef<HTMLInputElement>(null);
+  // fix/admin-mobile-chat-correctness: in-app image viewer target — image
+  // attachments never navigate the WebView to the raw file URL.
+  const [lightboxTarget, setLightboxTarget] = useState<ImageLightboxTarget | null>(null);
+  // Keyboard-aware height for the mobile full-screen conversation.
+  const visualViewportHeight = useVisualViewportHeight(isMobile && Boolean(selectedShipmentId));
 
   // Shortcut buttons (Shipment Details modal) preselect a shipment + channel.
   useEffect(() => {
@@ -389,23 +455,18 @@ export default function ChatCenter({
           setHasOlderMessages(Boolean(parsed.hasMore));
         }
 
-        // fix/chat-safety-reliability-phase1 (follow-up): this used to
-        // gate the /chat/seen call on `data.some(m => m.sender !== 'admin')`
-        // — meant to skip the call when there's nothing from "the other
-        // party" to mark. But every internal_staff message has
-        // sender: 'admin' (there is no other party — every participant is
-        // an admin), so that condition was ALWAYS false for internal_staff,
-        // meaning opening that channel never called /chat/seen at all and
-        // another admin's message could never be marked read. Call
-        // whenever the channel has any messages instead, and let the
-        // server's own session/channel/shipment-aware logic
-        // (isMessageFromOtherAdmin / isMessageUnreadForAdmin,
-        // chatUnreadAccess.ts) decide which messages actually get added to
-        // readByAdminIds — it already correctly excludes the viewing
-        // admin's own messages (own internal_staff messages included), so
-        // this is safe to call unconditionally rather than trying to
-        // duplicate that eligibility check client-side.
-        if (data.length > 0) {
+        // fix/admin-mobile-chat-correctness: opening the channel IS
+        // reading it — the seen call fires unconditionally on the initial
+        // load (not only when the fetched page has messages), because a
+        // legacy channel-less unread record can exist for a message this
+        // channel-filtered view doesn't even display; gating on the
+        // fetched page left exactly those records permanently stranded.
+        // Poll ticks only re-fire it when new messages actually arrived.
+        // The server-side write/delete is idempotent and strictly scoped
+        // to this admin + shipment + channel (plus deterministic legacy
+        // audience resolution — chatUnreadAccess.ts), so the extra call
+        // is safe.
+        if (!cursor || data.length > 0) {
           const seenRes = await apiFetch(`/api/shipments/${selectedShipment.id}/chat/seen`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -566,7 +627,13 @@ export default function ChatCenter({
     setIsSendingInternal(true);
     setInternalSendError('');
     try {
-      const body: Record<string, unknown> = { channel: 'internal_staff' };
+      // fix/admin-mobile-chat-correctness: the composer now serves every
+      // channel this surface can compose in (internal everywhere; driver/
+      // customer on mobile, where this is the one chat experience). The
+      // server still enforces channel permissions and audience rules
+      // regardless of what's sent here (resolveOutgoingChatChannel,
+      // canAccessInternalStaffChannel).
+      const body: Record<string, unknown> = { channel: activeChannel };
 
       if (internalFile) {
         // fix/chat-safety-reliability-phase1 (follow-up): a cached upload
@@ -662,435 +729,478 @@ export default function ChatCenter({
 
   const BackIcon = isRtl ? ChevronRight : ChevronLeft;
 
-  return (
-    /* feature/admin-mobile-ui correction pass: taller on mobile now that
-       App.tsx's dark header/footer are hidden there (freed-up viewport
-       height — see AdminPanel.tsx's mobile content padding).
-       fix/chat-safety-reliability-phase1: dvh (not vh) so the iOS on-screen
-       keyboard/collapsing address bar can't leave the composer hidden
-       below the fold — vh is computed against the layout viewport, which
-       doesn't shrink when the keyboard opens. */
-    <div className="flex flex-col lg:flex-row h-[78dvh] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
-      {/* Left: shipment conversation list.
-          feature/admin-mobile-ui: on mobile this list and the selected
-          conversation (below) are shown one at a time — list when nothing
-          is selected, full-screen detail once a shipment is picked — via
-          the same selectedShipmentId state this component already owns.
-          lg: always shows both side-by-side, unchanged. */}
-      <div className={`${selectedShipmentId ? 'hidden' : 'flex'} lg:flex w-full lg:w-80 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 flex-col bg-slate-50`}>
-        <div className="p-4 border-b border-slate-200">
-          <h2 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-            <MessageSquare className="w-4 h-4 text-orange-500" />
-            {label.title}
-          </h2>
-          <div className="relative mt-3">
-            {/* feature/chat-ui-ux-phase2: logical start/ps-/pe- instead of
-                physical left-3/pl-8/pr-3 — the icon now sits on the
-                correct side (and the input's own text/placeholder
-                alignment) in RTL (Arabic) instead of staying pinned to
-                the physical left regardless of direction. */}
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute top-1/2 -translate-y-1/2 start-3" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={label.searchPlaceholder}
-              className="w-full ps-8 pe-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-            />
+  // fix/admin-mobile-chat-correctness: the Chat Center composes in the
+  // internal channel everywhere; on mobile — where this is the ONE chat
+  // experience — it composes in the driver/customer channels too. The
+  // server still enforces every channel/permission rule regardless.
+  const canComposeInActiveChannel = activeChannel === 'internal_staff' || isMobile;
+
+  // The selected conversation — one pane shared verbatim by the desktop
+  // right-hand column and the mobile full-screen overlay, so the two can
+  // never drift into competing chat experiences again.
+  const conversationPane = !selectedShipment ? (
+    <div className="flex-1 flex flex-col items-center justify-center text-center p-8 gap-2">
+      <MessageSquare className="w-8 h-8 text-slate-300" />
+      <p className="text-sm font-semibold text-slate-500">{label.emptyState}</p>
+      <p className="text-[11px] text-slate-400 max-w-sm mt-2">{label.futureDirection}</p>
+    </div>
+  ) : (
+    <>
+      {/* Compact shipment header — the MAR reference stays the one visible
+          business identity of this order-scoped room. */}
+      <div className="px-2.5 py-2 lg:p-4 border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <button
+            type="button"
+            onClick={() => setSelectedShipmentId(null)}
+            aria-label={label.title}
+            className="lg:hidden shrink-0 w-9 h-9 flex items-center justify-center text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer border-0 bg-transparent"
+          >
+            <BackIcon className="w-5 h-5" />
+          </button>
+          <div className="min-w-0">
+            <span className="font-mono text-xs font-bold text-slate-900">{selectedShipment.shipmentNumber}</span>
+            <p className="text-[11px] text-slate-500 truncate">{selectedShipment.companyName} · {shipmentRouteLabel(selectedShipment)}</p>
           </div>
         </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {filteredShipments.length === 0 && (
-            <p className="text-xs text-slate-400 text-center py-8 px-4">{label.noShipments}</p>
-          )}
-          {filteredShipments.map((s) => {
-            const isSelected = s.id === selectedShipmentId;
-            const unread = summarizeUnreadForShipment(unreadChatMessages, s.id);
-            const preview = unread.lastMessage?.text || unread.lastMessage?.fileName || null;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setSelectedShipmentId(s.id)}
-                className={`w-full text-left px-4 py-3 border-b border-slate-100 transition-colors ${
-                  isSelected ? 'bg-orange-50 border-l-2 border-l-orange-500' : 'hover:bg-white'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
-                  {formatUnreadBadge(unread.count) && (
-                    <span className="shrink-0 min-w-[20px] h-[20px] px-1 rounded-full bg-orange-500 text-white text-[11px] font-bold flex items-center justify-center">
-                      {formatUnreadBadge(unread.count)}
-                    </span>
-                  )}
-                </div>
-                <p className="text-[11px] text-slate-500 truncate mt-0.5">{s.companyName} · {shipmentRouteLabel(s)}</p>
-                {preview && <p className="text-[11px] text-slate-400 truncate mt-1 italic">{preview}</p>}
-              </button>
-            );
-          })}
-        </div>
+        {/* fix/admin-mobile-chat-correctness: the hand-off to the desktop
+            drawer is DESKTOP-ONLY — on mobile this full-screen view is the
+            complete conversation, and rendering a second entry point to a
+            second UI for the same thread was one of the audited defects. */}
+        {!isMobile && activeChannel !== 'internal_staff' && (
+          <button
+            type="button"
+            onClick={() => onOpenFullChat(selectedShipment, activeChannel)}
+            className="shrink-0 flex items-center gap-1.5 text-[11px] font-bold text-orange-600 hover:text-orange-700 px-3 py-1.5 rounded-lg border border-orange-200 hover:bg-orange-50 transition-colors"
+          >
+            {label.continueInChat}
+            <ExternalLink className="w-3 h-3" />
+          </button>
+        )}
       </div>
 
-      {/* Main: channel tabs + selected conversation */}
-      <div className={`${selectedShipmentId ? 'flex' : 'hidden'} lg:flex flex-1 flex-col min-w-0`}>
-        {!selectedShipment ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-center p-8 gap-2">
-            <MessageSquare className="w-8 h-8 text-slate-300" />
-            <p className="text-sm font-semibold text-slate-500">{label.emptyState}</p>
-            <p className="text-[11px] text-slate-400 max-w-sm mt-2">{label.futureDirection}</p>
+      {/* Compact channel tabs — each carries its own unread count, derived
+          from the SAME authoritative array as the shipment/global badges
+          (countUnreadForChannel, chatCenterView.ts). */}
+      <div className="flex border-b border-slate-200 shrink-0">
+        {channelTabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeChannel === tab.id;
+          const tabUnread = selectedShipment ? countUnreadForChannel(unreadChatMessages, selectedShipment.id, tab.id) : 0;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveChannel(tab.id)}
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2 lg:py-2.5 text-xs font-bold border-b-2 transition-colors ${
+                isActive ? 'border-orange-500 text-orange-600 bg-orange-50/60' : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <Icon className="w-3.5 h-3.5" />
+                {tab.label}
+                {formatUnreadBadge(tabUnread) && (
+                  <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold flex items-center justify-center">
+                    {formatUnreadBadge(tabUnread)}
+                  </span>
+                )}
+              </span>
+              <span className="hidden lg:block text-[10px] font-medium text-slate-400">{tab.desc}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {activeChannel === 'internal_staff' && (
+        <div className="px-4 py-1.5 bg-slate-900 text-white text-[11px] font-bold flex items-center gap-1.5 shrink-0">
+          <Lock className="w-3 h-3 text-orange-400" />
+          {label.internalBanner}
+        </div>
+      )}
+
+      {/* Thread: the ONE scrollable region — flex-1 min-h-0 so it always
+          fills exactly the space between tabs and composer (no fixed-height
+          box, no dead space around a short/empty conversation). */}
+      <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto px-3 py-3 lg:p-5 bg-slate-50/50">
+        {isLoadingMessages ? (
+          <p className="text-xs text-slate-400 text-center py-10">{label.loading}</p>
+        ) : pollError && !hasLoadedMessagesOnce ? (
+          /* fix/chat-safety-reliability-phase1: never had a successful
+             fetch for this channel to show anything for — a distinct retry
+             state, not the same copy as a genuinely empty conversation. */
+          <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+            <AlertTriangle className="w-6 h-6 text-amber-500" />
+            <p className="text-xs font-semibold text-slate-500">{label.connectionError}</p>
+            <button
+              type="button"
+              onClick={() => retryNowRef.current()}
+              className="mt-1 inline-flex items-center gap-1.5 text-[11px] font-bold text-orange-600 hover:text-orange-700 px-3 py-2 rounded-lg border border-orange-200 hover:bg-orange-50 transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              {label.retryNow}
+            </button>
+          </div>
+        ) : channelMessages.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+            {pollError && (
+              <p className="text-[11px] font-semibold text-amber-600 flex items-center gap-1.5 mb-1">
+                <AlertTriangle className="w-3 h-3" />
+                {label.connectionErrorRetrying}
+              </p>
+            )}
+            <MessageSquare className="w-6 h-6 text-slate-300" />
+            <p className="text-xs text-slate-400">{label.noMessages}</p>
           </div>
         ) : (
           <>
-            <div className="p-3 lg:p-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-              <div className="flex items-center gap-2 min-w-0">
-                <button
-                  type="button"
-                  onClick={() => setSelectedShipmentId(null)}
-                  aria-label={label.title}
-                  className="lg:hidden shrink-0 w-8 h-8 flex items-center justify-center text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer border-0 bg-transparent"
-                >
-                  <BackIcon className="w-4.5 h-4.5" />
-                </button>
-                <div className="min-w-0">
-                  <span className="font-mono text-xs font-bold text-slate-900">{selectedShipment.shipmentNumber}</span>
-                  <p className="text-[11px] text-slate-500 truncate">{selectedShipment.companyName} · {shipmentRouteLabel(selectedShipment)}</p>
-                </div>
-              </div>
-              {activeChannel !== 'internal_staff' && (
-                <button
-                  type="button"
-                  onClick={() => onOpenFullChat(selectedShipment, activeChannel)}
-                  className="flex items-center gap-1.5 text-[11px] font-bold text-orange-600 hover:text-orange-700 px-3 py-1.5 rounded-lg border border-orange-200 hover:bg-orange-50 transition-colors"
-                >
-                  {label.continueInChat}
-                  <ExternalLink className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-
-            <div className="flex border-b border-slate-200">
-              {channelTabs.map((tab) => {
-                const Icon = tab.icon;
-                const isActive = activeChannel === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setActiveChannel(tab.id)}
-                    className={`flex-1 flex flex-col items-center gap-1 py-2 lg:py-2.5 text-xs font-bold border-b-2 transition-colors ${
-                      isActive ? 'border-orange-500 text-orange-600 bg-orange-50/60' : 'border-transparent text-slate-400 hover:text-slate-600'
-                    }`}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <Icon className="w-3.5 h-3.5" />
-                      {tab.label}
-                    </span>
-                    {/* feature/admin-mobile-ui correction pass: hidden on
-                        mobile — 3 tabs at 2 lines each was tall vertical
-                        space on a phone; the icon + short label alone is
-                        still unambiguous. */}
-                    <span className="hidden lg:block text-[10px] font-medium text-slate-400">{tab.desc}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {activeChannel === 'internal_staff' && (
-              <div className="px-4 py-2 bg-slate-900 text-white text-[11px] font-bold flex items-center gap-1.5">
-                <Lock className="w-3 h-3 text-orange-400" />
-                {label.internalBanner}
+            {pollError && (
+              /* fix/chat-safety-reliability-phase1: messages we already
+                 have stay fully visible — this is just a heads-up that the
+                 latest poll failed and is being retried automatically. */
+              <div className="sticky top-0 z-10 -mx-3 -mt-3 lg:-mx-5 lg:-mt-5 mb-2 px-5 py-1.5 bg-amber-50 border-b border-amber-200 text-[11px] font-semibold text-amber-700 flex items-center justify-center gap-1.5">
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                {label.connectionErrorRetrying}
               </div>
             )}
-
-            <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50/50">
-              {isLoadingMessages ? (
-                <p className="text-xs text-slate-400 text-center py-10">{label.loading}</p>
-              ) : pollError && !hasLoadedMessagesOnce ? (
-                /* fix/chat-safety-reliability-phase1: never had a
-                   successful fetch for this channel to show anything for —
-                   a distinct retry state, not the same copy as a
-                   genuinely empty conversation (which requires having
-                   loaded successfully at least once). */
-                <div className="h-full flex flex-col items-center justify-center text-center gap-2 py-10">
-                  <AlertTriangle className="w-6 h-6 text-amber-500" />
-                  <p className="text-xs font-semibold text-slate-500">{label.connectionError}</p>
-                  <button
-                    type="button"
-                    onClick={() => retryNowRef.current()}
-                    className="mt-1 inline-flex items-center gap-1.5 text-[11px] font-bold text-orange-600 hover:text-orange-700 px-3 py-2 rounded-lg border border-orange-200 hover:bg-orange-50 transition-colors"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    {label.retryNow}
-                  </button>
-                </div>
-              ) : channelMessages.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center gap-2 py-10">
-                  {pollError && (
-                    <p className="text-[11px] font-semibold text-amber-600 flex items-center gap-1.5 mb-1">
-                      <AlertTriangle className="w-3 h-3" />
-                      {label.connectionErrorRetrying}
-                    </p>
-                  )}
-                  <MessageSquare className="w-6 h-6 text-slate-300" />
-                  <p className="text-xs text-slate-400">{label.noMessages}</p>
-                </div>
-              ) : (
-                <>
-                  {pollError && (
-                    /* fix/chat-safety-reliability-phase1: messages we
-                       already have stay fully visible — this is just a
-                       small heads-up that the latest poll failed and is
-                       being retried automatically, not a replacement for
-                       the thread. */
-                    <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-2 px-5 py-1.5 bg-amber-50 border-b border-amber-200 text-[11px] font-semibold text-amber-700 flex items-center justify-center gap-1.5">
-                      <AlertTriangle className="w-3 h-3 shrink-0" />
-                      {label.connectionErrorRetrying}
+            {hasOlderMessages && (
+              <div className="flex justify-center pb-2">
+                <button
+                  type="button"
+                  onClick={loadOlderMessages}
+                  disabled={isLoadingOlder}
+                  className="text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:text-slate-800 bg-white border border-slate-200 rounded-full px-3 py-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {isLoadingOlder ? '…' : 'Load older messages'}
+                </button>
+              </div>
+            )}
+            {channelMessages.map((msg, index) => {
+              const isAdmin = msg.sender === 'admin';
+              const formattedTime = new Date(msg.timestamp).toLocaleTimeString(
+                lang === 'tr' ? 'tr-TR' : lang === 'ar' ? 'ar-IQ' : 'en-US',
+                { hour: '2-digit', minute: '2-digit' }
+              );
+              // feature/chat-ui-ux-phase2: date separators, grouped by the
+              // viewer's local calendar day.
+              const showDateSeparator = shouldShowDateSeparator(msg.timestamp, channelMessages[index - 1]?.timestamp);
+              // fix/admin-mobile-chat-correctness: consecutive messages
+              // from the same sender group — the name header renders once
+              // per run, follow-ups sit tighter. Purely visual; nothing
+              // about ordering/content changes.
+              const prevMsg = index > 0 ? channelMessages[index - 1] : undefined;
+              const isGrouped = !showDateSeparator && !!prevMsg && prevMsg.sender === msg.sender && prevMsg.senderName === msg.senderName;
+              // Read status only means anything for driver_admin/
+              // client_admin — `status` is the single global driver/client-
+              // facing read receipt; internal_staff has no such "other
+              // party" to read it.
+              const showReadStatus = isAdmin && activeChannel !== 'internal_staff';
+              const isImageAttachment =
+                msg.type === 'file' &&
+                !!msg.fileUrl &&
+                (msg.fileCategory === 'photo' || !!msg.fileName?.match(/\.(jpe?g|gif|png|webp)$/i));
+              return (
+                <div key={msg.id} className={index === 0 ? '' : isGrouped ? 'mt-1' : 'mt-3'}>
+                  {showDateSeparator && (
+                    <div className="flex items-center justify-center py-2">
+                      <span className="px-2.5 py-1 rounded-full bg-slate-200/70 text-slate-500 text-[11px] font-bold">
+                        {formatDateSeparatorLabel(msg.timestamp, lang)}
+                      </span>
                     </div>
                   )}
-                  {hasOlderMessages && (
-                    <div className="flex justify-center pb-2">
-                      <button
-                        type="button"
-                        onClick={loadOlderMessages}
-                        disabled={isLoadingOlder}
-                        className="text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:text-slate-800 bg-white border border-slate-200 rounded-full px-3 py-1.5 cursor-pointer disabled:opacity-50"
-                      >
-                        {isLoadingOlder ? '…' : 'Load older messages'}
-                      </button>
-                    </div>
-                  )}
-                  {channelMessages.map((msg, index) => {
-                    const isAdmin = msg.sender === 'admin';
-                    const formattedTime = new Date(msg.timestamp).toLocaleTimeString(
-                      lang === 'tr' ? 'tr-TR' : lang === 'ar' ? 'ar-IQ' : 'en-US',
-                      { hour: '2-digit', minute: '2-digit' }
-                    );
-                    // feature/chat-ui-ux-phase2: date separators, grouped
-                    // by the viewer's local calendar day.
-                    const showDateSeparator = shouldShowDateSeparator(msg.timestamp, channelMessages[index - 1]?.timestamp);
-                    // Read status only means anything for driver_admin/
-                    // client_admin — `status` is the single global
-                    // driver/client-facing read receipt (see
-                    // ChatMessage.status, types.ts); internal_staff has no
-                    // such "other party" to read it, so this stays absent
-                    // there rather than showing a status that isn't real.
-                    const showReadStatus = isAdmin && activeChannel !== 'internal_staff';
-                    const isImageAttachment =
-                      msg.type === 'file' &&
-                      !!msg.fileUrl &&
-                      (msg.fileCategory === 'photo' || !!msg.fileName?.match(/\.(jpe?g|gif|png|webp)$/i));
-                    // fix/chat-safety-reliability-phase1: this row is
-                    // `items-end`/`items-start` (never `stretch`), so a
-                    // flex child here sizes to its own content width, not
-                    // the row's — a bubble with unbroken text longer than
-                    // the row's max-w-[75%] (found while smoke-testing the
-                    // new 5000-char limit with a no-whitespace string)
-                    // rendered at full content width and overflowed the
-                    // whole panel, `break-words` alone had nothing to
-                    // shrink into. `max-w-full` on the bubble itself
-                    // (below) gives it something to wrap against.
-                    return (
-                      <div key={msg.id}>
-                        {showDateSeparator && (
-                          <div className="flex items-center justify-center py-2">
-                            <span className="px-2.5 py-1 rounded-full bg-slate-200/70 text-slate-500 text-[11px] font-bold">
-                              {formatDateSeparatorLabel(msg.timestamp, lang)}
-                            </span>
-                          </div>
-                        )}
-                        <div className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                        <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
-                        {msg.type === 'file' ? (
-                          <div className="flex flex-col gap-1.5">
-                            {/* fix/chat-safety-reliability-phase1: a real,
-                                clickable open/download control — this used
-                                to be a plain, non-interactive div with no
-                                way to open or download the attached file. */}
-                            <a
-                              href={msg.fileUrl || undefined}
-                              target="_blank"
-                              rel="noreferrer"
-                              download={msg.fileName || undefined}
-                              onClick={(e) => {
-                                if (!msg.fileUrl) e.preventDefault();
-                              }}
-                              aria-disabled={!msg.fileUrl}
-                              className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs border transition-colors ${
-                                isAdmin
-                                  ? 'bg-orange-500 border-orange-500 text-white hover:bg-orange-600'
-                                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                              } ${msg.fileUrl ? 'cursor-pointer' : 'cursor-default opacity-80'}`}
-                            >
-                              <FileText className="w-4 h-4 shrink-0" />
-                              <div className="min-w-0 flex-1">
-                                <p className="font-bold truncate underline decoration-dotted underline-offset-2">{msg.fileName || 'Attachment'}</p>
-                                <span className={`text-[11px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
-                                  {label.category[msg.fileCategory ?? 'other']}
-                                </span>
-                              </div>
-                              {msg.fileUrl && <Download className="w-3.5 h-3.5 shrink-0" />}
+                  <div className={`flex flex-col max-w-[75%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                    {!isGrouped && (
+                      <span className="text-[11px] text-slate-500 font-bold mb-0.5">{msg.senderName}</span>
+                    )}
+                    {msg.type === 'file' ? (
+                      <div className="flex flex-col gap-1.5">
+                        {/* fix/admin-mobile-chat-correctness: an IMAGE
+                            attachment opens the shared in-app
+                            ImageLightbox — never an <a> that navigates the
+                            WebView to the raw file URL. Non-image files
+                            keep the explicit open/download anchor. */}
+                        {isImageAttachment ? (
+                          <button
+                            type="button"
+                            onClick={() => setLightboxTarget({ url: msg.fileUrl!, name: msg.fileName || 'attachment' })}
+                            className={`text-left rounded-xl overflow-hidden border cursor-zoom-in p-0 bg-transparent ${
+                              isAdmin ? 'border-orange-300' : 'border-slate-200'
+                            }`}
+                            aria-label={msg.fileName || 'attachment'}
+                          >
+                            <img
+                              src={msg.fileUrl}
+                              alt={msg.fileName || 'attachment'}
+                              className="block w-full h-auto object-cover max-w-[220px] max-h-[180px]"
+                              referrerPolicy="no-referrer"
+                              loading="lazy"
+                            />
+                            <span className={`flex items-center gap-2 px-2.5 py-1.5 text-[11px] font-bold ${
+                              isAdmin ? 'bg-orange-500 text-white' : 'bg-white text-slate-700'
+                            }`}>
+                              <FileText className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate min-w-0">{msg.fileName || 'Attachment'}</span>
                               {msg.channel === 'internal_staff' && (
-                                <span className="shrink-0 flex items-center gap-1 text-[11px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
+                                <span className="shrink-0 flex items-center gap-1 text-[10px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
                                   <Lock className="w-2.5 h-2.5" />
                                   {label.internalOnly}
                                 </span>
                               )}
-                            </a>
-                            {isImageAttachment && (
-                              <a
-                                href={msg.fileUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="block rounded-lg overflow-hidden border border-slate-200 max-w-[180px]"
-                              >
-                                <img
-                                  src={msg.fileUrl}
-                                  alt={msg.fileName || 'attachment'}
-                                  className="w-full h-auto object-cover max-h-[140px]"
-                                  referrerPolicy="no-referrer"
-                                />
-                              </a>
-                            )}
-                            {msg.text && (
-                              <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
-                                {msg.text}
-                              </div>
-                            )}
-                          </div>
+                            </span>
+                          </button>
                         ) : (
+                          <a
+                            href={msg.fileUrl || undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={msg.fileName || undefined}
+                            onClick={(e) => {
+                              if (!msg.fileUrl) e.preventDefault();
+                            }}
+                            aria-disabled={!msg.fileUrl}
+                            className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs border transition-colors ${
+                              isAdmin
+                                ? 'bg-orange-500 border-orange-500 text-white hover:bg-orange-600'
+                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                            } ${msg.fileUrl ? 'cursor-pointer' : 'cursor-default opacity-80'}`}
+                          >
+                            <FileText className="w-4 h-4 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <p className="font-bold truncate underline decoration-dotted underline-offset-2">{msg.fileName || 'Attachment'}</p>
+                              <span className={`text-[11px] font-mono uppercase block ${isAdmin ? 'text-orange-100' : 'text-slate-400'}`}>
+                                {label.category[msg.fileCategory ?? 'other']}
+                              </span>
+                            </div>
+                            {msg.fileUrl && <Download className="w-3.5 h-3.5 shrink-0" />}
+                            {msg.channel === 'internal_staff' && (
+                              <span className="shrink-0 flex items-center gap-1 text-[11px] font-bold uppercase bg-slate-900/80 text-orange-300 px-1.5 py-0.5 rounded">
+                                <Lock className="w-2.5 h-2.5" />
+                                {label.internalOnly}
+                              </span>
+                            )}
+                          </a>
+                        )}
+                        {msg.text && (
                           <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
                             {msg.text}
                           </div>
                         )}
-                        <span className="flex items-center gap-1 text-[11px] text-slate-400 font-mono mt-0.5">
-                          {formattedTime}
-                          {showReadStatus && (
-                            <span className={`inline-flex items-center gap-0.5 ${msg.status === 'seen' ? 'text-emerald-500 font-bold' : 'text-slate-400'}`}>
-                              {msg.status === 'seen' ? (
-                                <CheckCheck className="w-3 h-3" />
-                              ) : (
-                                <Check className="w-3 h-3" />
-                              )}
-                              {msg.status === 'seen' ? label.seenStatus : label.sentStatus}
-                            </span>
-                          )}
-                        </span>
-                        </div>
                       </div>
-                    );
-                  })}
-                  <div ref={messagesEndRef} />
-                </>
-              )}
-            </div>
-
-            {activeChannel === 'internal_staff' && isSelectedShipmentClosed && (
-              // PR #111 review (Delivered/Closed terminal & chat rules):
-              // locks only at the freight-mode-appropriate closing status —
-              // never at "Delivered".
-              <div className="border-t border-slate-200 p-3 text-center text-[11px] font-semibold text-slate-500">
-                This shipment is closed. Chat is now read-only.
-              </div>
-            )}
-            {activeChannel === 'internal_staff' && !isSelectedShipmentClosed && (
-              <div className="border-t border-slate-200">
-                {internalSendError === 'upload' && (
-                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.uploadFailedError}</p>
-                )}
-                {internalSendError === 'send' && (
-                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.sendFailedError}</p>
-                )}
-                {internalSendError === 'closed' && (
-                  <p className="px-3 pt-2 text-[11px] font-bold text-red-600">This shipment is closed. Messages can no longer be sent.</p>
-                )}
-                {internalFile && (
-                  <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
-                    <FileText className="w-4 h-4 text-slate-500 shrink-0" />
-                    <span className="flex-1 truncate font-semibold text-slate-700">{internalFileName}</span>
-                    <select
-                      value={internalFileCategory}
-                      onChange={(e) => setInternalFileCategory(e.target.value as DocumentCategory)}
-                      className="text-[11px] border border-slate-200 rounded-md px-1.5 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-                    >
-                      {INTERNAL_FILE_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>{label.category[cat]}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={resetInternalAttachment}
-                      aria-label={label.removeAttachment}
-                      title={label.removeAttachment}
-                      className="p-2 -m-1 text-slate-400 hover:text-slate-600"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
+                    ) : (
+                      <div className={`px-3 py-2 rounded-xl text-xs break-words max-w-full ${isAdmin ? 'bg-orange-500 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+                        {msg.text}
+                      </div>
+                    )}
+                    <span className="flex items-center gap-1 text-[10px] text-slate-400 font-mono mt-0.5">
+                      {formattedTime}
+                      {showReadStatus && (
+                        <span className={`inline-flex items-center gap-0.5 ${msg.status === 'seen' ? 'text-emerald-500 font-bold' : 'text-slate-400'}`}>
+                          {msg.status === 'seen' ? (
+                            <CheckCheck className="w-3 h-3" />
+                          ) : (
+                            <Check className="w-3 h-3" />
+                          )}
+                          {msg.status === 'seen' ? label.seenStatus : label.sentStatus}
+                        </span>
+                      )}
+                    </span>
                   </div>
-                )}
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleSendInternalMessage();
-                  }}
-                  className="p-3 flex items-center gap-2"
-                >
-                  <input
-                    ref={internalFileInputRef}
-                    type="file"
-                    accept="image/*,application/pdf,.doc,.docx"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) handleInternalFileSelected(file);
-                    }}
-                    className="hidden"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => internalFileInputRef.current?.click()}
-                    disabled={isSendingInternal}
-                    title={label.attach}
-                    aria-label={label.attach}
-                    className="p-3 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                  </button>
-                  <textarea
-                    ref={internalTextareaRef}
-                    rows={1}
-                    value={internalMessageText}
-                    onChange={(e) => setInternalMessageText(e.target.value)}
-                    onKeyDown={(e) => {
-                      // Enter sends (matching the previous single-line
-                      // input's implicit submit-on-Enter); Shift+Enter
-                      // inserts a newline, now that this can grow to
-                      // multiple lines.
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendInternalMessage();
-                      }
-                    }}
-                    placeholder={label.internalInputPlaceholder}
-                    maxLength={MAX_CHAT_TEXT_LENGTH}
-                    disabled={isSendingInternal}
-                    style={{ minHeight: COMPOSER_MIN_HEIGHT_PX, maxHeight: COMPOSER_MAX_HEIGHT_PX }}
-                    className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60 resize-none overflow-y-auto leading-normal"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })}
-                    className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-3 rounded-lg transition-colors"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    {label.send}
-                  </button>
-                </form>
-              </div>
-            )}
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
           </>
         )}
       </div>
-    </div>
+
+      {canComposeInActiveChannel && isSelectedShipmentClosed && (
+        // PR #111 review (Delivered/Closed terminal & chat rules): locks
+        // only at the freight-mode-appropriate closing status — never at
+        // "Delivered".
+        <div className={`border-t border-slate-200 p-3 text-center text-[11px] font-semibold text-slate-500 shrink-0 ${isMobile ? 'pb-[max(env(safe-area-inset-bottom),0.75rem)]' : ''}`}>
+          This shipment is closed. Chat is now read-only.
+        </div>
+      )}
+      {canComposeInActiveChannel && !isSelectedShipmentClosed && (
+        <div className={`border-t border-slate-200 shrink-0 bg-white ${isMobile ? 'pb-[max(env(safe-area-inset-bottom),0.5rem)]' : ''}`}>
+          {internalSendError === 'upload' && (
+            <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.uploadFailedError}</p>
+          )}
+          {internalSendError === 'send' && (
+            <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.sendFailedError}</p>
+          )}
+          {internalSendError === 'closed' && (
+            <p className="px-3 pt-2 text-[11px] font-bold text-red-600">This shipment is closed. Messages can no longer be sent.</p>
+          )}
+          {internalFile && (
+            <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
+              <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+              <span className="flex-1 truncate font-semibold text-slate-700">{internalFileName}</span>
+              <select
+                value={internalFileCategory}
+                onChange={(e) => setInternalFileCategory(e.target.value as DocumentCategory)}
+                className="text-[11px] border border-slate-200 rounded-md px-1.5 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+              >
+                {(activeChannel === 'internal_staff' ? INTERNAL_FILE_CATEGORIES : CHANNEL_FILE_CATEGORIES).map((cat) => (
+                  <option key={cat} value={cat}>{label.category[cat]}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={resetInternalAttachment}
+                aria-label={label.removeAttachment}
+                title={label.removeAttachment}
+                className="p-2 -m-1 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSendInternalMessage();
+            }}
+            className="p-2.5 lg:p-3 flex items-center gap-2"
+          >
+            <input
+              ref={internalFileInputRef}
+              type="file"
+              accept="image/*,application/pdf,.doc,.docx"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleInternalFileSelected(file);
+              }}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => internalFileInputRef.current?.click()}
+              disabled={isSendingInternal}
+              title={label.attach}
+              aria-label={label.attach}
+              className="p-3 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Paperclip className="w-4 h-4" />
+            </button>
+            <textarea
+              ref={internalTextareaRef}
+              rows={1}
+              value={internalMessageText}
+              onChange={(e) => setInternalMessageText(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter sends; Shift+Enter inserts a newline.
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendInternalMessage();
+                }
+              }}
+              placeholder={activeChannel === 'internal_staff' ? label.internalInputPlaceholder : label.messagePlaceholder}
+              maxLength={MAX_CHAT_TEXT_LENGTH}
+              disabled={isSendingInternal}
+              style={{ minHeight: COMPOSER_MIN_HEIGHT_PX, maxHeight: COMPOSER_MAX_HEIGHT_PX }}
+              className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60 resize-none overflow-y-auto leading-normal"
+            />
+            <button
+              type="submit"
+              disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })}
+              className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-3 rounded-lg transition-colors"
+            >
+              <Send className="w-3.5 h-3.5" />
+              {label.send}
+            </button>
+          </form>
+        </div>
+      )}
+    </>
+  );
+
+  return (
+    <>
+      {/* fix/admin-mobile-chat-correctness: no fixed 78dvh-tall box on
+          mobile anymore — the list fills the space AdminPanel gives the
+          tab (100dvh minus the mobile top bar and bottom nav), and a
+          SELECTED conversation renders as the keyboard-aware full-screen
+          overlay below instead of squeezing into this in-flow card.
+          Desktop (lg) keeps the original two-pane layout and sizing. */}
+      <div className="flex flex-col lg:flex-row h-[calc(100dvh-13.5rem)] min-h-[320px] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
+        {/* Left: shipment conversation list — every row's badge is the
+            per-shipment total across channels, from the same authoritative
+            unread array as the channel tabs and the global badge. */}
+        <div className="flex w-full lg:w-80 shrink-0 lg:border-e border-slate-200 flex-col min-h-0 bg-slate-50">
+          <div className="p-3 lg:p-4 border-b border-slate-200">
+            <h2 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-orange-500" />
+              {label.title}
+            </h2>
+            <div className="relative mt-2.5">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute top-1/2 -translate-y-1/2 start-3" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={label.searchPlaceholder}
+                className="w-full ps-8 pe-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+              />
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {filteredShipments.length === 0 && (
+              <p className="text-xs text-slate-400 text-center py-8 px-4">{label.noShipments}</p>
+            )}
+            {filteredShipments.map((s) => {
+              const isSelected = s.id === selectedShipmentId;
+              const unread = summarizeUnreadForShipment(unreadChatMessages, s.id);
+              const preview = unread.lastMessage?.text || unread.lastMessage?.fileName || null;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSelectedShipmentId(s.id)}
+                  className={`w-full text-start px-4 py-3 border-b border-slate-100 transition-colors ${
+                    isSelected ? 'bg-orange-50 border-s-2 border-s-orange-500' : 'hover:bg-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
+                    {formatUnreadBadge(unread.count) && (
+                      <span className="shrink-0 min-w-[20px] h-[20px] px-1 rounded-full bg-orange-500 text-white text-[11px] font-bold flex items-center justify-center">
+                        {formatUnreadBadge(unread.count)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 truncate mt-0.5">{s.companyName} · {shipmentRouteLabel(s)}</p>
+                  {preview && <p className="text-[11px] text-slate-400 truncate mt-1 italic">{preview}</p>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Desktop right pane — unchanged two-pane experience. */}
+        <div className="hidden lg:flex flex-1 flex-col min-w-0 min-h-0">
+          {conversationPane}
+        </div>
+      </div>
+
+      {/* Mobile: the selected conversation as ONE full-screen, keyboard-
+          aware view — visualViewport height when the platform reports it
+          (the on-screen keyboard shrinks it), 100dvh otherwise. */}
+      {isMobile && selectedShipment && (
+        <div
+          className="fixed inset-x-0 top-0 z-[70] bg-white flex flex-col lg:hidden"
+          style={{ height: visualViewportHeight ? `${visualViewportHeight}px` : '100dvh' }}
+          dir={isRtl ? 'rtl' : 'ltr'}
+        >
+          {conversationPane}
+        </div>
+      )}
+
+      <ImageLightbox
+        target={lightboxTarget}
+        onClose={() => setLightboxTarget(null)}
+        labels={{ close: label.close, share: label.share, download: label.download }}
+      />
+    </>
   );
 }
