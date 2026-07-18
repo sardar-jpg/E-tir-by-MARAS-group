@@ -303,3 +303,23 @@ describe("mobile UX pass (feature/admin-chat-mobile-ux-pass)", () => {
     expect(OPTIMIZE).toContain("bitmap?.close?.();");
   });
 });
+
+describe("keyboard-gap fix (fix/admin-chat-keyboard-gap)", () => {
+  it("the visualViewport hook settles with a rAF loop and re-measures on focus/blur/orientation — never a single stale event-time read", () => {
+    expect(CHAT_CENTER).toContain("requestAnimationFrame(tick)");
+    expect(CHAT_CENTER).toContain("window.addEventListener('focusin', settle)");
+    expect(CHAT_CENTER).toContain("window.addEventListener('focusout', settle)");
+    expect(CHAT_CENTER).toContain("window.addEventListener('orientationchange', settle)");
+    expect(CHAT_CENTER).toContain("cancelAnimationFrame(raf)");
+  });
+
+  it("keyboard inset uses the standard visualViewport formula — no hardcoded keyboard height, no double subtraction", () => {
+    expect(CHAT_CENTER).toContain("window.innerHeight - visualViewport.height - visualViewport.offsetTop");
+    expect(CHAT_CENTER).toContain("const isKeyboardOpen = keyboardInset > 80;");
+  });
+
+  it("safe-area bottom padding is suppressed while the keyboard covers the home-indicator area, restored when it closes", () => {
+    expect(CHAT_CENTER).toContain("isKeyboardOpen ? 'pb-1' : 'pb-[max(env(safe-area-inset-bottom),0.5rem)]'");
+    expect(CHAT_CENTER).toContain("isKeyboardOpen ? 'pb-2' : 'pb-[max(env(safe-area-inset-bottom),0.75rem)]'");
+  });
+});
