@@ -241,3 +241,65 @@ describe("recent-activity ordering (feature/admin-chat-recent-activity-order)", 
     expect(ACTIVITY_BACKFILL).not.toContain(".delete(");
   });
 });
+
+describe("mobile UX pass (feature/admin-chat-mobile-ux-pass)", () => {
+  it("keyboard: the textarea is never disabled during a send, and Send/attach taps never steal its focus", () => {
+    // Disabling the focused textarea force-blurred it on iOS — the
+    // keyboard closed after every send. The isSending submit-gate
+    // (canSubmitChatMessage) remains the authoritative duplicate guard.
+    expect(CHAT_CENTER).not.toContain("disabled={isSendingInternal}\n              style={{ minHeight: COMPOSER_MIN_HEIGHT_PX");
+    const textareaRegion = region(CHAT_CENTER, "ref={internalTextareaRef}", 1800);
+    expect(textareaRegion).not.toContain("disabled={isSendingInternal}");
+    // Narrow pointerdown guards on exactly the two composer buttons.
+    expect((CHAT_CENTER.match(/onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/g) || []).length).toBe(2);
+    // Post-send focus restore (mobile safety net), draft cleared only on success.
+    expect(CHAT_CENTER).toContain("if (isMobile) internalTextareaRef.current?.focus();");
+  });
+
+  it("mobile list is flat (no outer card border/radius/shadow, no double gutter); desktop card intact", () => {
+    expect(CHAT_CENTER).toContain("border-0 lg:border");
+    expect(CHAT_CENTER).toContain("rounded-none lg:rounded-2xl");
+    expect(CHAT_CENTER).toContain("-mx-3 lg:mx-0");
+    expect(CHAT_CENTER).toContain("bg-white lg:bg-slate-50");
+    // The desktop sizing pin lives in the earlier describe and still holds;
+    // the measured visualViewport sizing from PR #124 stays wired:
+    expect(CHAT_CENTER).toContain("getBoundingClientRect().top");
+    expect(CHAT_CENTER).toContain("isMobile && mobileListHeight ? { height: mobileListHeight } : undefined");
+  });
+
+  it("optimistic images: pending item bound at creation, reconciled by server message, deduped by id, revoked on removal", () => {
+    // Image attachments route into the optimistic flow; other files keep
+    // the existing synchronous path.
+    expect(CHAT_CENTER).toContain("if (internalFile && (internalFile.type.startsWith('image/') || isLikelyHeic(internalFile))) {");
+    expect(CHAT_CENTER).toContain("startImageSend(internalFile, text);");
+    // The job posts to the CAPTURED shipment/channel, never the currently
+    // viewed one, and only appends to the visible thread when they match.
+    expect(CHAT_CENTER).toContain("`/api/shipments/${job.shipmentId}/chat`");
+    expect(CHAT_CENTER).toContain("channel: job.channel,");
+    expect(CHAT_CENTER).toContain("viewing.shipmentId === job.shipmentId && viewing.channel === job.channel");
+    // Reconciliation: server message merged de-dup-by-id (the ~3s poll
+    // delivering the same id later is a no-op), pending removed + URL revoked.
+    expect(CHAT_CENTER).toContain("setChannelMessages((prev) => mergeNewerChatMessages(prev, [msg]));");
+    expect(CHAT_CENTER).toContain("removePendingImage(prev, id)");
+    expect(CHAT_CENTER).toContain("revokePreviewUrl(revokedUrl)");
+    // Per-item duplicate-submission guard; retry reuses the same id and
+    // the cached upload URL (never re-uploads after a send-stage failure).
+    expect(CHAT_CENTER).toContain("if (!job || job.running) return;");
+    expect(CHAT_CENTER).toContain("markPendingImageRetrying(prev, id)");
+    expect(CHAT_CENTER).toContain("if (!job.uploadedUrl) {");
+    // Durable activity comes ONLY from the authoritative server message.
+    const jobRegion = region(CHAT_CENTER, "const runPendingImageJob", 3600);
+    expect(jobRegion).toContain("recordLocalActivity(job.shipmentId, msg.timestamp);");
+    // HEIC is refused with a clear message, never uploaded under a fake type.
+    expect(CHAT_CENTER).toContain("setInternalSendError('heic');");
+    expect(CHAT_CENTER).toContain("{label.heicUnsupported}");
+  });
+
+  it("the optimizer is dependency-free and falls back to the original file", () => {
+    const OPTIMIZE = readFileSync(join(ROOT, "src", "lib", "chatImageOptimize.ts"), "utf-8");
+    expect(OPTIMIZE).not.toMatch(/from ["'](?!\.)/); // no package imports at all
+    expect(OPTIMIZE).toContain("imageOrientation: \"from-image\"");
+    expect(OPTIMIZE).toContain("if (blob.size >= file.size) return original;");
+    expect(OPTIMIZE).toContain("bitmap?.close?.();");
+  });
+});
