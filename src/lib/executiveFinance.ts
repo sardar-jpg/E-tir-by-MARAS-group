@@ -22,6 +22,11 @@ const TERMINAL = new Set(["Delivered", "Closed", "Completed"]);
 /** A finished shipment with money still owed past this age is an overdue receivable. */
 export const RECEIVABLE_OVERDUE_DAYS = 14;
 
+/** Open = still being processed (not yet in a terminal status). */
+export function isOpenShipmentStatus(status: string | undefined | null): boolean {
+  return !TERMINAL.has(status || "");
+}
+
 export interface FinancePeriodFigures {
   today: number;
   thisMonth: number;
@@ -41,9 +46,21 @@ export interface CurrencyFinanceOverview {
   /** Payables split by cost item type: "driver"-typed items vs everything else (vendors). */
   driverPayables: number;
   vendorPayables: number;
+  /**
+   * Agreed value of all currently open (non-terminal) shipments in this
+   * currency. NOT recognized revenue — it is the business value being
+   * processed right now.
+   */
+  openShipmentsValue: number;
+  openShipmentsCount: number;
   averageProfitPerShipment: number | null;
   highestProfitShipmentThisMonth: { shipmentNumber: string; profit: number } | null;
-  highestRevenueCustomer: { companyName: string; revenue: number } | null;
+  /**
+   * Best customer of the CURRENT MONTH, ranked deterministically by gross
+   * profit first, revenue as tie-breaker, company name as final tie-breaker
+   * — never by revenue alone.
+   */
+  topCustomerThisMonth: { companyName: string; shipmentCount: number; revenue: number; grossProfit: number } | null;
 }
 
 export interface ExecutiveFinanceOverview {
@@ -66,7 +83,8 @@ export function buildExecutiveFinanceOverview(
   const shipmentById = new Map(shipments.map((s) => [s.id, s]));
   const perCurrency = new Map<string, CurrencyFinanceOverview>();
   const monthProfits = new Map<string, { shipmentNumber: string; profit: number }>();
-  const customerRevenue = new Map<string, Map<string, number>>(); // currency -> company -> revenue
+  // currency -> company -> this-month figures (for Top Customer This Month)
+  const customerMonth = new Map<string, Map<string, { shipmentCount: number; revenue: number; grossProfit: number }>>();
   const yearProfitCounts = new Map<string, number>();
   let deliveredWithStatementCount = 0;
 
@@ -84,9 +102,11 @@ export function buildExecutiveFinanceOverview(
         outstandingPayables: 0,
         driverPayables: 0,
         vendorPayables: 0,
+        openShipmentsValue: 0,
+        openShipmentsCount: 0,
         averageProfitPerShipment: null,
         highestProfitShipmentThisMonth: null,
-        highestRevenueCustomer: null,
+        topCustomerThisMonth: null,
       };
       perCurrency.set(currency, b);
     }
@@ -94,6 +114,23 @@ export function buildExecutiveFinanceOverview(
   };
 
   const overdueCutoff = new Date(new Date(nowIso).getTime() - RECEIVABLE_OVERDUE_DAYS * 86_400_000).toISOString();
+
+  const monthCustomer = (currency: string, company: string) => {
+    let byCompany = customerMonth.get(currency);
+    if (!byCompany) { byCompany = new Map(); customerMonth.set(currency, byCompany); }
+    let entry = byCompany.get(company);
+    if (!entry) { entry = { shipmentCount: 0, revenue: 0, grossProfit: 0 }; byCompany.set(company, entry); }
+    return entry;
+  };
+
+  // Open Shipments Value: the agreed value of everything still in flight,
+  // straight off the shipment records — never recognized as revenue here.
+  for (const s of shipments) {
+    if (!isOpenShipmentStatus(s.status) || !s.currency) continue;
+    const ob = bucket(s.currency);
+    ob.openShipmentsValue += s.agreedAmount || 0;
+    ob.openShipmentsCount += 1;
+  }
 
   for (const st of statements) {
     const shipment = shipmentById.get(st.shipmentId);
@@ -137,13 +174,13 @@ export function buildExecutiveFinanceOverview(
     if (agreedCurrency && agreed > 0) {
       const rb = bucket(agreedCurrency);
       if (inPeriod(deliveredAt, nowIso, "today")) rb.revenue.today += agreed;
-      if (inPeriod(deliveredAt, nowIso, "month")) rb.revenue.thisMonth += agreed;
-      if (inPeriod(deliveredAt, nowIso, "year")) rb.revenue.thisYear += agreed;
-      if (inPeriod(deliveredAt, nowIso, "year")) {
-        const byCompany = customerRevenue.get(agreedCurrency) || new Map<string, number>();
-        byCompany.set(st.companyName || "?", (byCompany.get(st.companyName || "?") || 0) + agreed);
-        customerRevenue.set(agreedCurrency, byCompany);
+      if (inPeriod(deliveredAt, nowIso, "month")) {
+        rb.revenue.thisMonth += agreed;
+        const entry = monthCustomer(agreedCurrency, st.companyName || "?");
+        entry.shipmentCount += 1;
+        entry.revenue += agreed;
       }
+      if (inPeriod(deliveredAt, nowIso, "year")) rb.revenue.thisYear += agreed;
     }
     const profit = computeGrossProfit(agreed, agreedCurrency as CostStatement["currency"], st.totalCost || 0, st.currency);
     if (profit === null) {
@@ -156,6 +193,9 @@ export function buildExecutiveFinanceOverview(
       pb.grossProfit.thisMonth += profit;
       const best = monthProfits.get(st.currency);
       if (!best || profit > best.profit) monthProfits.set(st.currency, { shipmentNumber: st.shipmentNumber || st.shipmentId, profit });
+      // profit !== null guarantees revenue and cost currencies match, so
+      // this lands in the same bucket as the customer's revenue above.
+      monthCustomer(st.currency, st.companyName || "?").grossProfit += profit;
     }
     if (inPeriod(deliveredAt, nowIso, "year")) {
       pb.grossProfit.thisYear += profit;
@@ -167,10 +207,14 @@ export function buildExecutiveFinanceOverview(
     const n = yearProfitCounts.get(currency) || 0;
     b.averageProfitPerShipment = n > 0 ? b.grossProfit.thisYear / n : null;
     b.highestProfitShipmentThisMonth = monthProfits.get(currency) || null;
-    const byCompany = customerRevenue.get(currency);
+    const byCompany = customerMonth.get(currency);
     if (byCompany && byCompany.size) {
-      const top = [...byCompany.entries()].sort((a, z) => z[1] - a[1])[0];
-      b.highestRevenueCustomer = { companyName: top[0], revenue: top[1] };
+      // Deterministic ranking: gross profit first, revenue as tie-breaker,
+      // company name as the final tie-breaker. Never revenue alone.
+      const [companyName, top] = [...byCompany.entries()].sort(
+        (a, z) => z[1].grossProfit - a[1].grossProfit || z[1].revenue - a[1].revenue || a[0].localeCompare(z[0])
+      )[0];
+      b.topCustomerThisMonth = { companyName, ...top };
     }
   }
 

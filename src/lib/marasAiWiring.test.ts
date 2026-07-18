@@ -504,6 +504,26 @@ describe("executive dashboard (PR #133) — deterministic finances, per-user lay
     const BRIEF_CARD = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiBriefCard.tsx"), "utf-8");
     expect(BRIEF_CARD).toContain('en: "Executive Brief"');
   });
+
+  it("review refinements: renamed section, Open Shipments Value KPI, Top Customer This Month", () => {
+    // The section is titled Executive Financial Overview — this is an
+    // Executive Dashboard, not an accounting page (UI + customize panel).
+    expect(FIN_SECTION).toContain('en: "Executive Financial Overview"');
+    expect(ADMIN_PANEL).toContain("en: 'Executive Financial Overview'");
+    // Open Shipments Value: deterministic shipment data, and its card opens
+    // the shipment list pre-filtered to ACTIVE using the SAME status rule
+    // (isOpenShipmentStatus) the KPI itself uses — they can never disagree.
+    expect(FIN_SECTION).toContain("openShipmentsValue");
+    expect(FIN_SECTION).toContain("onOpenShipments");
+    expect(ADMIN_PANEL).toContain("setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments');");
+    expect(ADMIN_PANEL).toContain("isOpenShipmentStatus(s.status)");
+    // Top Customer This Month is never ranked by revenue alone: gross
+    // profit first, revenue tie-break, name as the deterministic last word.
+    expect(FIN_SECTION).toContain("topCustomerThisMonth");
+    const FIN_LIB = readFileSync(join(ROOT, "src", "lib", "executiveFinance.ts"), "utf-8");
+    expect(FIN_LIB).toContain("z[1].grossProfit - a[1].grossProfit || z[1].revenue - a[1].revenue || a[0].localeCompare(z[0])");
+    expect(FIN_LIB).not.toContain("highestRevenueCustomer");
+  });
 });
 
 describe("the official product name is MARAS AI", () => {

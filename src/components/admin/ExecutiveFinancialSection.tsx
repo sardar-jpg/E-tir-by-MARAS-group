@@ -18,7 +18,7 @@ import type { AuditFinding, AuditPriorityAssessment } from "../../lib/auditEngin
  */
 
 const L: Record<string, { en: string; tr: string; ar: string }> = {
-  financial: { en: "Financial Overview", tr: "Finansal Genel Bakış", ar: "نظرة مالية عامة" },
+  financial: { en: "Executive Financial Overview", tr: "Yönetici Finansal Genel Bakış", ar: "النظرة المالية التنفيذية" },
   sourceNote: { en: "All figures come directly from the accounting records (per currency — never mixed, never AI).", tr: "Tüm rakamlar doğrudan muhasebe kayıtlarından gelir (para birimi bazında — asla karıştırılmaz, asla yapay zekâ).", ar: "جميع الأرقام تأتي مباشرة من سجلات المحاسبة (حسب العملة — لا تُخلط أبدًا، وليست من الذكاء الاصطناعي)." },
   revenue: { en: "Revenue", tr: "Gelir", ar: "الإيرادات" },
   grossProfit: { en: "Gross Profit", tr: "Brüt Kâr", ar: "إجمالي الربح" },
@@ -36,7 +36,12 @@ const L: Record<string, { en: string; tr: string; ar: string }> = {
   performance: { en: "Performance", tr: "Performans", ar: "الأداء" },
   avgProfit: { en: "Avg profit / shipment (year)", tr: "Sevkiyat başına ort. kâr (yıl)", ar: "متوسط الربح لكل شحنة (سنة)" },
   topShipment: { en: "Top profit shipment (month)", tr: "En kârlı sevkiyat (ay)", ar: "أعلى شحنة ربحًا (شهر)" },
-  topCustomer: { en: "Top revenue customer (year)", tr: "En yüksek gelirli müşteri (yıl)", ar: "أعلى عميل إيرادًا (سنة)" },
+  topCustomer: { en: "Top Customer This Month", tr: "Bu Ayın En İyi Müşterisi", ar: "أفضل عميل هذا الشهر" },
+  topCustomerNote: { en: "Ranked by gross profit, then revenue.", tr: "Brüt kâra göre, eşitlikte gelire göre sıralanır.", ar: "مرتب حسب إجمالي الربح ثم الإيرادات." },
+  shipmentsWord: { en: "shipments", tr: "sevkiyat", ar: "شحنات" },
+  openValue: { en: "Open Shipments Value", tr: "Açık Sevkiyat Değeri", ar: "قيمة الشحنات المفتوحة" },
+  openValueNote: { en: "Agreed value of active shipments — not recognized revenue. Tap to view the shipments.", tr: "Aktif sevkiyatların anlaşılan değeri — gerçekleşmiş gelir değildir. Sevkiyatları görmek için dokunun.", ar: "القيمة المتفق عليها للشحنات النشطة — ليست إيرادًا محققًا. اضغط لعرض الشحنات." },
+  activeShipments: { en: "active shipment(s)", tr: "aktif sevkiyat", ar: "شحنة نشطة" },
   profitExcluded: { en: "shipment(s) excluded from profit (currency mismatch)", tr: "sevkiyat kâr hesabına katılmadı (para birimi uyumsuz)", ar: "شحنات مستبعدة من الربح (عدم تطابق العملة)" },
   noData: { en: "No accounting records yet.", tr: "Henüz muhasebe kaydı yok.", ar: "لا توجد سجلات محاسبية بعد." },
   loadError: { en: "Financial overview could not be loaded. The rest of the dashboard is unaffected.", tr: "Finansal genel bakış yüklenemedi. Panonun geri kalanı etkilenmez.", ar: "تعذر تحميل النظرة المالية. بقية اللوحة تعمل كالمعتاد." },
@@ -57,7 +62,7 @@ function Cell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function CurrencyBlock({ b, lang }: { b: CurrencyFinanceOverview; lang: Language }) {
+function CurrencyBlock({ b, lang, onOpenShipments }: { b: CurrencyFinanceOverview; lang: Language; onOpenShipments: () => void }) {
   return (
     <div className="space-y-2 min-w-0">
       <h3 className="text-xs font-black text-slate-900">{b.currency}</h3>
@@ -77,10 +82,33 @@ function CurrencyBlock({ b, lang }: { b: CurrencyFinanceOverview; lang: Language
         <Cell label={t("vendorPay", lang)} value={money(b.vendorPayables)} />
         <Cell label={`${t("payables", lang)} · ${t("totalPay", lang)}`} value={money(b.outstandingPayables)} />
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+      <button
+        onClick={onOpenShipments}
+        className="w-full text-left bg-orange-50/60 hover:bg-orange-50 rounded-lg border border-orange-200 p-2 min-w-0 cursor-pointer block"
+      >
+        <p className="text-[9px] font-black uppercase tracking-wider text-orange-600 truncate">{t("openValue", lang)}</p>
+        <p className="text-sm font-black text-slate-800 truncate">
+          {money(b.openShipmentsValue)} <span className="text-[10px] font-bold text-slate-500">· {b.openShipmentsCount} {t("activeShipments", lang)}</span>
+        </p>
+        <p className="text-[9px] text-slate-400 font-medium">{t("openValueNote", lang)}</p>
+      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
         <Cell label={t("avgProfit", lang)} value={b.averageProfitPerShipment === null ? "—" : money(b.averageProfitPerShipment)} />
         <Cell label={t("topShipment", lang)} value={b.highestProfitShipmentThisMonth ? `${b.highestProfitShipmentThisMonth.shipmentNumber} (${money(b.highestProfitShipmentThisMonth.profit)})` : "—"} />
-        <Cell label={t("topCustomer", lang)} value={b.highestRevenueCustomer ? `${b.highestRevenueCustomer.companyName} (${money(b.highestRevenueCustomer.revenue)})` : "—"} />
+      </div>
+      <div className="bg-slate-50 rounded-lg border border-slate-200 p-2 min-w-0">
+        <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 truncate">{t("topCustomer", lang)}</p>
+        {b.topCustomerThisMonth ? (
+          <>
+            <p className="text-sm font-black text-slate-800 truncate">{b.topCustomerThisMonth.companyName}</p>
+            <p className="text-[10px] font-bold text-slate-600 truncate">
+              {b.topCustomerThisMonth.shipmentCount} {t("shipmentsWord", lang)} · {t("revenue", lang)} {money(b.topCustomerThisMonth.revenue)} · {t("grossProfit", lang)} {money(b.topCustomerThisMonth.grossProfit)}
+            </p>
+          </>
+        ) : (
+          <p className="text-sm font-black text-slate-800">—</p>
+        )}
+        <p className="text-[9px] text-slate-400 font-medium">{t("topCustomerNote", lang)}</p>
       </div>
       {b.profitExcludedCount > 0 && (
         <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 font-semibold">
@@ -91,7 +119,7 @@ function CurrencyBlock({ b, lang }: { b: CurrencyFinanceOverview; lang: Language
   );
 }
 
-export default function ExecutiveFinancialSection({ lang }: { lang: Language }) {
+export default function ExecutiveFinancialSection({ lang, onOpenShipments }: { lang: Language; onOpenShipments: () => void }) {
   const [data, setData] = useState<ExecutiveFinanceOverview | null>(null);
   const [error, setError] = useState("");
 
@@ -123,7 +151,7 @@ export default function ExecutiveFinancialSection({ lang }: { lang: Language }) 
       {!error && data && data.currencies.length === 0 && (
         <p className="text-[11px] font-semibold text-slate-400">{t("noData", lang)}</p>
       )}
-      {!error && data && data.currencies.map((b) => <CurrencyBlock key={b.currency} b={b} lang={lang} />)}
+      {!error && data && data.currencies.map((b) => <CurrencyBlock key={b.currency} b={b} lang={lang} onOpenShipments={onOpenShipments} />)}
       {!error && !data && <p className="text-xs text-slate-400 animate-pulse">…</p>}
     </div>
   );

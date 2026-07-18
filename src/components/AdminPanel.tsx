@@ -50,6 +50,7 @@ import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
+import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -98,10 +99,16 @@ const fetch = apiFetch;
 // backend genuinely knows how to collect system data for. Selecting one
 // only populates the prompt — the employee still presses Send.
 // PR #133: customize-bar labels for the Executive Dashboard sections.
+// "Active" pseudo-status for the shipment list filter: everything that is
+// still open (not Delivered/Closed/Completed) — the same rule the executive
+// Open Shipments Value KPI uses (isOpenShipmentStatus), so the KPI and the
+// list it opens can never disagree.
+const ACTIVE_FILTER_LABEL: Record<string, string> = { en: 'Active', tr: 'Aktif', ar: 'نشطة' };
+
 const DASHBOARD_SECTION_LABELS: Record<string, { en: string; tr: string; ar: string }> = {
   executive_brief: { en: 'Executive Brief', tr: 'Yönetici Brifingi', ar: 'الموجز التنفيذي' },
   operations: { en: 'Operations', tr: 'Operasyon', ar: 'العمليات' },
-  financial: { en: 'Financial Overview', tr: 'Finansal Genel Bakış', ar: 'نظرة مالية عامة' },
+  financial: { en: 'Executive Financial Overview', tr: 'Yönetici Finansal Genel Bakış', ar: 'النظرة المالية التنفيذية' },
   financial_alerts: { en: 'Financial Alerts', tr: 'Finansal Uyarılar', ar: 'تنبيهات مالية' },
   analytics: { en: 'Logistics Analytics', tr: 'Lojistik Analitiği', ar: 'تحليلات لوجستية' },
 };
@@ -4270,7 +4277,8 @@ MARAS Group etir Center`;
       (s.airline || "").toLowerCase().includes(q) ||
       (s.bookingNumber || "").toLowerCase().includes(q);
 
-    const matchStatus = statusFilter === "all" || s.status === statusFilter;
+    const matchStatus = statusFilter === "all"
+      || (statusFilter === "active" ? isOpenShipmentStatus(s.status) : s.status === statusFilter);
     const fType = s.freightType || "land";
     const matchType = typeFilter === "all" || fType === typeFilter;
     
@@ -5285,7 +5293,10 @@ MARAS Group etir Center`;
         </React.Suspense>
               ))}
               {sectionId === 'financial' && canViewCostStatements(resolvedAdminType) && (
-                <ExecutiveFinancialSection lang={lang} />
+                <ExecutiveFinancialSection
+                  lang={lang}
+                  onOpenShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
+                />
               )}
               {sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType) && (
                 <FinancialAlertsCard lang={lang} onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)} />
@@ -5387,10 +5398,10 @@ MARAS Group etir Center`;
 
               <div className="flex items-center gap-1.5 overflow-x-auto -mx-3 px-3 pb-0.5">
                 {(typeFilter === 'sea'
-                  ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                  ? ['all', 'active', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
-                    ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    ? ['all', 'active', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                    : ['all', 'active', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -5399,7 +5410,7 @@ MARAS Group etir Center`;
                       statusFilter === st ? 'bg-orange-100 text-orange-800' : 'bg-slate-100 text-slate-500'
                     }`}
                   >
-                    {st === "all" ? t('allStatuses') : st}
+                    {st === "all" ? t('allStatuses') : st === "active" ? (ACTIVE_FILTER_LABEL[lang] || ACTIVE_FILTER_LABEL.en) : st}
                   </button>
                 ))}
               </div>
@@ -5465,10 +5476,10 @@ MARAS Group etir Center`;
 
                 {/* Dynamically list candidate statuses depending on freight type */}
                 {(typeFilter === 'sea'
-                  ? ['all', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                  ? ['all', 'active', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
                   : typeFilter === 'air'
-                    ? ['all', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
+                    ? ['all', 'active', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
+                    : ['all', 'active', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
                 ).map((st) => (
                   <button
                     key={st}
@@ -5479,7 +5490,7 @@ MARAS Group etir Center`;
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}
                   >
-                    {st === "all" ? t('allStatuses') : st}
+                    {st === "all" ? t('allStatuses') : st === "active" ? (ACTIVE_FILTER_LABEL[lang] || ACTIVE_FILTER_LABEL.en) : st}
                   </button>
                 ))}
               </div>
