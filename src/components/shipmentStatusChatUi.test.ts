@@ -221,7 +221,7 @@ describe("admin/ChatCenter.tsx — internal_staff composer", () => {
 
   it("handleSendInternalMessage is guarded by isLocked, and reports a specific (not generic) error on SHIPMENT_CHAT_CLOSED", () => {
     const fnStart = SOURCE.indexOf("const handleSendInternalMessage = async () => {");
-    const fnRegion = SOURCE.slice(fnStart, fnStart + 4800);
+    const fnRegion = SOURCE.slice(fnStart, fnStart + 6400);
     expect(fnRegion).toContain("isLocked: isSelectedShipmentClosed");
     expect(fnRegion).toContain("closedBody?.code === 'SHIPMENT_CHAT_CLOSED'");
     expect(fnRegion).toContain("setInternalSendError('closed');");

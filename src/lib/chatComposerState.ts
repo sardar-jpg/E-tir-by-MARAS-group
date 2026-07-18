@@ -197,3 +197,83 @@ export function prependOlderChatMessages<TMessage extends { id: string }>(
   if (toAdd.length === 0) return existing;
   return [...toAdd, ...existing];
 }
+
+// ── Optimistic pending image messages (feature/admin-chat-mobile-ux-pass) ──
+
+/**
+ * One locally-pending image send, shown in the thread the moment the
+ * admin sends a picture — BEFORE the upload/message round-trip finishes —
+ * so image sending feels immediate. Strictly local UI state: a pending
+ * item never touches unread state or lastChatActivityAt (only the
+ * authoritative server message, created on upload success, does).
+ *
+ * `shipmentId` + `channel` are captured AT CREATION and never change:
+ * the item stays bound to the Order room and channel it was sent in,
+ * even if the admin switches chats mid-upload — it simply isn't rendered
+ * in other threads (selectPendingImagesForThread) and its eventual server
+ * message posts to the captured shipment/channel, not the current one.
+ */
+export interface PendingImageMessage {
+  id: string;
+  shipmentId: string;
+  channel: string;
+  /** Object URL for the local preview — must be revoked when the item is removed or reconciled. */
+  previewUrl: string;
+  fileName: string;
+  /** Optional text the admin typed alongside the image. */
+  text: string;
+  status: "uploading" | "failed";
+  /** 'upload' = storage upload failed; 'send' = upload OK but message create failed (retry reuses the cached URL). */
+  failureKind?: "upload" | "send";
+}
+
+export function createPendingImage(input: {
+  id: string;
+  shipmentId: string;
+  channel: string;
+  previewUrl: string;
+  fileName: string;
+  text: string;
+}): PendingImageMessage {
+  return { ...input, status: "uploading" };
+}
+
+/** Items to render inside ONE shipment+channel thread — a pending item never leaks into another room or channel. */
+export function selectPendingImagesForThread(
+  items: PendingImageMessage[],
+  shipmentId: string,
+  channel: string
+): PendingImageMessage[] {
+  return items.filter((p) => p.shipmentId === shipmentId && p.channel === channel);
+}
+
+export function markPendingImageFailed(
+  items: PendingImageMessage[],
+  id: string,
+  failureKind: "upload" | "send"
+): PendingImageMessage[] {
+  return items.map((p) => (p.id === id ? { ...p, status: "failed" as const, failureKind } : p));
+}
+
+/** Retry flips the SAME item (same id — never a duplicate) back to uploading. Only a failed item may retry. */
+export function markPendingImageRetrying(items: PendingImageMessage[], id: string): PendingImageMessage[] {
+  return items.map((p) => (p.id === id && p.status === "failed" ? { ...p, status: "uploading" as const, failureKind: undefined } : p));
+}
+
+export function canRetryPendingImage(item: Pick<PendingImageMessage, "status">): boolean {
+  return item.status === "failed";
+}
+
+/**
+ * Removes a pending item (successful reconciliation with the authoritative
+ * server message, or an explicit user Remove) and hands back the object
+ * URL that must now be revoked — the caller owns URL.revokeObjectURL,
+ * keeping this pure and leak-free by construction.
+ */
+export function removePendingImage(
+  items: PendingImageMessage[],
+  id: string
+): { items: PendingImageMessage[]; revokedUrl: string | null } {
+  const found = items.find((p) => p.id === id);
+  return { items: items.filter((p) => p.id !== id), revokedUrl: found ? found.previewUrl : null };
+}

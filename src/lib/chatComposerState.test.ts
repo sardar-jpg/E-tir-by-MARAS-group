@@ -11,6 +11,12 @@ import {
   mergeNewerChatMessages,
   prependOlderChatMessages,
   type ChatPollState,
+  createPendingImage,
+  selectPendingImagesForThread,
+  markPendingImageFailed,
+  markPendingImageRetrying,
+  removePendingImage,
+  canRetryPendingImage,
 } from "./chatComposerState";
 
 describe("canSubmitChatMessage (duplicate-send guard)", () => {
@@ -287,5 +293,52 @@ describe("prependOlderChatMessages — Phase 4 (Firestore scalability audit)", (
   it("an empty older page is a safe no-op, returning the same array reference", () => {
     const existing = [{ id: "a" }];
     expect(prependOlderChatMessages(existing, [])).toBe(existing);
+  });
+});
+
+describe("optimistic pending image messages (feature/admin-chat-mobile-ux-pass)", () => {
+  const make = (id: string, shipmentId = "s1", channel = "driver_admin") =>
+    createPendingImage({ id, shipmentId, channel, previewUrl: `blob:${id}`, fileName: `${id}.jpg`, text: "" });
+
+  it("a new pending item starts uploading, bound to its creation-time shipment and channel", () => {
+    const p = make("p1");
+    expect(p.status).toBe("uploading");
+    expect(p.shipmentId).toBe("s1");
+    expect(p.channel).toBe("driver_admin");
+  });
+
+  it("thread selection is strict: an item never renders in another shipment OR another channel of the same room", () => {
+    const items = [make("p1", "s1", "driver_admin"), make("p2", "s1", "internal_staff"), make("p3", "s2", "driver_admin")];
+    expect(selectPendingImagesForThread(items, "s1", "driver_admin").map((p) => p.id)).toEqual(["p1"]);
+    expect(selectPendingImagesForThread(items, "s1", "internal_staff").map((p) => p.id)).toEqual(["p2"]);
+    expect(selectPendingImagesForThread(items, "s2", "driver_admin").map((p) => p.id)).toEqual(["p3"]);
+  });
+
+  it("failure marks the SAME item failed with its failure kind; retry flips the SAME id back to uploading (never a duplicate)", () => {
+    let items = [make("p1")];
+    items = markPendingImageFailed(items, "p1", "send");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: "p1", status: "failed", failureKind: "send" });
+    expect(canRetryPendingImage(items[0])).toBe(true);
+    items = markPendingImageRetrying(items, "p1");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: "p1", status: "uploading" });
+    expect(items[0].failureKind).toBeUndefined();
+  });
+
+  it("retry is a no-op for an item that is still uploading (double-tap safe)", () => {
+    const items = [make("p1")];
+    expect(markPendingImageRetrying(items, "p1")[0].status).toBe("uploading");
+    expect(canRetryPendingImage(items[0])).toBe(false);
+  });
+
+  it("removal hands back the object URL for revocation and drops exactly that item", () => {
+    const items = [make("p1"), make("p2")];
+    const { items: after, revokedUrl } = removePendingImage(items, "p1");
+    expect(after.map((p) => p.id)).toEqual(["p2"]);
+    expect(revokedUrl).toBe("blob:p1");
+    const missing = removePendingImage(after, "nope");
+    expect(missing.items).toHaveLength(1);
+    expect(missing.revokedUrl).toBeNull();
   });
 });

@@ -12,7 +12,15 @@ import {
   planAttachmentSendForShipment,
   mergeNewerChatMessages,
   prependOlderChatMessages,
+  createPendingImage,
+  selectPendingImagesForThread,
+  markPendingImageFailed,
+  markPendingImageRetrying,
+  removePendingImage,
+  type PendingImageMessage,
 } from '../../lib/chatComposerState';
+import { optimizeChatImage, isLikelyHeic } from '../../lib/chatImageOptimize';
+import { MAX_UPLOAD_BYTES } from '../../lib/uploadValidation';
 import { isShipmentClosed } from '../../lib/shipmentStatusTransitions';
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from '../../lib/chatDisplay';
 import { encodePageCursor } from '../../lib/pagination';
@@ -148,6 +156,10 @@ const LABELS: Record<Language, {
   share: string;
   download: string;
   messagePlaceholder: string;
+  heicUnsupported: string;
+  imageTooLarge: string;
+  uploadingImage: string;
+  imageFailed: string;
   category: Record<DocumentCategory, string>;
 }> = {
   en: {
@@ -182,6 +194,10 @@ const LABELS: Record<Language, {
     share: 'Share',
     download: 'Download',
     messagePlaceholder: 'Type a message…',
+    heicUnsupported: 'HEIC/HEIF photos are not supported yet. Please choose a JPEG, PNG, or WebP image.',
+    imageTooLarge: 'This image is larger than 15 MB. Please choose a smaller one.',
+    uploadingImage: 'Uploading…',
+    imageFailed: 'Upload failed',
     category: {
       cmr: 'CMR',
       invoice: 'Invoice',
@@ -226,6 +242,10 @@ const LABELS: Record<Language, {
     share: 'Paylaş',
     download: 'İndir',
     messagePlaceholder: 'Bir mesaj yazın…',
+    heicUnsupported: 'HEIC/HEIF fotoğraflar henüz desteklenmiyor. Lütfen JPEG, PNG veya WebP seçin.',
+    imageTooLarge: 'Bu görsel 15 MB\'tan büyük. Lütfen daha küçük bir görsel seçin.',
+    uploadingImage: 'Yükleniyor…',
+    imageFailed: 'Yükleme başarısız',
     category: {
       cmr: 'CMR',
       invoice: 'Fatura',
@@ -270,6 +290,10 @@ const LABELS: Record<Language, {
     share: 'مشاركة',
     download: 'تنزيل',
     messagePlaceholder: 'اكتب رسالة…',
+    heicUnsupported: 'صور HEIC/HEIF غير مدعومة بعد. يرجى اختيار صورة JPEG أو PNG أو WebP.',
+    imageTooLarge: 'حجم هذه الصورة أكبر من 15 ميغابايت. يرجى اختيار صورة أصغر.',
+    uploadingImage: 'جارٍ الرفع…',
+    imageFailed: 'فشل الرفع',
     category: {
       cmr: 'CMR',
       invoice: 'فاتورة',
@@ -359,7 +383,7 @@ export default function ChatCenter({
   // Distinguishes "the upload itself failed (message never sent)" from
   // "the upload succeeded but creating the chat message failed" — the two
   // cases in section 2/7 of the phase-1 requirements need different copy.
-  const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send' | 'closed'>('');
+  const [internalSendError, setInternalSendError] = useState<'' | 'upload' | 'send' | 'closed' | 'heic' | 'too_large'>('');
   const internalFileInputRef = useRef<HTMLInputElement>(null);
   // fix/admin-mobile-chat-correctness: in-app image viewer target — image
   // attachments never navigate the WebView to the raw file URL.
@@ -375,6 +399,175 @@ export default function ChatCenter({
   const recordLocalActivity = (shipmentId: string, timestamp: string | undefined) => {
     if (!timestamp) return;
     setLocalActivity((prev) => (prev[shipmentId] && prev[shipmentId] >= timestamp ? prev : { ...prev, [shipmentId]: timestamp }));
+  };
+
+  // feature/admin-chat-mobile-ux-pass: optimistic image sending. Each
+  // pending item is LOCAL-ONLY UI state bound at creation to its
+  // shipmentId+channel (it never leaks into another room, and never
+  // touches unread state or lastChatActivityAt — only the authoritative
+  // server message created on success does). The job map holds the
+  // non-serializable pieces (blob, cached upload URL for retry).
+  const [pendingImages, setPendingImages] = useState<PendingImageMessage[]>([]);
+  const pendingJobsRef = useRef(
+    new Map<string, {
+      originalFile: File;
+      optimized?: { blob: Blob; fileName: string; mimeType: string };
+      category: DocumentCategory;
+      text: string;
+      shipmentId: string;
+      channel: ChatChannel;
+      uploadedUrl?: string;
+      running: boolean;
+    }>()
+  );
+  // Every object URL this component created, revoked on unmount (items
+  // removed/reconciled earlier revoke immediately and drop out of here).
+  const createdObjectUrlsRef = useRef(new Set<string>());
+  useEffect(() => () => {
+    createdObjectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    createdObjectUrlsRef.current.clear();
+  }, []);
+  // What the admin is LOOKING at right now — the job callback compares
+  // against this (not a stale closure) to decide whether the reconciled
+  // server message should also be appended to the visible thread.
+  const viewingRef = useRef<{ shipmentId: string | null; channel: ChatCenterChannel }>({ shipmentId: null, channel: 'internal_staff' });
+  useEffect(() => {
+    viewingRef.current = { shipmentId: selectedShipmentId, channel: activeChannel };
+  }, [selectedShipmentId, activeChannel]);
+
+  const revokePreviewUrl = (url: string | null) => {
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    createdObjectUrlsRef.current.delete(url);
+  };
+
+  const blobToDataUrl = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+
+  const runPendingImageJob = async (id: string) => {
+    const job = pendingJobsRef.current.get(id);
+    if (!job || job.running) return; // duplicate-submission guard per pending item
+    job.running = true;
+    try {
+      // Optimize once (document-safe downscale/re-encode; falls back to
+      // the original file on any failure — see chatImageOptimize.ts).
+      if (!job.optimized) {
+        const opt = await optimizeChatImage(job.originalFile);
+        if (opt.kind === 'unsupported_heic') {
+          setPendingImages((prev) => markPendingImageFailed(prev, id, 'upload'));
+          return;
+        }
+        job.optimized = { blob: opt.blob, fileName: opt.fileName, mimeType: opt.mimeType };
+      }
+      // Upload (skipped on retry when the URL is already cached — PR #95 parity).
+      if (!job.uploadedUrl) {
+        const dataUrl = await blobToDataUrl(job.optimized.blob);
+        const uploadRes = await apiFetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base64DataUrl: dataUrl, filename: job.optimized.fileName }),
+        });
+        if (!uploadRes.ok) {
+          setPendingImages((prev) => markPendingImageFailed(prev, id, 'upload'));
+          return;
+        }
+        job.uploadedUrl = (await uploadRes.json()).url;
+      }
+      // Authoritative message — posted to the shipment/channel CAPTURED AT
+      // CREATION, never the currently-viewed one.
+      const res = await apiFetch(`/api/shipments/${job.shipmentId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: job.channel,
+          type: 'file',
+          fileName: job.optimized.fileName,
+          fileCategory: job.category,
+          fileUrl: job.uploadedUrl,
+          ...(job.text ? { text: job.text } : {}),
+        }),
+      });
+      if (!res.ok) {
+        setPendingImages((prev) => markPendingImageFailed(prev, id, 'send'));
+        return;
+      }
+      const msg = await res.json();
+      recordLocalActivity(job.shipmentId, msg.timestamp);
+      // Reconcile: the server message (its ID and timestamp) replaces the
+      // pending item. mergeNewerChatMessages de-dups by id, so the ~3s
+      // thread poll delivering the same message later is a no-op.
+      const viewing = viewingRef.current;
+      if (viewing.shipmentId === job.shipmentId && viewing.channel === job.channel) {
+        isNearBottomRef.current = true;
+        setChannelMessages((prev) => mergeNewerChatMessages(prev, [msg]));
+      }
+      setPendingImages((prev) => {
+        const { items, revokedUrl } = removePendingImage(prev, id);
+        revokePreviewUrl(revokedUrl);
+        return items;
+      });
+      pendingJobsRef.current.delete(id);
+    } catch {
+      setPendingImages((prev) => markPendingImageFailed(prev, id, pendingJobsRef.current.get(id)?.uploadedUrl ? 'send' : 'upload'));
+    } finally {
+      const j = pendingJobsRef.current.get(id);
+      if (j) j.running = false;
+    }
+  };
+
+  const handleRetryPendingImage = (id: string) => {
+    setPendingImages((prev) => markPendingImageRetrying(prev, id));
+    void runPendingImageJob(id);
+  };
+
+  const handleRemovePendingImage = (id: string) => {
+    setPendingImages((prev) => {
+      const { items, revokedUrl } = removePendingImage(prev, id);
+      revokePreviewUrl(revokedUrl);
+      return items;
+    });
+    pendingJobsRef.current.delete(id);
+  };
+
+  const startImageSend = (file: File, text: string) => {
+    if (!selectedShipment) return;
+    if (isLikelyHeic(file)) {
+      setInternalSendError('heic');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setInternalSendError('too_large');
+      return;
+    }
+    const id = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const previewUrl = URL.createObjectURL(file);
+    createdObjectUrlsRef.current.add(previewUrl);
+    pendingJobsRef.current.set(id, {
+      originalFile: file,
+      category: internalFileCategory,
+      text,
+      shipmentId: selectedShipment.id,
+      channel: activeChannel,
+      running: false,
+    });
+    setPendingImages((prev) => [
+      ...prev,
+      createPendingImage({ id, shipmentId: selectedShipment.id, channel: activeChannel, previewUrl, fileName: file.name, text }),
+    ]);
+    // The composer frees up immediately — only THIS pending item is locked
+    // against duplicate submission (job.running), the rest of the chat
+    // stays fully usable, including further text messages.
+    setInternalMessageText('');
+    resetInternalAttachment();
+    setInternalSendError('');
+    isNearBottomRef.current = true;
+    if (isMobile) internalTextareaRef.current?.focus();
+    void runPendingImageJob(id);
   };
   // Keyboard-aware size/offset for the mobile full-screen conversation.
   const visualViewport = useVisualViewportMetrics(isMobile && Boolean(selectedShipmentId));
@@ -647,10 +840,10 @@ export default function ChatCenter({
   // isNearBottomRef reset above) — reading older history and having a new
   // message arrive must never yank the view back down.
   useEffect(() => {
-    if (channelMessages.length === 0) return;
+    if (channelMessages.length === 0 && pendingImages.length === 0) return;
     if (!isNearBottomRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [channelMessages.length, selectedShipment?.id, activeChannel]);
+  }, [channelMessages.length, pendingImages.length, selectedShipment?.id, activeChannel]);
 
   const handleMessagesScroll = () => {
     const el = messagesContainerRef.current;
@@ -738,6 +931,15 @@ export default function ChatCenter({
     const text = internalMessageText.trim();
     if (!selectedShipment) return;
     if (!canSubmitChatMessage({ text, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })) return;
+    // feature/admin-chat-mobile-ux-pass: IMAGE attachments go through the
+    // optimistic pending flow (immediate in-thread preview, background
+    // optimize+upload, Retry/Remove on failure) instead of blocking the
+    // composer. Non-image attachments (PDF/DOC/XLS) keep the existing
+    // synchronous path unchanged.
+    if (internalFile && (internalFile.type.startsWith('image/') || isLikelyHeic(internalFile))) {
+      startImageSend(internalFile, text);
+      return;
+    }
     setIsSendingInternal(true);
     setInternalSendError('');
     try {
@@ -814,6 +1016,12 @@ export default function ChatCenter({
         isNearBottomRef.current = true;
         setChannelMessages((prev) => [...prev, msg]);
         setInternalMessageText('');
+        // feature/admin-chat-mobile-ux-pass: a successful send keeps the
+        // conversation going — restore focus so the iOS keyboard stays up
+        // (the textarea is no longer disabled during the send, and the
+        // Send button's pointerdown guard stops the tap from blurring it;
+        // this focus() is the safety net if anything still slipped).
+        if (isMobile) internalTextareaRef.current?.focus();
         resetInternalAttachment();
         setInternalSendError('');
       } else {
@@ -855,6 +1063,12 @@ export default function ChatCenter({
   // experience — it composes in the driver/customer channels too. The
   // server still enforces every channel/permission rule regardless.
   const canComposeInActiveChannel = activeChannel === 'internal_staff' || isMobile;
+
+  // Pending optimistic images for exactly this room+channel — items sent
+  // from other shipments/channels never render here.
+  const pendingForThread = selectedShipment
+    ? selectPendingImagesForThread(pendingImages, selectedShipment.id, activeChannel)
+    : [];
 
   // The selected conversation — one pane shared verbatim by the desktop
   // right-hand column and the mobile full-screen overlay, so the two can
@@ -961,7 +1175,7 @@ export default function ChatCenter({
               {label.retryNow}
             </button>
           </div>
-        ) : channelMessages.length === 0 ? (
+        ) : channelMessages.length === 0 && pendingForThread.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center gap-2">
             {pollError && (
               <p className="text-[11px] font-semibold text-amber-600 flex items-center gap-1.5 mb-1">
@@ -1133,6 +1347,51 @@ export default function ChatCenter({
                 </div>
               );
             })}
+            {pendingForThread.map((pending) => (
+              <div key={pending.id} className="mt-3">
+                <div className="flex flex-col max-w-[82%] lg:max-w-[75%] ml-auto items-end">
+                  <div className={`relative rounded-xl overflow-hidden border ${pending.status === 'failed' ? 'border-red-300' : 'border-orange-300'}`}>
+                    <img
+                      src={pending.previewUrl}
+                      alt={pending.fileName}
+                      className="block w-full h-auto object-cover max-w-[220px] max-h-[180px]"
+                    />
+                    {pending.status === 'uploading' ? (
+                      <div className="absolute inset-0 bg-slate-900/45 flex flex-col items-center justify-center gap-1.5">
+                        <RefreshCw className="w-5 h-5 text-white animate-spin" />
+                        <span className="text-[11px] font-bold text-white">{label.uploadingImage}</span>
+                      </div>
+                    ) : (
+                      <div className="absolute inset-0 bg-slate-900/55 flex flex-col items-center justify-center gap-1.5 px-2 text-center">
+                        <AlertTriangle className="w-5 h-5 text-amber-400" />
+                        <span className="text-[11px] font-bold text-white">{label.imageFailed}</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleRetryPendingImage(pending.id)}
+                            className="text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 px-2.5 py-1 rounded-lg"
+                          >
+                            {label.retryNow}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemovePendingImage(pending.id)}
+                            className="text-[11px] font-bold text-white/90 bg-white/15 hover:bg-white/25 px-2.5 py-1 rounded-lg"
+                          >
+                            {label.removeAttachment}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {pending.text && (
+                    <div className="mt-1 px-3 py-2 rounded-xl text-[13px] leading-relaxed lg:text-xs break-words max-w-full bg-orange-500/80 text-white">
+                      {pending.text}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
             <div ref={messagesEndRef} />
           </div>
         )}
@@ -1156,6 +1415,12 @@ export default function ChatCenter({
           )}
           {internalSendError === 'closed' && (
             <p className="px-3 pt-2 text-[11px] font-bold text-red-600">This shipment is closed. Messages can no longer be sent.</p>
+          )}
+          {internalSendError === 'heic' && (
+            <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.heicUnsupported}</p>
+          )}
+          {internalSendError === 'too_large' && (
+            <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.imageTooLarge}</p>
           )}
           {internalFile && (
             <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs">
@@ -1201,6 +1466,7 @@ export default function ChatCenter({
             <button
               type="button"
               onClick={() => internalFileInputRef.current?.click()}
+              onPointerDown={(e) => e.preventDefault()}
               disabled={isSendingInternal}
               title={label.attach}
               aria-label={label.attach}
@@ -1232,12 +1498,12 @@ export default function ChatCenter({
               }}
               placeholder={activeChannel === 'internal_staff' ? label.internalInputPlaceholder : label.messagePlaceholder}
               maxLength={MAX_CHAT_TEXT_LENGTH}
-              disabled={isSendingInternal}
               style={{ minHeight: COMPOSER_MIN_HEIGHT_PX, maxHeight: COMPOSER_MAX_HEIGHT_PX }}
               className="flex-1 px-3 py-2.5 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/40 disabled:opacity-60 resize-none overflow-y-auto leading-normal"
             />
             <button
               type="submit"
+              onPointerDown={(e) => e.preventDefault()}
               disabled={!canSubmitChatMessage({ text: internalMessageText, hasAttachment: Boolean(internalFile), isSending: isSendingInternal, isLocked: isSelectedShipmentClosed })}
               className="flex items-center gap-1.5 text-[11px] font-bold text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-3 rounded-lg transition-colors"
             >
@@ -1260,7 +1526,7 @@ export default function ChatCenter({
           Desktop (lg) keeps the original two-pane layout and sizing. */}
       <div
         ref={listRootRef}
-        className="flex flex-col lg:flex-row min-h-[320px] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden"
+        className="flex flex-col lg:flex-row min-h-[320px] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border-0 lg:border border-slate-200 rounded-none lg:rounded-2xl shadow-none -mx-3 lg:mx-0 overflow-hidden"
         style={isMobile && mobileListHeight ? { height: mobileListHeight } : undefined}
         dir={isRtl ? 'rtl' : 'ltr'}
       >
@@ -1274,7 +1540,7 @@ export default function ChatCenter({
             CLIPPED the tail rows (the inner scroller never activated, so
             "scrolled to the end" still hid the last shipment). Desktop
             keeps the fixed 320px side column exactly as before. */}
-        <div className="flex w-full flex-1 lg:flex-none lg:w-80 lg:shrink-0 lg:border-e border-slate-200 flex-col min-h-0 bg-slate-50">
+        <div className="flex w-full flex-1 lg:flex-none lg:w-80 lg:shrink-0 lg:border-e border-slate-200 flex-col min-h-0 bg-white lg:bg-slate-50">
           <div className="p-3 lg:p-4 border-b border-slate-200">
             <h2 className="font-bold text-slate-900 text-sm flex items-center gap-2">
               <MessageSquare className="w-4 h-4 text-orange-500" />
