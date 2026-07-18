@@ -73,9 +73,32 @@ describe("one mobile chat experience — no duplicate full-chat hand-off on mobi
   });
 
   it("the mobile conversation is keyboard-aware (visualViewport) with the composer above the safe area", () => {
-    expect(CHAT_CENTER).toContain("useVisualViewportHeight");
+    expect(CHAT_CENTER).toContain("useVisualViewportMetrics");
     expect(CHAT_CENTER).toContain("window.visualViewport");
     expect(CHAT_CENTER).toContain("env(safe-area-inset-bottom)");
+  });
+
+  it("keyboard UX (real-iPhone pass): body locked while the conversation is open, overlay follows the visual viewport, thread bottom-anchored", () => {
+    // The page behind the overlay must never scroll (the shipment list
+    // could appear behind the composer when WebKit scrolled the document
+    // to reveal the focused input).
+    expect(CHAT_CENTER).toContain("body.style.position = 'fixed'");
+    expect(CHAT_CENTER).toContain("window.scrollTo(0, scrollY)");
+    // The overlay tracks the visual viewport's pan offset, so
+    // header/tabs/composer stay inside the visible area with the
+    // keyboard open — the page itself never repositions.
+    expect(CHAT_CENTER).toContain("translateY(${visualViewport.offsetTop}px)");
+    // Short conversations hug the composer (no dead space) —
+    // WhatsApp/Telegram/iMessage anchoring.
+    expect(CHAT_CENTER).toContain('"min-h-full flex flex-col justify-end"');
+    // Thread scrolling never chains into the page; the overlay refuses
+    // rubber-band overscroll.
+    expect(CHAT_CENTER).toContain("overscroll-contain");
+    expect(CHAT_CENTER).toContain("overscroll-none");
+    // Keyboard resize keeps the newest messages pinned; sending always
+    // follows your own message down.
+    expect(CHAT_CENTER).toContain("}, [visualViewport?.height, isMobile]);");
+    expect(CHAT_CENTER).toContain("isNearBottomRef.current = true;\n        setChannelMessages((prev) => [...prev, msg]);");
   });
 
   it("desktop keeps the two-pane layout and its sizing", () => {
