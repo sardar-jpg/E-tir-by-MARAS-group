@@ -1,123 +1,112 @@
 /**
- * firebaseRulesUid.ts
+ * firebaseRulesUid.ts — the Firebase rules posture guard.
  *
- * Pure helpers for scripts/check-firebase-readiness.ts (PR #66): extract the
- * hardcoded server-account UID from firestore.rules / storage.rules and
- * compare it (a) against each other and (b) against the optional
- * SERVER_FIREBASE_UID env var. This exists because firestore.rules /
- * storage.rules both hardcode `request.auth.uid == "<uid>"` for the
- * dedicated server account (see docs/REAL_FIREBASE_VERIFICATION.md §5–§6) —
- * if that UID doesn't match the real SERVER_FIREBASE_EMAIL account's
- * Firebase Auth UID, every Firestore/Storage request fails closed even
- * though SERVER_FIREBASE_EMAIL/PASSWORD are set correctly.
+ * PR #135 (Stage 2 PR 2, audit finding H-3), review correction: the guard
+ * is STRUCTURAL, not a blacklist. Since PR #121 the committed posture is
+ * deny-all in BOTH rules files — all Firestore/Storage access is
+ * server-mediated through the Firebase Admin SDK (which bypasses these
+ * rules), and the repo contains zero firebase/firestore or
+ * firebase/storage client-SDK usage (firebase/auth only, for identity).
  *
- * SERVER_FIREBASE_UID is NOT a secret — it's a verification value only,
- * unrelated to SERVER_FIREBASE_EMAIL/PASSWORD. Never touches Firebase.
+ * A file is accepted ONLY when every active `allow …;` statement in it is
+ * exactly the canonical deny-all rule (whitespace/formatting variations
+ * allowed, nothing else). Any additional allow statement of any kind —
+ * read, write, get, list, create, update, delete, custom condition, even
+ * a redundant `allow get: if false;` — fails the check, because proving
+ * deny-all requires proving there is NO other grant, not that no grant
+ * matches a known-bad list. Comments are stripped before scanning so
+ * documentation text can neither trigger nor satisfy any check.
+ *
+ * assessRulesPosture backs both scripts/check-firebase-readiness.ts
+ * (blocking) and the unit suite, which runs it against the REAL rules
+ * files — so CI fails anywhere the posture regresses.
  */
 
 const UID_PATTERN = /request\.auth\.uid\s*==\s*"([^"]+)"/;
-// Deny-all: `allow read, write: if false;` with NO UID authorization. This is
-// the fully-hardened, server-mediated posture — all Firestore/Storage access
-// goes through the Firebase Admin SDK, which bypasses these rules entirely.
-const DENY_ALL_PATTERN = /allow\s+read\s*,\s*write\s*:\s*if\s+false\s*;/;
+
+/** Every active allow statement, e.g. `allow read: if x;` (comments must be stripped first). */
+const ALLOW_STATEMENT_PATTERN = /\ballow\b[\s\S]*?;/g;
+
+/**
+ * The ONLY permitted active allow statement, in whitespace-insensitive
+ * form: `allow read, write: if false;`
+ */
+const CANONICAL_DENY_ALL_COMPACT = "allowread,write:iffalse;";
+
+function stripRulesComments(rulesText: string): string {
+  return rulesText.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+const compact = (stmt: string): string => stmt.replace(/\s+/g, "");
 
 export function extractServerUid(rulesText: string): string | null {
-  const match = rulesText.match(UID_PATTERN);
+  const match = stripRulesComments(rulesText).match(UID_PATTERN);
   return match ? match[1] : null;
 }
 
-/** True when the rules deny all direct client access and authorize no UID. */
-export function isDenyAllRules(rulesText: string): boolean {
-  return DENY_ALL_PATTERN.test(rulesText) && !UID_PATTERN.test(rulesText);
+/**
+ * All active allow statements, whitespace-normalized for reporting.
+ * Comments are stripped first.
+ */
+export function extractAllowStatements(rulesText: string): string[] {
+  const stripped = stripRulesComments(rulesText);
+  return (stripped.match(ALLOW_STATEMENT_PATTERN) || []).map((s) => s.replace(/\s+/g, " ").trim());
 }
 
-export interface RulesUidCheck {
-  firestoreUid: string | null;
-  storageUid: string | null;
-  /** true only when both files have a UID and it's the same one. */
-  rulesMatch: boolean;
+/**
+ * True when the file's active allow statements are exactly the canonical
+ * deny-all form (one or more occurrences, nothing else) and no UID
+ * authorization exists anywhere in it.
+ */
+export function isDenyAllRules(rulesText: string): boolean {
+  const statements = extractAllowStatements(rulesText);
+  return (
+    statements.length > 0 &&
+    statements.every((s) => compact(s) === CANONICAL_DENY_ALL_COMPACT) &&
+    extractServerUid(rulesText) === null
+  );
+}
+
+export interface RulesPostureCheck {
   problems: string[];
   warnings: string[];
 }
 
-export function checkRulesUids(
-  firestoreRulesText: string,
-  storageRulesText: string,
-  envUid: string | undefined,
-  opts: { isProduction: boolean; strictPersistence: boolean }
-): RulesUidCheck {
-  const firestoreUid = extractServerUid(firestoreRulesText);
-  const storageUid = extractServerUid(storageRulesText);
-  const firestoreDenyAll = isDenyAllRules(firestoreRulesText);
-  const storageDenyAll = isDenyAllRules(storageRulesText);
+export function assessRulesPosture(firestoreRulesText: string, storageRulesText: string): RulesPostureCheck {
   const problems: string[] = [];
   const warnings: string[] = [];
 
-  // Each rules file must be well-formed: it either authorizes a specific
-  // server-account UID (legacy model) OR explicitly denies all direct client
-  // access (deny-all — the fully server-mediated Admin-SDK model). Anything
-  // else is an unexpected shape and blocks.
-  if (!firestoreUid && !firestoreDenyAll) {
-    problems.push(
-      'firestore.rules has neither a server-account UID (request.auth.uid == "...") nor an explicit deny-all (allow read, write: if false).'
-    );
-  }
-  if (!storageUid && !storageDenyAll) {
-    problems.push(
-      'storage.rules has neither a server-account UID (request.auth.uid == "...") nor an explicit deny-all (allow read, write: if false).'
-    );
-  }
-
-  // Fully-hardened posture: both files deny all direct client access. All
-  // Firestore/Storage access is server-mediated via the Admin SDK, which
-  // bypasses these rules — so there is no UID to match and the UID/env checks
-  // below do not apply.
-  if (firestoreDenyAll && storageDenyAll) {
-    warnings.push(
-      "firestore.rules and storage.rules are deny-all (allow read, write: if false) — direct client access is fully blocked; all Firestore/Storage access is server-mediated via the Firebase Admin SDK. Server-UID checks are not applicable."
-    );
-    return { firestoreUid, storageUid, rulesMatch: false, problems, warnings };
-  }
-
-  // Transitional/mixed state: one file deny-all, the other still UID-based.
-  if (firestoreDenyAll !== storageDenyAll && (firestoreUid || storageUid)) {
-    warnings.push(
-      "firestore.rules and storage.rules are in different modes (one deny-all, one UID-based) — align both to the same model before deploying."
-    );
-  }
-
-  const rulesMatch = !!firestoreUid && !!storageUid && firestoreUid === storageUid;
-  if (firestoreUid && storageUid && !rulesMatch) {
-    problems.push(
-      `firestore.rules and storage.rules grant access to different UIDs (firestore: ${firestoreUid}, storage: ${storageUid}) — only one server account can be authorized; fix the mismatch before deploying either rule file.`
-    );
-  }
-
-  if (envUid) {
-    if (rulesMatch) {
-      if (envUid !== firestoreUid) {
-        const message =
-          `SERVER_FIREBASE_UID ("${envUid}") does not match the UID hardcoded in firestore.rules/storage.rules ` +
-          `("${firestoreUid}"). Firestore/Storage requests from this server account will be rejected until the ` +
-          "rules are updated (or SERVER_FIREBASE_UID is corrected if it's the one that's wrong).";
-        if (opts.isProduction && opts.strictPersistence) {
-          problems.push(message);
-        } else {
-          warnings.push(message);
-        }
-      }
-    } else if (firestoreUid || storageUid) {
-      warnings.push(
-        "SERVER_FIREBASE_UID is set, but firestore.rules and storage.rules disagree on the UID — cannot confirm a match until the rules agree."
+  for (const [name, raw] of [
+    ["firestore.rules", firestoreRulesText],
+    ["storage.rules", storageRulesText],
+  ] as const) {
+    const uid = extractServerUid(raw);
+    if (uid) {
+      problems.push(
+        `${name} contains legacy hardcoded server-UID authorization (request.auth.uid == "…"). ` +
+        "The required posture since PR #121 is deny-all — the server uses the Admin SDK and needs no rules grant. " +
+        "Remove the UID clause and restore `allow read, write: if false;`."
       );
     }
-  } else {
-    warnings.push(
-      "SERVER_FIREBASE_UID is not set — cannot statically confirm the rules' hardcoded UID matches the real " +
-      "SERVER_FIREBASE_EMAIL account's Firebase Auth UID. Confirm manually in Firebase Console > Authentication " +
-      "(see docs/REAL_FIREBASE_VERIFICATION.md)."
-    );
+
+    // Structural scan: EVERY active allow statement must be exactly the
+    // canonical deny-all. Anything else — permissive, conditional, or even
+    // a redundant extra denial — is a posture violation.
+    const statements = extractAllowStatements(raw);
+    const nonCanonical = statements.filter((s) => compact(s) !== CANONICAL_DENY_ALL_COMPACT);
+    for (const stmt of nonCanonical) {
+      problems.push(
+        `${name} contains an allow statement other than the canonical deny-all: "${stmt}". ` +
+        'The ONLY permitted active rule is `allow read, write: if false;` — remove every other allow statement.'
+      );
+    }
+    if (!statements.some((s) => compact(s) === CANONICAL_DENY_ALL_COMPACT)) {
+      problems.push(
+        `${name} is missing the explicit deny-all rule (allow read, write: if false;). ` +
+        "Restore it — anything else risks exposing raw collections/objects to browsers."
+      );
+    }
   }
 
-  return { firestoreUid, storageUid, rulesMatch, problems, warnings };
+  return { problems, warnings };
 }

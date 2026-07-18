@@ -17,13 +17,15 @@
  * hint, never an authoritative answer — only a live server boot (or
  * `npm run dev`) can confirm ADC actually works.
  *
- * Also checks (src/lib/firebaseRulesUid.ts) that firestore.rules and
- * storage.rules hardcode the *same* server-account UID, and — if the
- * non-secret SERVER_FIREBASE_UID env var is set — that it matches the UID
- * found in those rules. This UID-matching check predates the Admin SDK
- * migration and is unrelated to it (rules files are unchanged in this
- * branch) — it never reads firestore.rules/storage.rules from anywhere but
- * disk and never contacts Firebase.
+ * Also enforces (src/lib/firebaseRulesUid.ts, assessRulesPosture) the
+ * hardened rules posture from PR #121: firestore.rules and storage.rules
+ * must BOTH be deny-all. A returning legacy hardcoded server-UID
+ * authorization, any permissive client grant, or a missing rules file is
+ * a BLOCKING problem (Stage 2 PR 2, audit finding H-3). The old
+ * SERVER_FIREBASE_UID env-matching check is gone with the legacy model.
+ * This never reads the rules from anywhere but disk and never contacts
+ * Firebase — deployed rules must additionally be verified in the Firebase
+ * console (see docs/FIREBASE_MAPS_SECURITY_VERIFICATION.md).
  *
  * Usage:
  *   npx tsx scripts/check-firebase-readiness.ts
@@ -32,16 +34,15 @@
  * Exits non-zero if run with NODE_ENV=production and any launch-blocking
  * condition from the checklist is detected (memory fallback, demo seeding,
  * missing SESSION_SECRET/SUPER_ADMIN_PASSWORD_HASH, a wildcard CORS origin,
- * a committed service-account-looking JSON file, firestore.rules/storage.rules
- * disagreeing on the server UID, or — in production with STRICT_PERSISTENCE
- * on — SERVER_FIREBASE_UID disagreeing with the rules). Exits 0 (with
- * warnings) outside production, since local dev is expected to run on the
- * memory fallback with demo data.
+ * a committed service-account-looking JSON file, or an invalid
+ * firestore.rules/storage.rules posture). Exits 0 (with warnings) outside
+ * production, since local dev is expected to run on the memory fallback
+ * with demo data.
  */
 import fs from "fs";
 import path from "path";
 import { computePersistenceReadiness } from "../src/lib/persistenceReadiness";
-import { checkRulesUids } from "../src/lib/firebaseRulesUid";
+import { assessRulesPosture } from "../src/lib/firebaseRulesUid";
 import { checkFirebaseConfigConsistency } from "../src/lib/firebaseConfigConsistency";
 
 const projectRoot = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -159,23 +160,26 @@ function main() {
   problems.push(...configConsistency.problems);
   warnings.push(...configConsistency.warnings);
 
+  // PR #135 (Stage 2 PR 2, audit finding H-3): the rules posture guard.
+  // Deny-all in BOTH files is the only accepted shape — a returning legacy
+  // UID authorization or any permissive client grant is a BLOCKING problem,
+  // and missing rules files now block too (they'd deploy as Firebase's
+  // permissive defaults from the console otherwise).
   const firestoreRulesPath = path.join(projectRoot, "firestore.rules");
   const storageRulesPath = path.join(projectRoot, "storage.rules");
   if (fs.existsSync(firestoreRulesPath) && fs.existsSync(storageRulesPath)) {
-    const uidCheck = checkRulesUids(
+    const posture = assessRulesPosture(
       fs.readFileSync(firestoreRulesPath, "utf8"),
-      fs.readFileSync(storageRulesPath, "utf8"),
-      env.SERVER_FIREBASE_UID,
-      { isProduction: readiness.isProduction, strictPersistence: readiness.strictPersistence }
+      fs.readFileSync(storageRulesPath, "utf8")
     );
-    console.log(`firestore.rules server UID: ${uidCheck.firestoreUid ?? "(not found)"}`);
-    console.log(`storage.rules server UID: ${uidCheck.storageUid ?? "(not found)"}`);
-    console.log(`firestore.rules / storage.rules UIDs match: ${uidCheck.rulesMatch}`);
-    console.log(`SERVER_FIREBASE_UID present: ${!!env.SERVER_FIREBASE_UID}`);
-    problems.push(...uidCheck.problems);
-    warnings.push(...uidCheck.warnings);
+    console.log(`firestore.rules / storage.rules posture: ${posture.problems.length === 0 ? "deny-all (hardened)" : "INVALID"}`);
+    problems.push(...posture.problems);
+    warnings.push(...posture.warnings);
+    if (posture.problems.length === 0) {
+      console.log("Direct client access to Firestore/Storage is fully denied; all access is server-mediated via the Admin SDK.");
+    }
   } else {
-    warnings.push("firestore.rules and/or storage.rules not found at repo root — skipped server-UID consistency check.");
+    problems.push("firestore.rules and/or storage.rules not found at repo root — the deny-all posture cannot be verified.");
   }
 
   console.log("──────────────────────────────────────────────────────────");
