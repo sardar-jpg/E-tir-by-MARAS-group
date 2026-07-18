@@ -114,11 +114,27 @@ import {
   MARAS_AI_TIMEOUT_MS,
   MARAS_AI_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENAI_MODEL,
+  deriveConversationTitle,
+  appendConversationMessages,
+  canAccessConversation,
+  conversationHistoryForModel,
+  toConversationSummary,
+  type MarasAiConversation,
 } from "./src/lib/marasAiCore";
+import {
+  detectMarasAiIntents,
+  requiredDataForIntents,
+  buildSystemContextBlocks,
+  resolveMarasAiResponseSource,
+  type MarasAiSystemData,
+} from "./src/lib/marasAiIntents";
 import {
   recordMonitoringEvent,
   classifyRequestForMonitoring,
   deriveTechnicalAlerts,
+  mergeMonitoringEvents,
+  pruneExpiredMonitoringEvents,
+  monitoringDocIdForKey,
   type MonitoringEvent,
 } from "./src/lib/monitoringStore";
 import {
@@ -339,6 +355,13 @@ let memoryStore: {
   allianceOfferResponses: AllianceOfferResponse[];
   allianceAuditLogs: AllianceAuditEntry[];
   driverActiveJobs: DriverActiveJobLock[];
+  // PR #128 refinement — persistent monitoring + MARAS AI conversations.
+  // Same PR #44 lesson as pushTokens above: every collection this server
+  // reads/writes needs an entry here, or memory-fallback access silently
+  // no-ops. (With real Firestore these persist across restarts; the
+  // memory fallback is inherently volatile, like every collection here.)
+  monitoringEvents: MonitoringEvent[];
+  marasAiConversations: MarasAiConversation[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -367,6 +390,8 @@ function getMemoryStore() {
       allianceOfferResponses: [],
       allianceAuditLogs: [],
       driverActiveJobs: [],
+      monitoringEvents: [],
+      marasAiConversations: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -3413,10 +3438,77 @@ const uploadedFiles = new Map<string, UploadedFileStore>();
 
 async function startServer() {
   // ── PR #128: MARAS AI + internal application monitoring ─────────────
-  // Bounded in-process telemetry (NOT business data, NOT a new database —
-  // resets on restart like a process log). Grouping/caps live in the pure,
+  // Bounded, grouped telemetry. The working set is this in-process array
+  // (fast reads for the alert route and the AI digest); every event group
+  // is ALSO persisted as one document in the existing "monitoringEvents"
+  // collection through the same Firestore/memory-fallback wrappers all
+  // other collections use — no new database — so monitoring history
+  // survives a server restart. Grouping/caps/retention live in the pure,
   // unit-tested monitoringStore module.
   const monitoringEvents: MonitoringEvent[] = [];
+
+  // Start-up hydration: merge persisted event groups into the working
+  // set (and prune anything past the 30-day retention window). Never
+  // throws — a failed attempt just retries on the next read/record.
+  let monitoringHydrated = false;
+  let monitoringHydration: Promise<void> | null = null;
+  function ensureMonitoringHydrated(): Promise<void> {
+    if (monitoringHydrated) return Promise.resolve();
+    if (!monitoringHydration) {
+      monitoringHydration = (async () => {
+        const snap = await getDocs(collection(db, "monitoringEvents"));
+        const persisted = snap.docs
+          .map((d) => d.data() as MonitoringEvent)
+          .filter((e) => e && typeof e.key === "string" && typeof e.lastAt === "string");
+        mergeMonitoringEvents(monitoringEvents, persisted);
+        for (const expired of pruneExpiredMonitoringEvents(monitoringEvents, new Date().toISOString())) {
+          deleteDoc(doc(db, "monitoringEvents", monitoringDocIdForKey(expired.key))).catch(() => {});
+        }
+        monitoringHydrated = true;
+      })()
+        .catch((err) => {
+          console.warn("Monitoring hydration failed (will retry on next access):", err?.message || err);
+        })
+        .finally(() => {
+          monitoringHydration = null;
+        });
+    }
+    return monitoringHydration ?? Promise.resolve();
+  }
+
+  // Write-behind persistence: recording stays synchronous and cheap (the
+  // observer middleware runs on EVERY request), while dirty groups flush
+  // to their documents on a short debounce — so an error storm costs one
+  // grouped write per key per flush window, not one write per request.
+  // Retention pruning also runs here. Persistence failures only log:
+  // monitoring must never break a real request.
+  const dirtyMonitoringKeys = new Set<string>();
+  let monitoringFlushTimer: NodeJS.Timeout | null = null;
+  function flushMonitoringEvents(): void {
+    monitoringFlushTimer = null;
+    const keys = [...dirtyMonitoringKeys];
+    dirtyMonitoringKeys.clear();
+    for (const expired of pruneExpiredMonitoringEvents(monitoringEvents, new Date().toISOString())) {
+      deleteDoc(doc(db, "monitoringEvents", monitoringDocIdForKey(expired.key))).catch(() => {});
+    }
+    for (const key of keys) {
+      const evt = monitoringEvents.find((e) => e.key === key);
+      if (!evt) continue;
+      const docId = monitoringDocIdForKey(key);
+      setDoc(doc(db, "monitoringEvents", docId), { id: docId, ...evt }).catch((err) => {
+        console.warn("Monitoring event persist failed:", err?.message || err);
+      });
+    }
+  }
+  function recordAndPersistMonitoringEvent(candidate: Omit<MonitoringEvent, "count" | "firstAt" | "lastAt">): void {
+    recordMonitoringEvent(monitoringEvents, candidate, new Date().toISOString());
+    dirtyMonitoringKeys.add(candidate.key);
+    if (!monitoringFlushTimer) {
+      monitoringFlushTimer = setTimeout(flushMonitoringEvents, 3_000);
+      monitoringFlushTimer.unref?.();
+    }
+  }
+  void ensureMonitoringHydrated();
 
   // The ONLY OpenAI client in the entire application — server-side,
   // constructed lazily so a missing key never crashes startup. The key is
@@ -3455,7 +3547,7 @@ async function startServer() {
           statusCode: res.statusCode,
           durationMs: Date.now() - startedAt,
         });
-        if (candidate) recordMonitoringEvent(monitoringEvents, candidate, new Date().toISOString());
+        if (candidate) recordAndPersistMonitoringEvent(candidate);
       } catch {
         // Monitoring must never break a real request.
       }
@@ -9139,30 +9231,74 @@ async function startServer() {
         return res.status(400).json({ error: parsed.error });
       }
 
+      const adminId = req.session!.id;
+      const nowIso = new Date().toISOString();
+
+      // Conversation continuity: when the drawer continues an existing
+      // conversation, its stored thread is the server-authoritative
+      // history — ownership-checked, never another admin's.
+      let conversation: MarasAiConversation | null = null;
+      if (parsed.conversationId) {
+        const cDoc = await getDoc(doc(db, "marasAiConversations", parsed.conversationId));
+        const stored = cDoc.exists() ? (cDoc.data() as MarasAiConversation) : null;
+        if (!stored || !canAccessConversation(stored, adminId)) {
+          return res.status(404).json({ error: "Conversation not found." });
+        }
+        conversation = stored;
+      }
+
+      // System awareness: inspect the request FIRST, collect the backend
+      // data it needs, and only then build the AI prompt — "which
+      // shipments are delayed?" is answered from real shipment records,
+      // never with "please provide shipment information".
+      const intents = detectMarasAiIntents(parsed.message);
+      const needs = requiredDataForIntents(intents);
+      const systemData: MarasAiSystemData = {};
+      if (needs.shipments) {
+        systemData.shipments = (await getDocs(collection(db, "shipments"))).docs.map((d) => d.data() as Shipment);
+      }
+      if (needs.drivers) {
+        systemData.drivers = (await getDocs(collection(db, "drivers"))).docs.map((d) => d.data() as Driver);
+      }
+      if (needs.notifications) {
+        systemData.notifications = (await getDocs(collection(db, "notifications"))).docs.map((d) => d.data() as AppNotification);
+      }
+      if (needs.costStatements) {
+        systemData.costStatements = (await getDocs(collection(db, "costStatements"))).docs.map((d) => d.data() as CostStatement);
+      }
+      // Every block in systemBlocks is real backend data — the honest
+      // basis for the response-source indicator below.
+      const systemBlocks: string[] = buildSystemContextBlocks(intents, systemData, nowIso);
+
       // Optional shipment context — loaded server-side from the
       // authoritative record (never trusted from the client), reduced to
       // the whitelisted digest.
-      const contextBlocks: string[] = [];
       if (parsed.shipmentId) {
         const sDoc = await getDoc(doc(db, "shipments", parsed.shipmentId));
         if (sDoc.exists()) {
           const shipment = sDoc.data() as Shipment;
-          contextBlocks.push(buildShipmentAiContext(shipment, shipment.documents, undefined));
+          systemBlocks.push(buildShipmentAiContext(shipment, shipment.documents, undefined));
         } else {
-          contextBlocks.push(`CONTEXT DATA: no shipment record exists for id "${parsed.shipmentId}".`);
+          systemBlocks.push(`CONTEXT DATA: no shipment record exists for id "${parsed.shipmentId}".`);
         }
-      }
-      if (parsed.page) {
-        contextBlocks.push(`CONTEXT DATA: the employee is currently on the Admin Panel "${parsed.page}" page.`);
       }
       // Technical monitoring digest is SUPER-ADMIN-ONLY context — an
       // operation admin asking about system errors gets no telemetry.
-      if (req.session!.adminType === "super") {
-        contextBlocks.push(buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents)));
+      if (needs.monitoring && req.session!.adminType === "super") {
+        await ensureMonitoringHydrated();
+        systemBlocks.push(buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents)));
+      }
+
+      const contextBlocks: string[] = [...systemBlocks];
+      if (parsed.page) {
+        contextBlocks.push(`CONTEXT DATA: the employee is currently on the Admin Panel "${parsed.page}" page.`);
       }
 
       const instructions = [MARAS_AI_SYSTEM_PROMPT, ...contextBlocks].join("\n\n");
       const model = (process.env.OPENAI_MODEL || "").trim() || DEFAULT_OPENAI_MODEL;
+      // Stored conversation (server-authoritative) wins over client-sent
+      // history; the latter remains for the first turn of a new thread.
+      const historyForModel = conversation ? conversationHistoryForModel(conversation) : parsed.history;
 
       let responseText: string;
       try {
@@ -9170,7 +9306,7 @@ async function startServer() {
           getOpenAiClient().responses.create({
             model,
             instructions,
-            input: buildMarasAiInput(parsed.history, parsed.message),
+            input: buildMarasAiInput(historyForModel, parsed.message),
             max_output_tokens: MARAS_AI_MAX_OUTPUT_TOKENS,
           }),
           MARAS_AI_TIMEOUT_MS,
@@ -9181,18 +9317,14 @@ async function startServer() {
         // Provider failure: clean, honest error — never a fake response —
         // and a monitoring event so the Super Admin sees the pattern.
         console.error("MARAS AI provider call failed:", aiErr);
-        recordMonitoringEvent(
-          monitoringEvents,
-          {
-            key: "maras_ai_failure|provider",
-            kind: "maras_ai_failure",
-            severity: "medium",
-            area: "POST /api/admin/maras-ai/chat",
-            title: "MARAS AI provider call failed",
-            detail: "The OpenAI request failed or timed out.",
-          },
-          new Date().toISOString()
-        );
+        recordAndPersistMonitoringEvent({
+          key: "maras_ai_failure|provider",
+          kind: "maras_ai_failure",
+          severity: "medium",
+          area: "POST /api/admin/maras-ai/chat",
+          title: "MARAS AI provider call failed",
+          detail: "The OpenAI request failed or timed out.",
+        });
         return res.status(502).json({
           code: "MARAS_AI_UPSTREAM",
           error: "MARAS AI could not reach its model provider. Please try again in a moment.",
@@ -9205,7 +9337,37 @@ async function startServer() {
           error: "MARAS AI returned an empty response. Please try again.",
         });
       }
-      res.json({ reply: responseText, model });
+
+      // Honest response-source indicator: backend data was attached AND
+      // the model analyzed it -> System Data + AI Analysis; no backend
+      // data -> AI Analysis. Never guessed after the fact.
+      const source = resolveMarasAiResponseSource({ usedSystemData: systemBlocks.length > 0, usedAiModel: true });
+
+      // Persist the exchange into this admin's own conversation (new one
+      // auto-created and auto-titled on the first turn). A persistence
+      // failure never discards the reply — it is reported honestly.
+      const convo: MarasAiConversation = conversation ?? {
+        id: `maras-convo-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+        adminId,
+        title: deriveConversationTitle(parsed.message),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        messages: [],
+      };
+      convo.messages = appendConversationMessages(convo.messages, [
+        { role: "user", text: parsed.message, at: nowIso },
+        { role: "assistant", text: responseText, at: new Date().toISOString(), source },
+      ]);
+      convo.updatedAt = new Date().toISOString();
+      let persisted = true;
+      try {
+        await setDoc(doc(db, "marasAiConversations", convo.id), convo);
+      } catch (persistErr) {
+        persisted = false;
+        console.warn("MARAS AI conversation persist failed:", persistErr);
+      }
+
+      res.json({ reply: responseText, model, source, persisted, conversation: toConversationSummary(convo) });
     } catch (err) {
       console.error(err);
       if (respondIfServiceUnavailable(err, res)) return;
@@ -9213,9 +9375,68 @@ async function startServer() {
     }
   });
 
-  /** GET /api/admin/maras-ai/alerts — Super Admin ONLY technical alerts (grouped, worst-first). */
-  app.get("/api/admin/maras-ai/alerts", requireSuperAdmin, (req, res) => {
+  /** GET /api/admin/maras-ai/alerts — Super Admin ONLY technical alerts (grouped, worst-first, restart-surviving). */
+  app.get("/api/admin/maras-ai/alerts", requireSuperAdmin, async (req, res) => {
+    await ensureMonitoringHydrated();
     res.json({ alerts: deriveTechnicalAlerts(monitoringEvents) });
+  });
+
+  /**
+   * MARAS AI conversation history — persisted per admin through the same
+   * persistence layer as every other collection. Each admin (Super Admin
+   * included) can only ever list, read, or delete their OWN
+   * conversations: every route below filters/checks ownership via
+   * canAccessConversation before touching a record.
+   */
+  app.get("/api/admin/maras-ai/conversations", requireFullAdmin, async (req, res) => {
+    try {
+      const adminId = req.session!.id;
+      const snap = await getDocs(collection(db, "marasAiConversations"));
+      const conversations = snap.docs
+        .map((d) => d.data() as MarasAiConversation)
+        .filter((c) => canAccessConversation(c, adminId))
+        .sort((a, b) => ((a.updatedAt || "") < (b.updatedAt || "") ? 1 : -1))
+        .slice(0, 30)
+        .map(toConversationSummary);
+      res.json({ conversations });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load conversations." });
+    }
+  });
+
+  app.get("/api/admin/maras-ai/conversations/:id", requireFullAdmin, async (req, res) => {
+    try {
+      const cDoc = await getDoc(doc(db, "marasAiConversations", req.params.id));
+      const stored = cDoc.exists() ? (cDoc.data() as MarasAiConversation) : null;
+      // Missing and not-owned answer identically (404) — one admin can
+      // never even confirm another admin's conversation ids exist.
+      if (!stored || !canAccessConversation(stored, req.session!.id)) {
+        return res.status(404).json({ error: "Conversation not found." });
+      }
+      res.json({ conversation: { ...toConversationSummary(stored), messages: stored.messages || [] } });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load conversation." });
+    }
+  });
+
+  app.delete("/api/admin/maras-ai/conversations/:id", requireFullAdmin, async (req, res) => {
+    try {
+      const cDoc = await getDoc(doc(db, "marasAiConversations", req.params.id));
+      const stored = cDoc.exists() ? (cDoc.data() as MarasAiConversation) : null;
+      if (!stored || !canAccessConversation(stored, req.session!.id)) {
+        return res.status(404).json({ error: "Conversation not found." });
+      }
+      await deleteDoc(doc(db, "marasAiConversations", req.params.id));
+      res.json({ deleted: true });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to delete conversation." });
+    }
   });
 
   /**
@@ -9227,18 +9448,14 @@ async function startServer() {
     const message = typeof req.body?.message === "string" ? req.body.message.slice(0, 300) : "";
     const page = typeof req.body?.page === "string" ? req.body.page.slice(0, 60) : "unknown";
     if (!message) return res.status(400).json({ error: "message is required" });
-    recordMonitoringEvent(
-      monitoringEvents,
-      {
-        key: `frontend_error|${page}|${message.slice(0, 80)}`,
-        kind: "frontend_error",
-        severity: "medium",
-        area: `Admin frontend (${page})`,
-        title: "Repeated frontend error reported",
-        detail: message,
-      },
-      new Date().toISOString()
-    );
+    recordAndPersistMonitoringEvent({
+      key: `frontend_error|${page}|${message.slice(0, 80)}`,
+      kind: "frontend_error",
+      severity: "medium",
+      area: `Admin frontend (${page})`,
+      title: "Repeated frontend error reported",
+      detail: message,
+    });
     res.json({ recorded: true });
   });
 

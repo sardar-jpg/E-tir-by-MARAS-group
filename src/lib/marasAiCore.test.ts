@@ -8,6 +8,14 @@ import {
   MARAS_AI_SYSTEM_PROMPT,
   MARAS_AI_MAX_MESSAGE_CHARS,
   MARAS_AI_MAX_HISTORY_TURNS,
+  MARAS_AI_MAX_STORED_MESSAGES,
+  deriveConversationTitle,
+  appendConversationMessages,
+  canAccessConversation,
+  conversationHistoryForModel,
+  toConversationSummary,
+  type MarasAiConversation,
+  type MarasAiStoredMessage,
 } from "./marasAiCore";
 import type { Shipment } from "../types";
 
@@ -79,6 +87,66 @@ describe("validateMarasAiChatBody", () => {
       expect(r.history).toHaveLength(MARAS_AI_MAX_HISTORY_TURNS);
       expect(r.history[r.history.length - 1].text).toBe("m39");
     }
+  });
+});
+
+describe("validateMarasAiChatBody — conversation continuity", () => {
+  it("accepts an optional conversationId (trimmed, capped)", () => {
+    const r = validateMarasAiChatBody({ message: "q", conversationId: "  convo-1  " });
+    expect(r.ok && r.conversationId).toBe("convo-1");
+    const none = validateMarasAiChatBody({ message: "q" });
+    expect(none.ok && none.conversationId).toBeNull();
+    const junk = validateMarasAiChatBody({ message: "q", conversationId: 42 });
+    expect(junk.ok && junk.conversationId).toBeNull();
+  });
+});
+
+describe("conversation history — persisted per admin, never shared", () => {
+  const msg = (role: "user" | "assistant", text: string, at = "t"): MarasAiStoredMessage => ({ role, text, at });
+  const convo: MarasAiConversation = {
+    id: "c1",
+    adminId: "admin-1",
+    title: "Delayed shipments",
+    createdAt: "t0",
+    updatedAt: "t1",
+    messages: [msg("user", "Which shipments are delayed?"), msg("assistant", "Two are flagged.")],
+  };
+
+  it("titles auto-derive from the opening message, collapsed and capped", () => {
+    expect(deriveConversationTitle("  Which   shipments\nare delayed today?  ")).toBe("Which shipments");
+    expect(deriveConversationTitle("x".repeat(200)).length).toBeLessThanOrEqual(60);
+    expect(deriveConversationTitle("   ")).toBe("New conversation");
+  });
+
+  it("appending keeps only the newest stored messages", () => {
+    const many = Array.from({ length: MARAS_AI_MAX_STORED_MESSAGES + 10 }, (_, i) => msg("user", `m${i}`));
+    const out = appendConversationMessages(many, [msg("assistant", "latest")]);
+    expect(out).toHaveLength(MARAS_AI_MAX_STORED_MESSAGES);
+    expect(out[out.length - 1].text).toBe("latest");
+  });
+
+  it("ownership: only the owning admin can access — Super Admin follows the same rule", () => {
+    expect(canAccessConversation(convo, "admin-1")).toBe(true);
+    expect(canAccessConversation(convo, "admin-2")).toBe(false);
+    expect(canAccessConversation(convo, "")).toBe(false);
+    expect(canAccessConversation({}, "admin-1")).toBe(false);
+  });
+
+  it("the stored thread becomes capped model history in order", () => {
+    expect(conversationHistoryForModel(convo)).toEqual([
+      { role: "user", text: "Which shipments are delayed?" },
+      { role: "assistant", text: "Two are flagged." },
+    ]);
+    const long: MarasAiConversation = { ...convo, messages: Array.from({ length: 40 }, (_, i) => msg("user", `m${i}`)) };
+    const hist = conversationHistoryForModel(long);
+    expect(hist).toHaveLength(MARAS_AI_MAX_HISTORY_TURNS);
+    expect(hist[hist.length - 1].text).toBe("m39");
+  });
+
+  it("summaries never include message bodies", () => {
+    const summary = toConversationSummary(convo);
+    expect(summary).toEqual({ id: "c1", title: "Delayed shipments", createdAt: "t0", updatedAt: "t1", messageCount: 2 });
+    expect(JSON.stringify(summary)).not.toContain("delayed?");
   });
 });
 

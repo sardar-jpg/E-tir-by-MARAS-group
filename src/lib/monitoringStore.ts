@@ -43,6 +43,74 @@ export interface MonitoringEvent {
 
 export const MONITORING_MAX_EVENTS = 400;
 
+/**
+ * PR #128 refinement — persistent monitoring. Event groups are persisted
+ * through the project's EXISTING persistence layer (the same Firestore /
+ * memory-fallback wrappers every other collection uses — no new database),
+ * one document per group key in the "monitoringEvents" collection, so
+ * monitoring history survives a server restart. Anything older than this
+ * retention window is pruned on hydration and on each flush.
+ */
+export const MONITORING_RETENTION_DAYS = 30;
+export const MONITORING_RETENTION_MS = MONITORING_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Deterministic, Firestore-safe document id for a group key. Keys contain
+ * characters a document id can't ("/", "|", spaces), so the id is the
+ * sanitized key (readable in the console) plus an FNV-1a hash suffix that
+ * keeps two keys that sanitize identically from colliding.
+ */
+export function monitoringDocIdForKey(key: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const readable = key.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120);
+  return `${readable || "event"}-${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Merges event groups loaded from persistent storage into the live
+ * in-process store (start-up hydration). Same key = same problem, so the
+ * two groups combine: counts add, firstAt takes the earliest, lastAt the
+ * latest, severity the worst, and detail follows whichever occurrence is
+ * newer. Result is re-capped to MONITORING_MAX_EVENTS (oldest-first drop,
+ * matching recordMonitoringEvent).
+ */
+export function mergeMonitoringEvents(store: MonitoringEvent[], persisted: MonitoringEvent[]): void {
+  for (const p of persisted) {
+    const existing = store.find((e) => e.key === p.key);
+    if (!existing) {
+      store.push({ ...p });
+      continue;
+    }
+    existing.count += p.count;
+    if (p.firstAt < existing.firstAt) existing.firstAt = p.firstAt;
+    if (p.lastAt > existing.lastAt) {
+      existing.lastAt = p.lastAt;
+      existing.detail = p.detail;
+    }
+    if (severityRank(p.severity) > severityRank(existing.severity)) existing.severity = p.severity;
+  }
+  store.sort((a, b) => (a.lastAt < b.lastAt ? -1 : 1));
+  while (store.length > MONITORING_MAX_EVENTS) store.shift();
+}
+
+/**
+ * Retention: removes (in place) every group whose last occurrence is
+ * older than the retention window, returning the removed groups so the
+ * caller can delete their persisted documents too.
+ */
+export function pruneExpiredMonitoringEvents(store: MonitoringEvent[], nowIso: string): MonitoringEvent[] {
+  const cutoff = new Date(new Date(nowIso).getTime() - MONITORING_RETENTION_MS).toISOString();
+  const removed: MonitoringEvent[] = [];
+  for (let i = store.length - 1; i >= 0; i--) {
+    if (store[i].lastAt < cutoff) removed.push(...store.splice(i, 1));
+  }
+  return removed;
+}
+
 /** New occurrence of `candidate`: group onto an existing event with the same key, else append (dropping the oldest past the cap). */
 export function recordMonitoringEvent(
   store: MonitoringEvent[],

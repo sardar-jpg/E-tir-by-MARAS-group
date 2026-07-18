@@ -13,6 +13,7 @@
  * strings/arrays; the only place an OpenAI client exists is server.ts.
  */
 import type { ChatMessage, Shipment, ShipmentDocument } from "../types";
+import type { MarasAiResponseSource } from "./marasAiIntents";
 
 // ── Enablement ───────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ export interface MarasAiHistoryTurn {
 }
 
 export type MarasAiChatBodyResult =
-  | { ok: true; message: string; history: MarasAiHistoryTurn[]; shipmentId: string | null; page: string | null }
+  | { ok: true; message: string; history: MarasAiHistoryTurn[]; shipmentId: string | null; page: string | null; conversationId: string | null }
   | { ok: false; error: string };
 
 export function validateMarasAiChatBody(body: unknown): MarasAiChatBodyResult {
@@ -88,7 +89,81 @@ export function validateMarasAiChatBody(body: unknown): MarasAiChatBodyResult {
   const context = (b.context || {}) as Record<string, unknown>;
   const shipmentId = typeof context.shipmentId === "string" && context.shipmentId.trim() ? context.shipmentId.trim() : null;
   const page = typeof context.page === "string" && context.page.trim() ? context.page.trim().slice(0, 60) : null;
-  return { ok: true, message, history, shipmentId, page };
+  const conversationId =
+    typeof b.conversationId === "string" && b.conversationId.trim() ? b.conversationId.trim().slice(0, 80) : null;
+  return { ok: true, message, history, shipmentId, page, conversationId };
+}
+
+// ── Conversation history (persisted per admin) ──────────────────────
+//
+// Each Admin owns their conversations exclusively: every route in
+// server.ts checks canAccessConversation() before returning or deleting
+// one, and the list endpoint filters to the caller's own adminId. A
+// Super Admin follows exactly the same rule — no cross-admin reading.
+
+export interface MarasAiStoredMessage {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+  /** Assistant turns only — how the reply was produced (honest, server-derived). */
+  source?: MarasAiResponseSource;
+}
+
+export interface MarasAiConversation {
+  id: string;
+  /** Owning admin's session id — the ONLY identity conversations are ever served to. */
+  adminId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: MarasAiStoredMessage[];
+}
+
+export const MARAS_AI_MAX_STORED_MESSAGES = 60;
+const MAX_TITLE_CHARS = 60;
+
+/** Auto-title from the opening message: first line, whitespace collapsed, capped. */
+export function deriveConversationTitle(firstMessage: string): string {
+  const clean = firstMessage.split("\n")[0].replace(/\s+/g, " ").trim();
+  if (!clean) return "New conversation";
+  return clean.length > MAX_TITLE_CHARS ? `${clean.slice(0, MAX_TITLE_CHARS - 1)}…` : clean;
+}
+
+/** Appends new turns, keeping only the newest MARAS_AI_MAX_STORED_MESSAGES. */
+export function appendConversationMessages(
+  existing: MarasAiStoredMessage[],
+  added: MarasAiStoredMessage[]
+): MarasAiStoredMessage[] {
+  return [...existing, ...added].slice(-MARAS_AI_MAX_STORED_MESSAGES);
+}
+
+/** Ownership rule — the single place "whose conversation is this" is decided. */
+export function canAccessConversation(conversation: { adminId?: string }, adminId: string): boolean {
+  return !!adminId && conversation.adminId === adminId;
+}
+
+/** The stored thread reduced to model-input history (newest turns, capped like client history). */
+export function conversationHistoryForModel(conversation: MarasAiConversation): MarasAiHistoryTurn[] {
+  return conversation.messages
+    .slice(-MARAS_AI_MAX_HISTORY_TURNS)
+    .map((m) => ({ role: m.role, text: m.text.slice(0, 6_000) }));
+}
+
+/** Compact listing entry — never includes message bodies. */
+export function toConversationSummary(conversation: MarasAiConversation): {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+} {
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    messageCount: conversation.messages.length,
+  };
 }
 
 // ── Context builders (WHITELIST only — never secrets) ────────────────

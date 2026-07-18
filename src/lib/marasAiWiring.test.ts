@@ -27,7 +27,7 @@ function region(source: string, needle: string, length: number): string {
 }
 
 describe("MARAS AI endpoint — authentication and role boundaries", () => {
-  const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 5200);
+  const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 12000);
 
   it("chat requires a full admin (super/operation — same audience as the drawer); never public", () => {
     expect(SERVER).toContain('app.post("/api/admin/maras-ai/chat", requireFullAdmin,');
@@ -38,7 +38,7 @@ describe("MARAS AI endpoint — authentication and role boundaries", () => {
   });
 
   it("the monitoring digest joins the AI context ONLY for a super-admin session", () => {
-    expect(CHAT_ROUTE).toContain('if (req.session!.adminType === "super") {');
+    expect(CHAT_ROUTE).toContain('if (needs.monitoring && req.session!.adminType === "super") {');
     expect(CHAT_ROUTE).toContain("buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents))");
   });
 
@@ -52,7 +52,54 @@ describe("MARAS AI endpoint — authentication and role boundaries", () => {
   it("requests run through the tested validator and whitelist context builders", () => {
     expect(CHAT_ROUTE).toContain("validateMarasAiChatBody(req.body)");
     expect(CHAT_ROUTE).toContain("buildShipmentAiContext(");
-    expect(CHAT_ROUTE).toContain("buildMarasAiInput(parsed.history, parsed.message)");
+    expect(CHAT_ROUTE).toContain("buildMarasAiInput(historyForModel, parsed.message)");
+  });
+
+  it("system awareness: the request is inspected and backend data collected BEFORE the prompt is built", () => {
+    expect(CHAT_ROUTE).toContain("detectMarasAiIntents(parsed.message)");
+    expect(CHAT_ROUTE).toContain("requiredDataForIntents(intents)");
+    expect(CHAT_ROUTE).toContain("buildSystemContextBlocks(intents, systemData, nowIso)");
+    // Data collection goes through the project's existing persistence
+    // wrappers — the same getDocs every other route uses.
+    expect(CHAT_ROUTE).toContain('getDocs(collection(db, "shipments"))');
+    expect(CHAT_ROUTE).toContain('getDocs(collection(db, "drivers"))');
+    expect(CHAT_ROUTE).toContain('getDocs(collection(db, "costStatements"))');
+  });
+
+  it("the reply carries the honest response-source indicator", () => {
+    expect(CHAT_ROUTE).toContain("resolveMarasAiResponseSource({ usedSystemData: systemBlocks.length > 0, usedAiModel: true })");
+    expect(CHAT_ROUTE).toContain("res.json({ reply: responseText, model, source, persisted, conversation: toConversationSummary(convo) })");
+  });
+});
+
+describe("MARAS AI conversation history — per-admin, persisted, never shared", () => {
+  it("all three conversation routes exist behind requireFullAdmin", () => {
+    expect(SERVER).toContain('app.get("/api/admin/maras-ai/conversations", requireFullAdmin,');
+    expect(SERVER).toContain('app.get("/api/admin/maras-ai/conversations/:id", requireFullAdmin,');
+    expect(SERVER).toContain('app.delete("/api/admin/maras-ai/conversations/:id", requireFullAdmin,');
+  });
+
+  it("every read/delete is ownership-checked through the tested rule", () => {
+    const LIST = region(SERVER, 'app.get("/api/admin/maras-ai/conversations"', 1200);
+    const GET_ONE = region(SERVER, 'app.get("/api/admin/maras-ai/conversations/:id"', 1200);
+    const DELETE_ONE = region(SERVER, 'app.delete("/api/admin/maras-ai/conversations/:id"', 1200);
+    expect(LIST).toContain("canAccessConversation(c, adminId)");
+    expect(GET_ONE).toContain("canAccessConversation(stored, req.session!.id)");
+    expect(DELETE_ONE).toContain("canAccessConversation(stored, req.session!.id)");
+    // Not-owned and missing answer identically.
+    expect(GET_ONE).toContain("status(404)");
+    expect(DELETE_ONE).toContain("status(404)");
+  });
+
+  it("the chat route continues a conversation only after the same ownership check", () => {
+    const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 12000);
+    expect(CHAT_ROUTE).toContain("canAccessConversation(stored, adminId)");
+    expect(CHAT_ROUTE).toContain('doc(db, "marasAiConversations", convo.id)');
+  });
+
+  it("conversations persist through the existing persistence layer (memory-fallback entry included)", () => {
+    expect(SERVER).toContain("marasAiConversations: MarasAiConversation[];");
+    expect(SERVER).toContain("marasAiConversations: [],");
   });
 });
 
@@ -94,6 +141,30 @@ describe("MARAS AI is Admin-only — no AI surface in Driver, Customer, or publi
     // The old fake preview reply is gone.
     expect(ADMIN_PANEL).not.toContain("MARAS AI is not connected yet");
   });
+
+  it("conversation history: the drawer lists, opens, deletes, and starts conversations", () => {
+    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/maras-ai/conversations")');
+    expect(ADMIN_PANEL).toContain("apiFetch(`/api/admin/maras-ai/conversations/${conversationId}`)");
+    expect(ADMIN_PANEL).toContain('apiFetch(`/api/admin/maras-ai/conversations/${conversationId}`, { method: "DELETE" })');
+    expect(ADMIN_PANEL).toContain("handleNewMarasAiConversation");
+    expect(ADMIN_PANEL).toContain("New Conversation");
+    // Continuing a conversation defers history to the server's stored thread.
+    expect(ADMIN_PANEL).toContain("{ conversationId: activeMarasAiConversationId }");
+  });
+
+  it("quick suggestions come from the shared intent module and populate the prompt", () => {
+    expect(ADMIN_PANEL).toContain("MARAS_AI_QUICK_SUGGESTIONS.map((suggestion)");
+    expect(ADMIN_PANEL).toContain("setMarasAiPrompt(suggestion.prompt)");
+  });
+
+  it("the response-source indicator renders from the server's own source field, never invented client-side", () => {
+    expect(ADMIN_PANEL).toContain("MARAS_AI_SOURCE_LABELS");
+    expect(ADMIN_PANEL).toContain("turn.role === 'assistant' && turn.source");
+    // The client never computes or defaults a source itself — it only
+    // renders what the server sent on this turn.
+    expect(ADMIN_PANEL).not.toContain("source: 'system_data");
+    expect(ADMIN_PANEL).not.toContain('source: "system_data');
+  });
 });
 
 describe("the official product name is MARAS AI", () => {
@@ -106,11 +177,36 @@ describe("the official product name is MARAS AI", () => {
   });
 });
 
-describe("monitoring is wired without a new database", () => {
+describe("monitoring is persistent — existing persistence layer, no new database", () => {
   it("the response observer classifies finished /api requests through the tested pure module", () => {
     expect(SERVER).toContain("classifyRequestForMonitoring({");
     expect(SERVER).toContain('res.on("finish"');
     expect(SERVER).toContain("const monitoringEvents: MonitoringEvent[] = [];");
+  });
+
+  it("event groups persist to the monitoringEvents collection and hydrate back after a restart", () => {
+    // Start-up hydration merges persisted groups into the working set…
+    expect(SERVER).toContain('getDocs(collection(db, "monitoringEvents"))');
+    expect(SERVER).toContain("mergeMonitoringEvents(monitoringEvents, persisted)");
+    // …recording writes back through the SAME wrappers every other
+    // collection uses (write-behind, grouped by key)…
+    expect(SERVER).toContain("recordAndPersistMonitoringEvent(");
+    expect(SERVER).toContain('setDoc(doc(db, "monitoringEvents", docId)');
+    expect(SERVER).toContain("monitoringDocIdForKey(");
+    // …and the memory fallback has its collection entry (PR #44 lesson).
+    expect(SERVER).toContain("monitoringEvents: MonitoringEvent[];");
+    expect(SERVER).toContain("monitoringEvents: [],");
+  });
+
+  it("retention is automatic: expired groups are pruned and their documents deleted", () => {
+    expect(SERVER).toContain("pruneExpiredMonitoringEvents(monitoringEvents, new Date().toISOString())");
+    expect(SERVER).toContain('deleteDoc(doc(db, "monitoringEvents", monitoringDocIdForKey(expired.key)))');
+  });
+
+  it("the alerts route hydrates before deriving, so history survives a restart", () => {
+    const ALERTS = region(SERVER, 'app.get("/api/admin/maras-ai/alerts"', 400);
+    expect(ALERTS).toContain("await ensureMonitoringHydrated();");
+    expect(ALERTS).toContain("deriveTechnicalAlerts(monitoringEvents)");
   });
 
   it("frontend error reports are admin-authenticated and feed the same grouped store", () => {

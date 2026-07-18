@@ -4,7 +4,11 @@ import {
   classifyRequestForMonitoring,
   deriveTechnicalAlerts,
   normalizeMonitoringPath,
+  mergeMonitoringEvents,
+  pruneExpiredMonitoringEvents,
+  monitoringDocIdForKey,
   MONITORING_MAX_EVENTS,
+  MONITORING_RETENTION_MS,
   SLOW_REQUEST_MS,
   type MonitoringEvent,
 } from "./monitoringStore";
@@ -70,6 +74,79 @@ describe("classifyRequestForMonitoring", () => {
     const b = classifyRequestForMonitoring({ method: "GET", path: "/api/shipments/shipment-2044/chat", statusCode: 500, durationMs: 10 });
     expect(a?.key).toBe(b?.key);
     expect(normalizeMonitoringPath("/api/shipments/shipment-1001/chat")).toBe("/api/shipments/:id/chat");
+  });
+});
+
+describe("persistence: restart survival via mergeMonitoringEvents", () => {
+  const stored = (key: string, over: Partial<MonitoringEvent> = {}): MonitoringEvent => ({
+    ...candidate(key),
+    count: 1,
+    firstAt: "2026-07-01T00:00:00Z",
+    lastAt: "2026-07-01T00:00:00Z",
+    ...over,
+  });
+
+  it("hydrating persisted groups into a fresh (post-restart) store keeps the history", () => {
+    const live: MonitoringEvent[] = [];
+    mergeMonitoringEvents(live, [stored("k1", { count: 7 }), stored("k2", { count: 2, severity: "critical" })]);
+    expect(live).toHaveLength(2);
+    expect(live.find((e) => e.key === "k1")?.count).toBe(7);
+    expect(live.find((e) => e.key === "k2")?.severity).toBe("critical");
+  });
+
+  it("a group recorded before hydration completes combines with its persisted history", () => {
+    const live: MonitoringEvent[] = [];
+    // The observer recorded two occurrences right after boot…
+    recordMonitoringEvent(live, candidate("k1", { severity: "medium", detail: "new boom" }), "2026-07-10T00:00:00Z");
+    recordMonitoringEvent(live, candidate("k1", { severity: "medium", detail: "new boom" }), "2026-07-10T01:00:00Z");
+    // …then hydration merges the pre-restart history for the same key.
+    mergeMonitoringEvents(live, [stored("k1", { count: 5, severity: "critical", detail: "old boom" })]);
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({
+      count: 7,
+      firstAt: "2026-07-01T00:00:00Z", // earliest occurrence wins
+      lastAt: "2026-07-10T01:00:00Z",  // latest occurrence wins
+      severity: "critical",            // worst severity wins
+      detail: "new boom",              // detail follows the newest occurrence
+    });
+  });
+
+  it("merge re-caps the store at MONITORING_MAX_EVENTS", () => {
+    const live: MonitoringEvent[] = [];
+    const persisted = Array.from({ length: MONITORING_MAX_EVENTS + 10 }, (_, i) => stored(`k${i}`, { lastAt: `t${String(i).padStart(4, "0")}` }));
+    mergeMonitoringEvents(live, persisted);
+    expect(live).toHaveLength(MONITORING_MAX_EVENTS);
+  });
+});
+
+describe("retention: pruneExpiredMonitoringEvents (30 days)", () => {
+  it("removes groups whose last occurrence is past the retention window and returns them for doc deletion", () => {
+    const now = "2026-07-18T00:00:00Z";
+    const fresh: MonitoringEvent = { ...candidate("fresh"), count: 1, firstAt: "2026-07-17T00:00:00Z", lastAt: "2026-07-17T00:00:00Z" };
+    const stale: MonitoringEvent = { ...candidate("stale"), count: 4, firstAt: "2026-05-01T00:00:00Z", lastAt: "2026-05-02T00:00:00Z" };
+    const store = [stale, fresh];
+    const removed = pruneExpiredMonitoringEvents(store, now);
+    expect(removed.map((e) => e.key)).toEqual(["stale"]);
+    expect(store.map((e) => e.key)).toEqual(["fresh"]);
+    // An event exactly inside the window stays.
+    const edge: MonitoringEvent = { ...candidate("edge"), count: 1, firstAt: "x", lastAt: new Date(new Date(now).getTime() - MONITORING_RETENTION_MS + 60_000).toISOString() };
+    const store2 = [edge];
+    expect(pruneExpiredMonitoringEvents(store2, now)).toHaveLength(0);
+    expect(store2).toHaveLength(1);
+  });
+});
+
+describe("monitoringDocIdForKey — Firestore-safe, deterministic", () => {
+  it("is stable, readable, and never contains path separators or pipes", () => {
+    const key = "server_error|GET /api/shipments/:id/chat|500";
+    const id = monitoringDocIdForKey(key);
+    expect(id).toBe(monitoringDocIdForKey(key));
+    expect(id).not.toMatch(/[/|\s]/);
+    expect(id).toContain("server_error");
+  });
+
+  it("keys that sanitize identically still get distinct ids (hash suffix)", () => {
+    expect(monitoringDocIdForKey("a|b")).not.toBe(monitoringDocIdForKey("a/b"));
   });
 });
 
