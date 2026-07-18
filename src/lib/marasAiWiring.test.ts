@@ -286,12 +286,21 @@ describe("response presentation (PR #130) — structured cards + safe Markdown, 
 describe("full internal audit (PR #131) — deterministic, persistent, scoped, no hard deletes", () => {
   const MONITORING_PANEL = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiMonitoringPanel.tsx"), "utf-8");
 
-  it("manual runs are Super Admin only; the scheduler endpoint needs the env token in constant time", () => {
+  it("manual runs are Super Admin only; the scheduler endpoint authorizes through the tested pure module", () => {
     expect(SERVER).toContain('app.post("/api/admin/audit/run", requireSuperAdmin,');
-    const SCHED = region(SERVER, 'app.post("/api/audit/scheduler-run"', 1200);
-    expect(SCHED).toContain("process.env.AUDIT_SCHEDULER_TOKEN");
-    expect(SCHED).toContain("crypto.timingSafeEqual(a, b)");
+    // PR #136: the endpoint is app.all (unsupported methods get an explicit
+    // 405, never the SPA catch-all) and auth is the pure, constant-time
+    // evaluateSchedulerAuth (src/lib/auditScheduler.ts — unit tested there).
+    const SCHED = region(SERVER, 'app.all("/api/audit/scheduler-run"', 2600);
+    expect(SCHED).toContain('evaluateSchedulerAuth(process.env.AUDIT_SCHEDULER_TOKEN, req.headers["x-audit-token"])');
     expect(SCHED).toContain('"Scheduler runs are not enabled on this server."');
+    expect(SCHED).toContain("405");
+    expect(SCHED).toContain('res.setHeader("Allow", "POST")');
+    expect(SCHED).toContain("isDuplicateSchedulerFire(");
+    // Secret safety: the handler never interpolates a token into any string.
+    expect(SCHED).not.toContain("${provided");
+    expect(SCHED).not.toContain("${configured");
+    expect(SERVER).not.toContain('app.post("/api/audit/scheduler-run"'); // old registration is gone
   });
 
   it("every read is scope-filtered through the tested rule; ignore/resolve are Super Admin only", () => {

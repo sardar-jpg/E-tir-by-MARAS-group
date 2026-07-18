@@ -39,6 +39,7 @@ import {
   GENERIC_LOGIN_ERROR,
 } from "./src/lib/auth";
 import { assessProductionConfig } from "./src/lib/productionConfig";
+import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog } from "./src/lib/auditScheduler";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
@@ -3622,7 +3623,12 @@ async function startServer() {
     const snap = await getDoc(lockRef);
     const now = Date.now();
     const current = snap.exists() ? snap.data() : null;
-    if (current?.expiresAt && new Date(current.expiresAt).getTime() > now) return false;
+    if (!canTakeOverAuditLock(current as { expiresAt?: string } | null, now)) return false;
+    if (current?.expiresAt && current?.holder) {
+      // Stale-lock recovery: a crashed run's lock is taken over once its
+      // TTL passes. Holder is a run id — never a secret.
+      console.warn(`[audit] taking over expired lock previously held by ${current.holder}`);
+    }
     await setDoc(lockRef, {
       id: "lock",
       holder: runId,
@@ -3650,13 +3656,18 @@ async function startServer() {
     auditRunning = true;
     try {
       const ctx = await withTimeout(loadAuditContext(), 30_000, "Audit context load timed out");
-      // Automatic triggers skip when a fresh successful run already exists
-      // (Cloud Run can start many instances; the scheduler drives cadence).
-      if ((trigger === "startup" || trigger === "interval") && ctx.environment.lastSuccessfulRunAt) {
-        const age = Date.now() - new Date(ctx.environment.lastSuccessfulRunAt).getTime();
-        if (age < AUDIT_MIN_GAP_MS) return { ok: true };
+      // Best-effort automatic triggers skip when a fresh successful run
+      // already exists (Cloud Run can boot many instances in a burst).
+      // The authoritative scheduler and explicit manual triggers never
+      // skip here — recovering from a stale audit is exactly their job.
+      if (shouldSkipAutomaticRun(trigger, ctx.environment.lastSuccessfulRunAt, Date.now(), AUDIT_MIN_GAP_MS)) {
+        console.log(`[audit] ${trigger} trigger skipped — a fresh successful run already exists.`);
+        return { ok: true };
       }
-      if (!(await acquireAuditLock(runId))) return { ok: false, error: "Another audit run holds the lock." };
+      if (!(await acquireAuditLock(runId))) {
+        console.warn(`[audit] ${trigger} trigger skipped — another run holds the lock.`);
+        return { ok: false, error: "Another audit run holds the lock." };
+      }
       try {
         const { detections, ruleResults } = runAuditRules(AUDIT_RULES, ctx);
         const existing = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
@@ -3721,6 +3732,13 @@ async function startServer() {
             read: false,
           };
           await setDoc(doc(db, "notifications", alertNotif.id), alertNotif);
+        }
+        // Secret-safe observability: one grep-able line per finished run
+        // (counts and ids only), plus an explicit partial-failure warning
+        // so an isolated rule crash never passes silently.
+        console.log(summarizeRunForLog(run));
+        if (run.failedRuleCount > 0) {
+          console.warn(`[audit] ${run.failedRuleCount} rule(s) failed in isolation this run — remaining rules were unaffected (see auditRuns/${runId}).`);
         }
         await logActivity("", "MARAS AI Audit", actor,
           `Audit ${trigger} completed: ${rec.createdCount} new, ${rec.reopenedCount} reopened, ${rec.autoResolvedCount} auto-resolved, ${run.failedRuleCount} failed rule(s).`,
@@ -9791,18 +9809,67 @@ async function startServer() {
    * instances aren't guaranteed alive, so this endpoint — not the
    * in-process interval — is the correctness mechanism for cadence.
    */
-  app.post("/api/audit/scheduler-run", async (req, res) => {
-    const configured = (process.env.AUDIT_SCHEDULER_TOKEN || "").trim();
-    const provided = String(req.headers["x-audit-token"] || "");
-    if (!configured) return res.status(403).json({ error: "Scheduler runs are not enabled on this server." });
-    const a = Buffer.from(configured);
-    const b = Buffer.from(provided);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(403).json({ error: "Invalid scheduler token." });
+  // PR #136 (Stage 2 PR 3, audit finding H-2): the AUTHORITATIVE recurring
+  // audit trigger — the in-process timers above are best-effort only.
+  // Registered with app.all so unsupported methods get an explicit 405
+  // (instead of falling through to the SPA catch-all). Auth decisions are
+  // pure and unit-tested (evaluateSchedulerAuth: constant-time compare;
+  // malformed and wrong tokens share one response so nothing is leaked).
+  // NOTHING in this handler may ever log or return a token value.
+  app.all("/api/audit/scheduler-run", async (req, res) => {
+    try {
+      if (req.method !== "POST") {
+        res.setHeader("Allow", "POST");
+        return res.status(405).json({ error: "Method not allowed — use POST." });
+      }
+      const auth = evaluateSchedulerAuth(process.env.AUDIT_SCHEDULER_TOKEN, req.headers["x-audit-token"]);
+      if (auth === "disabled") {
+        return res.status(403).json({ error: "Scheduler runs are not enabled on this server." });
+      }
+      if (auth !== "ok") {
+        // One shared response for missing, malformed, and wrong tokens —
+        // an unauthenticated caller learns nothing about which it was.
+        console.warn("[audit-scheduler] rejected invocation (missing/invalid token).");
+        return res.status(403).json({ error: "Invalid scheduler token." });
+      }
+      console.log("[audit-scheduler] authorized invocation received.");
+
+      // Cloud Scheduler retries after slow/non-2xx attempts; a fire landing
+      // right after a success is acknowledged as a duplicate, not re-run.
+      const summarySnap = await getDoc(doc(db, "auditState", "summary"));
+      const lastSuccessfulRunAt = summarySnap.exists() ? (summarySnap.data()?.lastSuccessfulRunAt || null) : null;
+      if (isDuplicateSchedulerFire(lastSuccessfulRunAt, Date.now())) {
+        console.log("[audit-scheduler] duplicate fire inside the dedup window — acknowledged without re-running.");
+        return res.json({ ok: true, deduplicated: true });
+      }
+
+      const result = await runAudit("scheduler", "scheduler");
+      if (!result.ok) {
+        // 409 = lock held or run failure; Cloud Scheduler's retry policy
+        // will re-fire. The lock (with TTL takeover) guarantees retries
+        // can never produce overlapping runs.
+        return res.status(409).json({ error: result.error || "Audit failed." });
+      }
+      // Observable, secret-free result: ids, duration, and counts only.
+      res.json({
+        ok: true,
+        run: result.run
+          ? {
+              id: result.run.id,
+              durationMs: result.run.durationMs,
+              createdCount: result.run.createdCount,
+              reopenedCount: result.run.reopenedCount,
+              autoResolvedCount: result.run.autoResolvedCount,
+              failedRuleCount: result.run.failedRuleCount,
+              openTotalAfter: result.run.openTotalAfter,
+            }
+          : undefined,
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[audit-scheduler] invocation failed:", err);
+      res.status(500).json({ error: "Scheduler run failed." });
     }
-    const result = await runAudit("scheduler", "scheduler");
-    if (!result.ok) return res.status(409).json({ error: result.error || "Audit failed." });
-    res.json({ ok: true });
   });
 
   /**

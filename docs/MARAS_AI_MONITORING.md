@@ -55,15 +55,64 @@ interval is best-effort only:
    `POST /api/audit/scheduler-run` with header `x-audit-token:
    $AUDIT_SCHEDULER_TOKEN`. Disabled (403) until the env var is set.
 
-**Deployment requirement (manual, one-time):** create a Cloud Scheduler
-job hitting `https://etir.app/api/audit/scheduler-run` every 1–6 hours
-with the `x-audit-token` header, and set `AUDIT_SCHEDULER_TOKEN` on the
-Cloud Run service. Token comparison is constant-time.
+### Cloud Scheduler setup (manual, one-time — the authoritative trigger)
+
+PR #136 (Stage 2 PR 3, audit finding H-2) made this endpoint the
+authoritative recurring trigger; the in-process timers are best-effort
+only. **Never put the token value in this file, in a PR, or in a log** —
+it lives in Secret Manager as `etir-audit-scheduler-token` (see
+docs/PRODUCTION_CONFIGURATION.md) and is delivered to Cloud Run as the
+`AUDIT_SCHEDULER_TOKEN` env var by the deploy manifest.
+
+| Setting | Value |
+|---|---|
+| Target URL | `https://etir.app/api/audit/scheduler-run` |
+| HTTP method | `POST` (anything else gets `405` + `Allow: POST`) |
+| Header | `x-audit-token: <value of the etir-audit-scheduler-token secret>` |
+| Recommended cadence | every 3 hours: cron `0 */3 * * *` |
+| Timezone | `Europe/Istanbul` (business timezone; the endpoint itself is timezone-agnostic — cadence only) |
+| Retry policy | max 3 retries, min backoff 1 min, max backoff 10 min, deadline 120 s |
+
+Create it with:
+
+```bash
+gcloud scheduler jobs create http etir-audit-run \
+  --location=europe-west1 \
+  --schedule="0 */3 * * *" \
+  --time-zone="Europe/Istanbul" \
+  --uri="https://etir.app/api/audit/scheduler-run" \
+  --http-method=POST \
+  --update-headers="x-audit-token=$(gcloud secrets versions access latest --secret=etir-audit-scheduler-token)" \
+  --max-retry-attempts=3 --min-backoff=60s --max-backoff=600s --attempt-deadline=120s
+```
+
+(The command substitution reads the secret at creation time without ever
+writing it to this file or your shell history file — do not paste the
+value inline.)
+
+**Manual verification** (after creating the job): `gcloud scheduler jobs
+run etir-audit-run --location=europe-west1`, then confirm Cloud Logging
+shows `[audit-scheduler] authorized invocation received.` followed by an
+`[audit] scheduler run … succeeded` line with counts, and the Monitoring
+panel shows a fresh run. An unauthorized probe must get 403:
+`curl -s -o /dev/null -w '%{http_code}' -X POST https://etir.app/api/audit/scheduler-run` → `403`,
+and `curl -s -o /dev/null -w '%{http_code}' https://etir.app/api/audit/scheduler-run` → `405`.
+
+**Behavioral guarantees (unit-tested in src/lib/auditScheduler.test.ts):**
+- Missing, malformed, repeated, or wrong `x-audit-token` → one shared 403
+  (constant-time comparison; no oracle about which check failed).
+- A retry fire landing within 60 s of a success is acknowledged as
+  `{ ok: true, deduplicated: true }` without re-running.
+- Scheduler/manual triggers never skip on freshness — recovering from a
+  stale audit is exactly their job; only best-effort startup/interval
+  triggers skip while a success is fresher than 30 min.
+- Logs carry run ids, durations, and counts only — never token values.
 
 **Overlap prevention:** a Firestore lock document (`auditState/lock`)
-with a 10-minute TTL; acquire-then-confirm semantics. Best-effort (the
-shims expose no transactions) — the TTL bounds any race, and runs are
-idempotent by design (deterministic finding ids).
+with a 10-minute TTL; acquire-then-confirm semantics, expired locks are
+taken over (logged) so a crashed run can never wedge auditing. Best-effort
+(the shims expose no transactions) — the TTL bounds any race, and runs
+are idempotent by design (deterministic finding ids).
 
 ## Rule inventory
 
