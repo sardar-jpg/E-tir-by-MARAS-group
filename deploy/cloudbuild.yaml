@@ -1,0 +1,50 @@
+# eTIR by MARAS — declarative production deploy (Stage 2 PR 1, audit finding H-1).
+#
+# WHY THIS FILE EXISTS
+#   Production deploys run from a Cloud Build trigger on every push to
+#   `main`. Before this file, runtime env vars/secrets lived only in
+#   whatever the last person set on the Cloud Run service by hand — and
+#   one auto-deploy was observed to silently wipe them (MARAS AI reverted
+#   to "disabled" in production). This manifest makes the required
+#   configuration part of every deploy, so it can never be lost again.
+#
+# ACTIVATION (one-time, manual — deliberately NOT the default root path,
+# so merging this file changes nothing until you point the trigger at it):
+#   Console: Cloud Build → Triggers → <the main-branch trigger> → Edit →
+#   Configuration = "Cloud Build configuration file" → deploy/cloudbuild.yaml
+#   (see docs/PRODUCTION_CONFIGURATION.md for the full checklist, including
+#   creating the Secret Manager secrets referenced below FIRST).
+#
+# HARD RULES (enforced by src/lib/productionConfig.test.ts):
+#   - Only --update-env-vars / --update-secrets: they MERGE with existing
+#     service config. The replace-everything "set" and "clear" env flags
+#     (the H-1 wipe mechanism) are banned in this repo.
+#   - Secrets are referenced by Secret Manager NAME:VERSION only. No
+#     secret VALUE ever appears in this file, in logs, or in docs.
+#   - Variables not listed here (e.g. GOOGLE_MAPS_PLATFORM_KEY, DD_API_KEY,
+#     CORS origins) are PRESERVED as-is by the --update-* semantics.
+
+substitutions:
+  _SERVICE: "e-tir-by-maras-v2"
+  _REGION: "europe-west1"
+  _MARAS_AI_ENABLED: "true"
+  _STRICT_PERSISTENCE: "true"
+
+steps:
+  - id: deploy-to-cloud-run
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --source=.
+      - --region=${_REGION}
+      - --quiet
+      - --update-env-vars=NODE_ENV=production,MARAS_AI_ENABLED=${_MARAS_AI_ENABLED},STRICT_PERSISTENCE=${_STRICT_PERSISTENCE},SEED_DEMO_DATA=false,SUPER_ADMIN_EMAIL=sardar@maras.iq
+      - --update-secrets=SESSION_SECRET=etir-session-secret:latest,SUPER_ADMIN_PASSWORD_HASH=etir-super-admin-password-hash:latest,OPENAI_API_KEY=etir-openai-api-key:latest,AUDIT_SCHEDULER_TOKEN=etir-audit-scheduler-token:latest
+
+timeout: 1800s
+
+options:
+  logging: CLOUD_LOGGING_ONLY

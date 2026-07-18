@@ -38,6 +38,7 @@ import {
   verifyPasswordWithMigration,
   GENERIC_LOGIN_ERROR,
 } from "./src/lib/auth";
+import { assessProductionConfig } from "./src/lib/productionConfig";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
@@ -3889,6 +3890,24 @@ async function startServer() {
       "`openssl rand -base64 48` and set it as an environment variable."
     );
     process.exit(1);
+  }
+
+  // Declarative production-config contract (src/lib/productionConfig.ts).
+  // A production deploy that wiped or corrupted required configuration
+  // must fail its rollout here — Cloud Run then keeps the previous healthy
+  // revision serving — instead of running misconfigured. Issue messages
+  // contain variable NAMES only, never values.
+  {
+    const configIssues = assessProductionConfig(process.env);
+    for (const issue of configIssues) {
+      const line = `[config:${issue.level}] ${issue.code}: ${issue.message}`;
+      if (issue.level === "fatal") console.error(line);
+      else console.warn(line);
+    }
+    if (process.env.NODE_ENV === "production" && configIssues.some((i) => i.level === "fatal")) {
+      console.error("[FATAL] Production configuration is invalid — refusing to start. Fix the fatal items above and redeploy (see docs/PRODUCTION_CONFIGURATION.md).");
+      process.exit(1);
+    }
   }
 
   type SessionRole = AuthSessionRole;
