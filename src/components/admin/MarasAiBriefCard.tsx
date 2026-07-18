@@ -20,7 +20,7 @@ import type { AuditPriorityAssessment } from "../../lib/auditEngine";
  */
 
 const L: Record<string, { en: string; tr: string; ar: string }> = {
-  title: { en: "MARAS AI Brief", tr: "MARAS AI Brifingi", ar: "موجز MARAS AI" },
+  title: { en: "Executive Brief", tr: "Yönetici Brifingi", ar: "الموجز التنفيذي" },
   scopeAll: { en: "Summarizes all current operations", tr: "Tüm güncel operasyonları özetler", ar: "يلخص جميع العمليات الحالية" },
   lastUpdated: { en: "Last updated", tr: "Son güncelleme", ar: "آخر تحديث" },
   refresh: { en: "Refresh Brief", tr: "Brifingi Yenile", ar: "تحديث الموجز" },

@@ -171,6 +171,8 @@ import {
   buildBriefAiDigest,
   briefScopeKeyFor,
 } from "./src/lib/dashboardBrief";
+import { buildExecutiveFinanceOverview } from "./src/lib/executiveFinance";
+import { normalizeDashboardLayout, DEFAULT_DASHBOARD_LAYOUT } from "./src/lib/dashboardLayout";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -401,6 +403,7 @@ let memoryStore: {
   auditFindings: AuditFinding[];
   auditRuns: AuditRunRecord[];
   auditState: any[];
+  adminDashboardLayouts: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -434,6 +437,7 @@ function getMemoryStore() {
       auditFindings: [],
       auditRuns: [],
       auditState: [],
+      adminDashboardLayouts: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -10010,6 +10014,72 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to refresh the dashboard brief." });
+    }
+  });
+
+  // ── PR #133: Executive Dashboard — financial overview + layout ──────
+
+  /**
+   * Financial Overview — every figure computed server-side from the REAL
+   * accounting records via the canonical Phase B math, per currency
+   * (never mixed). Access mirrors the accounting module exactly:
+   * canViewCostStatements (super/accounts) — an operation admin gets 403
+   * here just like on the statements themselves. MARAS AI is never
+   * involved in this path.
+   */
+  app.get("/api/admin/dashboard/financial", requireRole("admin"), async (req, res) => {
+    try {
+      if (!canViewCostStatements(req.session!.adminType as any)) {
+        return res.status(403).json({ error: "Financial overview requires accounting access." });
+      }
+      const [statementsSnap, shipmentsSnap] = await Promise.all([
+        getDocs(collection(db, "costStatements")),
+        getDocs(collection(db, "shipments")),
+      ]);
+      const financial = buildExecutiveFinanceOverview(
+        statementsSnap.docs.map((d) => d.data() as CostStatement),
+        shipmentsSnap.docs.map((d) => d.data() as Shipment),
+        new Date().toISOString()
+      );
+      res.json({ financial });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load the financial overview." });
+    }
+  });
+
+  /**
+   * Per-admin dashboard personalization (section order + visibility) —
+   * one document per admin id; one admin's layout never affects another.
+   * Every read/write passes through normalizeDashboardLayout, and the
+   * client additionally intersects the layout with the viewer's
+   * permitted sections, so a stored id can never widen access.
+   */
+  app.get("/api/admin/dashboard/layout", requireRole("admin"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "adminDashboardLayouts", req.session!.id));
+      res.json({ layout: snap.exists() ? normalizeDashboardLayout(snap.data()) : DEFAULT_DASHBOARD_LAYOUT });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load the dashboard layout." });
+    }
+  });
+
+  app.put("/api/admin/dashboard/layout", requireRole("admin"), async (req, res) => {
+    try {
+      const layout = normalizeDashboardLayout(req.body?.layout);
+      await setDoc(doc(db, "adminDashboardLayouts", req.session!.id), {
+        id: req.session!.id,
+        ...layout,
+        updatedAt: new Date().toISOString(),
+      });
+      res.json({ layout });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to save the dashboard layout." });
     }
   });
 

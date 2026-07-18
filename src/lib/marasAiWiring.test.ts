@@ -425,16 +425,17 @@ describe("unified dashboard + MARAS AI Brief (PR #132)", () => {
   });
 
   it("analytics moved INTO Dashboard reusing the SAME lazy component, data, and permission gate", () => {
-    expect(ADMIN_PANEL).toContain("{activeTab === 'dashboard' && canViewLogisticsAnalytics(resolvedAdminType) && (");
+    // PR #133: the gate moved into the layout-driven section map.
+    expect(ADMIN_PANEL).toContain("sectionId === 'analytics' && canViewLogisticsAnalytics(resolvedAdminType) && (");
     expect(ADMIN_PANEL.split("<AdminReportsSection").length - 1).toBe(1); // one render site — inside Dashboard
     expect(ADMIN_PANEL).toContain("performanceAnalyticsData={performanceAnalyticsData}");
     // Progressive disclosure: collapsible on mobile, always open on desktop.
     expect(ADMIN_PANEL).toContain("isDashboardAnalyticsOpen || !isMobileMode");
   });
 
-  it("the brief card renders on BOTH mobile and desktop dashboards, mobile-first", () => {
-    expect(ADMIN_PANEL.split("<MarasAiBriefCard").length - 1).toBe(2);
-    // Mobile: the brief renders BEFORE MobileDashboard in source order.
+  it("the brief card renders through ONE layout-driven call site, brief-first by default", () => {
+    // PR #133: mobile and desktop share a single section stack.
+    expect(ADMIN_PANEL.split("<MarasAiBriefCard").length - 1).toBe(1);
     expect(ADMIN_PANEL.indexOf("<MarasAiBriefCard")).toBeLessThan(ADMIN_PANEL.indexOf("<MobileDashboard"));
   });
 
@@ -453,6 +454,55 @@ describe("unified dashboard + MARAS AI Brief (PR #132)", () => {
     expect(BRIEF_CARD).not.toContain("dangerouslySetInnerHTML");
     // Run Audit Now renders only for Super Admin.
     expect(BRIEF_CARD).toContain("{isSuper && (");
+  });
+});
+
+describe("executive dashboard (PR #133) — deterministic finances, per-user layout", () => {
+  const FIN_SECTION = readFileSync(join(ROOT, "src", "components", "admin", "ExecutiveFinancialSection.tsx"), "utf-8");
+
+  it("the financial route mirrors accounting access exactly and never touches the AI provider", () => {
+    expect(SERVER).toContain('app.get("/api/admin/dashboard/financial", requireRole("admin")');
+    const FIN = region(SERVER, 'app.get("/api/admin/dashboard/financial"', 1600);
+    expect(FIN).toContain("canViewCostStatements(req.session!.adminType");
+    expect(FIN).toContain("Financial overview requires accounting access.");
+    expect(FIN).toContain("buildExecutiveFinanceOverview(");
+    expect(FIN).not.toContain("getOpenAiClient");
+    expect(FIN).not.toContain("OPENAI");
+  });
+
+  it("layout persistence is strictly per admin id and always normalized", () => {
+    expect(SERVER).toContain('app.get("/api/admin/dashboard/layout", requireRole("admin")');
+    expect(SERVER).toContain('app.put("/api/admin/dashboard/layout", requireRole("admin")');
+    const PUT = region(SERVER, 'app.put("/api/admin/dashboard/layout"', 1000);
+    expect(PUT).toContain("normalizeDashboardLayout(req.body?.layout)");
+    expect(PUT).toContain('doc(db, "adminDashboardLayouts", req.session!.id)');
+    expect(SERVER).toContain("adminDashboardLayouts: [],"); // memory-fallback entry (PR #44 lesson)
+  });
+
+  it("the dashboard renders through the layout engine, intersected with role permissions", () => {
+    expect(ADMIN_PANEL).toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections)");
+    const PERM = region(ADMIN_PANEL, "const permittedDashboardSections", 600);
+    expect(PERM).toContain("canViewCostStatements(effectiveType)");
+    expect(PERM).toContain("canViewLogisticsAnalytics(effectiveType)");
+    // Customization: show/hide + drag & drop + reordering, saved per user.
+    expect(ADMIN_PANEL).toContain("saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))");
+    expect(ADMIN_PANEL).toContain("reorderDashboardSection(dashboardLayout, draggedDashboardSection, sectionId)");
+    expect(ADMIN_PANEL).toContain("moveDashboardSection(dashboardLayout, sectionId, 'up')");
+    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/dashboard/layout", {');
+    // Financial sections render only inside the accounting permission gate.
+    expect(ADMIN_PANEL).toContain("sectionId === 'financial' && canViewCostStatements(resolvedAdminType)");
+    expect(ADMIN_PANEL).toContain("sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType)");
+  });
+
+  it("financial UI states its source and reuses deterministic accounting findings for alerts", () => {
+    expect(FIN_SECTION).toContain("never mixed, never AI");
+    expect(FIN_SECTION).toContain('apiFetch("/api/admin/dashboard/financial")');
+    // Financial Alerts = the PR #131 accounting findings verbatim — no new detection.
+    expect(FIN_SECTION).toContain('apiFetch("/api/admin/audit/findings?category=accounting&status=open")');
+    expect(FIN_SECTION).not.toContain("dangerouslySetInnerHTML");
+    // The brief is now titled Executive Brief (product name MARAS AI unchanged elsewhere).
+    const BRIEF_CARD = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiBriefCard.tsx"), "utf-8");
+    expect(BRIEF_CARD).toContain('en: "Executive Brief"');
   });
 });
 
