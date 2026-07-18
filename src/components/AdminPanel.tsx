@@ -44,7 +44,7 @@ import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
-import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS } from "../lib/marasAiIntents";
+import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention } from "../lib/marasAiIntents";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -4209,6 +4209,44 @@ MARAS Group etir Center`;
   // re-derives this authoritatively at broadcast/assignment time.
   const allianceBusyDriverIds = React.useMemo(() => computeBusyDriverIds(shipments), [shipments]);
   const canManageAllianceUi = resolvedAdminType === 'super' || resolvedAdminType === 'operation';
+
+  // PR #129 follow-up — MARAS AI attention badge (mobile trigger only).
+  // Derived from data already on the client (the loaded shipment
+  // registry) via the SAME shared heuristic MARAS AI itself uses
+  // (deriveMarasAiAttention / assessShipmentDelay), plus — for Super
+  // Admins — alert severities from the EXISTING alerts endpoint, fetched
+  // once per session. No AI provider call, no polling, no new API.
+  const [marasAiAlertSeverities, setMarasAiAlertSeverities] = useState<string[]>([]);
+  const [marasAiBadgeDismissedSignature, setMarasAiBadgeDismissedSignature] = useState("");
+  useEffect(() => {
+    if (resolvedAdminType !== 'super') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/admin/maras-ai/alerts");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.alerts)) {
+          setMarasAiAlertSeverities(data.alerts.map((a: { severity?: string }) => String(a.severity || "")));
+        }
+      } catch {
+        // Badge is an indicator only — silently fine without telemetry.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [resolvedAdminType]);
+  const marasAiAttention = React.useMemo(
+    () => deriveMarasAiAttention({ shipments, monitoringAlertSeverities: marasAiAlertSeverities, nowIso: new Date().toISOString() }),
+    [shipments, marasAiAlertSeverities]
+  );
+  // Opening MARAS AI (mobile or desktop) dismisses the CURRENT actionable
+  // set; the badge re-appears only if the set changes afterwards, and it
+  // never shows while nothing actionable remains.
+  useEffect(() => {
+    if (isMarasAiOpen) setMarasAiBadgeDismissedSignature(marasAiAttention.signature);
+  }, [isMarasAiOpen, marasAiAttention.signature]);
+  const showMarasAiBadge =
+    marasAiAttention.needsAttention && marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen;
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
@@ -4362,6 +4400,7 @@ MARAS Group etir Center`;
             ? () => { setIsMarasAiOpen(true); setIsNotifOpen(false); setIsMoreMenuOpen(false); }
             : undefined
         }
+        marasAiAttention={showMarasAiBadge}
       />
 
       {/* Toast Alert */}

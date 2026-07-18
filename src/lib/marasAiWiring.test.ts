@@ -203,6 +203,25 @@ describe("mobile access — same drawer, same roles, desktop unchanged", () => {
     expect(ADMIN_PANEL).toContain("overscroll-contain");
   });
 
+  it("attention badge: derived from existing system data via the shared rule, dismissed on open, never from the AI provider", () => {
+    // AdminPanel derives it from the loaded shipments + the EXISTING
+    // alerts endpoint (super only) through the tested pure function…
+    expect(ADMIN_PANEL).toContain("deriveMarasAiAttention({ shipments, monitoringAlertSeverities: marasAiAlertSeverities");
+    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/maras-ai/alerts")');
+    expect(ADMIN_PANEL).toContain("if (resolvedAdminType !== 'super') return;");
+    // …opening the drawer dismisses the current actionable set…
+    expect(ADMIN_PANEL).toContain("if (isMarasAiOpen) setMarasAiBadgeDismissedSignature(marasAiAttention.signature);");
+    expect(ADMIN_PANEL).toContain("marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen");
+    // …and the bar renders a pure presentational dot (no polling, no AI
+    // call, no interval anywhere in the badge path).
+    expect(ADMIN_PANEL).toContain("marasAiAttention={showMarasAiBadge}");
+    const barTrigger = region(MOBILE_BAR, "onMarasAiClick && (", 900);
+    expect(barTrigger).toContain("marasAiAttention && (");
+    expect(barTrigger).toContain("bg-orange-500");
+    expect(MOBILE_BAR).not.toContain("setInterval");
+    expect(ADMIN_PANEL).not.toMatch(/setInterval\([^)]*maras/i);
+  });
+
   it("RTL: the drawer flips side and direction; the bar trigger is a fixed-size flex item that reorders with dir", () => {
     expect(ADMIN_PANEL).toContain("dir={isRtl ? 'rtl' : 'ltr'}");
     expect(ADMIN_PANEL).toContain("isRtl ? 'left-0 border-r' : 'right-0 border-l'");

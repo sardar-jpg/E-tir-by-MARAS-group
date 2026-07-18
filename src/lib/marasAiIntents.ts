@@ -318,6 +318,54 @@ export function resolveMarasAiResponseSource(input: { usedSystemData: boolean; u
   return "ai_analysis";
 }
 
+// ── Attention badge (mobile ✨ trigger) ──────────────────────────────
+//
+// PR #129 follow-up: a small "attention needed" indicator on the mobile
+// MARAS AI trigger. Derived ENTIRELY from system data the Admin client
+// already holds (the loaded shipment registry) plus, for Super Admins,
+// the alert severities from the EXISTING alerts endpoint — no AI call,
+// no OpenAI polling, no new backend API. Delay detection reuses
+// assessShipmentDelay above (the same heuristic MARAS AI itself
+// explains), so the badge and the AI can never disagree about what
+// "delayed" means.
+
+export interface MarasAiAttention {
+  needsAttention: boolean;
+  delayedCount: number;
+  /** Dispatched, unfinished shipments with zero documents on file (a brand-new undispatched Order is not yet actionable). */
+  missingDocumentsCount: number;
+  /** high/critical monitoring alert groups (Super Admin data only; 0 when unavailable). */
+  criticalAlertCount: number;
+  /** Stable fingerprint of the current actionable set — the drawer-open dismissal compares against this, so NEW items re-show the badge. */
+  signature: string;
+}
+
+export function deriveMarasAiAttention(input: {
+  shipments: Shipment[];
+  monitoringAlertSeverities?: string[];
+  nowIso: string;
+}): MarasAiAttention {
+  let delayedCount = 0;
+  let missingDocumentsCount = 0;
+  for (const s of input.shipments) {
+    const status = s.status || "";
+    if (TERMINAL_STATUSES.has(status)) continue;
+    const preDispatch = PRE_DISPATCH_STATUSES.has(status);
+    if (!preDispatch && assessShipmentDelay(s, input.nowIso).delayed) delayedCount += 1;
+    if (!preDispatch && (s.documents || []).length === 0) missingDocumentsCount += 1;
+  }
+  const criticalAlertCount = (input.monitoringAlertSeverities || []).filter(
+    (sev) => sev === "high" || sev === "critical"
+  ).length;
+  return {
+    needsAttention: delayedCount + missingDocumentsCount + criticalAlertCount > 0,
+    delayedCount,
+    missingDocumentsCount,
+    criticalAlertCount,
+    signature: `${delayedCount}|${missingDocumentsCount}|${criticalAlertCount}`,
+  };
+}
+
 // ── Quick suggestions (drawer, no active conversation) ──────────────
 
 export interface MarasAiQuickSuggestion {

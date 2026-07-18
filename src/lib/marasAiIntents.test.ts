@@ -11,6 +11,7 @@ import {
   buildAccountingAiContext,
   buildSystemContextBlocks,
   resolveMarasAiResponseSource,
+  deriveMarasAiAttention,
   MARAS_AI_SOURCE_LABELS,
   MARAS_AI_QUICK_SUGGESTIONS,
   DELAYED_STALE_DAYS,
@@ -182,6 +183,39 @@ describe("response source indicator — honest, never faked", () => {
     expect(MARAS_AI_SOURCE_LABELS.system_data).toBe("System Data");
     expect(MARAS_AI_SOURCE_LABELS.ai_analysis).toBe("AI Analysis");
     expect(MARAS_AI_SOURCE_LABELS.system_data_ai_analysis).toBe("System Data + AI Analysis");
+  });
+});
+
+describe("attention badge — system data only, never the AI provider", () => {
+  const healthy = shipment({ id: "h", updatedAt: "2026-07-18T08:00:00Z", documents: [{ id: "d", category: "cmr", name: "cmr.pdf" }] as Shipment["documents"] });
+
+  it("delayed shipments raise attention using the SAME shared delay heuristic", () => {
+    const a = deriveMarasAiAttention({ shipments: [healthy, shipment({ id: "late", updatedAt: "2026-07-08T00:00:00Z", documents: [{ id: "d" }] as Shipment["documents"] })], nowIso: NOW });
+    expect(a).toMatchObject({ needsAttention: true, delayedCount: 1, missingDocumentsCount: 0, criticalAlertCount: 0 });
+  });
+
+  it("a dispatched shipment with zero documents raises attention; pre-dispatch and finished ones never do", () => {
+    const noDocs = shipment({ id: "nd", updatedAt: "2026-07-18T08:00:00Z", documents: [] });
+    const brandNew = shipment({ id: "new", status: "New", documents: [] });
+    const done = shipment({ id: "done", status: "Delivered", documents: [], updatedAt: "2026-01-01T00:00:00Z" });
+    const a = deriveMarasAiAttention({ shipments: [noDocs, brandNew, done], nowIso: NOW });
+    expect(a.missingDocumentsCount).toBe(1);
+    expect(a.delayedCount).toBe(0);
+  });
+
+  it("high/critical monitoring alerts count; low/medium do not", () => {
+    const a = deriveMarasAiAttention({ shipments: [], monitoringAlertSeverities: ["medium", "high", "critical", "low"], nowIso: NOW });
+    expect(a).toMatchObject({ needsAttention: true, criticalAlertCount: 2 });
+  });
+
+  it("nothing actionable -> no badge, and the signature changes only when the actionable set changes", () => {
+    const calm = deriveMarasAiAttention({ shipments: [healthy], nowIso: NOW });
+    expect(calm.needsAttention).toBe(false);
+    const one = deriveMarasAiAttention({ shipments: [healthy, shipment({ id: "late", updatedAt: "2026-07-08T00:00:00Z", documents: [{ id: "d" }] as Shipment["documents"] })], nowIso: NOW });
+    expect(one.signature).not.toBe(calm.signature);
+    // Same actionable set twice -> same signature (dismissal stays effective).
+    const again = deriveMarasAiAttention({ shipments: [healthy, shipment({ id: "late", updatedAt: "2026-07-08T00:00:00Z", documents: [{ id: "d" }] as Shipment["documents"] })], nowIso: NOW });
+    expect(again.signature).toBe(one.signature);
   });
 });
 
