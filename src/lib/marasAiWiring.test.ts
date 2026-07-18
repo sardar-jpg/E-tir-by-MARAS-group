@@ -388,6 +388,74 @@ describe("full internal audit (PR #131) — deterministic, persistent, scoped, n
   });
 });
 
+describe("unified dashboard + MARAS AI Brief (PR #132)", () => {
+  const BRIEF_CARD = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiBriefCard.tsx"), "utf-8");
+
+  it("the brief GET is one consolidated, scope-filtered fetch that NEVER calls OpenAI", () => {
+    expect(SERVER).toContain('app.get("/api/admin/dashboard/brief", requireRole("admin")');
+    const GET_ROUTE = region(SERVER, 'app.get("/api/admin/dashboard/brief"', 1800);
+    expect(GET_ROUTE).not.toContain("getOpenAiClient");
+    expect(GET_ROUTE).toContain('summarizes: "all_current_operations"');
+    // Scope filtering + restricted-category gating live in ONE computer.
+    const COMPUTE = region(SERVER, "async function computeDashboardBrief", 2600);
+    expect(COMPUTE).toContain("filterFindingsForViewer(");
+    expect(COMPUTE).toContain('scopes.includes("accounting")');
+    expect(COMPUTE).toContain('adminType === "super"');
+    expect(COMPUTE).toContain(": null");
+  });
+
+  it("only the explicit refresh may call the provider, sends ONLY the digest, and caches per scope", () => {
+    const REFRESH = region(SERVER, 'app.post("/api/admin/dashboard/brief/refresh"', 3600);
+    expect(REFRESH).toContain("resolveMarasAiAvailability(process.env)");
+    expect(REFRESH).toContain("buildBriefAiDigest(computed.brief)");
+    expect(REFRESH).toContain("`brief_${computed.scopeKey}`");
+    // Honest degradation: unavailability/failure -> deterministic brief + aiError.
+    expect(REFRESH).toContain("showing the deterministic brief only");
+    // The digest is the ONLY payload — no raw collections in the AI call.
+    const AI_CALL = region(REFRESH, "getOpenAiClient().responses.create", 400);
+    expect(AI_CALL).not.toContain("shipments");
+    expect(AI_CALL).not.toContain("costStatements");
+  });
+
+  it("navigation: Logistics Analysis is no longer a primary tab; old 'reports' navigation redirects to Dashboard", () => {
+    expect(ADMIN_PANEL).not.toContain("{ id: 'reports', label: t('reports')");
+    expect(ADMIN_PANEL).toContain("if (activeTab === 'reports') {");
+    expect(ADMIN_PANEL).toContain("setIsDashboardAnalyticsOpen(true);");
+    expect(ADMIN_PANEL).toContain("setActiveTab('dashboard');");
+  });
+
+  it("analytics moved INTO Dashboard reusing the SAME lazy component, data, and permission gate", () => {
+    expect(ADMIN_PANEL).toContain("{activeTab === 'dashboard' && canViewLogisticsAnalytics(resolvedAdminType) && (");
+    expect(ADMIN_PANEL.split("<AdminReportsSection").length - 1).toBe(1); // one render site — inside Dashboard
+    expect(ADMIN_PANEL).toContain("performanceAnalyticsData={performanceAnalyticsData}");
+    // Progressive disclosure: collapsible on mobile, always open on desktop.
+    expect(ADMIN_PANEL).toContain("isDashboardAnalyticsOpen || !isMobileMode");
+  });
+
+  it("the brief card renders on BOTH mobile and desktop dashboards, mobile-first", () => {
+    expect(ADMIN_PANEL.split("<MarasAiBriefCard").length - 1).toBe(2);
+    // Mobile: the brief renders BEFORE MobileDashboard in source order.
+    expect(ADMIN_PANEL.indexOf("<MarasAiBriefCard")).toBeLessThan(ADMIN_PANEL.indexOf("<MobileDashboard"));
+  });
+
+  it("the card is honest and isolated: deterministic content, cached AI, explicit refresh, contained failures", () => {
+    // GET on mount; POST only from the Refresh button's load(true).
+    expect(BRIEF_CARD).toContain('await apiFetch("/api/admin/dashboard/brief")');
+    expect(BRIEF_CARD).toContain('await apiFetch("/api/admin/dashboard/brief/refresh", { method: "POST" })');
+    expect(BRIEF_CARD).toContain("void load(false); }, [load]");
+    // Source indicator uses the server's source field only.
+    expect(BRIEF_CARD).toContain('data.source === "system_data_ai_analysis"');
+    expect(BRIEF_CARD).toContain("System Data + AI Analysis");
+    expect(BRIEF_CARD).toContain('t("lastUpdated", lang)');
+    expect(BRIEF_CARD).toContain('t("scopeAll", lang)');
+    // Failure isolation: errors render inside the card, never thrown upward.
+    expect(BRIEF_CARD).toContain("The rest of the dashboard is unaffected.");
+    expect(BRIEF_CARD).not.toContain("dangerouslySetInnerHTML");
+    // Run Audit Now renders only for Super Admin.
+    expect(BRIEF_CARD).toContain("{isSuper && (");
+  });
+});
+
 describe("the official product name is MARAS AI", () => {
   it("the drawer says MARAS AI and never a forbidden rename", () => {
     const drawer = region(ADMIN_PANEL, "MARAS AI drawer", 6000);

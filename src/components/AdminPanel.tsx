@@ -47,6 +47,7 @@ import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForF
 import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention, type MarasAiStructuredResult } from "../lib/marasAiIntents";
 import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
+import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -526,6 +527,18 @@ export default function AdminPanel({
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
+  // PR #132: Logistics Analysis merged into the unified Dashboard. The
+  // 'reports' tab id stays valid for backward compatibility (old quick
+  // links, saved navigation state) but always redirects to Dashboard
+  // with the analytics section expanded.
+  const [isDashboardAnalyticsOpen, setIsDashboardAnalyticsOpen] = useState(false);
+  useEffect(() => {
+    if (activeTab === 'reports') {
+      setIsDashboardAnalyticsOpen(true);
+      setActiveTab('dashboard');
+    }
+  }, [activeTab]);
+
   // Set by the Shipment Details modal's chat shortcut buttons to preselect
   // a shipment + channel when navigating into the Chat Center tab.
   const [chatCenterFocus, setChatCenterFocus] = useState<ChatCenterFocus | null>(null);
@@ -4314,7 +4327,6 @@ MARAS Group etir Center`;
       { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
       { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
       { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
-      { id: 'reports', label: t('reports'), icon: BarChart3 },
       { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
       { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck },
       ...(isSuper ? [{ id: 'team', label: lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operation Team'), icon: UserPlus }] : []),
@@ -5099,7 +5111,20 @@ MARAS Group etir Center`;
         )
       )}
 
-      {/* 1. Dashboard Overview Tab */}
+      {/* 1. Dashboard Overview Tab — unified (PR #132): MARAS AI Brief
+          first, then the existing dashboard, then the Logistics Analytics
+          sections (formerly the separate Reports tab), collapsible on
+          mobile so the first screen stays light. */}
+      {activeTab === 'dashboard' && isMobileMode && (
+        <div className="mb-3">
+          <MarasAiBriefCard
+            lang={lang}
+            isMobileMode={isMobileMode}
+            isSuper={resolvedAdminType === 'super'}
+            onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
+          />
+        </div>
+      )}
       {activeTab === 'dashboard' && isMobileMode && (
         <MobileDashboard
           lang={lang}
@@ -5121,6 +5146,16 @@ MARAS Group etir Center`;
           canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
           onOpenNotifications={() => setIsNotifOpen(true)}
         />
+      )}
+      {activeTab === 'dashboard' && !isMobileMode && (
+        <div className="mb-4 lg:mx-4">
+          <MarasAiBriefCard
+            lang={lang}
+            isMobileMode={isMobileMode}
+            isSuper={resolvedAdminType === 'super'}
+            onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
+          />
+        </div>
       )}
       {activeTab === 'dashboard' && !isMobileMode && (
         <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
@@ -5747,28 +5782,43 @@ MARAS Group etir Center`;
         </div>
       )}
 
-      {/* 4. Reports Tab (Logistics Analytics).
-          Defense-in-depth (PR #59): 'reports' is already gated out of
-          filteredAdminTabs for anyone but canViewLogisticsAnalytics
-          (super only, for now — see adminAccess.ts), but this content
-          block had no adminType check of its own, matching the pattern
-          already used for 'audit'/'team'/'costs' below. */}
-      {activeTab === 'reports' && canViewLogisticsAnalytics(resolvedAdminType) && (
-        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
-          <AdminReportsSection
-            lang={lang}
-            t={t}
-            isMobileMode={isMobileMode}
-            totalShipmentsCount={totalShipmentsCount}
-            statusData={statusData}
-            currencyChartData={currencyChartData}
-            totalCompleted30d={totalCompleted30d}
-            avgDailyCompleted={avgDailyCompleted}
-            peakFormattedDay={peakFormattedDay}
-            performanceAnalyticsData={performanceAnalyticsData}
-            shipmentsHasMore={shipmentsHasMore}
-          />
-        </React.Suspense>
+      {/* PR #132: Logistics Analytics — formerly the separate Reports tab,
+          now a Dashboard section (same lazy component, same computed
+          data, same canViewLogisticsAnalytics gate). Collapsible on
+          mobile (progressive disclosure); always expanded on desktop.
+          The old 'reports' navigation redirects here. */}
+      {activeTab === 'dashboard' && canViewLogisticsAnalytics(resolvedAdminType) && (
+        <div className={`mt-4 ${isMobileMode ? '' : 'lg:mx-4'}`}>
+          <button
+            onClick={() => setIsDashboardAnalyticsOpen(!isDashboardAnalyticsOpen)}
+            className="w-full flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer mb-3"
+          >
+            <span className="text-sm font-black text-slate-900 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-orange-500" />
+              <span>{t('reports')}</span>
+            </span>
+            <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">
+              {(isDashboardAnalyticsOpen || !isMobileMode) ? '−' : '+'}
+            </span>
+          </button>
+          {(isDashboardAnalyticsOpen || !isMobileMode) && (
+            <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+              <AdminReportsSection
+                lang={lang}
+                t={t}
+                isMobileMode={isMobileMode}
+                totalShipmentsCount={totalShipmentsCount}
+                statusData={statusData}
+                currencyChartData={currencyChartData}
+                totalCompleted30d={totalCompleted30d}
+                avgDailyCompleted={avgDailyCompleted}
+                peakFormattedDay={peakFormattedDay}
+                performanceAnalyticsData={performanceAnalyticsData}
+                shipmentsHasMore={shipmentsHasMore}
+              />
+            </React.Suspense>
+          )}
+        </div>
       )}
 
       {/* Clients Tab */}

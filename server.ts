@@ -166,6 +166,12 @@ import {
 } from "./src/lib/auditEngine";
 import { AUDIT_RULES, AUDIT_RULES_VERSION } from "./src/lib/auditRules";
 import {
+  buildDashboardAttentionKpis,
+  buildDeterministicBrief,
+  buildBriefAiDigest,
+  briefScopeKeyFor,
+} from "./src/lib/dashboardBrief";
+import {
   resolveRouteCoords,
   haversineKm,
   isLandFreight,
@@ -9864,6 +9870,146 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update finding." });
+    }
+  });
+
+  // ── PR #132: unified dashboard — MARAS AI Brief ─────────────────────
+
+  /**
+   * Everything the unified dashboard's header needs in ONE fetch, always
+   * scope-filtered for the caller's role. The deterministic brief renders
+   * with or without OpenAI; this GET NEVER calls the AI provider — it only
+   * returns whatever AI explanation the refresh endpoint last cached for
+   * this role scope. The brief always summarizes ALL current operations
+   * (never a filtered subset), and the response says so.
+   */
+  async function computeDashboardBrief(adminType: string) {
+    const scopeKey = briefScopeKeyFor(adminType);
+    if (!scopeKey) return null;
+    const nowIso = new Date().toISOString();
+    const [shipmentsSnap, findingsSnap] = await Promise.all([
+      getDocs(collection(db, "shipments")),
+      getDocs(collection(db, "auditFindings")),
+    ]);
+    const shipments = shipmentsSnap.docs.map((d) => d.data() as Shipment);
+    const visible = filterFindingsForViewer(
+      findingsSnap.docs.map((d) => d.data() as AuditFinding),
+      adminType
+    );
+    const openVisible = visible.filter((f) => f.status === "open");
+    const kpis = buildDashboardAttentionKpis(shipments, nowIso);
+    const prioritySummary = summarizeFindingPriorities(visible, nowIso);
+    const scopes = visibleAuditScopesFor(adminType);
+    const brief = buildDeterministicBrief({
+      kpis,
+      prioritySummary,
+      // Restricted categories: null (never present) unless the role allows.
+      accountingOpenCount: scopes.includes("accounting")
+        ? openVisible.filter((f) => f.category === "accounting").length
+        : null,
+      securityTechnicalOpenCount:
+        adminType === "super"
+          ? openVisible.filter((f) => f.category === "security" || f.category === "technical").length
+          : null,
+    });
+    const topFindings = sortFindingsByPriority(openVisible, nowIso)
+      .slice(0, 3)
+      .map((f) => ({
+        id: f.id, ruleId: f.ruleId, title: f.title, severity: f.severity,
+        recordRef: f.recordRef, recordType: f.recordType, recordId: f.recordId,
+        priority: assessFindingPriority(f, nowIso),
+      }));
+    return { scopeKey, nowIso, brief, topFindings };
+  }
+
+  app.get("/api/admin/dashboard/brief", requireRole("admin"), async (req, res) => {
+    try {
+      const computed = await computeDashboardBrief(req.session!.adminType || "");
+      if (!computed) return res.status(403).json({ error: "The dashboard brief is not available for this role." });
+      const cacheSnap = await getDoc(doc(db, "auditState", `brief_${computed.scopeKey}`));
+      const cached = cacheSnap.exists() ? cacheSnap.data() : null;
+      const aiText = typeof cached?.aiText === "string" && cached.aiText ? cached.aiText : null;
+      res.json({
+        brief: computed.brief,
+        topFindings: computed.topFindings,
+        ai: aiText ? { text: aiText, generatedAt: cached?.aiGeneratedAt || null } : null,
+        source: aiText ? "system_data_ai_analysis" : "system_data",
+        generatedAt: computed.nowIso,
+        scope: computed.scopeKey,
+        summarizes: "all_current_operations",
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load the dashboard brief." });
+    }
+  });
+
+  /**
+   * Refresh Brief — recomputes the deterministic brief and, ONLY here and
+   * ONLY when MARAS AI is enabled, asks OpenAI for a short explanation of
+   * the scope-filtered digest (buildBriefAiDigest — the digest is the
+   * complete payload; nothing else is sent). The result caches per role
+   * scope, so ordinary page renders never trigger provider calls. AI
+   * failure/unavailability degrades honestly to the deterministic brief.
+   */
+  app.post("/api/admin/dashboard/brief/refresh", requireRole("admin"), async (req, res) => {
+    try {
+      const computed = await computeDashboardBrief(req.session!.adminType || "");
+      if (!computed) return res.status(403).json({ error: "The dashboard brief is not available for this role." });
+      let aiText: string | null = null;
+      let aiError: string | null = null;
+      const availability = resolveMarasAiAvailability(process.env);
+      if (!availability.enabled) {
+        aiError = "MARAS AI is not enabled — showing the deterministic brief only.";
+      } else {
+        try {
+          const model = (process.env.OPENAI_MODEL || "").trim() || DEFAULT_OPENAI_MODEL;
+          const aiResponse = await withTimeout(
+            getOpenAiClient().responses.create({
+              model,
+              instructions: [MARAS_AI_SYSTEM_PROMPT, buildBriefAiDigest(computed.brief)].join("\n\n"),
+              input: [{ role: "user" as const, content: "Write the operational brief now." }],
+              max_output_tokens: 500,
+            }),
+            MARAS_AI_TIMEOUT_MS,
+            "MARAS AI brief request timed out"
+          );
+          aiText = (aiResponse.output_text || "").trim() || null;
+          if (aiText) {
+            await setDoc(doc(db, "auditState", `brief_${computed.scopeKey}`), {
+              id: `brief_${computed.scopeKey}`,
+              aiText,
+              aiGeneratedAt: new Date().toISOString(),
+            });
+          }
+        } catch (aiErr) {
+          console.error("MARAS AI brief call failed:", aiErr);
+          recordAndPersistMonitoringEvent({
+            key: "maras_ai_failure|brief",
+            kind: "maras_ai_failure",
+            severity: "medium",
+            area: "POST /api/admin/dashboard/brief/refresh",
+            title: "MARAS AI brief call failed",
+            detail: "The OpenAI request for the dashboard brief failed or timed out.",
+          });
+          aiError = "MARAS AI could not be reached — showing the deterministic brief only.";
+        }
+      }
+      res.json({
+        brief: computed.brief,
+        topFindings: computed.topFindings,
+        ai: aiText ? { text: aiText, generatedAt: new Date().toISOString() } : null,
+        ...(aiError ? { aiError } : {}),
+        source: aiText ? "system_data_ai_analysis" : "system_data",
+        generatedAt: computed.nowIso,
+        scope: computed.scopeKey,
+        summarizes: "all_current_operations",
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to refresh the dashboard brief." });
     }
   });
 
