@@ -104,6 +104,29 @@ idempotent by design (deterministic finding ids).
 | TEC-002 | technical | critical | super | production serving from memory fallback |
 | TEC-003 | technical | high | super | no successful audit within 2× the schedule |
 
+### Recommended Priority engine
+
+Every finding additionally carries a **Recommended Priority** and
+**Response Time**, derived deterministically at read time (so aging open
+findings escalate live) — never by OpenAI, which only explains the
+engine's own reason string:
+
+| Priority | Response target |
+|---|---|
+| 🔴 Critical – Fix Immediately | Within 1 hour |
+| 🟠 High – Fix Today | Within the current business day |
+| 🟡 Medium – Review Soon | Within 2–3 business days |
+| 🔵 Low – Monitor | During normal operations |
+
+Score = base severity (critical 4 / high 3 / medium 2 / low-info 1)
++1 if unresolved ≥ 3 days · +1 if observed ≥ 5 runs · +1 for security
+category · +1 for customer impact (operational finding whose evidence
+shows the ETA already passed) — clamped to the four levels. The
+deterministic reason lists exactly the factors that applied. The
+dashboard shows the four-bucket triage row and sorts findings worst
+priority first; the AI digest carries priority + reason with an explicit
+instruction to explain, never invent.
+
 ### Severity policy
 critical = data corruption / security exposure / production integrity ·
 high = money, delivery, or references broken · medium = process stuck or

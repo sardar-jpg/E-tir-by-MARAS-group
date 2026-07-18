@@ -359,6 +359,11 @@ export interface MarasAiAuditFindingCardItem {
   recommendedAction: string;
   lastSeenAt: string;
   occurrenceCount: number;
+  /** PR #131 follow-up: the deterministic recommended-priority assessment (server-computed, never AI-invented). */
+  priority?: string;
+  priorityLabel?: string;
+  responseTarget?: string;
+  priorityReason?: string;
 }
 
 export type MarasAiStructuredResult =
@@ -490,11 +495,19 @@ export function buildAuditFindingsAiContext(findings: MarasAiAuditFindingCardIte
   if (findings.length === 0) {
     return "CONTEXT DATA — internal audit findings: the deterministic audit currently reports NO open findings for your role's scope. These deterministic findings are the ONLY real findings; do not invent others. General advice must be clearly labeled as a suggestion, not a detected finding.";
   }
-  const sorted = [...findings].sort((a, b) => (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0));
+  const PRIORITY_ORDER: Record<string, number> = { critical_now: 4, high_today: 3, medium_soon: 2, low_monitor: 1 };
+  const sorted = [...findings].sort(
+    (a, b) =>
+      (PRIORITY_ORDER[b.priority || ""] || 0) - (PRIORITY_ORDER[a.priority || ""] || 0) ||
+      (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0)
+  );
   const lines = sorted
     .slice(0, 30)
-    .map((f) => `  - [${f.severity.toUpperCase()}] ${f.ruleId} ${f.title} (${f.recordRef}, seen x${f.occurrenceCount}, status ${f.status}): ${f.evidence} Suggested: ${f.recommendedAction}`);
-  return `CONTEXT DATA — internal audit findings (deterministic backend rules, ${findings.length} in your role's scope; these are the ONLY real findings — never invent additional ones, and label any general advice as a suggestion, not a finding):\n${lines.join("\n")}`;
+    .map((f) => {
+      const prio = f.priorityLabel ? ` PRIORITY: ${f.priorityLabel} (respond ${f.responseTarget}) because ${f.priorityReason}` : "";
+      return `  - [${f.severity.toUpperCase()}] ${f.ruleId} ${f.title} (${f.recordRef}, seen x${f.occurrenceCount}, status ${f.status}): ${f.evidence}${prio} Suggested: ${f.recommendedAction}`;
+    });
+  return `CONTEXT DATA — internal audit findings (deterministic backend rules, ${findings.length} in your role's scope, ordered by the deterministic Recommended Priority engine; these are the ONLY real findings and the ONLY real priorities — never invent findings or priorities, only explain the given reasons; label any general advice as a suggestion, not a finding):\n${lines.join("\n")}`;
 }
 
 /** Super-Admin-only monitoring alerts card set — called by the server INSIDE its existing role gate. */

@@ -224,6 +224,13 @@ function StructuredResultView({
             <div className="text-[10px] text-slate-500 break-words">
               <span className="font-mono">{f.ruleId}</span> · {f.recordRef} · x{f.occurrenceCount}
             </div>
+            {/* Recommended Priority — server-computed, deterministic; the
+                card only displays what the engine assigned. */}
+            {f.priorityLabel && (
+              <div className="text-[10px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded px-1.5 py-1">
+                {f.priorityLabel}{f.responseTarget ? ` · ${f.responseTarget}` : ""}
+              </div>
+            )}
             <div className="text-[10px] text-slate-600">{f.evidence}</div>
             <div className="text-[10px] text-slate-500">{f.recommendedAction}</div>
             {f.recordType === "shipment" && f.recordId && onOpenShipment && (

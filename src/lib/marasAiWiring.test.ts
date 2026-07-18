@@ -355,6 +355,26 @@ describe("full internal audit (PR #131) — deterministic, persistent, scoped, n
     expect(ADMIN_PANEL).toContain("marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen) ||");
   });
 
+  it("recommended priority: derived server-side at read time, shown everywhere, never from OpenAI", () => {
+    // Summary carries the four-bucket triage row; findings are decorated
+    // and sorted by the deterministic engine.
+    expect(SERVER).toContain("byPriority: summarizeFindingPriorities(visible, new Date().toISOString())");
+    expect(SERVER).toContain("sortFindingsByPriority(findings, nowIso)");
+    expect(SERVER).toContain("priority: assessFindingPriority(f, nowIso)");
+    // The AI receives priorities as data and is told they are the ONLY
+    // real ones — explain, never invent.
+    const CHAT = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 17000);
+    expect(CHAT).toContain("const prio = assessFindingPriority(f, nowIso);");
+    const INTENTS = readFileSync(join(ROOT, "src", "lib", "marasAiIntents.ts"), "utf-8");
+    expect(INTENTS).toContain("the ONLY real findings and the ONLY real priorities");
+    // Dashboard triage row + per-finding priority block; AI cards show the label.
+    expect(MONITORING_PANEL).toContain("byPriority");
+    expect(MONITORING_PANEL).toContain('t("priorities", lang)');
+    expect(MONITORING_PANEL).toContain("f.priority.responseTarget");
+    const VIEW = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiResponseView.tsx"), "utf-8");
+    expect(VIEW).toContain("f.priorityLabel");
+  });
+
   it("the monitoring dashboard is safe presentation: server-scoped data, audited actions, no HTML injection", () => {
     expect(ADMIN_PANEL).toContain("<MarasAiMonitoringPanel");
     expect(MONITORING_PANEL).toContain('apiFetch("/api/admin/audit/summary")');

@@ -384,6 +384,104 @@ export function summarizeFindings(findings: Pick<AuditFinding, "status" | "sever
   return summary;
 }
 
+// ── Recommended priority (PR #131 follow-up) ─────────────────────────
+//
+// Deterministic triage on top of the unchanged rules: every finding gets
+// a Recommended Priority and Response Time, DERIVED at read time (so an
+// aging open finding escalates live) from severity, age, recurrence, and
+// category/customer impact. No OpenAI anywhere — MARAS AI only explains
+// the reason string this engine produces.
+
+export type AuditPriority = "critical_now" | "high_today" | "medium_soon" | "low_monitor";
+
+export const AUDIT_PRIORITY_RANK: Record<AuditPriority, number> = { critical_now: 4, high_today: 3, medium_soon: 2, low_monitor: 1 };
+
+export const AUDIT_PRIORITY_META: Record<AuditPriority, { emoji: string; label: string; responseTarget: string }> = {
+  critical_now: { emoji: "🔴", label: "Critical – Fix Immediately", responseTarget: "Within 1 hour" },
+  high_today: { emoji: "🟠", label: "High – Fix Today", responseTarget: "Within the current business day" },
+  medium_soon: { emoji: "🟡", label: "Medium – Review Soon", responseTarget: "Within 2–3 business days" },
+  low_monitor: { emoji: "🔵", label: "Low – Monitor", responseTarget: "During normal operations" },
+};
+
+export interface AuditPriorityAssessment {
+  priority: AuditPriority;
+  emoji: string;
+  label: string;
+  responseTarget: string;
+  /** Deterministic explanation of why this priority was assigned — the ONLY "why" MARAS AI is allowed to give. */
+  reason: string;
+}
+
+/** Escalation thresholds — exported so tests and docs pin the policy. */
+export const PRIORITY_AGE_ESCALATION_DAYS = 3;
+export const PRIORITY_RECURRENCE_ESCALATION = 5;
+
+export function assessFindingPriority(
+  finding: Pick<AuditFinding, "severity" | "category" | "evidence" | "firstSeenAt" | "occurrenceCount">,
+  nowIso: string
+): AuditPriorityAssessment {
+  const base =
+    finding.severity === "critical" ? 4 : finding.severity === "high" ? 3 : finding.severity === "medium" ? 2 : 1;
+  const reasons: string[] = [`Base severity is ${finding.severity}.`];
+  let score = base;
+
+  const ageDays = Math.max(0, (new Date(nowIso).getTime() - new Date(finding.firstSeenAt).getTime()) / 86_400_000);
+  if (ageDays >= PRIORITY_AGE_ESCALATION_DAYS) {
+    score += 1;
+    reasons.push(`Unresolved for ${Math.floor(ageDays)} days.`);
+  }
+  if (finding.occurrenceCount >= PRIORITY_RECURRENCE_ESCALATION) {
+    score += 1;
+    reasons.push(`Observed ${finding.occurrenceCount} times — the condition keeps recurring.`);
+  }
+  if (finding.category === "security") {
+    score += 1;
+    reasons.push("Security impact escalates the response.");
+  }
+  // Customer impact: an operational finding whose deterministic evidence
+  // says the customer's ETA has already passed is customer-visible NOW.
+  if (finding.category === "operations" && /ETA/i.test(finding.evidence)) {
+    score += 1;
+    reasons.push("Customer impact: the promised ETA has already passed.");
+  }
+
+  const priority: AuditPriority = score >= 4 ? "critical_now" : score === 3 ? "high_today" : score === 2 ? "medium_soon" : "low_monitor";
+  const meta = AUDIT_PRIORITY_META[priority];
+  return { priority, emoji: meta.emoji, label: meta.label, responseTarget: meta.responseTarget, reason: reasons.join(" ") };
+}
+
+export interface AuditPrioritySummary {
+  critical_now: number;
+  high_today: number;
+  medium_soon: number;
+  low_monitor: number;
+}
+
+/** Priority counts over OPEN findings only (the dashboard triage row). */
+export function summarizeFindingPriorities(
+  findings: Pick<AuditFinding, "status" | "severity" | "category" | "evidence" | "firstSeenAt" | "occurrenceCount">[],
+  nowIso: string
+): AuditPrioritySummary {
+  const out: AuditPrioritySummary = { critical_now: 0, high_today: 0, medium_soon: 0, low_monitor: 0 };
+  for (const f of findings) {
+    if (f.status !== "open") continue;
+    out[assessFindingPriority(f, nowIso).priority] += 1;
+  }
+  return out;
+}
+
+/** Worst recommended priority first, then severity, then most recent. */
+export function sortFindingsByPriority<T extends Pick<AuditFinding, "severity" | "category" | "evidence" | "firstSeenAt" | "occurrenceCount" | "lastSeenAt">>(
+  findings: T[],
+  nowIso: string
+): T[] {
+  return [...findings].sort((a, b) => {
+    const pa = AUDIT_PRIORITY_RANK[assessFindingPriority(a, nowIso).priority];
+    const pb = AUDIT_PRIORITY_RANK[assessFindingPriority(b, nowIso).priority];
+    return pb - pa || AUDIT_SEVERITY_RANK[b.severity] - AUDIT_SEVERITY_RANK[a.severity] || (a.lastSeenAt < b.lastSeenAt ? 1 : -1);
+  });
+}
+
 // ── Runs ─────────────────────────────────────────────────────────────
 
 export type AuditRunTrigger = "startup" | "interval" | "manual" | "scheduler";

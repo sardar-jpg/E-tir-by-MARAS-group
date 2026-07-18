@@ -7,6 +7,12 @@ import {
   filterFindingsForViewer,
   visibleAuditScopesFor,
   summarizeFindings,
+  assessFindingPriority,
+  summarizeFindingPriorities,
+  sortFindingsByPriority,
+  AUDIT_PRIORITY_META,
+  PRIORITY_AGE_ESCALATION_DAYS,
+  PRIORITY_RECURRENCE_ESCALATION,
   type AuditContext,
   type AuditFinding,
   type AuditRule,
@@ -143,6 +149,61 @@ describe("role scoping — the single visibility rule", () => {
     expect(filterFindingsForViewer(findings, "accounts").map((f) => f.scope)).toEqual(["accounting"]);
     expect(filterFindingsForViewer(findings, "")).toHaveLength(0);
     expect(visibleAuditScopesFor("operation")).not.toContain("super"); // security/technical never leak
+  });
+});
+
+describe("recommended-priority engine — deterministic triage, never OpenAI", () => {
+  const NOW = "2026-07-18T12:00:00Z";
+  const f = (over: Partial<AuditFinding> = {}): Pick<AuditFinding, "severity" | "category" | "evidence" | "firstSeenAt" | "occurrenceCount" | "status" | "lastSeenAt"> => ({
+    severity: "medium",
+    category: "operations",
+    evidence: "no status change for 4 days",
+    firstSeenAt: NOW,
+    lastSeenAt: NOW,
+    occurrenceCount: 1,
+    status: "open",
+    ...over,
+  });
+
+  it("maps base severities to the four priority levels with the specified response targets", () => {
+    expect(assessFindingPriority(f({ severity: "critical" }), NOW)).toMatchObject({ priority: "critical_now", emoji: "🔴", responseTarget: "Within 1 hour" });
+    expect(assessFindingPriority(f({ severity: "high" }), NOW)).toMatchObject({ priority: "high_today", emoji: "🟠", responseTarget: "Within the current business day" });
+    expect(assessFindingPriority(f({ severity: "medium" }), NOW)).toMatchObject({ priority: "medium_soon", emoji: "🟡", responseTarget: "Within 2–3 business days" });
+    expect(assessFindingPriority(f({ severity: "low" }), NOW)).toMatchObject({ priority: "low_monitor", emoji: "🔵", responseTarget: "During normal operations" });
+    expect(AUDIT_PRIORITY_META.high_today.label).toBe("High – Fix Today");
+  });
+
+  it("the spec example: medium severity + customer ETA impact escalates to High – Fix Today, with the reason explained", () => {
+    const p = assessFindingPriority(f({ evidence: 'ETA 2026-07-15 has passed while status is still "In Transit"' }), NOW);
+    expect(p.priority).toBe("high_today");
+    expect(p.reason).toContain("Base severity is medium.");
+    expect(p.reason).toContain("Customer impact");
+  });
+
+  it("age and recurrence escalate; escalations stack and clamp at critical", () => {
+    const oldFirstSeen = new Date(new Date(NOW).getTime() - (PRIORITY_AGE_ESCALATION_DAYS + 1) * 86400000).toISOString();
+    expect(assessFindingPriority(f({ firstSeenAt: oldFirstSeen }), NOW).priority).toBe("high_today");
+    expect(assessFindingPriority(f({ occurrenceCount: PRIORITY_RECURRENCE_ESCALATION }), NOW).priority).toBe("high_today");
+    const p = assessFindingPriority(f({ severity: "high", firstSeenAt: oldFirstSeen, occurrenceCount: 99 }), NOW);
+    expect(p.priority).toBe("critical_now");
+    expect(p.reason).toContain("Unresolved for");
+    expect(p.reason).toContain("keeps recurring");
+  });
+
+  it("security category escalates one level", () => {
+    expect(assessFindingPriority(f({ category: "security", severity: "medium" }), NOW).priority).toBe("high_today");
+  });
+
+  it("sorts worst-priority first and summarizes OPEN findings into the four dashboard buckets", () => {
+    const low = f({ severity: "low" });
+    const escalatedMedium = f({ evidence: "ETA passed", severity: "medium" });
+    const sorted = sortFindingsByPriority([low, escalatedMedium], NOW);
+    expect(sorted[0]).toBe(escalatedMedium);
+    const buckets = summarizeFindingPriorities(
+      [f({ severity: "critical" }), escalatedMedium, low, f({ severity: "critical", status: "resolved" })],
+      NOW
+    );
+    expect(buckets).toEqual({ critical_now: 1, high_today: 1, medium_soon: 0, low_monitor: 1 });
   });
 });
 

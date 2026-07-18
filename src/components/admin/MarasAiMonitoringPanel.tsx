@@ -2,7 +2,18 @@ import React, { useState, useEffect, useCallback } from "react";
 import { X, RefreshCw, ShieldAlert, Search } from "lucide-react";
 import type { Language } from "../../types";
 import { apiFetch } from "../../lib/api";
-import type { AuditFinding, AuditSummary, AuditSeverity, AuditCategory, AuditFindingStatus } from "../../lib/auditEngine";
+import type {
+  AuditFinding,
+  AuditSummary,
+  AuditSeverity,
+  AuditCategory,
+  AuditFindingStatus,
+  AuditPriorityAssessment,
+  AuditPrioritySummary,
+} from "../../lib/auditEngine";
+
+/** Findings arrive from the API already decorated with their deterministic priority assessment. */
+type PrioritizedFinding = AuditFinding & { priority?: AuditPriorityAssessment };
 
 /**
  * MarasAiMonitoringPanel (PR #131) — the MARAS AI Monitoring dashboard,
@@ -44,6 +55,13 @@ const L: Record<string, { en: string; tr: string; ar: string }> = {
   ignore: { en: "Ignore", tr: "Yoksay", ar: "تجاهل" },
   resolve: { en: "Resolve", tr: "Çöz", ar: "حل" },
   reasonPrompt: { en: "Reason (required, recorded in the audit trail):", tr: "Gerekçe (zorunlu, denetim izine yazılır):", ar: "السبب (إلزامي ويُسجَّل في سجل التدقيق):" },
+  priorities: { en: "Recommended Priorities", tr: "Önerilen Öncelikler", ar: "الأولويات الموصى بها" },
+  critical_now: { en: "Critical (Immediate)", tr: "Kritik (Hemen)", ar: "حرج (فورًا)" },
+  high_today: { en: "High (Today)", tr: "Yüksek (Bugün)", ar: "عالٍ (اليوم)" },
+  medium_soon: { en: "Medium (Soon)", tr: "Orta (Yakında)", ar: "متوسط (قريبًا)" },
+  low_monitor: { en: "Low (Monitor)", tr: "Düşük (İzle)", ar: "منخفض (مراقبة)" },
+  respondBy: { en: "Response target", tr: "Yanıt hedefi", ar: "هدف الاستجابة" },
+  why: { en: "Why this priority", tr: "Bu önceliğin nedeni", ar: "سبب هذه الأولوية" },
   empty: { en: "No findings match the current filters.", tr: "Filtrelere uyan bulgu yok.", ar: "لا توجد نتائج مطابقة للمرشحات." },
   loadError: { en: "Could not load monitoring data.", tr: "İzleme verileri yüklenemedi.", ar: "تعذر تحميل بيانات المراقبة." },
 };
@@ -55,6 +73,12 @@ const SEV_BADGE: Record<string, string> = {
   medium: "bg-amber-100 text-amber-700 border-amber-200",
   low: "bg-slate-100 text-slate-600 border-slate-200",
   info: "bg-slate-50 text-slate-500 border-slate-200",
+};
+const PRIO_BADGE: Record<string, string> = {
+  critical_now: "bg-red-100 text-red-700 border-red-200",
+  high_today: "bg-orange-100 text-orange-700 border-orange-200",
+  medium_soon: "bg-amber-100 text-amber-700 border-amber-200",
+  low_monitor: "bg-sky-100 text-sky-700 border-sky-200",
 };
 const CATEGORIES: (AuditCategory | "")[] = ["", "operations", "accounting", "data_integrity", "security", "technical"];
 const SEVERITIES: (AuditSeverity | "")[] = ["", "critical", "high", "medium", "low", "info"];
@@ -73,9 +97,10 @@ interface MarasAiMonitoringPanelProps {
 
 export default function MarasAiMonitoringPanel({ lang, isRtl, isSuper, onClose, onOpenShipment, onChanged }: MarasAiMonitoringPanelProps) {
   const [summary, setSummary] = useState<AuditSummary | null>(null);
+  const [byPriority, setByPriority] = useState<AuditPrioritySummary | null>(null);
   const [lastSuccessfulRunAt, setLastSuccessfulRunAt] = useState<string | null>(null);
   const [auditRunning, setAuditRunning] = useState(false);
-  const [findings, setFindings] = useState<AuditFinding[]>([]);
+  const [findings, setFindings] = useState<PrioritizedFinding[]>([]);
   const [category, setCategory] = useState("");
   const [severity, setSeverity] = useState("");
   const [status, setStatus] = useState("open");
@@ -100,6 +125,7 @@ export default function MarasAiMonitoringPanel({ lang, isRtl, isSuper, onClose, 
       const sumData = await sumRes.json();
       const listData = await listRes.json();
       setSummary(sumData.summary || null);
+      setByPriority(sumData.byPriority || null);
       setLastSuccessfulRunAt(sumData.lastSuccessfulRunAt || null);
       setAuditRunning(!!sumData.running);
       setFindings(Array.isArray(listData.findings) ? listData.findings : []);
@@ -214,6 +240,20 @@ export default function MarasAiMonitoringPanel({ lang, isRtl, isSuper, onClose, 
             </div>
           )}
 
+          {/* Recommended-priority triage row (deterministic engine, open findings) */}
+          {byPriority && (
+            <div className="p-3 rounded-xl border border-slate-200 bg-white">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{t("priorities", lang)}</span>
+              <div className="flex gap-1.5 mt-2 flex-wrap">
+                {(["critical_now", "high_today", "medium_soon", "low_monitor"] as const).map((prio) => (
+                  <span key={prio} className={`px-2 py-0.5 rounded border text-[10px] font-black ${PRIO_BADGE[prio]}`}>
+                    {t(prio, lang)}: {byPriority[prio]}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Filters */}
           <div className="space-y-1.5">
             <div className="flex gap-1.5 flex-wrap">
@@ -261,6 +301,11 @@ export default function MarasAiMonitoringPanel({ lang, isRtl, isSuper, onClose, 
               >
                 <span className="text-xs font-black text-slate-900 min-w-0 truncate">{f.title}</span>
                 <span className="flex items-center gap-1.5 shrink-0">
+                  {f.priority && (
+                    <span className={`px-1.5 py-0.5 rounded border text-[9px] font-black ${PRIO_BADGE[f.priority.priority] || ""}`}>
+                      {f.priority.emoji} {t(f.priority.priority, lang)}
+                    </span>
+                  )}
                   <span className={`px-1.5 py-0.5 rounded border text-[9px] font-black uppercase ${SEV_BADGE[f.severity]}`}>{f.severity}</span>
                   <span className="px-1.5 py-0.5 rounded border border-slate-200 bg-slate-50 text-[9px] font-bold text-slate-500 uppercase">{t(f.status, lang)}</span>
                 </span>
@@ -274,6 +319,12 @@ export default function MarasAiMonitoringPanel({ lang, isRtl, isSuper, onClose, 
               </div>
               {expandedId === f.id && (
                 <div className="space-y-1.5 pt-1 border-t border-slate-100">
+                  {f.priority && (
+                    <div className={`text-[10px] font-semibold rounded px-1.5 py-1 border ${PRIO_BADGE[f.priority.priority] || ""}`}>
+                      {f.priority.emoji} {f.priority.label} · {t("respondBy", lang)}: {f.priority.responseTarget}
+                      <span className="block font-medium mt-0.5">{t("why", lang)}: {f.priority.reason}</span>
+                    </div>
+                  )}
                   <div className="text-[10px] text-slate-600"><span className="font-black uppercase text-slate-400">{t("evidence", lang)}: </span>{f.evidence}</div>
                   <div className="text-[10px] text-slate-600"><span className="font-black uppercase text-slate-400">{t("action", lang)}: </span>{f.recommendedAction}</div>
                   <div className="flex flex-wrap gap-1.5 pt-0.5">

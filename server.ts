@@ -150,6 +150,9 @@ import {
   filterFindingsForViewer,
   visibleAuditScopesFor,
   summarizeFindings,
+  assessFindingPriority,
+  summarizeFindingPriorities,
+  sortFindingsByPriority,
   AUDIT_SEVERITY_RANK,
   AUDIT_RUN_RETENTION,
   AUDIT_MAX_DURATION_MS,
@@ -9540,12 +9543,17 @@ async function startServer() {
         const allFindings = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
         const visibleFindings: MarasAiAuditFindingCardItem[] = filterFindingsForViewer(allFindings, req.session!.adminType || "")
           .filter((f) => f.status === "open" || f.status === "acknowledged")
-          .map((f) => ({
-            ruleId: f.ruleId, title: f.title, severity: f.severity, category: f.category, status: f.status,
-            recordType: f.recordType, recordId: f.recordId, recordRef: f.recordRef,
-            evidence: f.evidence, recommendedAction: f.recommendedAction,
-            lastSeenAt: f.lastSeenAt, occurrenceCount: f.occurrenceCount,
-          }));
+          .map((f) => {
+            const prio = assessFindingPriority(f, nowIso);
+            return {
+              ruleId: f.ruleId, title: f.title, severity: f.severity, category: f.category, status: f.status,
+              recordType: f.recordType, recordId: f.recordId, recordRef: f.recordRef,
+              evidence: f.evidence, recommendedAction: f.recommendedAction,
+              lastSeenAt: f.lastSeenAt, occurrenceCount: f.occurrenceCount,
+              priority: prio.priority, priorityLabel: `${prio.emoji} ${prio.label}`,
+              responseTarget: prio.responseTarget, priorityReason: prio.reason,
+            };
+          });
         systemBlocks.push(buildAuditFindingsAiContext(visibleFindings));
         structured.push(buildAuditFindingsResult(visibleFindings));
       }
@@ -9772,6 +9780,9 @@ async function startServer() {
       const state = stateSnap.exists() ? stateSnap.data() : {};
       res.json({
         summary: summarizeFindings(visible),
+        // Recommended-priority triage row — deterministic, derived at
+        // read time so aging open findings escalate live. Never OpenAI.
+        byPriority: summarizeFindingPriorities(visible, new Date().toISOString()),
         scopes: visibleAuditScopesFor(adminType),
         lastSuccessfulRunAt: state?.lastSuccessfulRunAt || null,
         lastFailedRunAt: state?.lastFailedRunAt || null,
@@ -9802,10 +9813,14 @@ async function startServer() {
           (f) => f.recordRef.toLowerCase().includes(needle) || f.recordId.toLowerCase().includes(needle) || f.ruleId.toLowerCase().includes(needle)
         );
       }
-      findings.sort(
-        (a, b) => AUDIT_SEVERITY_RANK[b.severity] - AUDIT_SEVERITY_RANK[a.severity] || (a.lastSeenAt < b.lastSeenAt ? 1 : -1)
-      );
-      res.json({ findings: findings.slice(0, 300), total: findings.length });
+      // Recommended-priority ordering (worst first), each finding
+      // decorated with its deterministic priority assessment.
+      const nowIso = new Date().toISOString();
+      const decorated = sortFindingsByPriority(findings, nowIso).map((f) => ({
+        ...f,
+        priority: assessFindingPriority(f, nowIso),
+      }));
+      res.json({ findings: decorated.slice(0, 300), total: decorated.length });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
