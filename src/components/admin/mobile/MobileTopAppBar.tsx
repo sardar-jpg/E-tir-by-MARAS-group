@@ -12,6 +12,14 @@ interface MobileTopAppBarProps {
   onMenuClick: () => void;
   /** Optional back button for detail-style pages (e.g. an open order). Omit for the 5 primary tab pages. */
   onBack?: () => void;
+  /**
+   * feature/mobile-maras-ai-access: opens the existing ✨ MARAS AI drawer.
+   * AdminPanel passes this ONLY for the same super/operation admins the
+   * desktop MARAS AI button renders for — this component never decides
+   * roles itself; absent prop = no button (accounts admins, and any role
+   * without desktop MARAS AI access, see nothing here).
+   */
+  onMarasAiClick?: () => void;
 }
 
 /**
@@ -42,6 +50,7 @@ export default function MobileTopAppBar({
   onBellClick,
   onMenuClick,
   onBack,
+  onMarasAiClick,
 }: MobileTopAppBarProps) {
   const BackIcon = isRtl ? ChevronRight : ChevronLeft;
   return (
@@ -65,6 +74,24 @@ export default function MobileTopAppBar({
         {TitleIcon && !onBack && <TitleIcon className="w-4 h-4 text-orange-500 shrink-0" />}
         <span className="font-extrabold text-sm text-slate-900 truncate">{title}</span>
       </div>
+
+      {/* ✨ MARAS AI — same product mark and dark/orange identity as the
+          desktop header button, in this bar's compact icon-button format.
+          Sits beside the bell; fixed-size shrink-0 buttons in this flex
+          row (title truncates via flex-1 min-w-0) so nothing overlaps in
+          LTR or RTL. Rendered only when AdminPanel passed the handler
+          (super/operation admins — the exact desktop audience). */}
+      {onMarasAiClick && (
+        <button
+          type="button"
+          onClick={onMarasAiClick}
+          aria-label="MARAS AI"
+          title="MARAS AI"
+          className="w-9 h-9 shrink-0 flex items-center justify-center rounded-lg bg-gradient-to-br from-slate-900 to-slate-800 border border-orange-500/40 cursor-pointer text-[15px] leading-none"
+        >
+          <span aria-hidden="true">✨</span>
+        </button>
+      )}
 
       <button
         type="button"

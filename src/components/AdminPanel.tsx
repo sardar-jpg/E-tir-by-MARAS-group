@@ -4354,6 +4354,14 @@ MARAS Group etir Center`;
         unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
         onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
         onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
+        // feature/mobile-maras-ai-access: the SAME role gate as the desktop
+        // MARAS AI header button below — super/operation only. Other roles
+        // never receive the handler, so the bar renders no AI button.
+        onMarasAiClick={
+          resolvedAdminType === 'super' || resolvedAdminType === 'operation'
+            ? () => { setIsMarasAiOpen(true); setIsNotifOpen(false); setIsMoreMenuOpen(false); }
+            : undefined
+        }
       />
 
       {/* Toast Alert */}
@@ -4695,7 +4703,12 @@ MARAS Group etir Center`;
             onClick={(e) => e.stopPropagation()}
             dir={isRtl ? 'rtl' : 'ltr'}
           >
-            <div className="flex items-start justify-between gap-3 p-5 border-b border-slate-800 bg-gradient-to-br from-slate-900 to-slate-800 text-white shrink-0">
+            {/* feature/mobile-maras-ai-access: pt uses max(designed padding,
+                safe-area-inset-top) so on notched phones (iPhone Safari,
+                Android Chrome) the title/close button clear the status bar;
+                on desktop env() is 0 and max() resolves to the exact same
+                1.25rem this header always had — zero desktop change. */}
+            <div className="flex items-start justify-between gap-3 p-5 pt-[max(1.25rem,env(safe-area-inset-top))] border-b border-slate-800 bg-gradient-to-br from-slate-900 to-slate-800 text-white shrink-0">
               <div>
                 <h2 className="text-lg font-black tracking-tight flex items-center gap-2">
                   <span>✨</span>
@@ -4712,7 +4725,10 @@ MARAS Group etir Center`;
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            {/* Same max() trick for the home-indicator inset at the bottom;
+                overscroll-contain keeps thread scrolling inside the drawer
+                on touch devices instead of rubber-banding the page. */}
+            <div className="flex-1 overflow-y-auto overscroll-contain p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] space-y-5">
               <div className="flex gap-2 p-3 rounded-xl border border-orange-200 bg-orange-50 text-orange-800 text-xs font-semibold leading-relaxed">
                 <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-orange-500" />
                 <span>MARAS AI provides suggestions only. Staff must review and approve before any action.</span>
