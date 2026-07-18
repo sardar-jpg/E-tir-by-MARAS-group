@@ -359,10 +359,58 @@ export default function AdminPanel({
   }, []);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
   const chatDropdownRef = React.useRef<HTMLDivElement>(null);
-  // PR #36: ✨ MARAS AI header drawer — UI-only state, no backend calls.
+  // PR #36 UI foundation, connected to the real backend in PR #128:
+  // conversation state for the ✨ MARAS AI drawer. The thread lives for
+  // the current Admin session only (component state — nothing persisted),
+  // and the OpenAI call happens exclusively server-side
+  // (POST /api/admin/maras-ai/chat) — no key or provider client exists in
+  // this bundle.
   const [isMarasAiOpen, setIsMarasAiOpen] = useState(false);
   const [marasAiPrompt, setMarasAiPrompt] = useState("");
-  const [marasAiSendMessage, setMarasAiSendMessage] = useState<string | null>(null);
+  const [marasAiThread, setMarasAiThread] = useState<{ role: 'user' | 'assistant'; text: string }[]>([]);
+  const [isMarasAiSending, setIsMarasAiSending] = useState(false);
+  const [marasAiError, setMarasAiError] = useState("");
+
+  const handleSendMarasAi = async () => {
+    const message = marasAiPrompt.trim();
+    // Duplicate-submission guard: one in-flight request at a time.
+    if (!message || isMarasAiSending) return;
+    setIsMarasAiSending(true);
+    setMarasAiError("");
+    setMarasAiThread((prev) => [...prev, { role: 'user', text: message }]);
+    try {
+      const res = await apiFetch("/api/admin/maras-ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          // Last few turns only — the server caps this again anyway.
+          history: marasAiThread.slice(-12),
+          context: {
+            page: activeTab,
+            // The shipment whose details modal is open, if any — the
+            // server loads the authoritative record itself.
+            ...(openDetailsId ? { shipmentId: openDetailsId } : {}),
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMarasAiThread((prev) => [...prev, { role: 'assistant', text: String(data.reply || "") }]);
+        setMarasAiPrompt("");
+      } else {
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        // 503 = cleanly unavailable (disabled/unconfigured); 502 =
+        // provider failure — both show the server's own clear message.
+        setMarasAiError(body?.error || "MARAS AI request failed. Please try again.");
+      }
+    } catch {
+      setMarasAiError("MARAS AI request failed. Check your connection and try again.");
+    } finally {
+      setIsMarasAiSending(false);
+    }
+  };
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
@@ -4584,7 +4632,7 @@ MARAS Group etir Center`;
 
               <div className="flex gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 text-xs font-medium leading-relaxed">
                 <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-400" />
-                <span>No shipment, document, or chat data is sent to an AI provider in this version.</span>
+                <span>Only the minimum operational data needed for your request is sent to the AI provider. Credentials and keys never leave the server.</span>
               </div>
 
               <div>
@@ -4597,7 +4645,7 @@ MARAS Group etir Center`;
                         key={action.id}
                         onClick={() => {
                           setMarasAiPrompt(action.prompt);
-                          setMarasAiSendMessage(null);
+                          setMarasAiError("");
                         }}
                         className="flex flex-col items-start gap-1.5 p-3 rounded-xl border border-slate-200 bg-white hover:border-orange-300 hover:bg-orange-50/50 text-left transition-all cursor-pointer"
                       >
@@ -4609,6 +4657,32 @@ MARAS Group etir Center`;
                 </div>
               </div>
 
+              {marasAiThread.length > 0 && (
+                <div className="space-y-2.5">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Conversation</h3>
+                  {marasAiThread.map((turn, i) => (
+                    <div
+                      key={i}
+                      className={`p-3 rounded-xl text-xs leading-relaxed whitespace-pre-wrap break-words ${
+                        turn.role === 'user'
+                          ? 'bg-orange-50 border border-orange-200 text-slate-800 font-semibold'
+                          : 'bg-slate-50 border border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <span className={`block text-[10px] font-black uppercase tracking-wider mb-1 ${turn.role === 'user' ? 'text-orange-500' : 'text-slate-400'}`}>
+                        {turn.role === 'user' ? 'You' : 'MARAS AI'}
+                      </span>
+                      {turn.text}
+                    </div>
+                  ))}
+                  {isMarasAiSending && (
+                    <div className="p-3 rounded-xl text-xs bg-slate-50 border border-slate-200 text-slate-400 font-semibold animate-pulse">
+                      MARAS AI is thinking…
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-2">
                 <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Ask MARAS AI</h3>
                 <textarea
@@ -4616,18 +4690,25 @@ MARAS Group etir Center`;
                   onChange={(e) => setMarasAiPrompt(e.target.value)}
                   rows={3}
                   placeholder="Ask MARAS AI about a shipment, document, chat, or operation..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMarasAi();
+                    }
+                  }}
                   className="w-full p-3 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-orange-500/40 focus:border-orange-400 resize-none font-medium"
                 />
                 <button
-                  onClick={() => setMarasAiSendMessage("MARAS AI is not connected yet. This preview is UI-only.")}
-                  className="w-full flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2.5 rounded-lg font-bold text-xs shadow-md transition-all cursor-pointer"
+                  onClick={handleSendMarasAi}
+                  disabled={isMarasAiSending || !marasAiPrompt.trim()}
+                  className="w-full flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold text-xs shadow-md transition-all cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send</span>
+                  <span>{isMarasAiSending ? 'Sending…' : 'Send'}</span>
                 </button>
-                {marasAiSendMessage && (
-                  <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2.5 font-semibold">
-                    {marasAiSendMessage}
+                {marasAiError && (
+                  <div className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5 font-semibold">
+                    {marasAiError}
                   </div>
                 )}
               </div>

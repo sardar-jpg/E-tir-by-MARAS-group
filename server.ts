@@ -103,6 +103,24 @@ import {
   type AdminChatUnreadRecord,
 } from "./src/lib/chatUnreadAccess";
 import { buildSeenScopeFilters, planSeenWrites, type SeenWrite } from "./src/lib/chatSeenPlan";
+import OpenAI from "openai";
+import {
+  resolveMarasAiAvailability,
+  validateMarasAiChatBody,
+  buildShipmentAiContext,
+  buildMonitoringAiContext,
+  buildMarasAiInput,
+  MARAS_AI_SYSTEM_PROMPT,
+  MARAS_AI_TIMEOUT_MS,
+  MARAS_AI_MAX_OUTPUT_TOKENS,
+  DEFAULT_OPENAI_MODEL,
+} from "./src/lib/marasAiCore";
+import {
+  recordMonitoringEvent,
+  classifyRequestForMonitoring,
+  deriveTechnicalAlerts,
+  type MonitoringEvent,
+} from "./src/lib/monitoringStore";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -3394,6 +3412,24 @@ interface UploadedFileStore {
 const uploadedFiles = new Map<string, UploadedFileStore>();
 
 async function startServer() {
+  // ── PR #128: MARAS AI + internal application monitoring ─────────────
+  // Bounded in-process telemetry (NOT business data, NOT a new database —
+  // resets on restart like a process log). Grouping/caps live in the pure,
+  // unit-tested monitoringStore module.
+  const monitoringEvents: MonitoringEvent[] = [];
+
+  // The ONLY OpenAI client in the entire application — server-side,
+  // constructed lazily so a missing key never crashes startup. The key is
+  // read exclusively from the environment; nothing about it ever reaches
+  // a client bundle or an API response.
+  let openAiClient: OpenAI | null = null;
+  function getOpenAiClient(): OpenAI {
+    if (!openAiClient) {
+      openAiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: MARAS_AI_TIMEOUT_MS });
+    }
+    return openAiClient;
+  }
+
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
@@ -3404,6 +3440,28 @@ async function startServer() {
 
   // Use JSON middleware with reasonable limits for inline file mock uploads (base64)
   app.use(express.json({ limit: "20mb" }));
+
+  // PR #128 — monitoring observer: classifies every finished /api request
+  // (5xx families, unusually slow responses) into the bounded, grouped
+  // event store. classifyRequestForMonitoring excludes the monitoring/AI
+  // endpoints themselves so a failing monitor can never feed itself.
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    res.on("finish", () => {
+      try {
+        const candidate = classifyRequestForMonitoring({
+          method: req.method,
+          path: req.path,
+          statusCode: res.statusCode,
+          durationMs: Date.now() - startedAt,
+        });
+        if (candidate) recordMonitoringEvent(monitoringEvents, candidate, new Date().toISOString());
+      } catch {
+        // Monitoring must never break a real request.
+      }
+    });
+    next();
+  });
 
   // Support X-HTTP-Method-Override header for envs where PUT/DELETE/etc are blocked or filtered
   app.use((req, res, next) => {
@@ -9052,6 +9110,138 @@ async function startServer() {
   // Admin-only (see requireRole below), so intentionally spans both
   // channels — the BUG-03 audience partition only restricts what
   // driver/client sessions can see, not admin.
+  // ── PR #128: MARAS AI (Admin Panel only) ────────────────────────────
+
+  /**
+   * POST /api/admin/maras-ai/chat — the ONE MARAS AI endpoint. Full
+   * admins only (super/operation — the same audience the existing ✨
+   * drawer renders for; drivers, customers, and the public can never
+   * reach it). Reads and analyzes only; it never mutates any record.
+   * The OpenAI credential stays in this process: requests carry only the
+   * employee's message, capped history, and a WHITELISTED context digest
+   * (marasAiCore.ts) — never tokens, passwords, or share links.
+   */
+  app.post("/api/admin/maras-ai/chat", requireFullAdmin, async (req, res) => {
+    try {
+      const availability = resolveMarasAiAvailability(process.env);
+      if (!availability.enabled) {
+        return res.status(503).json({
+          code: "MARAS_AI_UNAVAILABLE",
+          error:
+            availability.reason === "disabled"
+              ? "MARAS AI is currently disabled. Set MARAS_AI_ENABLED=true to enable it."
+              : "MARAS AI is not configured on this server (missing OpenAI API key).",
+        });
+      }
+
+      const parsed = validateMarasAiChatBody(req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      // Optional shipment context — loaded server-side from the
+      // authoritative record (never trusted from the client), reduced to
+      // the whitelisted digest.
+      const contextBlocks: string[] = [];
+      if (parsed.shipmentId) {
+        const sDoc = await getDoc(doc(db, "shipments", parsed.shipmentId));
+        if (sDoc.exists()) {
+          const shipment = sDoc.data() as Shipment;
+          contextBlocks.push(buildShipmentAiContext(shipment, shipment.documents, undefined));
+        } else {
+          contextBlocks.push(`CONTEXT DATA: no shipment record exists for id "${parsed.shipmentId}".`);
+        }
+      }
+      if (parsed.page) {
+        contextBlocks.push(`CONTEXT DATA: the employee is currently on the Admin Panel "${parsed.page}" page.`);
+      }
+      // Technical monitoring digest is SUPER-ADMIN-ONLY context — an
+      // operation admin asking about system errors gets no telemetry.
+      if (req.session!.adminType === "super") {
+        contextBlocks.push(buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents)));
+      }
+
+      const instructions = [MARAS_AI_SYSTEM_PROMPT, ...contextBlocks].join("\n\n");
+      const model = (process.env.OPENAI_MODEL || "").trim() || DEFAULT_OPENAI_MODEL;
+
+      let responseText: string;
+      try {
+        const aiResponse = await withTimeout(
+          getOpenAiClient().responses.create({
+            model,
+            instructions,
+            input: buildMarasAiInput(parsed.history, parsed.message),
+            max_output_tokens: MARAS_AI_MAX_OUTPUT_TOKENS,
+          }),
+          MARAS_AI_TIMEOUT_MS,
+          "MARAS AI model request timed out"
+        );
+        responseText = (aiResponse.output_text || "").trim();
+      } catch (aiErr) {
+        // Provider failure: clean, honest error — never a fake response —
+        // and a monitoring event so the Super Admin sees the pattern.
+        console.error("MARAS AI provider call failed:", aiErr);
+        recordMonitoringEvent(
+          monitoringEvents,
+          {
+            key: "maras_ai_failure|provider",
+            kind: "maras_ai_failure",
+            severity: "medium",
+            area: "POST /api/admin/maras-ai/chat",
+            title: "MARAS AI provider call failed",
+            detail: "The OpenAI request failed or timed out.",
+          },
+          new Date().toISOString()
+        );
+        return res.status(502).json({
+          code: "MARAS_AI_UPSTREAM",
+          error: "MARAS AI could not reach its model provider. Please try again in a moment.",
+        });
+      }
+
+      if (!responseText) {
+        return res.status(502).json({
+          code: "MARAS_AI_UPSTREAM",
+          error: "MARAS AI returned an empty response. Please try again.",
+        });
+      }
+      res.json({ reply: responseText, model });
+    } catch (err) {
+      console.error(err);
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "MARAS AI request failed." });
+    }
+  });
+
+  /** GET /api/admin/maras-ai/alerts — Super Admin ONLY technical alerts (grouped, worst-first). */
+  app.get("/api/admin/maras-ai/alerts", requireSuperAdmin, (req, res) => {
+    res.json({ alerts: deriveTechnicalAlerts(monitoringEvents) });
+  });
+
+  /**
+   * POST /api/admin/monitoring/frontend-error — lets the Admin frontend
+   * report repeated client-side errors into the same grouped store. Any
+   * authenticated admin may report; only the Super Admin ever reads.
+   */
+  app.post("/api/admin/monitoring/frontend-error", requireRole("admin"), (req, res) => {
+    const message = typeof req.body?.message === "string" ? req.body.message.slice(0, 300) : "";
+    const page = typeof req.body?.page === "string" ? req.body.page.slice(0, 60) : "unknown";
+    if (!message) return res.status(400).json({ error: "message is required" });
+    recordMonitoringEvent(
+      monitoringEvents,
+      {
+        key: `frontend_error|${page}|${message.slice(0, 80)}`,
+        kind: "frontend_error",
+        severity: "medium",
+        area: `Admin frontend (${page})`,
+        title: "Repeated frontend error reported",
+        detail: message,
+      },
+      new Date().toISOString()
+    );
+    res.json({ recorded: true });
+  });
+
   app.get("/api/chat/unread", requireRole("admin"), async (req, res) => {
     try {
       // feature/admin-mobile-ui correction pass: per-admin (WhatsApp/
