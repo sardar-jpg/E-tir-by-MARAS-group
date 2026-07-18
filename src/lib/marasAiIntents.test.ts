@@ -12,6 +12,9 @@ import {
   buildSystemContextBlocks,
   resolveMarasAiResponseSource,
   deriveMarasAiAttention,
+  buildStructuredMarasAiResults,
+  buildMonitoringAlertsResult,
+  MARAS_AI_MAX_CARD_ITEMS,
   MARAS_AI_SOURCE_LABELS,
   MARAS_AI_QUICK_SUGGESTIONS,
   DELAYED_STALE_DAYS,
@@ -183,6 +186,81 @@ describe("response source indicator — honest, never faked", () => {
     expect(MARAS_AI_SOURCE_LABELS.system_data).toBe("System Data");
     expect(MARAS_AI_SOURCE_LABELS.ai_analysis).toBe("AI Analysis");
     expect(MARAS_AI_SOURCE_LABELS.system_data_ai_analysis).toBe("System Data + AI Analysis");
+  });
+});
+
+describe("structured results (PR #130) — typed cards from system data, never parsed from Markdown", () => {
+  const fleet2 = [
+    shipment({ id: "s1", shipmentNumber: "MAR-2026-1001", updatedAt: "2026-07-08T00:00:00Z", documents: [{ id: "d1", category: "cmr", name: "cmr.pdf" }] as Shipment["documents"] }), // stale -> delayed, has docs
+    shipment({ id: "s2", shipmentNumber: "MAR-2026-1002", updatedAt: "2026-07-17T20:00:00Z", documents: [] }), // fresh, no docs
+    shipment({ id: "s3", shipmentNumber: "MAR-2026-1003", status: "Delivered" }),
+  ];
+
+  it("delayed_shipments builds shipment cards with id, number, status, route, driver, customer, reason, severity", () => {
+    const [r] = buildStructuredMarasAiResults(["delayed_shipments"], { shipments: fleet2 }, NOW);
+    expect(r.responseType).toBe("delayed_shipments");
+    if (r.responseType !== "delayed_shipments") return;
+    expect(r.totalCount).toBe(1);
+    expect(r.shipments[0]).toMatchObject({
+      id: "s1",
+      shipmentNumber: "MAR-2026-1001",
+      status: "In Transit",
+      originCity: "Mersin",
+      destinationCity: "Erbil",
+      driverName: "Murat",
+      companyName: "Client Ltd",
+      severity: "critical",
+    });
+    expect(r.shipments[0].reason).toContain("no status change");
+  });
+
+  it("multiple intents -> multiple card sets; overview marks delayed rows as warnings", () => {
+    const results = buildStructuredMarasAiResults(["delayed_shipments", "shipments_overview", "missing_documents"], { shipments: fleet2 }, NOW);
+    expect(results.map((r) => r.responseType)).toEqual(["delayed_shipments", "shipments_overview", "missing_documents"]);
+    const overview = results[1];
+    if (overview.responseType === "shipments_overview") {
+      expect(overview.totalCount).toBe(2); // terminal shipment excluded
+      const delayedRow = overview.shipments.find((s) => s.id === "s1");
+      expect(delayedRow?.severity).toBe("warning");
+      expect(overview.shipments.find((s) => s.id === "s2")?.severity).toBe("info");
+    }
+    const missing = results[2];
+    if (missing.responseType === "missing_documents") {
+      expect(missing.shipments.map((s) => s.id)).toEqual(["s2"]);
+      expect(missing.shipments[0].reason).toBe("No documents on file");
+    }
+  });
+
+  it("driver_performance builds per-driver rows from real records", () => {
+    const drivers = [{ id: "d1", name: "Murat", truckNumber: "33 ABC 123", completedShipmentsCount: 12 } as Driver];
+    const [r] = buildStructuredMarasAiResults(["driver_performance"], { shipments: fleet2, drivers }, NOW);
+    if (r.responseType === "driver_performance") {
+      expect(r.drivers[0]).toMatchObject({ driverName: "Murat", truckNumber: "33 ABC 123", activeCount: 2, delayedCount: 1, completedCount: 12 });
+    } else {
+      throw new Error("expected driver_performance");
+    }
+  });
+
+  it("caps card items and reports the real total", () => {
+    const many = Array.from({ length: 30 }, (_, i) => shipment({ id: `s${i}`, shipmentNumber: `MAR-${i}`, updatedAt: "2026-07-01T00:00:00Z" }));
+    const [r] = buildStructuredMarasAiResults(["delayed_shipments"], { shipments: many }, NOW);
+    if (r.responseType === "delayed_shipments") {
+      expect(r.shipments).toHaveLength(MARAS_AI_MAX_CARD_ITEMS);
+      expect(r.totalCount).toBe(30);
+    }
+  });
+
+  it("cards never contain secrets and monitoring is left to the server's super gate", () => {
+    const results = buildStructuredMarasAiResults(["delayed_shipments", "monitoring_alerts"], { shipments: fleet2 }, NOW);
+    expect(JSON.stringify(results)).not.toContain("SECRET-SHARE-TOKEN-XYZ");
+    expect(results.some((r) => r.responseType === "monitoring_alerts")).toBe(false);
+    const alerts = buildMonitoringAlertsResult([
+      { title: "Slow API request", severity: "medium", area: "GET /api/x", count: 4, time: "t", explanation: "e", suggestedAction: "Profile it." },
+    ]);
+    expect(alerts).toMatchObject({ responseType: "monitoring_alerts", totalCount: 1 });
+    if (alerts.responseType === "monitoring_alerts") {
+      expect(alerts.alerts[0]).toMatchObject({ title: "Slow API request", severity: "medium", count: 4, suggestedAction: "Profile it." });
+    }
   });
 });
 

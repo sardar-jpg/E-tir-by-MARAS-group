@@ -17,6 +17,7 @@
  * prompt.
  */
 import type { AppNotification, CostStatement, Driver, Shipment } from "../types";
+import type { MonitoringAlertForAi } from "./marasAiCore";
 
 // ── Intent detection ─────────────────────────────────────────────────
 
@@ -293,6 +294,172 @@ export function buildSystemContextBlocks(intents: MarasAiIntent[], data: MarasAi
   // operational_risks + delayed_shipments/missing_documents can both add
   // the same digest — keep each block once.
   return [...new Set(blocks)];
+}
+
+// ── Structured results (PR #130 — presentation only) ─────────────────
+//
+// Typed payloads for the drawer's card rendering, derived from the SAME
+// authoritative records the server already collected for the detected
+// intents — never parsed back out of the model's Markdown, and carrying
+// only the whitelisted operational fields the text digests already use
+// (shareToken/credentials are never read here either). The AI text stays
+// the narrative; these are the data the narrative is about.
+
+export type MarasAiSeverityTag = "info" | "warning" | "critical";
+
+export interface MarasAiShipmentCardItem {
+  id: string;
+  shipmentNumber: string;
+  status: string;
+  originCity: string | null;
+  destinationCity: string | null;
+  driverName: string | null;
+  companyName: string | null;
+  updatedAt: string | null;
+  /** Why this shipment is listed (delay reason, "no documents on file", …). */
+  reason: string | null;
+  severity: MarasAiSeverityTag;
+}
+
+export interface MarasAiDriverCardItem {
+  driverName: string;
+  truckNumber: string | null;
+  activeCount: number;
+  delayedCount: number;
+  completedCount: number;
+}
+
+export interface MarasAiAlertCardItem {
+  title: string;
+  severity: string;
+  area: string;
+  count: number;
+  time: string;
+  suggestedAction: string;
+}
+
+export type MarasAiStructuredResult =
+  | { responseType: "delayed_shipments" | "shipments_overview" | "missing_documents" | "operational_risks"; totalCount: number; shipments: MarasAiShipmentCardItem[] }
+  | { responseType: "driver_performance"; totalCount: number; drivers: MarasAiDriverCardItem[] }
+  | { responseType: "monitoring_alerts"; totalCount: number; alerts: MarasAiAlertCardItem[] };
+
+/** Card caps keep responses light and conversation documents small. */
+export const MARAS_AI_MAX_CARD_ITEMS = 15;
+
+function toShipmentCard(s: Shipment, reason: string | null, severity: MarasAiSeverityTag): MarasAiShipmentCardItem {
+  return {
+    id: s.id,
+    shipmentNumber: s.shipmentNumber || s.id,
+    status: s.status || "?",
+    originCity: s.loadingCity || null,
+    destinationCity: s.deliveryCity || null,
+    driverName: s.assignedDriverName || null,
+    companyName: s.companyName || null,
+    updatedAt: s.updatedAt || s.createdAt || null,
+    reason,
+    severity,
+  };
+}
+
+/**
+ * One structured result per supported intent, from the collected data.
+ * Monitoring alerts are deliberately NOT built here — the server appends
+ * them inside its existing Super-Admin gate (buildMonitoringAlertsResult)
+ * so the role restriction has exactly one owner.
+ */
+export function buildStructuredMarasAiResults(
+  intents: MarasAiIntent[],
+  data: MarasAiSystemData,
+  nowIso: string
+): MarasAiStructuredResult[] {
+  const results: MarasAiStructuredResult[] = [];
+  const shipments = data.shipments || [];
+  const seen = new Set<string>();
+
+  for (const intent of intents) {
+    if (seen.has(intent)) continue;
+    seen.add(intent);
+    switch (intent) {
+      case "delayed_shipments":
+      case "operational_risks": {
+        const flagged = shipments
+          .map((s) => ({ s, a: assessShipmentDelay(s, nowIso) }))
+          .filter((x) => x.a.delayed)
+          .sort((x, y) => y.a.daysSinceUpdate - x.a.daysSinceUpdate);
+        results.push({
+          responseType: intent,
+          totalCount: flagged.length,
+          shipments: flagged.slice(0, MARAS_AI_MAX_CARD_ITEMS).map((x) => toShipmentCard(x.s, x.a.reason, "critical")),
+        });
+        break;
+      }
+      case "shipments_overview": {
+        const active = shipments
+          .filter((s) => !TERMINAL_STATUSES.has(s.status || ""))
+          .sort((a, b) => ((a.updatedAt || a.createdAt || "") < (b.updatedAt || b.createdAt || "") ? 1 : -1));
+        results.push({
+          responseType: "shipments_overview",
+          totalCount: active.length,
+          shipments: active.slice(0, MARAS_AI_MAX_CARD_ITEMS).map((s) => {
+            const delay = assessShipmentDelay(s, nowIso);
+            return toShipmentCard(s, delay.delayed ? delay.reason : null, delay.delayed ? "warning" : "info");
+          }),
+        });
+        break;
+      }
+      case "missing_documents": {
+        const missing = shipments.filter(
+          (s) => !TERMINAL_STATUSES.has(s.status || "") && !PRE_DISPATCH_STATUSES.has(s.status || "") && (s.documents || []).length === 0
+        );
+        results.push({
+          responseType: "missing_documents",
+          totalCount: missing.length,
+          shipments: missing.slice(0, MARAS_AI_MAX_CARD_ITEMS).map((s) => toShipmentCard(s, "No documents on file", "warning")),
+        });
+        break;
+      }
+      case "driver_performance": {
+        const rows = (data.drivers || [])
+          .map((d) => {
+            const own = shipments.filter((s) => s.assignedDriverId === d.id || (s.additionalDriverIds || []).includes(d.id));
+            const active = own.filter((s) => !TERMINAL_STATUSES.has(s.status || "") && !PRE_DISPATCH_STATUSES.has(s.status || ""));
+            return {
+              driverName: d.name,
+              truckNumber: d.truckNumber || null,
+              activeCount: active.length,
+              delayedCount: active.filter((s) => assessShipmentDelay(s, nowIso).delayed).length,
+              completedCount: d.completedShipmentsCount || 0,
+            };
+          })
+          .sort((a, b) => b.delayedCount - a.delayedCount || b.activeCount - a.activeCount);
+        results.push({
+          responseType: "driver_performance",
+          totalCount: rows.length,
+          drivers: rows.slice(0, MARAS_AI_MAX_CARD_ITEMS),
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return results;
+}
+
+/** Super-Admin-only monitoring alerts card set — called by the server INSIDE its existing role gate. */
+export function buildMonitoringAlertsResult(alerts: MonitoringAlertForAi[]): MarasAiStructuredResult {
+  return {
+    responseType: "monitoring_alerts",
+    totalCount: alerts.length,
+    alerts: alerts.slice(0, MARAS_AI_MAX_CARD_ITEMS).map((a) => ({
+      title: a.title,
+      severity: a.severity,
+      area: a.area,
+      count: a.count,
+      time: a.time,
+      suggestedAction: a.suggestedAction,
+    })),
+  };
 }
 
 // ── Response source indicator ────────────────────────────────────────

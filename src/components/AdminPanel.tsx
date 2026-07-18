@@ -44,7 +44,8 @@ import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
-import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention } from "../lib/marasAiIntents";
+import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention, type MarasAiStructuredResult } from "../lib/marasAiIntents";
+import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -372,7 +373,7 @@ export default function AdminPanel({
   // indicator (System Data / AI Analysis / System Data + AI Analysis).
   const [isMarasAiOpen, setIsMarasAiOpen] = useState(false);
   const [marasAiPrompt, setMarasAiPrompt] = useState("");
-  const [marasAiThread, setMarasAiThread] = useState<{ role: 'user' | 'assistant'; text: string; source?: string }[]>([]);
+  const [marasAiThread, setMarasAiThread] = useState<{ role: 'user' | 'assistant'; text: string; source?: string; structured?: MarasAiStructuredResult[] }[]>([]);
   const [isMarasAiSending, setIsMarasAiSending] = useState(false);
   const [marasAiError, setMarasAiError] = useState("");
   const [marasAiConversations, setMarasAiConversations] = useState<{ id: string; title: string; updatedAt: string; messageCount: number }[]>([]);
@@ -417,6 +418,9 @@ export default function AdminPanel({
         role: m.role === 'assistant' ? 'assistant' as const : 'user' as const,
         text: String(m.text || ""),
         ...(typeof m.source === 'string' ? { source: m.source } : {}),
+        // PR #130: stored assistant messages carry their card payload so
+        // reopening a conversation re-renders the same cards.
+        ...(Array.isArray(m.structured) ? { structured: m.structured } : {}),
       })));
       setActiveMarasAiConversationId(conversationId);
     } catch {
@@ -437,6 +441,25 @@ export default function AdminPanel({
     } catch {
       setMarasAiError("Could not delete the conversation. Check your connection.");
     }
+  };
+
+  // PR #130 — read-only navigation actions on MARAS AI shipment cards.
+  // Each just routes into an EXISTING Admin view (details modal, tracking
+  // tab, Chat Center) and closes the drawer; nothing here can write data.
+  // The tracking action is additionally role-gated at the render site
+  // (canViewGpsTracking) — the button never exists for roles without it.
+  const handleMarasAiOpenShipment = (shipmentId: string) => {
+    setIsMarasAiOpen(false);
+    setOpenDetailsId(shipmentId);
+  };
+  const handleMarasAiOpenTracking = () => {
+    setIsMarasAiOpen(false);
+    setActiveTab('tracking_map');
+  };
+  const handleMarasAiOpenChat = (shipmentId: string) => {
+    setIsMarasAiOpen(false);
+    setChatCenterFocus({ shipmentId, channel: 'internal_staff' });
+    setActiveTab('chat_center');
   };
 
   const handleSendMarasAi = async () => {
@@ -469,6 +492,7 @@ export default function AdminPanel({
           role: 'assistant',
           text: String(data.reply || ""),
           ...(typeof data.source === 'string' ? { source: data.source } : {}),
+          ...(Array.isArray(data.structured) && data.structured.length ? { structured: data.structured } : {}),
         }]);
         setMarasAiPrompt("");
         // The reply lives in a persisted conversation now — track it and
@@ -4858,7 +4882,23 @@ MARAS Group etir Center`;
                       <span className={`block text-[10px] font-black uppercase tracking-wider mb-1 ${turn.role === 'user' ? 'text-orange-500' : 'text-slate-400'}`}>
                         {turn.role === 'user' ? 'You' : 'MARAS AI'}
                       </span>
-                      {turn.text}
+                      {turn.role === 'assistant' ? (
+                        // PR #130: structured cards + safe Markdown — one
+                        // shared component for mobile and desktop. The
+                        // tracking action is role-gated here; shipment/chat
+                        // views are available to every role this drawer
+                        // renders for.
+                        <MarasAiResponseView
+                          text={turn.text}
+                          structured={turn.structured}
+                          lang={lang}
+                          onOpenShipment={handleMarasAiOpenShipment}
+                          onOpenTracking={canViewGpsTracking(resolvedAdminType) ? handleMarasAiOpenTracking : undefined}
+                          onOpenChat={handleMarasAiOpenChat}
+                        />
+                      ) : (
+                        turn.text
+                      )}
                       {/* Honest, server-derived response-source indicator —
                           never invented client-side. */}
                       {turn.role === 'assistant' && turn.source && (MARAS_AI_SOURCE_LABELS as Record<string, string>)[turn.source] && (
