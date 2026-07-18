@@ -101,6 +101,17 @@ describe("one mobile chat experience — no duplicate full-chat hand-off on mobi
     expect(CHAT_CENTER).toContain("isNearBottomRef.current = true;\n        setChannelMessages((prev) => [...prev, msg]);");
   });
 
+  it("mobile list card is sized by MEASUREMENT, not a hardcoded viewport guess (last row must never clip under the bottom nav)", () => {
+    // The old hardcoded chrome guess clipped the final shipment row on
+    // real iPhones (top bar + browser toolbar + safe areas exceeded it).
+    expect(CHAT_CENTER).not.toContain("h-[calc(100dvh-13.5rem)]");
+    // Measured: card top + live visualViewport height, reserving exactly
+    // AdminPanel's own bottom-nav allowance (5.5rem + safe-area inset).
+    expect(CHAT_CENTER).toContain("getBoundingClientRect().top");
+    expect(CHAT_CENTER).toContain("px - 5.5rem - env(safe-area-inset-bottom)");
+    expect(CHAT_CENTER).toContain("isMobile && mobileListHeight ? { height: mobileListHeight } : undefined");
+  });
+
   it("desktop keeps the two-pane layout and its sizing", () => {
     expect(CHAT_CENTER).toContain("lg:h-[calc(100vh-220px)] lg:min-h-[520px]");
     expect(CHAT_CENTER).toContain('"hidden lg:flex flex-1 flex-col min-w-0 min-h-0"');

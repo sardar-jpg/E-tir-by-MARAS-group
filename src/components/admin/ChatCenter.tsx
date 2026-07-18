@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, Check, CheckCheck, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
@@ -366,6 +366,41 @@ export default function ChatCenter({
   const [lightboxTarget, setLightboxTarget] = useState<ImageLightboxTarget | null>(null);
   // Keyboard-aware size/offset for the mobile full-screen conversation.
   const visualViewport = useVisualViewportMetrics(isMobile && Boolean(selectedShipmentId));
+
+  // fix/admin-chat-list-clipping: the mobile shipment-list card used to
+  // size itself with a hardcoded `calc(100dvh - 13.5rem)` guess at the
+  // surrounding chrome. On a real iPhone the top app bar + browser
+  // toolbar + safe areas exceed that guess, so the card's bottom slid
+  // UNDER the fixed bottom navigation — the inner list scrolled to its
+  // end, but its last row stayed clipped behind the nav. The card is now
+  // sized from reality: measure its own top edge, take the live
+  // visualViewport height (which tracks the collapsing browser toolbar),
+  // and reserve exactly the bottom-nav allowance AdminPanel itself uses
+  // (5.5rem + env(safe-area-inset-bottom)) — no more, so there is no
+  // excessive blank space either.
+  const listRootRef = useRef<HTMLDivElement>(null);
+  const [mobileListHeight, setMobileListHeight] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    if (!isMobile || typeof window === 'undefined') {
+      setMobileListHeight(null);
+      return;
+    }
+    const update = () => {
+      const el = listRootRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const available = Math.max(Math.round(viewportHeight - top), 320);
+      setMobileListHeight(`calc(${available}px - 5.5rem - env(safe-area-inset-bottom))`);
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.visualViewport?.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.visualViewport?.removeEventListener('resize', update);
+    };
+  }, [isMobile]);
 
   // fix/admin-mobile-chat-keyboard-ux: while the mobile conversation is
   // open, the PAGE BEHIND it must not scroll at all — on a real iPhone,
@@ -1196,11 +1231,23 @@ export default function ChatCenter({
           SELECTED conversation renders as the keyboard-aware full-screen
           overlay below instead of squeezing into this in-flow card.
           Desktop (lg) keeps the original two-pane layout and sizing. */}
-      <div className="flex flex-col lg:flex-row h-[calc(100dvh-13.5rem)] min-h-[320px] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
+      <div
+        ref={listRootRef}
+        className="flex flex-col lg:flex-row min-h-[320px] lg:h-[calc(100vh-220px)] lg:min-h-[520px] bg-white border border-slate-200 rounded-2xl overflow-hidden"
+        style={isMobile && mobileListHeight ? { height: mobileListHeight } : undefined}
+        dir={isRtl ? 'rtl' : 'ltr'}
+      >
         {/* Left: shipment conversation list — every row's badge is the
             per-shipment total across channels, from the same authoritative
             unread array as the channel tabs and the global badge. */}
-        <div className="flex w-full lg:w-80 shrink-0 lg:border-e border-slate-200 flex-col min-h-0 bg-slate-50">
+        {/* fix/admin-chat-list-clipping: on mobile this pane must FILL the
+            card (flex-1 min-h-0) so the inner list scrolls within it —
+            with the previous shrink-0 the pane refused to shrink, grew to
+            its full content height, and the card's overflow-hidden simply
+            CLIPPED the tail rows (the inner scroller never activated, so
+            "scrolled to the end" still hid the last shipment). Desktop
+            keeps the fixed 320px side column exactly as before. */}
+        <div className="flex w-full flex-1 lg:flex-none lg:w-80 lg:shrink-0 lg:border-e border-slate-200 flex-col min-h-0 bg-slate-50">
           <div className="p-3 lg:p-4 border-b border-slate-200">
             <h2 className="font-bold text-slate-900 text-sm flex items-center gap-2">
               <MessageSquare className="w-4 h-4 text-orange-500" />
