@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, Check, CheckCheck, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
-import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment, countUnreadForChannel } from '../../lib/chatCenterView';
+import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment, countUnreadForChannel, sortShipmentsByChatActivity } from '../../lib/chatCenterView';
 import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
 import ImageLightbox, { type ImageLightboxTarget } from '../ImageLightbox';
 import { MAX_CHAT_TEXT_LENGTH } from '../../lib/chatMessageValidation';
@@ -364,6 +364,18 @@ export default function ChatCenter({
   // fix/admin-mobile-chat-correctness: in-app image viewer target — image
   // attachments never navigate the WebView to the raw file URL.
   const [lightboxTarget, setLightboxTarget] = useState<ImageLightboxTarget | null>(null);
+  // feature/admin-chat-recent-activity-order: this session's own memory of
+  // the newest chat activity per Order — set the instant the current admin
+  // sends (immediate reorder, no refresh) and when an opened thread loads
+  // its newest page (so reading a LEGACY Order — no lastChatActivityAt
+  // field yet — never demotes it once its unread entries clear). Merged
+  // with the server field and the unread poll by
+  // sortShipmentsByChatActivity (chatCenterView.ts).
+  const [localActivity, setLocalActivity] = useState<Record<string, string>>({});
+  const recordLocalActivity = (shipmentId: string, timestamp: string | undefined) => {
+    if (!timestamp) return;
+    setLocalActivity((prev) => (prev[shipmentId] && prev[shipmentId] >= timestamp ? prev : { ...prev, [shipmentId]: timestamp }));
+  };
   // Keyboard-aware size/offset for the mobile full-screen conversation.
   const visualViewport = useVisualViewportMetrics(isMobile && Boolean(selectedShipmentId));
 
@@ -457,7 +469,15 @@ export default function ChatCenter({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus]);
 
-  const filteredShipments = filterShipmentsBySearch(shipments, searchQuery);
+  // feature/admin-chat-recent-activity-order: WhatsApp-style ordering —
+  // search filters first, the surviving rows keep the same
+  // recent-activity order (sort is pure: same rows out as in, nothing
+  // duplicated or dropped).
+  const filteredShipments = sortShipmentsByChatActivity(
+    filterShipmentsBySearch(shipments, searchQuery),
+    unreadChatMessages,
+    localActivity
+  );
   const selectedShipment = selectedShipmentId
     ? shipments.find((s) => s.id === selectedShipmentId) ?? null
     : null;
@@ -539,6 +559,10 @@ export default function ChatCenter({
         const newest = data[data.length - 1];
         if (newest) {
           newestCursorRef.current = encodePageCursor({ ts: newest.timestamp, id: (newest as any).id });
+          // feature/admin-chat-recent-activity-order: remember this
+          // Order's newest visible message as known activity, so reading
+          // it (which clears unread records) never demotes the Order.
+          recordLocalActivity(selectedShipment.id, newest.timestamp);
         }
         if (!cursor) {
           olderCursorRef.current = parsed.nextCursor ?? null;
@@ -781,6 +805,9 @@ export default function ChatCenter({
       });
       if (res.ok) {
         const msg = await res.json();
+        // feature/admin-chat-recent-activity-order: the send IS activity —
+        // this Order moves to the top of the list immediately.
+        recordLocalActivity(selectedShipment.id, msg.timestamp);
         // fix/admin-mobile-chat-keyboard-ux: sending always follows your
         // own message to the bottom (smooth, via the length effect) —
         // never leaves the view parked at an older scroll position.

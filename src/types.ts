@@ -130,6 +130,20 @@ export interface Shipment {
   // client only ever submits the revision it last read, never a value it
   // computes itself.
   revision?: number;
+  /**
+   * feature/admin-chat-recent-activity-order: timestamp of the newest chat
+   * message in this Order's chat room (any of its three channels —
+   * internal_staff / driver_admin / client_admin — any sender role).
+   * Written atomically in the SAME Firestore batch as the message + unread
+   * fan-out (commitChatMessageWithUnreadFanout, server.ts) so the Chat
+   * Center can sort Orders by recent activity (WhatsApp-style) without
+   * scanning chatMessages. Deliberately does NOT touch `updatedAt` — a
+   * chat message is not a shipment edit. Optional: legacy shipments
+   * without it sort by createdAt below Orders with known activity (see
+   * sortShipmentsByChatActivity, chatCenterView.ts); a dry-run backfill
+   * exists in scripts/backfill-last-chat-activity.ts.
+   */
+  lastChatActivityAt?: string;
   isLinkShared: boolean;
   shareToken: string;
   shareIncludeDocuments: boolean;

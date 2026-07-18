@@ -54,6 +54,78 @@ export function shipmentRouteLabel(shipment: Pick<Shipment, "loadingCity" | "del
   return `${shipment.loadingCity} → ${shipment.deliveryCity}`;
 }
 
+// ── Recent-activity ordering (feature/admin-chat-recent-activity-order) ──
+
+/**
+ * The newest KNOWN chat activity for one Order's room, as the maximum of
+ * three sources (all ISO-8601 strings, so plain lexicographic comparison
+ * is chronological — no Date parsing in the sort hot path):
+ *  1. shipment.lastChatActivityAt — the durable, server-maintained
+ *     summary written atomically with every message create
+ *     (commitChatMessageWithUnreadFanout, server.ts);
+ *  2. the newest unreadChatMessages timestamp for this shipment — moves
+ *     an Order up within one ≤12s badge poll when SOMEONE ELSE sends,
+ *     even before this client refetches the shipment record;
+ *  3. localActivity[shipmentId] — the Chat Center's own session memory
+ *     (set the moment the current admin sends, and when an opened
+ *     thread loads its newest page), which is also what keeps a LEGACY
+ *     Order (no lastChatActivityAt yet) from sliding back down when
+ *     reading clears its unread entries: activity happened; reading
+ *     doesn't un-happen it.
+ * Returns null when no activity is known from any source.
+ */
+export function resolveShipmentChatActivityAt(
+  shipment: Pick<Shipment, "id" | "lastChatActivityAt">,
+  newestUnreadByShipment: Map<string, string>,
+  localActivity: Record<string, string>
+): string | null {
+  let latest = shipment.lastChatActivityAt || "";
+  const unreadTs = newestUnreadByShipment.get(shipment.id);
+  if (unreadTs && unreadTs > latest) latest = unreadTs;
+  const localTs = localActivity[shipment.id];
+  if (localTs && localTs > latest) latest = localTs;
+  return latest || null;
+}
+
+/** Newest unread-message timestamp per shipment, indexed once per sort (O(unread)). */
+export function indexNewestUnreadByShipment(unreadMessages: ChatMessage[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const m of unreadMessages) {
+    const prev = map.get(m.shipmentId);
+    if (!prev || m.timestamp > prev) map.set(m.shipmentId, m.timestamp);
+  }
+  return map;
+}
+
+/**
+ * WhatsApp/Telegram-style Chat Center ordering: the Order with the most
+ * recent chat activity (any of its three channels, any sender role)
+ * first. Orders with NO known activity sort below every Order that has
+ * some, falling back to shipment creation time. Fully deterministic
+ * tie-break: activity timestamp desc → createdAt desc → shipmentId
+ * ascending. Pure and non-mutating — returns a new array with exactly
+ * the same rows (nothing duplicated, nothing dropped), so callers can
+ * filter first (search) and the surviving rows keep this same order.
+ * NOT derived from unread state alone: clearing unread never demotes an
+ * Order (sources 1 and 3 above persist through a read).
+ */
+export function sortShipmentsByChatActivity<
+  T extends Pick<Shipment, "id" | "createdAt" | "lastChatActivityAt">
+>(shipments: T[], unreadMessages: ChatMessage[], localActivity: Record<string, string>): T[] {
+  const newestUnread = indexNewestUnreadByShipment(unreadMessages);
+  return [...shipments].sort((a, b) => {
+    const aActivity = resolveShipmentChatActivityAt(a, newestUnread, localActivity);
+    const bActivity = resolveShipmentChatActivityAt(b, newestUnread, localActivity);
+    if (aActivity && bActivity && aActivity !== bActivity) return aActivity < bActivity ? 1 : -1;
+    if (aActivity && !bActivity) return -1;
+    if (!aActivity && bActivity) return 1;
+    const aCreated = a.createdAt || "";
+    const bCreated = b.createdAt || "";
+    if (aCreated !== bCreated) return aCreated < bCreated ? 1 : -1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
 /**
  * fix/admin-mobile-chat-correctness: per-channel unread count for one
  * shipment's channel tabs, derived from the SAME authoritative

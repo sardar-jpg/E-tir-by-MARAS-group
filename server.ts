@@ -1080,9 +1080,22 @@ function chunkArray<T>(items: T[], size: number): T[][] {
  * in, so no separate atomicity primitive is needed there.
  */
 async function commitChatMessageWithUnreadFanout(message: ChatMessage, unreadRecords: AdminChatUnreadRecord[]): Promise<void> {
+  // feature/admin-chat-recent-activity-order: the shipment-level
+  // recent-activity summary the Chat Center sorts by (WhatsApp-style).
+  // Written in the SAME first batch as the message itself, so a message
+  // can never exist without its Order's lastChatActivityAt reflecting it
+  // (and vice versa). One field only — deliberately NOT updatedAt, which
+  // means "the shipment record was edited" and drives the shipment delta
+  // polls; a chat message is not a shipment edit. Exact shipmentId scope:
+  // the message's own room, all three channels, all sender roles.
+  const activityUpdate = { lastChatActivityAt: message.timestamp };
+
   if (useMemoryFallback || !db) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
     await setDoc(doc(db, "chatMessages", message.id), message);
+    // Memory-fallback parity for the activity summary (updateDoc merges
+    // only the provided field — updatedAt untouched).
+    await updateDoc(doc(db, "shipments", message.shipmentId), activityUpdate);
     for (const record of unreadRecords) {
       await setDoc(doc(db, "adminChatUnread", record.id), record);
     }
@@ -1095,7 +1108,13 @@ async function commitChatMessageWithUnreadFanout(message: ChatMessage, unreadRec
   try {
     for (; committedChunks < batchesNeeded.length; committedChunks++) {
       const batch = db.batch();
-      if (committedChunks === 0) batch.set(db.collection("chatMessages").doc(message.id), cleanUndefined(message));
+      if (committedChunks === 0) {
+        batch.set(db.collection("chatMessages").doc(message.id), cleanUndefined(message));
+        // Atomic with the message write (the route already verified the
+        // shipment exists — requireShipmentAccess + the closed-chat gate
+        // both loaded it).
+        batch.update(db.collection("shipments").doc(message.shipmentId), activityUpdate);
+      }
       for (const record of batchesNeeded[committedChunks]) {
         batch.set(db.collection("adminChatUnread").doc(record.id), cleanUndefined(record));
       }
@@ -1113,6 +1132,7 @@ async function commitChatMessageWithUnreadFanout(message: ChatMessage, unreadRec
     const messageAlreadyCommitted = committedChunks > 0;
     if (!messageAlreadyCommitted) {
       await setDoc(doc(db, "chatMessages", message.id), message);
+      await updateDoc(doc(db, "shipments", message.shipmentId), activityUpdate);
     }
     for (const record of batchesNeeded.slice(committedChunks).flat()) {
       await setDoc(doc(db, "adminChatUnread", record.id), record);

@@ -21,6 +21,7 @@ const ADMIN_PANEL = readFileSync(join(ROOT, "src", "components", "AdminPanel.tsx
 const LIGHTBOX = readFileSync(join(ROOT, "src", "components", "ImageLightbox.tsx"), "utf-8");
 const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
 const RECONCILE = readFileSync(join(ROOT, "scripts", "reconcile-admin-chat-unread.ts"), "utf-8");
+const ACTIVITY_BACKFILL = readFileSync(join(ROOT, "scripts", "backfill-last-chat-activity.ts"), "utf-8");
 
 function region(source: string, needle: string, length: number): string {
   const start = source.indexOf(needle);
@@ -198,5 +199,45 @@ describe("channel privacy boundaries stay wired", () => {
   it("the ChatCenter composer posts to the shipment-scoped chat route with the active channel — the server still decides permissions", () => {
     expect(CHAT_CENTER).toContain("const body: Record<string, unknown> = { channel: activeChannel };");
     expect(CHAT_CENTER).toContain("`/api/shipments/${selectedShipment.id}/chat`");
+  });
+});
+
+describe("recent-activity ordering (feature/admin-chat-recent-activity-order)", () => {
+  it("lastChatActivityAt is written ATOMICALLY in the same first batch as the message — and never touches updatedAt", () => {
+    const COMMIT = region(SERVER, "async function commitChatMessageWithUnreadFanout", 3600);
+    expect(COMMIT).toContain("const activityUpdate = { lastChatActivityAt: message.timestamp };");
+    // Firestore: same first batch as the message set.
+    expect(COMMIT).toContain('batch.update(db.collection("shipments").doc(message.shipmentId), activityUpdate);');
+    // Memory-fallback parity (single-field merge).
+    expect(COMMIT).toContain('await updateDoc(doc(db, "shipments", message.shipmentId), activityUpdate);');
+    // A chat message is not a shipment edit: updatedAt must not appear in
+    // the activity update (only in prose comments, if anywhere).
+    expect(COMMIT).not.toContain("updatedAt:");
+  });
+
+  it("the Chat Center sorts through the ONE tested pure helper — search filters first, ordering preserved", () => {
+    expect(CHAT_CENTER).toContain("sortShipmentsByChatActivity(");
+    expect(CHAT_CENTER).toContain("filterShipmentsBySearch(shipments, searchQuery),");
+    // Immediate reorder on own send + read-never-demotes memory.
+    expect(CHAT_CENTER).toContain("recordLocalActivity(selectedShipment.id, msg.timestamp);");
+    expect(CHAT_CENTER).toContain("recordLocalActivity(selectedShipment.id, newest.timestamp);");
+    // Ordering is never derived by fetching the chatMessages collection.
+    expect(CHAT_CENTER).not.toContain('"/api/chat/');
+  });
+
+  it("the activity backfill is dry-run by default; apply requires its explicit flag and never deletes", () => {
+    const beforeApplyGate = ACTIVITY_BACKFILL.slice(0, ACTIVITY_BACKFILL.indexOf("if (!apply)"));
+    expect(beforeApplyGate.length).toBeGreaterThan(500);
+    // No Firestore write shape may be reachable before the dry-run exit —
+    // no document reference is even constructed there (`.doc(`), and no
+    // update/delete call exists. (Map.prototype.set for the in-memory
+    // aggregation is not a write.)
+    expect(beforeApplyGate).not.toContain(".update(");
+    expect(beforeApplyGate).not.toContain(".doc(");
+    expect(beforeApplyGate).not.toContain(".delete(");
+    expect(ACTIVITY_BACKFILL).toContain("Dry run complete. Nothing was modified.");
+    expect(ACTIVITY_BACKFILL).toContain('const APPLY_FLAG = "--apply-last-chat-activity"');
+    expect(ACTIVITY_BACKFILL).toContain("process.argv.includes(APPLY_FLAG)");
+    expect(ACTIVITY_BACKFILL).not.toContain(".delete(");
   });
 });
