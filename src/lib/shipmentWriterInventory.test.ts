@@ -75,6 +75,16 @@ const KNOWN_WRITE_SITES: WriteSite[] = [
     needle: 'await setDoc(doc(db, "shipments", id), newShipment);',
     reason: "POST /api/shipments (create route) — a brand-new document, not a mutation of an existing one; explicitly sets revision: INITIAL_SHIPMENT_REVISION.",
   },
+  {
+    needle: 'batch.update(db.collection("shipments").doc(message.shipmentId), activityUpdate);',
+    reason:
+      "feature/admin-chat-recent-activity-order — the ONE Firestore write of the chat-activity summary (lastChatActivityAt), reviewed as a category-3-EQUIVALENT writer: a single-field server-side merge that (a) touches only a field buildUpdatedShipment's ...current spread always preserves and no form field maps to, (b) never reads or advances revision (revision-preserving, like applyIsolatedShipmentUpdate), (c) cannot clobber any other field by construction (field-level update, not a doc replace), and (d) is safe AGAINST the three transactional helpers because Firestore retries their transactions when the doc changes between read and commit, re-reading the fresh lastChatActivityAt. It deliberately does NOT go through applyIsolatedShipmentUpdate: the summary must commit in the SAME WriteBatch as the chat message + unread fan-out (commitChatMessageWithUnreadFanout) so a message can never exist without its Order's activity reflecting it.",
+  },
+  {
+    needle: 'await updateDoc(doc(db, "shipments", message.shipmentId), activityUpdate);',
+    reason:
+      "the memory-fallback / Firestore-failure parity writes of the same single-field chat-activity merge (2 occurrences — the memory branch and the batch-failure recovery branch of commitChatMessageWithUnreadFanout). handleUpdateDocMemory merges only the provided field; the memory store is single-threaded, so no interleaving risk.",
+  },
 ];
 
 // Matches any write call that targets a shipment document reference,
@@ -85,7 +95,7 @@ const KNOWN_WRITE_SITES: WriteSite[] = [
 // any of those wrappers at all). Broad on purpose — a future writer using
 // a slightly different local variable name, or a different chained-call
 // shape, must still be caught, not silently miscounted as zero.
-const WRITE_CALL_PATTERN = /(?:(?:tx\.set|setDoc|updateDoc)\(\s*(?:sDocRef|sRef|doc\(db,\s*"shipments"))|(?:db\.collection\("shipments"\)\.doc\([^)]*\)\.set\()/g;
+const WRITE_CALL_PATTERN = /(?:(?:tx\.set|setDoc|updateDoc)\(\s*(?:sDocRef|sRef|doc\(db,\s*"shipments"))|(?:db\.collection\("shipments"\)\.doc\([^)]*\)\.(?:set|update)\()|(?:batch\.(?:set|update)\(db\.collection\("shipments"\))/g;
 
 function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
@@ -155,14 +165,35 @@ describe("Every write to the shipments collection is a known, reviewed writer", 
     expect(guardedCallCount).toBe(1);
   });
 
-  it("no write call targets a shipment document reference outside the three revision-aware helper functions or the two documented new-document exceptions", () => {
+  it("no write call targets a shipment document reference outside the reviewed inventory", () => {
     // Every occurrence of the broad write pattern must be explained by one
     // of: the three helper functions' own internal tx.set (3 occurrences),
-    // the startup seed (1), or the create route (1) — 5 total. If this
-    // count ever grows, a new writer was added that isn't accounted for in
-    // KNOWN_WRITE_SITES above and needs review before this test is updated.
+    // the startup seed (1), the create route (1), or the reviewed
+    // chat-activity summary writer (feature/admin-chat-recent-activity-order:
+    // 1 Firestore batch.update + 2 memory/fallback updateDoc parity writes
+    // inside commitChatMessageWithUnreadFanout — see its KNOWN_WRITE_SITES
+    // entries for the full category-3-equivalence review) — 8 total. If
+    // this count ever grows, a new writer was added that isn't accounted
+    // for in KNOWN_WRITE_SITES above and needs review before this test is
+    // updated. (This pass also widened the detection pattern to catch
+    // chained .update( calls, which the original .set(-only pattern missed.)
     const matches = SOURCE.match(WRITE_CALL_PATTERN) || [];
-    expect(matches.length).toBe(5);
+    expect(matches.length).toBe(8);
+  });
+
+  it("the chat-activity summary writer stays a single-field, revision-preserving merge — never a doc replace, never touching revision or updatedAt", () => {
+    const COMMIT = SOURCE.slice(
+      SOURCE.indexOf("async function commitChatMessageWithUnreadFanout"),
+      SOURCE.indexOf("async function commitChatMessageWithUnreadFanout") + 3600
+    );
+    expect(COMMIT).toContain("const activityUpdate = { lastChatActivityAt: message.timestamp };");
+    // Field-level update()/updateDoc merge only — a .set( against a
+    // shipment ref inside this function would be a doc replace bypassing
+    // the revision system entirely.
+    expect(COMMIT).not.toContain('.doc(message.shipmentId), cleanUndefined');
+    expect(COMMIT).not.toContain('setDoc(doc(db, "shipments"');
+    expect(COMMIT).not.toContain("revision");
+    expect(COMMIT).not.toContain("updatedAt:");
   });
 });
 
