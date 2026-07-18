@@ -44,6 +44,7 @@ import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
+import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS } from "../lib/marasAiIntents";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -86,17 +87,20 @@ function AdminSectionLoadingFallback({ lang }: { lang: Language }) {
 
 const fetch = apiFetch;
 
-// PR #36: ✨ MARAS AI header drawer — UI foundation only, no backend/AI
-// provider wired up yet. Quick actions just seed the prompt textarea; the
-// Send button always shows a "not connected yet" preview message.
-const MARAS_AI_QUICK_ACTIONS: { id: string; label: string; icon: typeof Ship; prompt: string }[] = [
-  { id: 'summarize_shipment', label: 'Summarize Shipment', icon: Ship, prompt: 'Summarize shipment ' },
-  { id: 'check_missing_documents', label: 'Check Missing Documents', icon: FileText, prompt: 'Check missing documents for shipment ' },
-  { id: 'draft_customer_message', label: 'Draft Customer Message', icon: Mail, prompt: 'Draft a customer message about ' },
-  { id: 'draft_driver_instruction', label: 'Draft Driver Instruction', icon: Truck, prompt: 'Draft driver instructions for ' },
-  { id: 'summarize_internal_chat', label: 'Summarize Internal Chat', icon: MessageSquare, prompt: 'Summarize the internal chat for ' },
-  { id: 'review_operational_risks', label: 'Review Operational Risks', icon: ShieldAlert, prompt: 'Review operational risks for ' },
-];
+// PR #128 refinement: the drawer's quick suggestions come from the same
+// shared module the server's intent detection lives in
+// (src/lib/marasAiIntents.ts), so every suggestion is a prompt the
+// backend genuinely knows how to collect system data for. Selecting one
+// only populates the prompt — the employee still presses Send.
+const MARAS_AI_SUGGESTION_ICONS: Record<string, typeof Ship> = {
+  delayed_shipments: Clock,
+  todays_operations: Calendar,
+  monitoring_alerts: ShieldAlert,
+  missing_documents: FileText,
+  operational_risks: AlertCircle,
+  dashboard_summary: BarChart3,
+  driver_performance: Truck,
+};
 
 /**
  * Decodes the `id` field out of this browser's own signed session token
@@ -359,10 +363,141 @@ export default function AdminPanel({
   }, []);
   const [isChatDropdownOpen, setIsChatDropdownOpen] = useState(false);
   const chatDropdownRef = React.useRef<HTMLDivElement>(null);
-  // PR #36: ✨ MARAS AI header drawer — UI-only state, no backend calls.
+  // PR #36 UI foundation, connected to the real backend in PR #128:
+  // conversation state for the ✨ MARAS AI drawer. Conversations are
+  // PERSISTED per admin server-side (each admin only ever sees their
+  // own); the OpenAI call happens exclusively server-side
+  // (POST /api/admin/maras-ai/chat) — no key or provider client exists in
+  // this bundle. Assistant turns carry the server-derived response-source
+  // indicator (System Data / AI Analysis / System Data + AI Analysis).
   const [isMarasAiOpen, setIsMarasAiOpen] = useState(false);
   const [marasAiPrompt, setMarasAiPrompt] = useState("");
-  const [marasAiSendMessage, setMarasAiSendMessage] = useState<string | null>(null);
+  const [marasAiThread, setMarasAiThread] = useState<{ role: 'user' | 'assistant'; text: string; source?: string }[]>([]);
+  const [isMarasAiSending, setIsMarasAiSending] = useState(false);
+  const [marasAiError, setMarasAiError] = useState("");
+  const [marasAiConversations, setMarasAiConversations] = useState<{ id: string; title: string; updatedAt: string; messageCount: number }[]>([]);
+  const [activeMarasAiConversationId, setActiveMarasAiConversationId] = useState<string | null>(null);
+
+  // Refresh this admin's own conversation list whenever the drawer opens.
+  useEffect(() => {
+    if (!isMarasAiOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/admin/maras-ai/conversations");
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) setMarasAiConversations(Array.isArray(data.conversations) ? data.conversations : []);
+        }
+      } catch {
+        // Listing is best-effort; sending still works without it.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isMarasAiOpen]);
+
+  const handleNewMarasAiConversation = () => {
+    setActiveMarasAiConversationId(null);
+    setMarasAiThread([]);
+    setMarasAiPrompt("");
+    setMarasAiError("");
+  };
+
+  const handleOpenMarasAiConversation = async (conversationId: string) => {
+    setMarasAiError("");
+    try {
+      const res = await apiFetch(`/api/admin/maras-ai/conversations/${conversationId}`);
+      if (!res.ok) {
+        setMarasAiError("Could not load this conversation.");
+        return;
+      }
+      const data = await res.json();
+      const messages = Array.isArray(data.conversation?.messages) ? data.conversation.messages : [];
+      setMarasAiThread(messages.map((m: any) => ({
+        role: m.role === 'assistant' ? 'assistant' as const : 'user' as const,
+        text: String(m.text || ""),
+        ...(typeof m.source === 'string' ? { source: m.source } : {}),
+      })));
+      setActiveMarasAiConversationId(conversationId);
+    } catch {
+      setMarasAiError("Could not load this conversation. Check your connection.");
+    }
+  };
+
+  const handleDeleteMarasAiConversation = async (conversationId: string) => {
+    if (!window.confirm("Delete this MARAS AI conversation? This cannot be undone.")) return;
+    try {
+      const res = await apiFetch(`/api/admin/maras-ai/conversations/${conversationId}`, { method: "DELETE" });
+      if (res.ok) {
+        setMarasAiConversations((prev) => prev.filter((c) => c.id !== conversationId));
+        if (activeMarasAiConversationId === conversationId) handleNewMarasAiConversation();
+      } else {
+        setMarasAiError("Could not delete the conversation.");
+      }
+    } catch {
+      setMarasAiError("Could not delete the conversation. Check your connection.");
+    }
+  };
+
+  const handleSendMarasAi = async () => {
+    const message = marasAiPrompt.trim();
+    // Duplicate-submission guard: one in-flight request at a time.
+    if (!message || isMarasAiSending) return;
+    setIsMarasAiSending(true);
+    setMarasAiError("");
+    setMarasAiThread((prev) => [...prev, { role: 'user', text: message }]);
+    try {
+      const res = await apiFetch("/api/admin/maras-ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          // Continuing a conversation: the server uses its own stored
+          // thread as history. First turn of a new one: nothing to send.
+          ...(activeMarasAiConversationId ? { conversationId: activeMarasAiConversationId } : { history: marasAiThread.slice(-12) }),
+          context: {
+            page: activeTab,
+            // The shipment whose details modal is open, if any — the
+            // server loads the authoritative record itself.
+            ...(openDetailsId ? { shipmentId: openDetailsId } : {}),
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMarasAiThread((prev) => [...prev, {
+          role: 'assistant',
+          text: String(data.reply || ""),
+          ...(typeof data.source === 'string' ? { source: data.source } : {}),
+        }]);
+        setMarasAiPrompt("");
+        // The reply lives in a persisted conversation now — track it and
+        // float its summary to the top of the list.
+        if (data.conversation?.id) {
+          setActiveMarasAiConversationId(String(data.conversation.id));
+          setMarasAiConversations((prev) => [
+            {
+              id: String(data.conversation.id),
+              title: String(data.conversation.title || "New conversation"),
+              updatedAt: String(data.conversation.updatedAt || new Date().toISOString()),
+              messageCount: Number(data.conversation.messageCount) || 0,
+            },
+            ...prev.filter((c) => c.id !== data.conversation.id),
+          ]);
+        }
+      } else {
+        let body: any = null;
+        try { body = await res.json(); } catch {}
+        // 503 = cleanly unavailable (disabled/unconfigured); 502 =
+        // provider failure — both show the server's own clear message.
+        setMarasAiError(body?.error || "MARAS AI request failed. Please try again.");
+      }
+    } catch {
+      setMarasAiError("MARAS AI request failed. Check your connection and try again.");
+    } finally {
+      setIsMarasAiSending(false);
+    }
+  };
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
@@ -4546,9 +4681,10 @@ MARAS Group etir Center`;
         </div>
       </div>
 
-      {/* ✨ MARAS AI drawer — UI foundation only. No AI provider is
-          connected; quick actions only seed the prompt textarea and Send
-          always shows a "not connected yet" preview message. */}
+      {/* ✨ MARAS AI drawer — connected to the server-side backend (PR
+          #128). Quick suggestions seed the prompt; conversations are
+          persisted per admin; every assistant reply carries its honest
+          response-source indicator. */}
       {isMarasAiOpen && (resolvedAdminType === 'super' || resolvedAdminType === 'operation') && (
         <div
           className="fixed inset-0 bg-slate-950/50 backdrop-blur-xs z-[200] animate-fade-in"
@@ -4584,30 +4720,108 @@ MARAS Group etir Center`;
 
               <div className="flex gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 text-xs font-medium leading-relaxed">
                 <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-400" />
-                <span>No shipment, document, or chat data is sent to an AI provider in this version.</span>
+                <span>Only the minimum operational data needed for your request is sent to the AI provider. Credentials and keys never leave the server.</span>
               </div>
 
-              <div>
-                <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-2">Quick Actions</h3>
-                <div className="grid grid-cols-2 gap-2">
-                  {MARAS_AI_QUICK_ACTIONS.map((action) => {
-                    const Icon = action.icon;
-                    return (
-                      <button
-                        key={action.id}
-                        onClick={() => {
-                          setMarasAiPrompt(action.prompt);
-                          setMarasAiSendMessage(null);
-                        }}
-                        className="flex flex-col items-start gap-1.5 p-3 rounded-xl border border-slate-200 bg-white hover:border-orange-300 hover:bg-orange-50/50 text-left transition-all cursor-pointer"
-                      >
-                        <Icon className="w-4 h-4 text-orange-500" />
-                        <span className="text-xs font-bold text-slate-700 leading-tight">{action.label}</span>
-                      </button>
-                    );
-                  })}
+              {/* Quick suggestions — shown only when there is no active
+                  conversation. Selecting one populates the prompt. */}
+              {marasAiThread.length === 0 && (
+                <div>
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-2">Quick Suggestions</h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    {MARAS_AI_QUICK_SUGGESTIONS.map((suggestion) => {
+                      const Icon = MARAS_AI_SUGGESTION_ICONS[suggestion.id] || Ship;
+                      return (
+                        <button
+                          key={suggestion.id}
+                          onClick={() => {
+                            setMarasAiPrompt(suggestion.prompt);
+                            setMarasAiError("");
+                          }}
+                          className="flex flex-col items-start gap-1.5 p-3 rounded-xl border border-slate-200 bg-white hover:border-orange-300 hover:bg-orange-50/50 text-left transition-all cursor-pointer"
+                        >
+                          <Icon className="w-4 h-4 text-orange-500" />
+                          <span className="text-xs font-bold text-slate-700 leading-tight">{suggestion.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* This admin's own persisted conversations — reopen or delete. */}
+              {marasAiThread.length === 0 && marasAiConversations.length > 0 && (
+                <div>
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-2">Conversations</h3>
+                  <div className="space-y-1.5">
+                    {marasAiConversations.map((convo) => (
+                      <div key={convo.id} className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleOpenMarasAiConversation(convo.id)}
+                          className="flex-1 min-w-0 text-left p-2.5 rounded-xl border border-slate-200 bg-white hover:border-orange-300 hover:bg-orange-50/50 transition-all cursor-pointer"
+                        >
+                          <span className="block text-xs font-bold text-slate-700 truncate">{convo.title}</span>
+                          <span className="block text-[10px] text-slate-400 font-medium mt-0.5">
+                            {convo.messageCount} message{convo.messageCount === 1 ? '' : 's'} · {new Date(convo.updatedAt).toLocaleString()}
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => handleDeleteMarasAiConversation(convo.id)}
+                          className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all border-0 cursor-pointer shrink-0"
+                          title="Delete conversation"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {marasAiThread.length > 0 && (
+                <button
+                  onClick={handleNewMarasAiConversation}
+                  className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-widest text-orange-500 hover:text-orange-600 bg-transparent border-0 cursor-pointer p-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>New Conversation</span>
+                </button>
+              )}
+
+              {marasAiThread.length > 0 && (
+                <div className="space-y-2.5">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Conversation</h3>
+                  {marasAiThread.map((turn, i) => (
+                    <div
+                      key={i}
+                      className={`p-3 rounded-xl text-xs leading-relaxed whitespace-pre-wrap break-words ${
+                        turn.role === 'user'
+                          ? 'bg-orange-50 border border-orange-200 text-slate-800 font-semibold'
+                          : 'bg-slate-50 border border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <span className={`block text-[10px] font-black uppercase tracking-wider mb-1 ${turn.role === 'user' ? 'text-orange-500' : 'text-slate-400'}`}>
+                        {turn.role === 'user' ? 'You' : 'MARAS AI'}
+                      </span>
+                      {turn.text}
+                      {/* Honest, server-derived response-source indicator —
+                          never invented client-side. */}
+                      {turn.role === 'assistant' && turn.source && (MARAS_AI_SOURCE_LABELS as Record<string, string>)[turn.source] && (
+                        <span className="mt-2 block">
+                          <span className="inline-block text-[9px] font-black uppercase tracking-wider text-slate-400 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5">
+                            {(MARAS_AI_SOURCE_LABELS as Record<string, string>)[turn.source]}
+                          </span>
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  {isMarasAiSending && (
+                    <div className="p-3 rounded-xl text-xs bg-slate-50 border border-slate-200 text-slate-400 font-semibold animate-pulse">
+                      MARAS AI is thinking…
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-2">
                 <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Ask MARAS AI</h3>
@@ -4616,18 +4830,25 @@ MARAS Group etir Center`;
                   onChange={(e) => setMarasAiPrompt(e.target.value)}
                   rows={3}
                   placeholder="Ask MARAS AI about a shipment, document, chat, or operation..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMarasAi();
+                    }
+                  }}
                   className="w-full p-3 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-orange-500/40 focus:border-orange-400 resize-none font-medium"
                 />
                 <button
-                  onClick={() => setMarasAiSendMessage("MARAS AI is not connected yet. This preview is UI-only.")}
-                  className="w-full flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2.5 rounded-lg font-bold text-xs shadow-md transition-all cursor-pointer"
+                  onClick={handleSendMarasAi}
+                  disabled={isMarasAiSending || !marasAiPrompt.trim()}
+                  className="w-full flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold text-xs shadow-md transition-all cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send</span>
+                  <span>{isMarasAiSending ? 'Sending…' : 'Send'}</span>
                 </button>
-                {marasAiSendMessage && (
-                  <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2.5 font-semibold">
-                    {marasAiSendMessage}
+                {marasAiError && (
+                  <div className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5 font-semibold">
+                    {marasAiError}
                   </div>
                 )}
               </div>
