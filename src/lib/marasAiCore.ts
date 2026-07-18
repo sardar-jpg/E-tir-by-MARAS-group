@@ -13,7 +13,7 @@
  * strings/arrays; the only place an OpenAI client exists is server.ts.
  */
 import type { ChatMessage, Shipment, ShipmentDocument } from "../types";
-import type { MarasAiResponseSource } from "./marasAiIntents";
+import type { MarasAiResponseSource, MarasAiStructuredResult } from "./marasAiIntents";
 
 // ── Enablement ───────────────────────────────────────────────────────
 
@@ -107,6 +107,13 @@ export interface MarasAiStoredMessage {
   at: string;
   /** Assistant turns only — how the reply was produced (honest, server-derived). */
   source?: MarasAiResponseSource;
+  /**
+   * PR #130 (presentation): the typed card payload that accompanied this
+   * assistant reply, so reopening a conversation re-renders the same
+   * cards. Optional and additive — messages stored before this field
+   * existed simply render as text.
+   */
+  structured?: MarasAiStructuredResult[];
 }
 
 export interface MarasAiConversation {

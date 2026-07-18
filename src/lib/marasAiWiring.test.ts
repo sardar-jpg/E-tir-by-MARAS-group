@@ -27,7 +27,7 @@ function region(source: string, needle: string, length: number): string {
 }
 
 describe("MARAS AI endpoint — authentication and role boundaries", () => {
-  const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 12000);
+  const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 14000);
 
   it("chat requires a full admin (super/operation — same audience as the drawer); never public", () => {
     expect(SERVER).toContain('app.post("/api/admin/maras-ai/chat", requireFullAdmin,');
@@ -39,7 +39,8 @@ describe("MARAS AI endpoint — authentication and role boundaries", () => {
 
   it("the monitoring digest joins the AI context ONLY for a super-admin session", () => {
     expect(CHAT_ROUTE).toContain('if (needs.monitoring && req.session!.adminType === "super") {');
-    expect(CHAT_ROUTE).toContain("buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents))");
+    expect(CHAT_ROUTE).toContain("const technicalAlerts = deriveTechnicalAlerts(monitoringEvents);");
+    expect(CHAT_ROUTE).toContain("buildMonitoringAiContext(technicalAlerts)");
   });
 
   it("disabled/misconfigured -> clean 503; provider failure -> honest 502; never a fake response", () => {
@@ -68,7 +69,7 @@ describe("MARAS AI endpoint — authentication and role boundaries", () => {
 
   it("the reply carries the honest response-source indicator", () => {
     expect(CHAT_ROUTE).toContain("resolveMarasAiResponseSource({ usedSystemData: systemBlocks.length > 0, usedAiModel: true })");
-    expect(CHAT_ROUTE).toContain("res.json({ reply: responseText, model, source, persisted, conversation: toConversationSummary(convo) })");
+    expect(CHAT_ROUTE).toContain("res.json({ reply: responseText, model, source, structured, persisted, conversation: toConversationSummary(convo) })");
   });
 });
 
@@ -92,7 +93,7 @@ describe("MARAS AI conversation history — per-admin, persisted, never shared",
   });
 
   it("the chat route continues a conversation only after the same ownership check", () => {
-    const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 12000);
+    const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 14000);
     expect(CHAT_ROUTE).toContain("canAccessConversation(stored, adminId)");
     expect(CHAT_ROUTE).toContain('doc(db, "marasAiConversations", convo.id)');
   });
@@ -227,6 +228,58 @@ describe("mobile access — same drawer, same roles, desktop unchanged", () => {
     expect(ADMIN_PANEL).toContain("isRtl ? 'left-0 border-r' : 'right-0 border-l'");
     const trigger = region(MOBILE_BAR, "onMarasAiClick && (", 600);
     expect(trigger).toContain("w-9 h-9 shrink-0");
+  });
+});
+
+describe("response presentation (PR #130) — structured cards + safe Markdown, one shared component", () => {
+  const RESPONSE_VIEW = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiResponseView.tsx"), "utf-8");
+
+  it("the chat route returns and persists the typed structured payload (derived from collected data, not parsed Markdown)", () => {
+    const CHAT_ROUTE = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 14000);
+    expect(CHAT_ROUTE).toContain("buildStructuredMarasAiResults(intents, systemData, nowIso)");
+    expect(CHAT_ROUTE).toContain("res.json({ reply: responseText, model, source, structured, persisted, conversation: toConversationSummary(convo) })");
+    expect(CHAT_ROUTE).toContain("...(structured.length ? { structured } : {})");
+    // Monitoring cards only ever join inside the existing Super Admin gate.
+    const superGate = region(CHAT_ROUTE, 'if (needs.monitoring && req.session!.adminType === "super")', 400);
+    expect(superGate).toContain("structured.push(buildMonitoringAlertsResult(technicalAlerts))");
+  });
+
+  it("both mobile and desktop render assistant turns through the ONE shared response view", () => {
+    expect(ADMIN_PANEL).toContain("<MarasAiResponseView");
+    expect(ADMIN_PANEL.split("<MarasAiResponseView").length - 1).toBe(1); // one call site — the shared drawer bubble
+    expect(ADMIN_PANEL).toContain("structured={turn.structured}");
+  });
+
+  it("Markdown renders through the typed parser — never raw HTML injection", () => {
+    expect(RESPONSE_VIEW).toContain("parseMarasAiMarkdown");
+    expect(RESPONSE_VIEW).not.toContain("dangerouslySetInnerHTML");
+    expect(ADMIN_PANEL).not.toContain("dangerouslySetInnerHTML");
+    // External links opened safely.
+    expect(RESPONSE_VIEW).toContain('rel="noopener noreferrer"');
+  });
+
+  it("navigation actions are read-only routes into existing views, gated by handler + id", () => {
+    // Buttons render only when a valid internal id exists AND a handler was passed.
+    expect(RESPONSE_VIEW).toContain("const hasId = !!item.id;");
+    expect(RESPONSE_VIEW).toContain("hasId && (onOpenShipment || onOpenTracking || onOpenChat)");
+    // AdminPanel role-gates tracking with the existing permission rule and
+    // every handler only navigates + closes the drawer (no writes).
+    expect(ADMIN_PANEL).toContain("onOpenTracking={canViewGpsTracking(resolvedAdminType) ? handleMarasAiOpenTracking : undefined}");
+    const openShipment = region(ADMIN_PANEL, "const handleMarasAiOpenShipment", 700);
+    expect(openShipment).toContain("setOpenDetailsId(shipmentId)");
+    expect(openShipment).toContain("setChatCenterFocus({ shipmentId, channel: 'internal_staff' })");
+    expect(openShipment).not.toMatch(/apiFetch\([^)]*method:\s*["'](POST|PUT|DELETE)/);
+  });
+
+  it("status labels reuse the existing EN/TR/AR translations; cards localize their own field labels", () => {
+    expect(RESPONSE_VIEW).toContain("getShipmentStatusLabel");
+    for (const needle of ["Geciken Sevkiyatlar", "الشحنات المتأخرة", "Delayed Shipments"]) {
+      expect(RESPONSE_VIEW).toContain(needle);
+    }
+  });
+
+  it("stored conversations round-trip their card payloads (backward compatible with older plain messages)", () => {
+    expect(ADMIN_PANEL).toContain("...(Array.isArray(m.structured) ? { structured: m.structured } : {})");
   });
 });
 

@@ -126,7 +126,10 @@ import {
   requiredDataForIntents,
   buildSystemContextBlocks,
   resolveMarasAiResponseSource,
+  buildStructuredMarasAiResults,
+  buildMonitoringAlertsResult,
   type MarasAiSystemData,
+  type MarasAiStructuredResult,
 } from "./src/lib/marasAiIntents";
 import {
   recordMonitoringEvent,
@@ -9269,6 +9272,10 @@ async function startServer() {
       // Every block in systemBlocks is real backend data — the honest
       // basis for the response-source indicator below.
       const systemBlocks: string[] = buildSystemContextBlocks(intents, systemData, nowIso);
+      // PR #130 (presentation only): typed card payloads for the drawer,
+      // derived from the SAME collected records — never parsed back out
+      // of the model's Markdown.
+      const structured: MarasAiStructuredResult[] = buildStructuredMarasAiResults(intents, systemData, nowIso);
 
       // Optional shipment context — loaded server-side from the
       // authoritative record (never trusted from the client), reduced to
@@ -9286,7 +9293,9 @@ async function startServer() {
       // operation admin asking about system errors gets no telemetry.
       if (needs.monitoring && req.session!.adminType === "super") {
         await ensureMonitoringHydrated();
-        systemBlocks.push(buildMonitoringAiContext(deriveTechnicalAlerts(monitoringEvents)));
+        const technicalAlerts = deriveTechnicalAlerts(monitoringEvents);
+        systemBlocks.push(buildMonitoringAiContext(technicalAlerts));
+        structured.push(buildMonitoringAlertsResult(technicalAlerts));
       }
 
       const contextBlocks: string[] = [...systemBlocks];
@@ -9356,7 +9365,13 @@ async function startServer() {
       };
       convo.messages = appendConversationMessages(convo.messages, [
         { role: "user", text: parsed.message, at: nowIso },
-        { role: "assistant", text: responseText, at: new Date().toISOString(), source },
+        {
+          role: "assistant",
+          text: responseText,
+          at: new Date().toISOString(),
+          source,
+          ...(structured.length ? { structured } : {}),
+        },
       ]);
       convo.updatedAt = new Date().toISOString();
       let persisted = true;
@@ -9367,7 +9382,7 @@ async function startServer() {
         console.warn("MARAS AI conversation persist failed:", persistErr);
       }
 
-      res.json({ reply: responseText, model, source, persisted, conversation: toConversationSummary(convo) });
+      res.json({ reply: responseText, model, source, structured, persisted, conversation: toConversationSummary(convo) });
     } catch (err) {
       console.error(err);
       if (respondIfServiceUnavailable(err, res)) return;
