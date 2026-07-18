@@ -29,7 +29,8 @@ export type MarasAiIntent =
   | "todays_operations"
   | "monitoring_alerts"
   | "accounting_summary"
-  | "operational_risks";
+  | "operational_risks"
+  | "audit_findings";
 
 /**
  * Keyword table — each intent fires when ANY of its patterns matches the
@@ -61,6 +62,9 @@ const INTENT_PATTERNS: Record<MarasAiIntent, RegExp[]> = {
   operational_risks: [
     /risk|problem|issue|attention|concern|risk review|sorun|مخاطر|مشكل/,
   ],
+  audit_findings: [
+    /audit|finding|critical problems|fix first|inconsisten|suspicious|integrity|denetim|bulgu|تدقيق|نتائج/,
+  ],
 };
 
 export function detectMarasAiIntents(message: string): MarasAiIntent[] {
@@ -80,6 +84,8 @@ export interface MarasAiDataNeeds {
   notifications: boolean;
   costStatements: boolean;
   monitoring: boolean;
+  /** PR #131: persisted deterministic audit findings (scope-filtered by the server per role). */
+  auditFindings: boolean;
 }
 
 const INTENT_DATA: Record<MarasAiIntent, Partial<MarasAiDataNeeds>> = {
@@ -91,10 +97,11 @@ const INTENT_DATA: Record<MarasAiIntent, Partial<MarasAiDataNeeds>> = {
   monitoring_alerts: { monitoring: true },
   accounting_summary: { costStatements: true },
   operational_risks: { shipments: true, monitoring: true },
+  audit_findings: { auditFindings: true },
 };
 
 export function requiredDataForIntents(intents: MarasAiIntent[]): MarasAiDataNeeds {
-  const needs: MarasAiDataNeeds = { shipments: false, drivers: false, notifications: false, costStatements: false, monitoring: false };
+  const needs: MarasAiDataNeeds = { shipments: false, drivers: false, notifications: false, costStatements: false, monitoring: false, auditFindings: false };
   for (const intent of intents) Object.assign(needs, INTENT_DATA[intent]);
   return needs;
 }
@@ -338,10 +345,32 @@ export interface MarasAiAlertCardItem {
   suggestedAction: string;
 }
 
+/** PR #131: one deterministic audit finding, reduced to card/AI-digest fields (already redacted at detection time). */
+export interface MarasAiAuditFindingCardItem {
+  ruleId: string;
+  title: string;
+  severity: string;
+  category: string;
+  status: string;
+  recordType: string;
+  recordId: string;
+  recordRef: string;
+  evidence: string;
+  recommendedAction: string;
+  lastSeenAt: string;
+  occurrenceCount: number;
+  /** PR #131 follow-up: the deterministic recommended-priority assessment (server-computed, never AI-invented). */
+  priority?: string;
+  priorityLabel?: string;
+  responseTarget?: string;
+  priorityReason?: string;
+}
+
 export type MarasAiStructuredResult =
   | { responseType: "delayed_shipments" | "shipments_overview" | "missing_documents" | "operational_risks"; totalCount: number; shipments: MarasAiShipmentCardItem[] }
   | { responseType: "driver_performance"; totalCount: number; drivers: MarasAiDriverCardItem[] }
-  | { responseType: "monitoring_alerts"; totalCount: number; alerts: MarasAiAlertCardItem[] };
+  | { responseType: "monitoring_alerts"; totalCount: number; alerts: MarasAiAlertCardItem[] }
+  | { responseType: "audit_findings"; totalCount: number; findings: MarasAiAuditFindingCardItem[] };
 
 /** Card caps keep responses light and conversation documents small. */
 export const MARAS_AI_MAX_CARD_ITEMS = 15;
@@ -444,6 +473,41 @@ export function buildStructuredMarasAiResults(
     }
   }
   return results;
+}
+
+const SEVERITY_ORDER: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+
+/**
+ * PR #131 — deterministic audit findings as system data for MARAS AI.
+ * The server passes findings ALREADY scope-filtered for the requesting
+ * role; this builder only sorts (worst first), caps, and digests. The
+ * AI is explicitly told these are the only real findings, so it can
+ * explain and prioritize but never invent.
+ */
+export function buildAuditFindingsResult(findings: MarasAiAuditFindingCardItem[]): MarasAiStructuredResult {
+  const sorted = [...findings].sort(
+    (a, b) => (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0) || (a.lastSeenAt < b.lastSeenAt ? 1 : -1)
+  );
+  return { responseType: "audit_findings", totalCount: findings.length, findings: sorted.slice(0, MARAS_AI_MAX_CARD_ITEMS) };
+}
+
+export function buildAuditFindingsAiContext(findings: MarasAiAuditFindingCardItem[]): string {
+  if (findings.length === 0) {
+    return "CONTEXT DATA — internal audit findings: the deterministic audit currently reports NO open findings for your role's scope. These deterministic findings are the ONLY real findings; do not invent others. General advice must be clearly labeled as a suggestion, not a detected finding.";
+  }
+  const PRIORITY_ORDER: Record<string, number> = { critical_now: 4, high_today: 3, medium_soon: 2, low_monitor: 1 };
+  const sorted = [...findings].sort(
+    (a, b) =>
+      (PRIORITY_ORDER[b.priority || ""] || 0) - (PRIORITY_ORDER[a.priority || ""] || 0) ||
+      (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0)
+  );
+  const lines = sorted
+    .slice(0, 30)
+    .map((f) => {
+      const prio = f.priorityLabel ? ` PRIORITY: ${f.priorityLabel} (respond ${f.responseTarget}) because ${f.priorityReason}` : "";
+      return `  - [${f.severity.toUpperCase()}] ${f.ruleId} ${f.title} (${f.recordRef}, seen x${f.occurrenceCount}, status ${f.status}): ${f.evidence}${prio} Suggested: ${f.recommendedAction}`;
+    });
+  return `CONTEXT DATA — internal audit findings (deterministic backend rules, ${findings.length} in your role's scope, ordered by the deterministic Recommended Priority engine; these are the ONLY real findings and the ONLY real priorities — never invent findings or priorities, only explain the given reasons; label any general advice as a suggestion, not a finding):\n${lines.join("\n")}`;
 }
 
 /** Super-Admin-only monitoring alerts card set — called by the server INSIDE its existing role gate. */

@@ -46,6 +46,7 @@ import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, typ
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
 import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention, type MarasAiStructuredResult } from "../lib/marasAiIntents";
 import MarasAiResponseView from "./admin/MarasAiResponseView";
+import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -4242,6 +4243,25 @@ MARAS Group etir Center`;
   // once per session. No AI provider call, no polling, no new API.
   const [marasAiAlertSeverities, setMarasAiAlertSeverities] = useState<string[]>([]);
   const [marasAiBadgeDismissedSignature, setMarasAiBadgeDismissedSignature] = useState("");
+  // PR #131 — the MARAS AI Monitoring dashboard + audit badge signal.
+  // The count comes from the audit summary endpoint (already
+  // scope-filtered per role server-side); unlike the operational
+  // attention signature below, audit high/critical findings are NEVER
+  // dismissed by merely opening the drawer — the badge clears only when
+  // findings are acknowledged/resolved/ignored or no longer detected.
+  const [isMarasAiMonitoringOpen, setIsMarasAiMonitoringOpen] = useState(false);
+  const [auditOpenHighOrCritical, setAuditOpenHighOrCritical] = useState(0);
+  const refreshAuditSummary = React.useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/admin/audit/summary");
+      if (!res.ok) return;
+      const data = await res.json();
+      setAuditOpenHighOrCritical(Number(data?.summary?.openHighOrCritical) || 0);
+    } catch {
+      // Badge signal is best-effort.
+    }
+  }, []);
+  useEffect(() => { void refreshAuditSummary(); }, [refreshAuditSummary]);
   useEffect(() => {
     if (resolvedAdminType !== 'super') return;
     let cancelled = false;
@@ -4270,7 +4290,11 @@ MARAS Group etir Center`;
     if (isMarasAiOpen) setMarasAiBadgeDismissedSignature(marasAiAttention.signature);
   }, [isMarasAiOpen, marasAiAttention.signature]);
   const showMarasAiBadge =
-    marasAiAttention.needsAttention && marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen;
+    (marasAiAttention.needsAttention && marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen) ||
+    // PR #131: open high/critical audit findings keep the badge on
+    // regardless of drawer opens — only acknowledge/resolve/ignore (or
+    // the condition clearing) removes them from this count.
+    auditOpenHighOrCritical > 0;
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
@@ -4779,13 +4803,26 @@ MARAS Group etir Center`;
                 </h2>
                 <p className="text-xs text-slate-300 font-medium mt-1">AI support for MARAS operations inside eTIR.</p>
               </div>
-              <button
-                onClick={() => setIsMarasAiOpen(false)}
-                className="p-1.5 text-slate-300 hover:text-white hover:bg-white/10 rounded-lg transition-all border-0 cursor-pointer shrink-0"
-                title="Close"
-              >
-                <X className="w-4.5 h-4.5" />
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                {/* PR #131: MARAS AI Monitoring dashboard — full view for
+                    Super Admin; operation admins see their operational
+                    scope (the server filters regardless of the client). */}
+                <button
+                  onClick={() => setIsMarasAiMonitoringOpen(true)}
+                  className="p-1.5 text-slate-300 hover:text-white hover:bg-white/10 rounded-lg transition-all border-0 cursor-pointer"
+                  title="Monitoring"
+                  aria-label="Monitoring"
+                >
+                  <ShieldAlert className="w-4.5 h-4.5" />
+                </button>
+                <button
+                  onClick={() => setIsMarasAiOpen(false)}
+                  className="p-1.5 text-slate-300 hover:text-white hover:bg-white/10 rounded-lg transition-all border-0 cursor-pointer"
+                  title="Close"
+                >
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
             </div>
 
             {/* Same max() trick for the home-indicator inset at the bottom;
@@ -4950,6 +4987,23 @@ MARAS Group etir Center`;
             </div>
           </div>
         </div>
+      )}
+
+      {/* PR #131: MARAS AI Monitoring dashboard — rendered above the
+          drawer; the server scope-filters every list and action by role. */}
+      {isMarasAiMonitoringOpen && (resolvedAdminType === 'super' || resolvedAdminType === 'operation') && (
+        <MarasAiMonitoringPanel
+          lang={lang}
+          isRtl={isRtl}
+          isSuper={resolvedAdminType === 'super'}
+          onClose={() => setIsMarasAiMonitoringOpen(false)}
+          onOpenShipment={(shipmentId) => {
+            setIsMarasAiMonitoringOpen(false);
+            setIsMarasAiOpen(false);
+            setOpenDetailsId(shipmentId);
+          }}
+          onChanged={() => { void refreshAuditSummary(); }}
+        />
       )}
 
       {/* The old inline "Menu" bar that used to live here (hamburger button

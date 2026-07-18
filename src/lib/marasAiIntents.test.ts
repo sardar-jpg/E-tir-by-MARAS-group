@@ -64,7 +64,10 @@ describe("detectMarasAiIntents — the request is inspected BEFORE any prompt is
     expect(requiredDataForIntents(["driver_performance"])).toMatchObject({ drivers: true, shipments: true });
     expect(requiredDataForIntents(["monitoring_alerts"])).toMatchObject({ monitoring: true, shipments: false });
     expect(requiredDataForIntents(["accounting_summary"])).toMatchObject({ costStatements: true });
-    expect(requiredDataForIntents([])).toEqual({ shipments: false, drivers: false, notifications: false, costStatements: false, monitoring: false });
+    expect(requiredDataForIntents([])).toEqual({ shipments: false, drivers: false, notifications: false, costStatements: false, monitoring: false, auditFindings: false });
+    expect(requiredDataForIntents(["audit_findings"])).toMatchObject({ auditFindings: true, shipments: false });
+    expect(detectMarasAiIntents("What are the most critical problems in the system?")).toContain("audit_findings");
+    expect(detectMarasAiIntents("Audit all current shipments.")).toContain("audit_findings");
   });
 });
 

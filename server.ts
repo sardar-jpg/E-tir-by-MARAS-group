@@ -128,8 +128,11 @@ import {
   resolveMarasAiResponseSource,
   buildStructuredMarasAiResults,
   buildMonitoringAlertsResult,
+  buildAuditFindingsResult,
+  buildAuditFindingsAiContext,
   type MarasAiSystemData,
   type MarasAiStructuredResult,
+  type MarasAiAuditFindingCardItem,
 } from "./src/lib/marasAiIntents";
 import {
   recordMonitoringEvent,
@@ -140,6 +143,28 @@ import {
   monitoringDocIdForKey,
   type MonitoringEvent,
 } from "./src/lib/monitoringStore";
+import {
+  runAuditRules,
+  reconcileFindings,
+  applyFindingAction,
+  filterFindingsForViewer,
+  visibleAuditScopesFor,
+  summarizeFindings,
+  assessFindingPriority,
+  summarizeFindingPriorities,
+  sortFindingsByPriority,
+  AUDIT_SEVERITY_RANK,
+  AUDIT_RUN_RETENTION,
+  AUDIT_MAX_DURATION_MS,
+  AUDIT_LOCK_TTL_MS,
+  AUDIT_INTERVAL_MS,
+  AUDIT_MIN_GAP_MS,
+  type AuditContext,
+  type AuditFinding,
+  type AuditRunRecord,
+  type AuditRunTrigger,
+} from "./src/lib/auditEngine";
+import { AUDIT_RULES, AUDIT_RULES_VERSION } from "./src/lib/auditRules";
 import {
   resolveRouteCoords,
   haversineKm,
@@ -365,6 +390,11 @@ let memoryStore: {
   // memory fallback is inherently volatile, like every collection here.)
   monitoringEvents: MonitoringEvent[];
   marasAiConversations: MarasAiConversation[];
+  // PR #131 — full internal audit. Same PR #44 lesson: every collection
+  // this server reads/writes needs an entry here.
+  auditFindings: AuditFinding[];
+  auditRuns: AuditRunRecord[];
+  auditState: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -395,6 +425,9 @@ function getMemoryStore() {
       driverActiveJobs: [],
       monitoringEvents: [],
       marasAiConversations: [],
+      auditFindings: [],
+      auditRuns: [],
+      auditState: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -3406,8 +3439,15 @@ async function pushNotification(
     // or whatever action triggered it (e.g. assigning a shipment) -
     // the in-app notification above already succeeded regardless.
     console.error("Error sending push notification: ", err);
+    // PR #131: surface delivery failures to the monitoring store (the
+    // recorder lives inside startServer; this hook is set there).
+    try { notifyMonitoringOfPushFailure?.(); } catch { /* monitoring never breaks sends */ }
   }
 }
+
+// PR #131 — set by startServer so module-level pushNotification failures
+// feed the grouped monitoring store without moving either function.
+let notifyMonitoringOfPushFailure: (() => void) | null = null;
 
 async function notifyCustomerWatchers(shipment: any, eventType: string, title: string, message: string) {
   if (!shipment.customerEmails || shipment.customerEmails.length === 0) return;
@@ -3512,6 +3552,204 @@ async function startServer() {
     }
   }
   void ensureMonitoringHydrated();
+  notifyMonitoringOfPushFailure = () =>
+    recordAndPersistMonitoringEvent({
+      key: "notification_failure|push",
+      kind: "notification_failure",
+      severity: "medium",
+      area: "push delivery",
+      title: "Push notification delivery failed",
+      detail: "sendEachForMulticast threw; in-app notification was still written.",
+    });
+
+  // ── PR #131: full internal audit engine ─────────────────────────────
+  // Deterministic rules (auditRules.ts) over a bounded snapshot, findings
+  // persisted forever in "auditFindings", run records in "auditRuns",
+  // lock/summary in "auditState" — all through the existing persistence
+  // wrappers. OpenAI is never involved in detection.
+  let auditRunning = false;
+
+  async function loadAuditContext(): Promise<AuditContext> {
+    await ensureMonitoringHydrated();
+    const [shipmentsSnap, driversSnap, clientsSnap, vendorsSnap, adminsSnap, statementsSnap, notificationsSnap, logsSnap, stateSnap] =
+      await Promise.all([
+        getDocs(collection(db, "shipments")),
+        getDocs(collection(db, "drivers")),
+        getDocs(collection(db, "clients")),
+        getDocs(collection(db, "vendors")),
+        getDocs(collection(db, "admins")),
+        getDocs(collection(db, "costStatements")),
+        getDocs(collection(db, "notifications")),
+        getDocs(collection(db, "activityLogs")),
+        getDoc(doc(db, "auditState", "summary")),
+      ]);
+    const newestFirst = (a: { timestamp?: string }, b: { timestamp?: string }) => ((a.timestamp || "") < (b.timestamp || "") ? 1 : -1);
+    return {
+      nowIso: new Date().toISOString(),
+      shipments: shipmentsSnap.docs.map((d) => d.data() as Shipment),
+      drivers: driversSnap.docs.map((d) => d.data() as Driver),
+      clients: clientsSnap.docs.map((d) => d.data() as Client),
+      vendors: vendorsSnap.docs.map((d) => d.data() as Vendor),
+      // Sanitized by construction: password/hash fields are never copied
+      // into the audit context, so no rule can ever leak them.
+      admins: adminsSnap.docs.map((d) => {
+        const a = d.data() as { id?: string; name?: string; email?: string; adminType?: string };
+        return { id: a.id || d.id, name: a.name, email: a.email, adminType: a.adminType };
+      }),
+      costStatements: statementsSnap.docs.map((d) => d.data() as CostStatement),
+      // Bounded windows — rules must not assume completeness.
+      notifications: (notificationsSnap.docs.map((d) => d.data() as AppNotification)).sort(newestFirst).slice(0, 300),
+      activityLogs: (logsSnap.docs.map((d) => d.data() as ActivityLog)).sort(newestFirst).slice(0, 300),
+      monitoringEvents: [...monitoringEvents],
+      environment: {
+        isProduction: process.env.NODE_ENV === "production",
+        memoryFallback: useMemoryFallback,
+        lastSuccessfulRunAt: stateSnap.exists() ? (stateSnap.data()?.lastSuccessfulRunAt || null) : null,
+      },
+    };
+  }
+
+  // Best-effort distributed lock (Firestore doc with TTL) so overlapping
+  // Cloud Run instances / scheduler hits never run two audits at once.
+  async function acquireAuditLock(runId: string): Promise<boolean> {
+    const lockRef = doc(db, "auditState", "lock");
+    const snap = await getDoc(lockRef);
+    const now = Date.now();
+    const current = snap.exists() ? snap.data() : null;
+    if (current?.expiresAt && new Date(current.expiresAt).getTime() > now) return false;
+    await setDoc(lockRef, {
+      id: "lock",
+      holder: runId,
+      acquiredAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + AUDIT_LOCK_TTL_MS).toISOString(),
+    });
+    const confirm = await getDoc(lockRef);
+    return confirm.exists() && confirm.data()?.holder === runId;
+  }
+  async function releaseAuditLock(runId: string): Promise<void> {
+    try {
+      const lockRef = doc(db, "auditState", "lock");
+      const snap = await getDoc(lockRef);
+      if (snap.exists() && snap.data()?.holder === runId) {
+        await setDoc(lockRef, { id: "lock", holder: "", acquiredAt: "", expiresAt: "" });
+      }
+    } catch { /* lock expiry handles a failed release */ }
+  }
+
+  async function runAudit(trigger: AuditRunTrigger, actor: string): Promise<{ ok: boolean; error?: string; run?: AuditRunRecord }> {
+    if (auditRunning) return { ok: false, error: "An audit is already running in this instance." };
+    const runId = `audit-run-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    auditRunning = true;
+    try {
+      const ctx = await withTimeout(loadAuditContext(), 30_000, "Audit context load timed out");
+      // Automatic triggers skip when a fresh successful run already exists
+      // (Cloud Run can start many instances; the scheduler drives cadence).
+      if ((trigger === "startup" || trigger === "interval") && ctx.environment.lastSuccessfulRunAt) {
+        const age = Date.now() - new Date(ctx.environment.lastSuccessfulRunAt).getTime();
+        if (age < AUDIT_MIN_GAP_MS) return { ok: true };
+      }
+      if (!(await acquireAuditLock(runId))) return { ok: false, error: "Another audit run holds the lock." };
+      try {
+        const { detections, ruleResults } = runAuditRules(AUDIT_RULES, ctx);
+        const existing = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
+        const nowIso = new Date().toISOString();
+        const rec = reconcileFindings(existing, detections, nowIso);
+        for (const finding of rec.changed) {
+          await setDoc(doc(db, "auditFindings", finding.id), finding);
+        }
+        const byId = new Map(existing.map((f) => [f.id, f]));
+        for (const f of rec.changed) byId.set(f.id, f);
+        const summary = summarizeFindings([...byId.values()]);
+        const durationMs = Date.now() - startedAtMs;
+        const exceeded = durationMs > AUDIT_MAX_DURATION_MS;
+        const run: AuditRunRecord = {
+          id: runId,
+          trigger,
+          actor,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs,
+          ok: !exceeded,
+          ...(exceeded ? { error: `Exceeded AUDIT_MAX_DURATION_MS (${durationMs}ms).` } : {}),
+          ruleResults,
+          createdCount: rec.createdCount,
+          reopenedCount: rec.reopenedCount,
+          autoResolvedCount: rec.autoResolvedCount,
+          failedRuleCount: ruleResults.filter((r) => !r.ok).length,
+          openTotalAfter: summary.openTotal,
+        };
+        await setDoc(doc(db, "auditRuns", runId), run);
+        await setDoc(doc(db, "auditState", "summary"), {
+          id: "summary",
+          rulesVersion: AUDIT_RULES_VERSION,
+          ...(run.ok ? { lastSuccessfulRunAt: run.finishedAt, lastSuccessfulRunId: runId } : { lastFailedRunAt: run.finishedAt, lastFailedRunId: runId }),
+          lastRunSummary: summary,
+        }, { merge: true });
+        // Run-record retention (findings are NEVER pruned).
+        const runs = (await getDocs(collection(db, "auditRuns"))).docs.map((d) => d.data() as AuditRunRecord)
+          .sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+        for (const old of runs.slice(AUDIT_RUN_RETENTION)) {
+          await deleteDoc(doc(db, "auditRuns", old.id)).catch(() => {});
+        }
+        // Grouped in-app notification for NEW high/critical findings —
+        // one notification per run, never one per finding (no spam).
+        // 'ai_alert' is the type PR #44 reserved for exactly this; it is
+        // admin-only by construction in chatVisibility.ts.
+        if (rec.newlyCriticalOrHigh.length > 0) {
+          const n = rec.newlyCriticalOrHigh.length;
+          const top = rec.newlyCriticalOrHigh.slice(0, 3).map((f) => `${f.title} (${f.recordRef})`).join("; ");
+          const alertNotif: AppNotification = {
+            id: `notif-${Date.now()}-audit-${Math.floor(Math.random() * 1000)}`,
+            shipmentId: "",
+            shipmentNumber: "MARAS AI Audit",
+            type: "ai_alert",
+            titleEn: `MARAS AI audit: ${n} new high/critical finding(s)`,
+            titleTr: `MARAS AI denetimi: ${n} yeni yüksek/kritik bulgu`,
+            titleAr: `تدقيق MARAS AI: ${n} نتيجة جديدة عالية/حرجة`,
+            messageEn: top,
+            messageTr: top,
+            messageAr: top,
+            timestamp: new Date().toISOString(),
+            read: false,
+          };
+          await setDoc(doc(db, "notifications", alertNotif.id), alertNotif);
+        }
+        await logActivity("", "MARAS AI Audit", actor,
+          `Audit ${trigger} completed: ${rec.createdCount} new, ${rec.reopenedCount} reopened, ${rec.autoResolvedCount} auto-resolved, ${run.failedRuleCount} failed rule(s).`,
+          `Denetim (${trigger}) tamamlandı: ${rec.createdCount} yeni, ${rec.reopenedCount} yeniden açıldı, ${rec.autoResolvedCount} otomatik çözüldü.`,
+          `اكتمل التدقيق (${trigger}): ${rec.createdCount} جديد، ${rec.reopenedCount} أعيد فتحه، ${rec.autoResolvedCount} حُل تلقائيًا.`);
+        return { ok: run.ok, run, ...(run.error ? { error: run.error } : {}) };
+      } finally {
+        await releaseAuditLock(runId);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message.slice(0, 300) : "audit failed";
+      console.error("Audit run failed:", err);
+      const failedRun: AuditRunRecord = {
+        id: runId, trigger, actor, startedAt, finishedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAtMs, ok: false, error: message,
+        ruleResults: [], createdCount: 0, reopenedCount: 0, autoResolvedCount: 0, failedRuleCount: 0, openTotalAfter: -1,
+      };
+      await setDoc(doc(db, "auditRuns", runId), failedRun).catch(() => {});
+      await setDoc(doc(db, "auditState", "summary"), { id: "summary", lastFailedRunAt: failedRun.finishedAt, lastFailedRunId: runId }, { merge: true }).catch(() => {});
+      await logActivity("", "MARAS AI Audit", actor, `Audit ${trigger} FAILED: ${message}`, `Denetim (${trigger}) BAŞARISIZ: ${message}`, `فشل التدقيق (${trigger}): ${message}`).catch(() => {});
+      return { ok: false, error: message };
+    } finally {
+      auditRunning = false;
+    }
+  }
+
+  // Scheduling: startup pass (after persistence settles) + best-effort
+  // in-process interval. Cloud Run instances are NOT guaranteed to stay
+  // alive, so real cadence comes from an external scheduler hitting
+  // POST /api/audit/scheduler-run with AUDIT_SCHEDULER_TOKEN — see
+  // docs/MARAS_AI_MONITORING.md for the exact deployment requirement.
+  const auditStartupTimer = setTimeout(() => { void runAudit("startup", "system"); }, 15_000);
+  auditStartupTimer.unref?.();
+  const auditIntervalTimer = setInterval(() => { void runAudit("interval", "system"); }, AUDIT_INTERVAL_MS);
+  auditIntervalTimer.unref?.();
 
   // The ONLY OpenAI client in the entire application — server-side,
   // constructed lazily so a missing key never crashes startup. The key is
@@ -9297,6 +9535,28 @@ async function startServer() {
         systemBlocks.push(buildMonitoringAiContext(technicalAlerts));
         structured.push(buildMonitoringAlertsResult(technicalAlerts));
       }
+      // PR #131: deterministic audit findings as system data — ALWAYS
+      // scope-filtered for the requesting role before anything reaches
+      // the prompt or the cards. The AI is told these are the only real
+      // findings; it explains and prioritizes, never invents.
+      if (needs.auditFindings) {
+        const allFindings = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
+        const visibleFindings: MarasAiAuditFindingCardItem[] = filterFindingsForViewer(allFindings, req.session!.adminType || "")
+          .filter((f) => f.status === "open" || f.status === "acknowledged")
+          .map((f) => {
+            const prio = assessFindingPriority(f, nowIso);
+            return {
+              ruleId: f.ruleId, title: f.title, severity: f.severity, category: f.category, status: f.status,
+              recordType: f.recordType, recordId: f.recordId, recordRef: f.recordRef,
+              evidence: f.evidence, recommendedAction: f.recommendedAction,
+              lastSeenAt: f.lastSeenAt, occurrenceCount: f.occurrenceCount,
+              priority: prio.priority, priorityLabel: `${prio.emoji} ${prio.label}`,
+              responseTarget: prio.responseTarget, priorityReason: prio.reason,
+            };
+          });
+        systemBlocks.push(buildAuditFindingsAiContext(visibleFindings));
+        structured.push(buildAuditFindingsResult(visibleFindings));
+      }
 
       const contextBlocks: string[] = [...systemBlocks];
       if (parsed.page) {
@@ -9472,6 +9732,139 @@ async function startServer() {
       detail: message,
     });
     res.json({ recorded: true });
+  });
+
+  // ── PR #131: full internal audit routes ─────────────────────────────
+
+  /** Manual "Run audit now" — Super Admin only. */
+  app.post("/api/admin/audit/run", requireSuperAdmin, async (req, res) => {
+    const actor = req.session!.id;
+    await logActivity("", "MARAS AI Audit", actor, "Manual audit requested.", "Manuel denetim istendi.", "طُلب تدقيق يدوي.").catch(() => {});
+    const result = await runAudit("manual", actor);
+    if (!result.ok) return res.status(result.error?.includes("lock") || result.error?.includes("already running") ? 409 : 500).json({ error: result.error || "Audit failed." });
+    res.json({ ok: true, run: result.run });
+  });
+
+  /**
+   * External-scheduler entry (Cloud Scheduler / cron): enabled ONLY when
+   * AUDIT_SCHEDULER_TOKEN is set; compared in constant time. Cloud Run
+   * instances aren't guaranteed alive, so this endpoint — not the
+   * in-process interval — is the correctness mechanism for cadence.
+   */
+  app.post("/api/audit/scheduler-run", async (req, res) => {
+    const configured = (process.env.AUDIT_SCHEDULER_TOKEN || "").trim();
+    const provided = String(req.headers["x-audit-token"] || "");
+    if (!configured) return res.status(403).json({ error: "Scheduler runs are not enabled on this server." });
+    const a = Buffer.from(configured);
+    const b = Buffer.from(provided);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(403).json({ error: "Invalid scheduler token." });
+    }
+    const result = await runAudit("scheduler", "scheduler");
+    if (!result.ok) return res.status(409).json({ error: result.error || "Audit failed." });
+    res.json({ ok: true });
+  });
+
+  /**
+   * Findings + summary — every admin role, but ALWAYS scope-filtered
+   * through visibleAuditScopesFor: super sees everything; operation sees
+   * operational findings only; accounts sees accounting only. Security,
+   * technical, and data-integrity findings never leave the super scope.
+   */
+  app.get("/api/admin/audit/summary", requireRole("admin"), async (req, res) => {
+    try {
+      const adminType = req.session!.adminType || "";
+      const findings = (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding);
+      const visible = filterFindingsForViewer(findings, adminType);
+      const stateSnap = await getDoc(doc(db, "auditState", "summary"));
+      const state = stateSnap.exists() ? stateSnap.data() : {};
+      res.json({
+        summary: summarizeFindings(visible),
+        // Recommended-priority triage row — deterministic, derived at
+        // read time so aging open findings escalate live. Never OpenAI.
+        byPriority: summarizeFindingPriorities(visible, new Date().toISOString()),
+        scopes: visibleAuditScopesFor(adminType),
+        lastSuccessfulRunAt: state?.lastSuccessfulRunAt || null,
+        lastFailedRunAt: state?.lastFailedRunAt || null,
+        rulesVersion: state?.rulesVersion || null,
+        running: auditRunning,
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load audit summary." });
+    }
+  });
+
+  app.get("/api/admin/audit/findings", requireRole("admin"), async (req, res) => {
+    try {
+      const adminType = req.session!.adminType || "";
+      const { category, severity, status, q } = req.query as Record<string, string | undefined>;
+      let findings = filterFindingsForViewer(
+        (await getDocs(collection(db, "auditFindings"))).docs.map((d) => d.data() as AuditFinding),
+        adminType
+      );
+      if (category) findings = findings.filter((f) => f.category === category);
+      if (severity) findings = findings.filter((f) => f.severity === severity);
+      if (status) findings = findings.filter((f) => f.status === status);
+      if (q && q.trim()) {
+        const needle = q.trim().toLowerCase();
+        findings = findings.filter(
+          (f) => f.recordRef.toLowerCase().includes(needle) || f.recordId.toLowerCase().includes(needle) || f.ruleId.toLowerCase().includes(needle)
+        );
+      }
+      // Recommended-priority ordering (worst first), each finding
+      // decorated with its deterministic priority assessment.
+      const nowIso = new Date().toISOString();
+      const decorated = sortFindingsByPriority(findings, nowIso).map((f) => ({
+        ...f,
+        priority: assessFindingPriority(f, nowIso),
+      }));
+      res.json({ findings: decorated.slice(0, 300), total: decorated.length });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load findings." });
+    }
+  });
+
+  /**
+   * Finding actions. Acknowledge: any role that can SEE the finding.
+   * Ignore + manual resolve: Super Admin only, mandatory reason. Every
+   * change appends to the finding's own history AND the activity log —
+   * no hard deletes exist anywhere in the audit system.
+   */
+  app.post("/api/admin/audit/findings/:id/action", requireRole("admin"), async (req, res) => {
+    try {
+      const adminType = req.session!.adminType || "";
+      const action = String(req.body?.action || "");
+      const reason = String(req.body?.reason || "");
+      if (action !== "acknowledge" && action !== "ignore" && action !== "resolve") {
+        return res.status(400).json({ error: "action must be acknowledge, ignore, or resolve." });
+      }
+      const snap = await getDoc(doc(db, "auditFindings", req.params.id));
+      const finding = snap.exists() ? (snap.data() as AuditFinding) : null;
+      // Invisible and missing answer identically.
+      if (!finding || !visibleAuditScopesFor(adminType).includes(finding.scope)) {
+        return res.status(404).json({ error: "Finding not found." });
+      }
+      if ((action === "ignore" || action === "resolve") && adminType !== "super") {
+        return res.status(403).json({ error: "Only a Super Admin can ignore or manually resolve findings." });
+      }
+      const actor = req.session!.id;
+      const applied = applyFindingAction(finding, action, actor, reason, new Date().toISOString());
+      if (!applied.ok) return res.status(400).json({ error: applied.error });
+      await setDoc(doc(db, "auditFindings", applied.finding.id), applied.finding);
+      await logActivity("", applied.finding.recordRef, actor,
+        `Audit finding ${action}: ${applied.finding.ruleId} — ${reason || "no reason (acknowledge)"}`,
+        `Denetim bulgusu ${action}: ${applied.finding.ruleId}`,
+        `إجراء على نتيجة التدقيق (${action}): ${applied.finding.ruleId}`).catch(() => {});
+      res.json({ finding: applied.finding });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to update finding." });
+    }
   });
 
   app.get("/api/chat/unread", requireRole("admin"), async (req, res) => {
