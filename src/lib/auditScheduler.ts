@@ -169,6 +169,25 @@ export function assessSchedulerHealth(
 }
 
 /**
+ * Timeout/success ordering race guard (PR #136 review issue 2): when the
+ * HTTP deadline and the run's own completion land near-simultaneously,
+ * Promise.race may discard a JUST-SUCCEEDED result and take the timeout
+ * branch anyway. Writing lastTimedOutAt then would shadow the real,
+ * already-persisted success with a NEWER timeout timestamp and flip
+ * health to "failing" for a run that actually succeeded. Record the
+ * timeout marker ONLY when no success has been persisted since this
+ * invocation began: a success at/after invokedAtMs is the very run we
+ * launched, so the 504 stays (HTTP deadline truly passed) but the health
+ * marker is suppressed.
+ */
+export function shouldRecordSchedulerTimeout(
+  lastSuccessfulRunAt: string | null | undefined,
+  invokedAtMs: number
+): boolean {
+  return ts(lastSuccessfulRunAt) < invokedAtMs;
+}
+
+/**
  * One secret-safe, grep-able log line per finished run: trigger, outcome,
  * duration, and finding counts. Contains counts and ids only — never a
  * token, never finding content.

@@ -8,6 +8,7 @@ import {
   canTakeOverAuditLock,
   summarizeRunForLog,
   assessSchedulerHealth,
+  shouldRecordSchedulerTimeout,
   SCHEDULER_DUPLICATE_WINDOW_MS,
   EXPECTED_SCHEDULER_CADENCE_MS,
   SCHEDULER_HTTP_DEADLINE_MS,
@@ -59,6 +60,18 @@ describe("overlap and duplicate protection", () => {
     expect(isDuplicateSchedulerFire(iso(SCHEDULER_DUPLICATE_WINDOW_MS + 1), NOW)).toBe(false);
     expect(isDuplicateSchedulerFire(null, NOW)).toBe(false);
     expect(isDuplicateSchedulerFire(iso(-5_000), NOW)).toBe(false); // clock skew: future timestamp is not a duplicate
+  });
+
+  it("timeout/success ordering race: a success persisted at/after the invocation suppresses the timeout marker", () => {
+    // Previous run's success (before this invocation) → our run really
+    // timed out; record the marker.
+    expect(shouldRecordSchedulerTimeout(iso(120_000), NOW)).toBe(true);
+    expect(shouldRecordSchedulerTimeout(null, NOW)).toBe(true);
+    // Success landed AT or AFTER this invocation began: that is the run
+    // we launched — the 504 stands, but the health marker is suppressed
+    // so stale timeout metadata can never shadow a real success.
+    expect(shouldRecordSchedulerTimeout(iso(0), NOW)).toBe(false);
+    expect(shouldRecordSchedulerTimeout(iso(-30_000), NOW)).toBe(false); // finished during the race window
   });
 });
 
@@ -186,11 +199,24 @@ describe("server wiring — scheduler is the authoritative trigger (H-2)", () =>
     expect(SCHED).not.toContain("AUDIT_SCHEDULER_TOKEN}");
   });
 
-  it("HTTP deadline: withTimeout wraps the scheduler run; expiry → 504 + persisted lastTimedOutAt + secret-free log; lock NOT released early", () => {
+  it("dedup reads SCHEDULER-ONLY persisted state — a manual/startup/interval success can never suppress the external run", () => {
+    // The dedup lookup targets auditState/scheduler via schedulerStateRef…
+    expect(SCHED).toContain("const schedulerStateSnap = await getDoc(schedulerStateRef)");
+    expect(SCHED).toContain("isDuplicateSchedulerFire(schedulerLastSuccessAt, invokedAtMs)");
+    // …and the handler never consults the all-trigger summary document.
+    expect(SCHED).not.toContain('"auditState", "summary"');
+  });
+
+  it("HTTP deadline: withTimeout wraps the scheduler run; expiry → 504 + race-guarded lastTimedOutAt + secret-free log; lock NOT released early", () => {
     expect(SCHED).toContain("withTimeout(runAudit(\"scheduler\", \"scheduler\"), SCHEDULER_HTTP_DEADLINE_MS");
     expect(SCHED).toContain("504");
     expect(SCHED).toContain('outcome: "timed_out"');
+    // Race guard: the timeout marker is written only through the pure,
+    // tested decision — a success persisted since this invocation
+    // suppresses it (and that suppression is logged).
+    expect(SCHED).toContain("shouldRecordSchedulerTimeout(successSinceInvocation, invokedAtMs)");
     expect(SCHED).toContain("lastTimedOutAt: new Date().toISOString()");
+    expect(SCHED).toContain("timeout marker suppressed");
     // The timeout branch must not touch the lock: release happens only in
     // runAudit's own finally path (retry overlap is blocked by the lock).
     expect(SCHED).not.toContain("releaseAuditLock");

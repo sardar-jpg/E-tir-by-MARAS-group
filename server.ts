@@ -39,7 +39,7 @@ import {
   GENERIC_LOGIN_ERROR,
 } from "./src/lib/auth";
 import { assessProductionConfig } from "./src/lib/productionConfig";
-import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
+import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, shouldRecordSchedulerTimeout, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
@@ -9853,13 +9853,18 @@ async function startServer() {
       // the external scheduler look healthy. Timestamps only — no token
       // or token-derived value ever lands in this document.
       const schedulerStateRef = doc(db, "auditState", "scheduler");
-      await setDoc(schedulerStateRef, { id: "scheduler", lastTriggeredAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+      const invokedAtMs = Date.now();
+      await setDoc(schedulerStateRef, { id: "scheduler", lastTriggeredAt: new Date(invokedAtMs).toISOString() }, { merge: true }).catch(() => {});
 
       // Cloud Scheduler retries after slow/non-2xx attempts; a fire landing
       // right after a success is acknowledged as a duplicate, not re-run.
-      const summarySnap = await getDoc(doc(db, "auditState", "summary"));
-      const lastSuccessfulRunAt = summarySnap.exists() ? (summarySnap.data()?.lastSuccessfulRunAt || null) : null;
-      if (isDuplicateSchedulerFire(lastSuccessfulRunAt, Date.now())) {
+      // PR #136 review issue 1: the dedup source is the SCHEDULER-ONLY
+      // persisted state — never auditState/summary, which manual/startup/
+      // interval runs also update and which could otherwise suppress the
+      // authoritative external run.
+      const schedulerStateSnap = await getDoc(schedulerStateRef);
+      const schedulerLastSuccessAt = schedulerStateSnap.exists() ? (schedulerStateSnap.data()?.lastSuccessfulRunAt || null) : null;
+      if (isDuplicateSchedulerFire(schedulerLastSuccessAt, invokedAtMs)) {
         console.log("[audit-scheduler] duplicate fire inside the dedup window — acknowledged without re-running.");
         return res.json({ ok: true, outcome: "deduplicated", deduplicated: true });
       }
@@ -9879,7 +9884,19 @@ async function startServer() {
       } catch (err) {
         if (err instanceof Error && err.message === SCHEDULER_DEADLINE_SENTINEL) {
           console.warn(`[audit-scheduler] run exceeded the ${SCHEDULER_HTTP_DEADLINE_MS}ms HTTP deadline — 504 returned; the run continues in the background and its lock guards against retry overlap.`);
-          await setDoc(schedulerStateRef, { id: "scheduler", lastTimedOutAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+          // PR #136 review issue 2 (timeout/success ordering race): if the
+          // run we launched already persisted its success while the race
+          // settled, writing lastTimedOutAt NOW would shadow that real
+          // success with a newer timeout and falsely flip health to
+          // "failing". Re-read the scheduler state and record the timeout
+          // marker only when no success has landed since this invocation.
+          const raceSnap = await getDoc(schedulerStateRef).catch(() => null);
+          const successSinceInvocation = raceSnap?.exists() ? (raceSnap.data()?.lastSuccessfulRunAt || null) : null;
+          if (shouldRecordSchedulerTimeout(successSinceInvocation, invokedAtMs)) {
+            await setDoc(schedulerStateRef, { id: "scheduler", lastTimedOutAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+          } else {
+            console.log("[audit-scheduler] the run completed successfully while the deadline settled — timeout marker suppressed.");
+          }
           return res.status(504).json({ error: "Audit run exceeded the scheduler deadline.", outcome: "timed_out" });
         }
         throw err;
