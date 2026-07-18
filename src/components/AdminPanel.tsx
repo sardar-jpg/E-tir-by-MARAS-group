@@ -44,7 +44,7 @@ import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
 import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForFreightMode, resolveFreightMode } from "../lib/shipmentStatusTransitions";
-import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS } from "../lib/marasAiIntents";
+import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention } from "../lib/marasAiIntents";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
@@ -4209,6 +4209,44 @@ MARAS Group etir Center`;
   // re-derives this authoritatively at broadcast/assignment time.
   const allianceBusyDriverIds = React.useMemo(() => computeBusyDriverIds(shipments), [shipments]);
   const canManageAllianceUi = resolvedAdminType === 'super' || resolvedAdminType === 'operation';
+
+  // PR #129 follow-up — MARAS AI attention badge (mobile trigger only).
+  // Derived from data already on the client (the loaded shipment
+  // registry) via the SAME shared heuristic MARAS AI itself uses
+  // (deriveMarasAiAttention / assessShipmentDelay), plus — for Super
+  // Admins — alert severities from the EXISTING alerts endpoint, fetched
+  // once per session. No AI provider call, no polling, no new API.
+  const [marasAiAlertSeverities, setMarasAiAlertSeverities] = useState<string[]>([]);
+  const [marasAiBadgeDismissedSignature, setMarasAiBadgeDismissedSignature] = useState("");
+  useEffect(() => {
+    if (resolvedAdminType !== 'super') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/admin/maras-ai/alerts");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.alerts)) {
+          setMarasAiAlertSeverities(data.alerts.map((a: { severity?: string }) => String(a.severity || "")));
+        }
+      } catch {
+        // Badge is an indicator only — silently fine without telemetry.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [resolvedAdminType]);
+  const marasAiAttention = React.useMemo(
+    () => deriveMarasAiAttention({ shipments, monitoringAlertSeverities: marasAiAlertSeverities, nowIso: new Date().toISOString() }),
+    [shipments, marasAiAlertSeverities]
+  );
+  // Opening MARAS AI (mobile or desktop) dismisses the CURRENT actionable
+  // set; the badge re-appears only if the set changes afterwards, and it
+  // never shows while nothing actionable remains.
+  useEffect(() => {
+    if (isMarasAiOpen) setMarasAiBadgeDismissedSignature(marasAiAttention.signature);
+  }, [isMarasAiOpen, marasAiAttention.signature]);
+  const showMarasAiBadge =
+    marasAiAttention.needsAttention && marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen;
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
@@ -4354,6 +4392,15 @@ MARAS Group etir Center`;
         unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
         onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
         onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
+        // feature/mobile-maras-ai-access: the SAME role gate as the desktop
+        // MARAS AI header button below — super/operation only. Other roles
+        // never receive the handler, so the bar renders no AI button.
+        onMarasAiClick={
+          resolvedAdminType === 'super' || resolvedAdminType === 'operation'
+            ? () => { setIsMarasAiOpen(true); setIsNotifOpen(false); setIsMoreMenuOpen(false); }
+            : undefined
+        }
+        marasAiAttention={showMarasAiBadge}
       />
 
       {/* Toast Alert */}
@@ -4695,7 +4742,12 @@ MARAS Group etir Center`;
             onClick={(e) => e.stopPropagation()}
             dir={isRtl ? 'rtl' : 'ltr'}
           >
-            <div className="flex items-start justify-between gap-3 p-5 border-b border-slate-800 bg-gradient-to-br from-slate-900 to-slate-800 text-white shrink-0">
+            {/* feature/mobile-maras-ai-access: pt uses max(designed padding,
+                safe-area-inset-top) so on notched phones (iPhone Safari,
+                Android Chrome) the title/close button clear the status bar;
+                on desktop env() is 0 and max() resolves to the exact same
+                1.25rem this header always had — zero desktop change. */}
+            <div className="flex items-start justify-between gap-3 p-5 pt-[max(1.25rem,env(safe-area-inset-top))] border-b border-slate-800 bg-gradient-to-br from-slate-900 to-slate-800 text-white shrink-0">
               <div>
                 <h2 className="text-lg font-black tracking-tight flex items-center gap-2">
                   <span>✨</span>
@@ -4712,7 +4764,10 @@ MARAS Group etir Center`;
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            {/* Same max() trick for the home-indicator inset at the bottom;
+                overscroll-contain keeps thread scrolling inside the drawer
+                on touch devices instead of rubber-banding the page. */}
+            <div className="flex-1 overflow-y-auto overscroll-contain p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] space-y-5">
               <div className="flex gap-2 p-3 rounded-xl border border-orange-200 bg-orange-50 text-orange-800 text-xs font-semibold leading-relaxed">
                 <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-orange-500" />
                 <span>MARAS AI provides suggestions only. Staff must review and approve before any action.</span>

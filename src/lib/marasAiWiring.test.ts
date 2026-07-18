@@ -167,6 +167,69 @@ describe("MARAS AI is Admin-only — no AI surface in Driver, Customer, or publi
   });
 });
 
+describe("mobile access — same drawer, same roles, desktop unchanged", () => {
+  const MOBILE_BAR = readFileSync(join(ROOT, "src", "components", "admin", "mobile", "MobileTopAppBar.tsx"), "utf-8");
+
+  it("the mobile top bar renders the MARAS AI trigger only when AdminPanel passed the handler", () => {
+    expect(MOBILE_BAR).toContain("onMarasAiClick?: () => void");
+    expect(MOBILE_BAR).toContain("{onMarasAiClick && (");
+    expect(MOBILE_BAR).toContain('aria-label="MARAS AI"');
+    // The bar never decides roles itself — absent handler = no button.
+    expect(MOBILE_BAR).not.toMatch(/adminType|'super'|'operation'/);
+  });
+
+  it("AdminPanel gates the mobile trigger with the SAME role check as the desktop button", () => {
+    const gate = "resolvedAdminType === 'super' || resolvedAdminType === 'operation'";
+    // Desktop button gate — unchanged from PR #36/#128.
+    expect(ADMIN_PANEL).toContain(`{(${gate}) && (`);
+    // Mobile handler: same gate, else undefined (button hidden for
+    // accounts admins and every other unauthorized role).
+    const mobileWiring = region(ADMIN_PANEL, "onMarasAiClick={", 500);
+    expect(mobileWiring).toContain(gate);
+    expect(mobileWiring).toContain("setIsMarasAiOpen(true)");
+    expect(mobileWiring).toContain(": undefined");
+  });
+
+  it("tapping opens the ONE existing drawer — no separate mobile page, no duplicate conversation logic", () => {
+    expect(ADMIN_PANEL.split("{isMarasAiOpen && (resolvedAdminType === 'super' || resolvedAdminType === 'operation') && (").length - 1).toBe(1);
+    expect(ADMIN_PANEL.split('apiFetch("/api/admin/maras-ai/chat"').length - 1).toBe(1);
+    expect(ADMIN_PANEL.split("const handleSendMarasAi").length - 1).toBe(1);
+  });
+
+  it("the drawer respects mobile safe areas (notch + home indicator) and contains its own scrolling", () => {
+    // max(designed padding, env inset) — a no-op on desktop where env()=0.
+    expect(ADMIN_PANEL).toContain("pt-[max(1.25rem,env(safe-area-inset-top))]");
+    expect(ADMIN_PANEL).toContain("pb-[max(1.25rem,env(safe-area-inset-bottom))]");
+    expect(ADMIN_PANEL).toContain("overscroll-contain");
+  });
+
+  it("attention badge: derived from existing system data via the shared rule, dismissed on open, never from the AI provider", () => {
+    // AdminPanel derives it from the loaded shipments + the EXISTING
+    // alerts endpoint (super only) through the tested pure function…
+    expect(ADMIN_PANEL).toContain("deriveMarasAiAttention({ shipments, monitoringAlertSeverities: marasAiAlertSeverities");
+    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/maras-ai/alerts")');
+    expect(ADMIN_PANEL).toContain("if (resolvedAdminType !== 'super') return;");
+    // …opening the drawer dismisses the current actionable set…
+    expect(ADMIN_PANEL).toContain("if (isMarasAiOpen) setMarasAiBadgeDismissedSignature(marasAiAttention.signature);");
+    expect(ADMIN_PANEL).toContain("marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen");
+    // …and the bar renders a pure presentational dot (no polling, no AI
+    // call, no interval anywhere in the badge path).
+    expect(ADMIN_PANEL).toContain("marasAiAttention={showMarasAiBadge}");
+    const barTrigger = region(MOBILE_BAR, "onMarasAiClick && (", 900);
+    expect(barTrigger).toContain("marasAiAttention && (");
+    expect(barTrigger).toContain("bg-orange-500");
+    expect(MOBILE_BAR).not.toContain("setInterval");
+    expect(ADMIN_PANEL).not.toMatch(/setInterval\([^)]*maras/i);
+  });
+
+  it("RTL: the drawer flips side and direction; the bar trigger is a fixed-size flex item that reorders with dir", () => {
+    expect(ADMIN_PANEL).toContain("dir={isRtl ? 'rtl' : 'ltr'}");
+    expect(ADMIN_PANEL).toContain("isRtl ? 'left-0 border-r' : 'right-0 border-l'");
+    const trigger = region(MOBILE_BAR, "onMarasAiClick && (", 600);
+    expect(trigger).toContain("w-9 h-9 shrink-0");
+  });
+});
+
 describe("the official product name is MARAS AI", () => {
   it("the drawer says MARAS AI and never a forbidden rename", () => {
     const drawer = region(ADMIN_PANEL, "MARAS AI drawer", 6000);

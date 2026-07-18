@@ -12,6 +12,20 @@ interface MobileTopAppBarProps {
   onMenuClick: () => void;
   /** Optional back button for detail-style pages (e.g. an open order). Omit for the 5 primary tab pages. */
   onBack?: () => void;
+  /**
+   * feature/mobile-maras-ai-access: opens the existing ✨ MARAS AI drawer.
+   * AdminPanel passes this ONLY for the same super/operation admins the
+   * desktop MARAS AI button renders for — this component never decides
+   * roles itself; absent prop = no button (accounts admins, and any role
+   * without desktop MARAS AI access, see nothing here).
+   */
+  onMarasAiClick?: () => void;
+  /**
+   * PR #129 follow-up: shows a small orange attention dot on the MARAS AI
+   * trigger. Purely presentational — AdminPanel derives it from existing
+   * system data (deriveMarasAiAttention) and clears it on drawer open.
+   */
+  marasAiAttention?: boolean;
 }
 
 /**
@@ -42,6 +56,8 @@ export default function MobileTopAppBar({
   onBellClick,
   onMenuClick,
   onBack,
+  onMarasAiClick,
+  marasAiAttention,
 }: MobileTopAppBarProps) {
   const BackIcon = isRtl ? ChevronRight : ChevronLeft;
   return (
@@ -65,6 +81,30 @@ export default function MobileTopAppBar({
         {TitleIcon && !onBack && <TitleIcon className="w-4 h-4 text-orange-500 shrink-0" />}
         <span className="font-extrabold text-sm text-slate-900 truncate">{title}</span>
       </div>
+
+      {/* ✨ MARAS AI — same product mark and dark/orange identity as the
+          desktop header button, in this bar's compact icon-button format.
+          Sits beside the bell; fixed-size shrink-0 buttons in this flex
+          row (title truncates via flex-1 min-w-0) so nothing overlaps in
+          LTR or RTL. Rendered only when AdminPanel passed the handler
+          (super/operation admins — the exact desktop audience). */}
+      {onMarasAiClick && (
+        <button
+          type="button"
+          onClick={onMarasAiClick}
+          aria-label="MARAS AI"
+          title="MARAS AI"
+          className="relative w-9 h-9 shrink-0 flex items-center justify-center rounded-lg bg-gradient-to-br from-slate-900 to-slate-800 border border-orange-500/40 cursor-pointer text-[15px] leading-none"
+        >
+          <span aria-hidden="true">✨</span>
+          {/* Attention dot — same visual language as the bell's unread
+              badge (orange on white ring), logical `end-` position so it
+              sits on the correct corner in RTL too. */}
+          {marasAiAttention && (
+            <span className="absolute top-0.5 end-0.5 w-2.5 h-2.5 rounded-full bg-orange-500 border-2 border-white" />
+          )}
+        </button>
+      )}
 
       <button
         type="button"
