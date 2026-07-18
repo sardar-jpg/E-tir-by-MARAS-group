@@ -70,13 +70,48 @@ function useVisualViewportMetrics(enabled: boolean): VisualViewportMetrics | nul
       return;
     }
     const vv = window.visualViewport;
-    const update = () => setMetrics({ height: Math.round(vv.height), offsetTop: Math.round(vv.offsetTop) });
-    update();
-    vv.addEventListener('resize', update);
-    vv.addEventListener('scroll', update);
+    // Identity-preserving read: rAF ticks that observe no change return
+    // the same state reference, so the settle loop never re-render-spams.
+    const read = () => {
+      setMetrics((prev) => {
+        const next = { height: Math.round(vv.height), offsetTop: Math.round(vv.offsetTop) };
+        return prev && prev.height === next.height && prev.offsetTop === next.offsetTop ? prev : next;
+      });
+    };
+    // fix/admin-chat-keyboard-gap: on a real iPhone, Safari can fire its
+    // LAST visualViewport resize BEFORE the keyboard + collapsing bottom
+    // chrome finish settling (the classic stale-height quirk, made worse
+    // by the position:fixed body lock this overlay uses). A single
+    // event-time read then freezes the overlay at an intermediate, too-
+    // small height — the composer parks mid-screen with a large blank gap
+    // above the keyboard. Every trigger therefore starts a short
+    // requestAnimationFrame settle loop (~700ms) that keeps re-reading
+    // until the geometry stops moving; focus/blur and orientation changes
+    // trigger it too, since those can move geometry without a vv event.
+    let raf = 0;
+    let settleUntil = 0;
+    const tick = () => {
+      read();
+      if (performance.now() < settleUntil) raf = requestAnimationFrame(tick);
+      else raf = 0;
+    };
+    const settle = () => {
+      settleUntil = performance.now() + 700;
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    read();
+    vv.addEventListener('resize', settle);
+    vv.addEventListener('scroll', settle);
+    window.addEventListener('focusin', settle);
+    window.addEventListener('focusout', settle);
+    window.addEventListener('orientationchange', settle);
     return () => {
-      vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', update);
+      vv.removeEventListener('resize', settle);
+      vv.removeEventListener('scroll', settle);
+      window.removeEventListener('focusin', settle);
+      window.removeEventListener('focusout', settle);
+      window.removeEventListener('orientationchange', settle);
+      if (raf) cancelAnimationFrame(raf);
     };
   }, [enabled]);
   return enabled ? metrics : null;
@@ -1064,6 +1099,18 @@ export default function ChatCenter({
   // server still enforces every channel/permission rule regardless.
   const canComposeInActiveChannel = activeChannel === 'internal_staff' || isMobile;
 
+  // fix/admin-chat-keyboard-gap: how much of the layout viewport the
+  // keyboard (plus collapsed browser chrome) is covering right now —
+  // the standard visualViewport formula, no hardcoded keyboard height.
+  // While the keyboard is up it covers the home-indicator area, so the
+  // composer's env(safe-area-inset-bottom) reserve would be pure blank
+  // space doubled on top of the keyboard inset — suppress it then, and
+  // restore it the moment the keyboard closes.
+  const keyboardInset = visualViewport
+    ? Math.max(0, Math.round(window.innerHeight - visualViewport.height - visualViewport.offsetTop))
+    : 0;
+  const isKeyboardOpen = keyboardInset > 80;
+
   // Pending optimistic images for exactly this room+channel — items sent
   // from other shipments/channels never render here.
   const pendingForThread = selectedShipment
@@ -1401,12 +1448,12 @@ export default function ChatCenter({
         // PR #111 review (Delivered/Closed terminal & chat rules): locks
         // only at the freight-mode-appropriate closing status — never at
         // "Delivered".
-        <div className={`border-t border-slate-200 p-3 text-center text-[11px] font-semibold text-slate-500 shrink-0 ${isMobile ? 'pb-[max(env(safe-area-inset-bottom),0.75rem)]' : ''}`}>
+        <div className={`border-t border-slate-200 p-3 text-center text-[11px] font-semibold text-slate-500 shrink-0 ${isMobile ? (isKeyboardOpen ? 'pb-2' : 'pb-[max(env(safe-area-inset-bottom),0.75rem)]') : ''}`}>
           This shipment is closed. Chat is now read-only.
         </div>
       )}
       {canComposeInActiveChannel && !isSelectedShipmentClosed && (
-        <div className={`border-t border-slate-200 shrink-0 bg-white ${isMobile ? 'pb-[max(env(safe-area-inset-bottom),0.5rem)]' : ''}`}>
+        <div className={`border-t border-slate-200 shrink-0 bg-white ${isMobile ? (isKeyboardOpen ? 'pb-1' : 'pb-[max(env(safe-area-inset-bottom),0.5rem)]') : ''}`}>
           {internalSendError === 'upload' && (
             <p className="px-3 pt-2 text-[11px] font-bold text-red-600">{label.uploadFailedError}</p>
           )}
