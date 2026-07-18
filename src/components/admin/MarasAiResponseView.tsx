@@ -30,6 +30,7 @@ const LABELS: Record<string, { en: string; tr: string; ar: string }> = {
   operational_risks: { en: "Operational Risks", tr: "Operasyonel Riskler", ar: "المخاطر التشغيلية" },
   driver_performance: { en: "Driver Performance", tr: "Sürücü Performansı", ar: "أداء السائقين" },
   monitoring_alerts: { en: "Monitoring Alerts", tr: "İzleme Uyarıları", ar: "تنبيهات المراقبة" },
+  audit_findings: { en: "Audit Findings", tr: "Denetim Bulguları", ar: "نتائج التدقيق" },
   driver: { en: "Driver", tr: "Sürücü", ar: "السائق" },
   customer: { en: "Customer", tr: "Müşteri", ar: "العميل" },
   updated: { en: "Updated", tr: "Güncellendi", ar: "آخر تحديث" },
@@ -172,6 +173,7 @@ function StructuredResultView({
   const shown =
     result.responseType === "driver_performance" ? result.drivers.length :
     result.responseType === "monitoring_alerts" ? result.alerts.length :
+    result.responseType === "audit_findings" ? result.findings.length :
     result.shipments.length;
   return (
     <div className="space-y-1.5 min-w-0">
@@ -208,6 +210,30 @@ function StructuredResultView({
             </div>
             <div className="text-[10px] text-slate-500 break-words">{a.area} · {a.count} {label("occurrences", lang)} · {formatWhen(a.time)}</div>
             <div className="text-[10px] text-slate-600">{a.suggestedAction}</div>
+          </div>
+        ))}
+      {result.responseType === "audit_findings" &&
+        result.findings.map((f, i) => (
+          <div key={i} className="p-2.5 rounded-lg border border-slate-200 bg-white space-y-1 min-w-0">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-xs font-bold text-slate-900">{f.title}</span>
+              <span className={`px-1.5 py-0.5 rounded border text-[9px] font-black uppercase ${ALERT_SEVERITY_BADGE[f.severity] || SEVERITY_BADGE.info}`}>
+                {f.severity}
+              </span>
+            </div>
+            <div className="text-[10px] text-slate-500 break-words">
+              <span className="font-mono">{f.ruleId}</span> · {f.recordRef} · x{f.occurrenceCount}
+            </div>
+            <div className="text-[10px] text-slate-600">{f.evidence}</div>
+            <div className="text-[10px] text-slate-500">{f.recommendedAction}</div>
+            {f.recordType === "shipment" && f.recordId && onOpenShipment && (
+              <button
+                onClick={() => onOpenShipment(f.recordId)}
+                className="px-2 py-1 rounded-md border border-slate-200 bg-white hover:border-orange-300 hover:bg-orange-50 text-[10px] font-bold text-slate-600 cursor-pointer transition-all"
+              >
+                {label("openShipment", lang)}
+              </button>
+            )}
           </div>
         ))}
       {(result.responseType === "delayed_shipments" ||

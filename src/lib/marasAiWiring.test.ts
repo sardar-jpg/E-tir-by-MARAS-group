@@ -283,6 +283,91 @@ describe("response presentation (PR #130) — structured cards + safe Markdown, 
   });
 });
 
+describe("full internal audit (PR #131) — deterministic, persistent, scoped, no hard deletes", () => {
+  const MONITORING_PANEL = readFileSync(join(ROOT, "src", "components", "admin", "MarasAiMonitoringPanel.tsx"), "utf-8");
+
+  it("manual runs are Super Admin only; the scheduler endpoint needs the env token in constant time", () => {
+    expect(SERVER).toContain('app.post("/api/admin/audit/run", requireSuperAdmin,');
+    const SCHED = region(SERVER, 'app.post("/api/audit/scheduler-run"', 1200);
+    expect(SCHED).toContain("process.env.AUDIT_SCHEDULER_TOKEN");
+    expect(SCHED).toContain("crypto.timingSafeEqual(a, b)");
+    expect(SCHED).toContain('"Scheduler runs are not enabled on this server."');
+  });
+
+  it("every read is scope-filtered through the tested rule; ignore/resolve are Super Admin only", () => {
+    expect(SERVER).toContain('app.get("/api/admin/audit/summary", requireRole("admin")');
+    expect(SERVER).toContain('app.get("/api/admin/audit/findings", requireRole("admin")');
+    const ACTION = region(SERVER, 'app.post("/api/admin/audit/findings/:id/action"', 2600);
+    expect(ACTION).toContain("visibleAuditScopesFor(adminType).includes(finding.scope)");
+    expect(ACTION).toContain('adminType !== "super"');
+    expect(ACTION).toContain("Only a Super Admin can ignore or manually resolve findings.");
+    expect(SERVER.split("filterFindingsForViewer(").length - 1).toBeGreaterThanOrEqual(3); // summary, findings, AI context
+  });
+
+  it("runs are lock-protected, duration-capped, and persisted; findings are NEVER hard-deleted", () => {
+    expect(SERVER).toContain("async function acquireAuditLock(");
+    expect(SERVER).toContain("AUDIT_LOCK_TTL_MS");
+    expect(SERVER).toContain("AUDIT_MAX_DURATION_MS");
+    expect(SERVER).toContain('setDoc(doc(db, "auditFindings", finding.id), finding)');
+    expect(SERVER).toContain('setDoc(doc(db, "auditRuns", runId), run)');
+    expect(SERVER).not.toContain('deleteDoc(doc(db, "auditFindings"'); // no hard deletes, ever
+    // Memory-fallback entries exist (PR #44 lesson).
+    expect(SERVER).toContain("auditFindings: AuditFinding[];");
+    expect(SERVER).toContain("auditRuns: AuditRunRecord[];");
+    expect(SERVER).toContain("auditState: [],");
+  });
+
+  it("scheduling: startup pass + best-effort interval + fresh-run skip; scheduler endpoint is the correctness path", () => {
+    expect(SERVER).toContain('void runAudit("startup", "system")');
+    expect(SERVER).toContain('void runAudit("interval", "system")');
+    expect(SERVER).toContain("AUDIT_MIN_GAP_MS");
+  });
+
+  it("the audit context sanitizes admins (no password fields) and push failures feed monitoring", () => {
+    const CTX = region(SERVER, "async function loadAuditContext", 2600);
+    expect(CTX).toContain("adminType: a.adminType");
+    // The mapped admin object never reads a credential property.
+    expect(CTX).not.toContain("a.password");
+    expect(CTX).not.toContain("passwordHash");
+    expect(SERVER).toContain("notifyMonitoringOfPushFailure");
+  });
+
+  it("new high/critical findings produce ONE grouped ai_alert notification per run — never one per finding", () => {
+    const RUN = region(SERVER, "async function runAudit(", 7000);
+    expect(RUN).toContain("if (rec.newlyCriticalOrHigh.length > 0) {");
+    expect(RUN).toContain('type: "ai_alert"');
+    // The notification write sits outside any per-finding loop: exactly one setDoc to notifications in the run body.
+    expect(RUN.split('doc(db, "notifications"').length - 1).toBe(1);
+  });
+
+  it("MARAS AI receives findings as scope-filtered system data and is told never to invent findings", () => {
+    const CHAT = region(SERVER, 'app.post("/api/admin/maras-ai/chat"', 16000);
+    expect(CHAT).toContain("if (needs.auditFindings) {");
+    expect(CHAT).toContain('filterFindingsForViewer(allFindings, req.session!.adminType || "")');
+    expect(CHAT).toContain("buildAuditFindingsAiContext(visibleFindings)");
+    expect(CHAT).toContain("buildAuditFindingsResult(visibleFindings)");
+  });
+
+  it("the badge counts open high/critical findings and is never dismissed by opening the drawer", () => {
+    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/audit/summary")');
+    expect(ADMIN_PANEL).toContain("auditOpenHighOrCritical > 0");
+    // The audit term sits OUTSIDE the signature-dismissal expression.
+    expect(ADMIN_PANEL).toContain("marasAiAttention.signature !== marasAiBadgeDismissedSignature && !isMarasAiOpen) ||");
+  });
+
+  it("the monitoring dashboard is safe presentation: server-scoped data, audited actions, no HTML injection", () => {
+    expect(ADMIN_PANEL).toContain("<MarasAiMonitoringPanel");
+    expect(MONITORING_PANEL).toContain('apiFetch("/api/admin/audit/summary")');
+    expect(MONITORING_PANEL).toContain("/api/admin/audit/findings/");
+    expect(MONITORING_PANEL).not.toContain("dangerouslySetInnerHTML");
+    // Run Audit Now renders only for Super Admin; ignore/resolve buttons too.
+    expect(MONITORING_PANEL).toContain("{isSuper && (");
+    expect(MONITORING_PANEL).toContain("isSuper && f.status !== \"resolved\"");
+    // Ignore/resolve require a typed reason before any request is sent.
+    expect(MONITORING_PANEL).toContain('window.prompt(t("reasonPrompt", lang))');
+  });
+});
+
 describe("the official product name is MARAS AI", () => {
   it("the drawer says MARAS AI and never a forbidden rename", () => {
     const drawer = region(ADMIN_PANEL, "MARAS AI drawer", 6000);
