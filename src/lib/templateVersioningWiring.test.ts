@@ -5,9 +5,16 @@ import { join } from "node:path";
 const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
 
 describe("template versioning + issued-document snapshots", () => {
-  it("company profile save archives the prior version and bumps the version", () => {
-    expect(SERVER).toContain('doc(db, "companyProfileVersions"');
+  it("company profile publish/restore are atomic (item 14/15) — archive + version bump in one transaction", () => {
+    // Cross-instance safe: read current + version, archive current (immutable),
+    // bump version, write new current — all inside runAccountingTransaction.
+    expect(SERVER).toContain('tx.set("companyProfileVersions"');
     expect(SERVER).toContain("version: currentVersion + 1");
+    expect(SERVER).toContain("sourceRestoredVersion");
+  });
+  it("template publish/restore are atomic too (items 16/17)", () => {
+    expect(SERVER).toContain('tx.set("templateConfigVersions"');
+    expect(SERVER).toContain('tx.set("accountingSettings", `template_${docType}`');
   });
   it("version history + restore routes exist (view/super-admin)", () => {
     expect(SERVER).toContain('app.get("/api/admin/accounting/company-profile/versions", requireCanViewCostStatements');

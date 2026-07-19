@@ -14,7 +14,9 @@ describe("template customization routes (Phase 11)", () => {
   });
   it("config is validated + versioned; PDFs apply it", () => {
     expect(SERVER).toContain("validateTemplateConfig(");
-    expect(SERVER).toContain('doc(db, "templateConfigVersions"');
+    // Versioning is now atomic (increment 3, item 16): archived inside the
+    // transaction under a deterministic per-version id.
+    expect(SERVER).toContain('tx.set("templateConfigVersions"');
     expect(SERVER).toContain("applyTemplateToModel(buildInvoicePdfModel");
     expect(SERVER).toContain("applyTemplateToModel(buildVoucherPdfModel");
     expect(SERVER).toContain("buildSamplePreviewModel(");

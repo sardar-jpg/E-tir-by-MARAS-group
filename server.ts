@@ -10935,22 +10935,25 @@ async function startServer() {
   });
   app.put("/api/admin/accounting/company-profile", requireSuperAdmin, async (req, res) => {
     try {
-      const result = validateCompanyProfile(req.body || {});
-      if (!result.ok) return res.status(400).json({ error: result.error });
+      const validated = validateCompanyProfile(req.body || {});
+      if (!validated.ok) return res.status(400).json({ error: validated.error });
       const now = new Date().toISOString();
-      // Template versioning: archive the currently-published profile before
-      // overwriting, and bump the version. Issued documents snapshot the
-      // profile, so historical documents are unaffected by this change.
-      const current = await loadCompanyProfile();
-      const currentVersion = typeof current.version === "number" ? current.version : 0;
-      if (currentVersion > 0) {
-        const archive: CompanyProfileVersion = { ...current, id: `cpv-${currentVersion}-${Date.now()}`, version: currentVersion, archivedAt: now } as CompanyProfileVersion;
-        await setDoc(doc(db, "companyProfileVersions", archive.id), cleanUndefined(archive));
-      }
-      const profile: CompanyProfile = { ...result.profile, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
-      await setDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID), cleanUndefined(profile));
-      await logActivity("", "Accounting", req.session!.id, `Company profile updated (v${profile.version})`, "", "");
-      res.json({ profile: cleanUndefined(profile) });
+      // Atomic publish (item 14): read current + version, archive current
+      // exactly once (deterministic id → immutable, never a duplicate archive),
+      // assign the next version, and write the new current — all in ONE
+      // transaction, so two simultaneous publishes get DISTINCT versions.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        const current = (await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID)) || {};
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) {
+          tx.set("companyProfileVersions", `cpv-${currentVersion}`, { ...current, id: `cpv-${currentVersion}`, version: currentVersion, archivedAt: now });
+        }
+        const profile: CompanyProfile = { ...validated.profile, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", COMPANY_PROFILE_SETTINGS_ID, profile);
+        return { http: 200, body: { profile: cleanUndefined(profile) }, version: profile.version };
+      });
+      await logActivity("", "Accounting", req.session!.id, `Company profile updated (v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to save company profile." });
@@ -10974,18 +10977,28 @@ async function startServer() {
       const prior = snap.docs.map((d) => d.data() as CompanyProfileVersion).find((v) => v.version === target);
       if (!prior) return res.status(404).json({ error: "That version was not found." });
       const now = new Date().toISOString();
-      const current = await loadCompanyProfile();
-      const currentVersion = typeof current.version === "number" ? current.version : 0;
-      // Archive current, then republish the prior content as a NEW version.
-      if (currentVersion > 0) {
-        const archive: CompanyProfileVersion = { ...current, id: `cpv-${currentVersion}-${Date.now()}`, version: currentVersion, archivedAt: now } as CompanyProfileVersion;
-        await setDoc(doc(db, "companyProfileVersions", archive.id), cleanUndefined(archive));
-      }
-      const { id: _id, version: _v, archivedAt: _a, ...content } = prior;
-      const restored: CompanyProfile = { ...content, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
-      await setDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID), cleanUndefined(restored));
-      await logActivity("", "Accounting", req.session!.id, `Company profile restored from v${target} (now v${restored.version})`, "", "");
-      res.json({ profile: cleanUndefined(restored) });
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("company-profile-restore", idemKey) : undefined;
+      // Atomic restore-as-NEW-version (item 15): archive current, then publish
+      // the prior CONTENT under a fresh version — the historical version being
+      // restored is NEVER mutated. Idempotent: a repeated restore with the same
+      // key replays instead of minting another version.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ version: number }>("accountingIdempotency", scopedKey);
+          if (rec) { const cur = await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID); return { http: 200, body: { profile: cleanUndefined(cur), idempotent: true }, version: rec.version }; }
+        }
+        const current = (await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID)) || {};
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("companyProfileVersions", `cpv-${currentVersion}`, { ...current, id: `cpv-${currentVersion}`, version: currentVersion, archivedAt: now });
+        const { id: _id, version: _v, archivedAt: _a, ...content } = prior;
+        const restored: CompanyProfile & { sourceRestoredVersion?: number } = { ...content, version: currentVersion + 1, sourceRestoredVersion: target, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", COMPANY_PROFILE_SETTINGS_ID, restored);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "company-profile-restore", version: restored.version, createdAt: now });
+        return { http: 200, body: { profile: cleanUndefined(restored) }, version: restored.version };
+      });
+      await logActivity("", "Accounting", req.session!.id, `Company profile restored from v${target} (now v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to restore version." });
@@ -12003,14 +12016,21 @@ async function startServer() {
   app.put("/api/admin/accounting/templates/:docType", requireSuperAdmin, async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const docType = req.params.docType;
       const now = new Date().toISOString();
-      const current = await loadTemplateConfig(req.params.docType);
-      const currentVersion = typeof current.version === "number" ? current.version : 0;
-      if (currentVersion > 0) await setDoc(doc(db, "templateConfigVersions", `tpl-${req.params.docType}-${currentVersion}-${Date.now()}`), cleanUndefined({ ...current, id: `tpl-${req.params.docType}-${currentVersion}`, docType: req.params.docType, version: currentVersion, archivedAt: now }));
-      const config: TemplateConfig = { ...validateTemplateConfig(req.params.docType, req.body || {}), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
-      await setDoc(doc(db, "accountingSettings", `template_${req.params.docType}`), cleanUndefined(config));
-      await logActivity("", "Accounting", req.session!.id, `Template updated: ${req.params.docType} (v${config.version})`, "", "");
-      res.json({ config });
+      // Atomic publish (item 16): archive current (deterministic id → immutable),
+      // bump version, write new current — one transaction; concurrent publishes
+      // get distinct versions.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        const current = (await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`)) || defaultTemplateConfig(docType);
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("templateConfigVersions", `tpl-${docType}-${currentVersion}`, { ...current, id: `tpl-${docType}-${currentVersion}`, docType, version: currentVersion, archivedAt: now });
+        const config: TemplateConfig = { ...validateTemplateConfig(docType, req.body || {}), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", `template_${docType}`, config);
+        return { http: 200, body: { config }, version: config.version };
+      });
+      await logActivity("", "Accounting", req.session!.id, `Template updated: ${docType} (v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to save template." }); }
   });
   app.get("/api/admin/accounting/templates/:docType/versions", requireCanViewCostStatements, async (req, res) => {
@@ -12023,17 +12043,31 @@ async function startServer() {
   app.post("/api/admin/accounting/templates/:docType/restore/:version", requireSuperAdmin, async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const docType = req.params.docType;
+      const target = Number(req.params.version);
       const snap = await getDocs(collection(db, "templateConfigVersions"));
-      const prior = snap.docs.map((d) => d.data() as any).find((v) => v.docType === req.params.docType && v.version === Number(req.params.version));
+      const prior = snap.docs.map((d) => d.data() as any).find((v) => v.docType === docType && v.version === target);
       if (!prior) return res.status(404).json({ error: "Version not found." });
       const now = new Date().toISOString();
-      const current = await loadTemplateConfig(req.params.docType);
-      const currentVersion = typeof current.version === "number" ? current.version : 0;
-      if (currentVersion > 0) await setDoc(doc(db, "templateConfigVersions", `tpl-${req.params.docType}-${currentVersion}-${Date.now()}`), cleanUndefined({ ...current, id: `tpl-${req.params.docType}-${currentVersion}`, docType: req.params.docType, version: currentVersion, archivedAt: now }));
-      const restored: TemplateConfig = { ...validateTemplateConfig(req.params.docType, prior), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
-      await setDoc(doc(db, "accountingSettings", `template_${req.params.docType}`), cleanUndefined(restored));
-      await logActivity("", "Accounting", req.session!.id, `Template restored: ${req.params.docType} from v${req.params.version}`, "", "");
-      res.json({ config: restored });
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey(`template-restore-${docType}`, idemKey) : undefined;
+      // Atomic restore-as-NEW-version (item 17): the historical version is never
+      // mutated; a fresh version is published with sourceRestoredVersion.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ version: number }>("accountingIdempotency", scopedKey);
+          if (rec) { const cur = await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`); return { http: 200, body: { config: cur, idempotent: true }, version: rec.version }; }
+        }
+        const current = (await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`)) || defaultTemplateConfig(docType);
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("templateConfigVersions", `tpl-${docType}-${currentVersion}`, { ...current, id: `tpl-${docType}-${currentVersion}`, docType, version: currentVersion, archivedAt: now });
+        const restored: TemplateConfig & { sourceRestoredVersion?: number } = { ...validateTemplateConfig(docType, prior), version: currentVersion + 1, sourceRestoredVersion: target, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", `template_${docType}`, restored);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: `template-restore-${docType}`, version: restored.version, createdAt: now });
+        return { http: 200, body: { config: restored }, version: restored.version };
+      });
+      await logActivity("", "Accounting", req.session!.id, `Template restored: ${docType} from v${target}`, "", "");
+      res.status(outcome.http).json(outcome.body);
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to restore template." }); }
   });
 
