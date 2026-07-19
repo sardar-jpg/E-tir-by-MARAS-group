@@ -50,7 +50,9 @@ describe("permissions — Super/Operations only, server-side", () => {
   });
 
   it("working routes and the alliance Inactive switch are rejected for driver sessions on PUT /api/drivers/:id", () => {
-    const route = region('app.put("/api/drivers/:id", requireAuth', 3000);
+    // Region widened in PR #138: the route gained the M-2 authorization
+    // gates and the M-1 404-instead-of-fabricate block above this logic.
+    const route = region('app.put("/api/drivers/:id", requireAuth', 4200);
     expect(route).toContain('req.session!.role === "driver" && (workingRoutes !== undefined || allianceInactive !== undefined)');
     expect(route).toContain("managed by MARAS Operations");
     expect(route).toContain("sanitizeWorkingRoutes(workingRoutes)");

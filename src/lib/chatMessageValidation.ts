@@ -35,6 +35,7 @@
  *    a valid attachment is present — there was previously no length limit
  *    anywhere in the pipeline at all.
  */
+import { isPlaceholderDocumentValue } from "./documentAccess";
 
 export const MAX_CHAT_TEXT_LENGTH = 5000;
 
@@ -81,6 +82,7 @@ export interface ChatSendPayloadInput {
   type?: unknown;
   text?: unknown;
   fileUrl?: unknown;
+  fileName?: unknown;
 }
 
 /**
@@ -126,6 +128,15 @@ export function validateChatSendPayload(input: ChatSendPayloadInput): ChatSendVa
   if (isFileMessage) {
     if (!fileUrl) {
       return { ok: false, error: "A valid uploaded file URL is required." };
+    }
+    // PR #138 review (audit finding M-1): a file message must carry a REAL
+    // file name — the chat→document mirror used to substitute
+    // "unnamed_document.bin", fabricating a placeholder-named document
+    // record. Text-message behavior is unchanged (fileName is only ever
+    // required when type === "file").
+    const fileName = typeof input.fileName === "string" ? input.fileName.trim() : "";
+    if (!fileName || isPlaceholderDocumentValue(fileName)) {
+      return { ok: false, error: "A real file name is required for an attachment." };
     }
   } else if (!trimmedText) {
     return { ok: false, error: "Message text cannot be empty." };

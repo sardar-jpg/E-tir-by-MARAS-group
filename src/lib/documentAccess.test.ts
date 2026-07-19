@@ -6,6 +6,8 @@ import {
   canDriverUploadDocumentCategory,
   buildPublicShareDocumentPath,
   resolveNewDocumentSharedExternally,
+  validateDocumentReference,
+  INVALID_DOCUMENT_INPUT_CODE,
 } from "./documentAccess";
 import type { DocumentCategory } from "../types";
 
@@ -153,5 +155,46 @@ describe("resolveNewDocumentSharedExternally", () => {
 
   it("only opts a document into public visibility on an explicit true", () => {
     expect(resolveNewDocumentSharedExternally(true)).toBe(true);
+  });
+});
+
+describe("validateDocumentReference — production documents are never fabricated (PR #138 review, M-1)", () => {
+  const VALID_URL = "https://firebasestorage.googleapis.com/v0/b/x/o/uploads%2Fcmr.pdf?alt=media&token=t";
+
+  it("accepts a real name + a real https upload reference (and same-origin /api/ references)", () => {
+    expect(validateDocumentReference({ name: "CMR-4711.pdf", url: VALID_URL })).toEqual({ ok: true, name: "CMR-4711.pdf", url: VALID_URL });
+    expect(validateDocumentReference({ name: " pod.png ", url: "/api/uploads/legacy-123" })).toEqual({ ok: true, name: "pod.png", url: "/api/uploads/legacy-123" });
+  });
+
+  it("rejects missing values — no record can be created from an empty request", () => {
+    expect(validateDocumentReference({}).ok).toBe(false);
+    expect(validateDocumentReference({ name: "CMR.pdf" }).ok).toBe(false); // missing url
+    expect(validateDocumentReference({ url: VALID_URL }).ok).toBe(false); // missing name
+    expect(validateDocumentReference({ name: 42 as unknown, url: VALID_URL }).ok).toBe(false);
+  });
+
+  it("rejects blank and whitespace-only values", () => {
+    expect(validateDocumentReference({ name: "   ", url: VALID_URL }).ok).toBe(false);
+    expect(validateDocumentReference({ name: "CMR.pdf", url: "   " }).ok).toBe(false);
+  });
+
+  it('rejects "#" and the old placeholder defaults outright', () => {
+    expect(validateDocumentReference({ name: "CMR.pdf", url: "#" }).ok).toBe(false);
+    expect(validateDocumentReference({ name: "document.bin", url: VALID_URL }).ok).toBe(false);
+    expect(validateDocumentReference({ name: "unnamed_document.bin", url: VALID_URL }).ok).toBe(false);
+    expect(validateDocumentReference({ name: "Untitled", url: VALID_URL }).ok).toBe(false);
+  });
+
+  it("rejects references outside the upload contract (http, data:, javascript:, bare strings)", () => {
+    for (const bad of ["http://x/y.pdf", "data:image/png;base64,AAA", "javascript:alert(1)", "y.pdf", "#fragment"]) {
+      expect(validateDocumentReference({ name: "CMR.pdf", url: bad }).ok).toBe(false);
+    }
+  });
+
+  it("errors are stable, safe messages naming the field only", () => {
+    const r = validateDocumentReference({ name: "", url: "" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe("A real document name is required.");
+    expect(INVALID_DOCUMENT_INPUT_CODE).toBe("invalid_document_input");
   });
 });
