@@ -20,9 +20,11 @@ export const ACCOUNTING_PERMISSION_KEYS = [
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate", "customerPayments.reverse",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "costStatements.print",
   "bankAccounts.view", "bankAccounts.manage",
   "accountingTemplates.view", "accountingTemplates.manage", "accountingTemplates.publish", "accountingTemplates.restore",
   "accountingCompanyProfile.view", "accountingCompanyProfile.manage", "accountingCompanyProfile.restore",
+  "accountingAttachments.view", "accountingAttachments.upload", "accountingAttachments.remove",
   "accountingRepair.view", "accountingRepair.execute",
   "accountingAudit.view",
 ] as const;
@@ -59,6 +61,7 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
       p("costs.deleteDraft", "Delete draft cost line", "حذف بند تكلفة مسودة", "Taslak maliyet satırını sil"),
       p("costs.approve", "Approve costs", "اعتماد التكاليف", "Maliyetleri onayla"),
       p("costs.reopen", "Reopen closed costs", "إعادة فتح التكاليف المغلقة", "Kapalı maliyetleri yeniden aç"),
+      p("costStatements.print", "Print cost statement", "طباعة كشف التكاليف", "Maliyet tablosunu yazdır"),
     ],
   },
   {
@@ -130,6 +133,14 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    id: "attachments", label: { en: "Accounting Attachments", ar: "مرفقات المحاسبة", tr: "Muhasebe Ekleri" },
+    permissions: [
+      p("accountingAttachments.view", "View attachments", "عرض المرفقات", "Ekleri görüntüle"),
+      p("accountingAttachments.upload", "Upload attachment", "رفع مرفق", "Ek yükle"),
+      p("accountingAttachments.remove", "Remove attachment", "إزالة مرفق", "Eki kaldır"),
+    ],
+  },
+  {
     id: "repairAudit", label: { en: "Repair and Audit", ar: "الإصلاح والتدقيق", tr: "Onarım ve Denetim" },
     permissions: [
       p("accountingRepair.view", "View ledger repair results", "عرض نتائج إصلاح السجلات", "Defter onarım sonuçlarını görüntüle"),
@@ -151,9 +162,11 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "costStatements.print",
   "bankAccounts.view",
   "accountingTemplates.view",
   "accountingCompanyProfile.view",
+  "accountingAttachments.view", "accountingAttachments.upload",
   "accountingRepair.view",
 ];
 
@@ -167,6 +180,7 @@ export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] =
   "bankAccounts.manage",
   "accountingTemplates.manage", "accountingTemplates.publish", "accountingTemplates.restore",
   "accountingCompanyProfile.manage", "accountingCompanyProfile.restore",
+  "accountingAttachments.remove",
   "accountingRepair.execute",
   "accountingAudit.view",
 ];

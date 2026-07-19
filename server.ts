@@ -112,6 +112,11 @@ import {
 } from "./src/lib/invoiceLedger";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildBankAccountSnapshot, resolveInvoiceBank } from "./src/lib/bankSnapshot";
+import {
+  validateAttachmentUpload, buildAttachmentMetadata, applyAttachmentRemoval,
+  randomAttachmentStorageName, attachmentStoragePath,
+  ATTACHMENT_PARENT_TYPES, type AccountingAttachment, type AccountingAttachmentParentType,
+} from "./src/lib/accountingAttachments";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
   buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
@@ -497,6 +502,9 @@ let memoryStore: {
   vendorPayableLedgers: any[];
   // Idempotency records persisted inside accounting transactions.
   accountingIdempotency: any[];
+  // Accounting proof/supporting attachment METADATA (raw bytes go to storage,
+  // never here). Same PR #44 lesson — every collection needs an entry.
+  accountingAttachments: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -543,6 +551,7 @@ function getMemoryStore() {
       invoiceAccountingLedgers: [],
       vendorPayableLedgers: [],
       accountingIdempotency: [],
+      accountingAttachments: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -12202,6 +12211,140 @@ async function startServer() {
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to restore template." }); }
   });
 
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Attachments (Increment 6, section 13) — proof/supporting
+  // files for accounting records. Raw bytes go to the storage adapter
+  // (Firebase Storage in prod, the in-memory uploadedFiles map in memory
+  // mode); Firestore holds ONLY the metadata. Internal-only (never customer/
+  // driver/public). Metadata is never hard-deleted (soft-remove with reason).
+  // ══════════════════════════════════════════════════════════════════
+  async function loadAccountingAttachment(id: string): Promise<AccountingAttachment | null> {
+    const snap = await getDoc(doc(db, "accountingAttachments", id));
+    return snap.exists() ? (snap.data() as AccountingAttachment) : null;
+  }
+  // Persist bytes to the approved storage. Returns the storagePath; a memory
+  // adapter keeps the buffer in uploadedFiles so downloads work deterministically
+  // in tests. In strict production without a bucket it throws (never fakes it).
+  async function storeAttachmentBytes(storagePath: string, attachmentId: string, buffer: Buffer, mimeType: string): Promise<void> {
+    if (!useMemoryFallback && storageBucketRef) {
+      const file = storageBucketRef.file(storagePath);
+      await file.save(buffer, { metadata: { contentType: mimeType } });
+      return;
+    }
+    if (useMemoryFallback) { uploadedFiles.set(attachmentId, { filename: storagePath, mimeType, buffer }); return; }
+    const err: any = new Error("attachment_storage_unavailable");
+    err.code = "attachment_storage_unavailable";
+    throw err;
+  }
+
+  app.post("/api/accounting/attachments", requirePermission("accountingAttachments.upload"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const parentType = body.parentType as AccountingAttachmentParentType;
+      const parentId = typeof body.parentId === "string" ? body.parentId : "";
+      if (!ATTACHMENT_PARENT_TYPES.includes(parentType) || !parentId) {
+        return res.status(400).json({ code: "document_state_invalid", error: "A valid parentType and parentId are required." });
+      }
+      const dataUrl = body.base64DataUrl || body.file || body.base64;
+      const originalFileName = typeof body.originalFileName === "string" ? body.originalFileName : (typeof body.fileName === "string" ? body.fileName : "proof");
+      if (typeof dataUrl !== "string") return res.status(400).json({ code: "document_state_invalid", error: "File data is required." });
+      const match = dataUrl.match(/^data:(.*?);base64,(.*)$/);
+      const base64 = match ? match[2] : dataUrl;
+      const buffer = Buffer.from(base64, "base64");
+      // Trust the SNIFFED content type, not the client-declared MIME.
+      const validation = validateAttachmentUpload({ originalFileName, bytes: new Uint8Array(buffer), sizeBytes: buffer.length });
+      if (!validation.ok) return res.status(validation.code === "attachment_too_large" ? 413 : 415).json({ code: validation.code, error: validation.error });
+      // Idempotent upload: same key returns the existing metadata (no duplicate).
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      if (idemKey) {
+        const all = (await getDocs(collection(db, "accountingAttachments"))).docs.map((d) => d.data() as AccountingAttachment);
+        const prior = all.find((a) => a.idempotencyKey === idemKey && a.parentId === parentId);
+        if (prior) return res.status(200).json({ attachment: cleanUndefined(prior), idempotent: true });
+      }
+      const now = new Date().toISOString();
+      const attachmentId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const storageName = randomAttachmentStorageName(validation.mimeType, crypto.randomUUID());
+      const storagePath = attachmentStoragePath(parentType, parentId, storageName);
+      try {
+        await storeAttachmentBytes(storagePath, attachmentId, buffer, validation.mimeType);
+      } catch (storageErr: any) {
+        if (storageErr?.code === "attachment_storage_unavailable") {
+          return res.status(503).json({ code: "attachment_storage_unavailable", error: "Attachment storage is unavailable. Your file was NOT saved — please try again." });
+        }
+        throw storageErr;
+      }
+      const meta = buildAttachmentMetadata({
+        attachmentId, parentType, parentId, storageName, originalFileName,
+        mimeType: validation.mimeType, sizeBytes: buffer.length, storagePath,
+        uploadedAt: now, uploadedBy: req.session!.id,
+        description: typeof body.description === "string" ? body.description : undefined,
+        idempotencyKey: idemKey || undefined,
+      });
+      await setDoc(doc(db, "accountingAttachments", attachmentId), cleanUndefined(meta));
+      await logActivity("", "Accounting", req.session!.id, `Attachment uploaded for ${parentType} ${parentId}`, "", "");
+      res.status(201).json({ attachment: cleanUndefined(meta) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] attachment upload failed:", err instanceof Error ? err.message : err);
+      res.status(500).json({ code: "attachment_storage_unavailable", error: "Failed to store the attachment." });
+    }
+  });
+
+  app.get("/api/accounting/attachments", requirePermission("accountingAttachments.view"), async (req, res) => {
+    try {
+      const parentType = req.query.parentType as AccountingAttachmentParentType;
+      const parentId = typeof req.query.parentId === "string" ? req.query.parentId : "";
+      if (!ATTACHMENT_PARENT_TYPES.includes(parentType) || !parentId) return res.status(400).json({ code: "document_state_invalid", error: "A valid parentType and parentId are required." });
+      const all = (await getDocs(collection(db, "accountingAttachments"))).docs.map((d) => d.data() as AccountingAttachment);
+      const list = all.filter((a) => a.parentType === parentType && a.parentId === parentId)
+        .sort((a, b) => (a.uploadedAt || "").localeCompare(b.uploadedAt || ""));
+      res.json({ attachments: list.map(cleanUndefined) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load attachments." });
+    }
+  });
+
+  app.get("/api/accounting/attachments/:id/download", requirePermission("accountingAttachments.view"), async (req, res) => {
+    try {
+      const meta = await loadAccountingAttachment(req.params.id);
+      if (!meta || meta.status !== "active") return res.status(404).json({ code: "document_not_available", error: "Attachment not available." });
+      // Authorization is enforced here on EVERY download (never a public token).
+      let buffer: Buffer | null = null;
+      if (!useMemoryFallback && storageBucketRef) {
+        const [data] = await storageBucketRef.file(meta.storagePath).download();
+        buffer = data as Buffer;
+      } else {
+        const mem = uploadedFiles.get(meta.attachmentId);
+        buffer = mem ? mem.buffer : null;
+      }
+      if (!buffer) return res.status(404).json({ code: "document_not_available", error: "Attachment file not found." });
+      res.setHeader("Content-Type", meta.mimeType);
+      res.setHeader("Content-Disposition", `inline; filename="${meta.originalFileName.replace(/[^A-Za-z0-9._-]/g, "-")}"`);
+      res.send(buffer);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to download the attachment." });
+    }
+  });
+
+  app.post("/api/accounting/attachments/:id/remove", requirePermission("accountingAttachments.remove"), async (req, res) => {
+    try {
+      const meta = await loadAccountingAttachment(req.params.id);
+      if (!meta) return res.status(404).json({ code: "document_not_available", error: "Attachment not found." });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const outcome = applyAttachmentRemoval(meta, { reason, actor: req.session!.id, nowIso: new Date().toISOString() });
+      if (!outcome.ok) return res.status(outcome.code === "removal_reason_required" ? 400 : 409).json({ code: outcome.code, error: outcome.error });
+      // Soft-remove: metadata is preserved forever (never hard-deleted).
+      await setDoc(doc(db, "accountingAttachments", meta.id), cleanUndefined(outcome.attachment));
+      await logActivity("", "Accounting", req.session!.id, `Attachment removed (${meta.parentType} ${meta.parentId}): ${reason.slice(0, 120)}`, "", "");
+      res.json({ attachment: cleanUndefined(outcome.attachment) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to remove the attachment." });
+    }
+  });
+
   const pdfLang = (req: express.Request): Language => {
     const l = typeof req.query.lang === "string" ? req.query.lang : "en";
     return (l === "ar" || l === "tr" ? l : "en") as Language;
@@ -12213,21 +12356,25 @@ async function startServer() {
   };
 
   // Customer Invoice PDF (draft preview or issued — the badge/watermark differ).
+  // ISSUED invoices render ONLY from their immutable snapshots (company + bank);
+  // the live master bank is used only for a DRAFT preview.
   app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requirePermission("invoices.print"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
-      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      if (!snap.exists()) return res.status(404).json({ code: "document_not_available", error: "Invoice not found." });
       const invoice = snap.data() as CustomerInvoice;
-      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ code: "document_not_available", error: "Invoice not found for this shipment." });
       const company = invoice.companySnapshot || (await loadCompanyProfile());
+      // Draft previews may resolve the current default bank; an issued invoice
+      // uses ONLY its snapshot (never a live lookup).
       let bank: BankAccount | null = null;
-      if (!invoice.bankAccountSnapshot) bank = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), invoice.currency);
+      if (invoice.status === "draft" && !invoice.bankAccountSnapshot) bank = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), invoice.currency);
       const model = applyTemplateToModel(buildInvoicePdfModel({ invoice, company, bank, language: pdfLang(req), nowIso: new Date().toISOString() }), await loadTemplateConfig("invoice"));
       sendPdf(res, await renderAccountingPdf(model), `Invoice_${invoice.invoiceNumber}.pdf`);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] invoice pdf failed:", err);
-      res.status(500).json({ error: "Failed to render invoice PDF." });
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render invoice PDF." });
     }
   });
 
@@ -12244,7 +12391,7 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] receipt pdf failed:", err);
-      res.status(500).json({ error: "Failed to render receipt PDF." });
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render receipt PDF." });
     }
   });
 
@@ -12262,7 +12409,7 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] statement pdf failed:", err);
-      res.status(500).json({ error: "Failed to render statement PDF." });
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render statement PDF." });
     }
   });
 
@@ -12282,7 +12429,30 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] voucher pdf failed:", err);
-      res.status(500).json({ error: "Failed to render voucher PDF." });
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render voucher PDF." });
+    }
+  });
+
+  // Final Cost Statement PDF (INTERNAL only) — live render of the authoritative
+  // statement in the requested language. The immutable finalized PDF snapshot is
+  // served separately via /final-pdf; this is the on-demand print surface.
+  app.get("/api/cost-statements/:shipmentId/pdf", requirePermission("costStatements.print"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const history = (stmt.approvalHistory as ApprovalHistoryEntry[] | undefined) || [];
+      const model = buildFinalPdfModel({
+        statement: stmt, approvalHistory: history,
+        cycleNumber: typeof (stmt as any).cycleNumber === "number" ? (stmt as any).cycleNumber : 1,
+        finalizedAt: (stmt as any).finalizedAt || new Date().toISOString(),
+        finalStatementRevision: typeof stmt.revision === "number" ? stmt.revision : 1,
+        company: await loadCompanyProfile(), language: pdfLang(req),
+      });
+      sendPdf(res, await renderFinalCostStatementPdf(model), `CostStatement_${stmt.shipmentNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost statement pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render cost statement PDF." });
     }
   });
 
