@@ -17,9 +17,16 @@ describe("customer payment routes — permissions + lifecycle", () => {
     expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/allocate", requireCanWriteCostStatements');
     expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements');
   });
-  it("allocation + summary + guards come from the pure module", () => {
-    expect(SERVER).toContain("autoAllocate(");
-    expect(SERVER).toContain("validateAllocations({");
+  it("allocation is enforced by the transaction-safe invoice ledger (item 2)", () => {
+    // Cross-instance safety (increment 3): allocation math reads + writes the
+    // per-invoice ledger inside runAccountingTransaction — Firestore, not an
+    // in-process mutex, enforces no-over-allocation.
+    expect(SERVER).toContain("runAccountingTransaction(");
+    expect(SERVER).toContain("autoAllocateFromLedgers(");
+    expect(SERVER).toContain("applyAllocationDeltas(");
+    expect(SERVER).toContain("invoiceAccountingLedgers");
+  });
+  it("summary/dedup/reversal guards still come from the pure modules", () => {
     expect(SERVER).toContain("summarizeCustomerAccount(");
     expect(SERVER).toContain("isDuplicatePayment(");
     expect(SERVER).toContain("canReversePayment(");

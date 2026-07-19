@@ -24,8 +24,13 @@ describe("vendor payables routes — permissions + internal-only", () => {
 });
 
 describe("vendor payables — server-authoritative + data integrity", () => {
-  it("amounts/currency/overpay/duplicate come from the pure module", () => {
-    expect(SERVER).toContain("validateVendorPayment({");
+  it("overpay is prevented by the transaction-safe ledger; duplicate/reverse via pure modules", () => {
+    // Cross-instance safety (increment 3, item 6): the per-cost-item ledger is
+    // read + written inside runAccountingTransaction, so Firestore — not an
+    // in-process mutex — enforces the no-overpay invariant.
+    expect(SERVER).toContain("decideVendorPayment(");
+    expect(SERVER).toContain("applyVendorLedgerDelta(");
+    expect(SERVER).toContain("runAccountingTransaction(");
     expect(SERVER).toContain("summarizeVendorPayable(");
     expect(SERVER).toContain("isDuplicateVendorPayment(");
     expect(SERVER).toContain("canReverseVendorPayment(");

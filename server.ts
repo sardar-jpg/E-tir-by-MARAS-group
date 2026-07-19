@@ -101,6 +101,13 @@ import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriori
 import { decideSetDefaultBank } from "./src/lib/bankDefault";
 import { planCostStatementRepair } from "./src/lib/shipmentCostStatement";
 import { KeyedMutex } from "./src/lib/asyncMutex";
+import {
+  vendorLedgerId, buildVendorLedger, decideVendorPayment, applyVendorLedgerDelta, type VendorPayableLedger,
+} from "./src/lib/vendorPayableLedger";
+import {
+  invoiceLedgerId, buildInvoiceLedger, initInvoiceLedgerFromInvoice, availableToAllocate,
+  applyAllocationDeltas, autoAllocateFromLedgers, type InvoiceAccountingLedger,
+} from "./src/lib/invoiceLedger";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
@@ -478,6 +485,14 @@ let memoryStore: {
   companyProfileVersions: CompanyProfileVersion[];
   // Per-document-type template config version history (Phase 11).
   templateConfigVersions: any[];
+  // Cross-instance transaction-safe ledgers (PR #140 increment 3). Rebuildable
+  // aggregates read+written INSIDE accounting transactions so Firestore (not an
+  // in-process mutex) enforces over-allocation / overpayment across instances.
+  // Same PR #44 lesson — every collection needs a memory-fallback entry.
+  invoiceAccountingLedgers: any[];
+  vendorPayableLedgers: any[];
+  // Idempotency records persisted inside accounting transactions.
+  accountingIdempotency: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -521,6 +536,9 @@ function getMemoryStore() {
       paymentReceipts: [],
       companyProfileVersions: [],
       templateConfigVersions: [],
+      invoiceAccountingLedgers: [],
+      vendorPayableLedgers: [],
+      accountingIdempotency: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -10388,14 +10406,62 @@ async function startServer() {
     return { httpStatus: outcome.httpStatus, body: outcome.body };
   }
 
-  // Serializes multi-document accounting mutations (customer-account and
-  // vendor-payment create/allocate) per contended resource key, so the
-  // read→validate→write cannot interleave and two concurrent requests can
-  // never over-allocate an invoice or overpay a cost item (items 1/2/4). Real
-  // serialization in memory mode + within a single instance (item 14);
-  // cross-instance Firestore additionally needs per-invoice/per-cost-item
-  // ledger aggregates (documented as remaining hardening).
+  // Serializes multi-document accounting mutations in MEMORY-FALLBACK mode
+  // only (item 14). In Firestore mode the correctness boundary is
+  // runAccountingTransaction below — Firestore itself, not this mutex.
   const accountingMutex = new KeyedMutex();
+
+  /**
+   * Multi-document accounting transaction (PR #140 increment 3, item 1).
+   * The PRODUCTION correctness boundary for ledger-guarded mutations
+   * (customer allocation, vendor overpay). Firestore mode runs `work` inside a
+   * real runTransaction: `tx.get(collection, id)` reads a document and
+   * `tx.set(...)` stages a write; Firestore serializes commits and retries the
+   * whole callback on contention, so two server instances can never both read
+   * the same ledger and commit conflicting totals. Memory mode serializes all
+   * accounting transactions and applies staged writes all-or-nothing (a throw
+   * discards every staged write). ALL reads must precede writes (Firestore
+   * rule) — the ledger flows read every needed doc first, then write.
+   */
+  interface AcctTx {
+    get<T = any>(collection: string, id: string): Promise<T | null>;
+    set(collection: string, id: string, data: any): void;
+  }
+  async function runAccountingTransaction<T>(work: (tx: AcctTx) => Promise<T>): Promise<T> {
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      return await withTimeout(
+        (db as any).runTransaction(async (fsTx: any) => {
+          const tx: AcctTx = {
+            async get(collection, id) { const s = await fsTx.get(doc(db, collection, id)); return s.exists ? (s.data() as any) : null; },
+            set(collection, id, data) { fsTx.set(doc(db, collection, id), cleanUndefined(data)); },
+          };
+          return await work(tx);
+        }),
+        10000,
+        "Accounting transaction timed out"
+      );
+    }
+    // Memory fallback: serialized + all-or-nothing.
+    return await accountingMutex.run("__acct_tx__", async () => {
+      const staged: Array<{ collection: string; id: string; data: any }> = [];
+      const tx: AcctTx = {
+        async get(collection, id) {
+          const store = (getMemoryStore() as any)[collection] as any[];
+          const found = Array.isArray(store) ? store.find((r) => r.id === id) : undefined;
+          return found ? (JSON.parse(JSON.stringify(found)) as any) : null; // clone: work must not mutate the live store pre-commit
+        },
+        set(collection, id, data) { staged.push({ collection, id, data: { ...data, id } }); },
+      };
+      const result = await work(tx); // a throw here leaves `staged` unapplied
+      for (const w of staged) {
+        const store = (getMemoryStore() as any)[w.collection] as any[];
+        if (!Array.isArray(store)) continue;
+        const idx = store.findIndex((r) => r.id === w.id);
+        if (idx >= 0) store[idx] = w.data; else store.push(w.data);
+      }
+      return result;
+    });
+  }
 
   /** Super + Accounts admins to notify when a statement is finalized. */
   function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
@@ -11044,6 +11110,56 @@ async function startServer() {
     }
   });
 
+  // Ledger reconciliation + repair (item 7). Recomputes the expected invoice
+  // and vendor ledgers from SOURCE records (invoices/payments/cost statements),
+  // reports discrepancies, and — only when ?mode=repair — creates missing and
+  // fixes incorrect ledgers. DRY-RUN by default; never touches source records;
+  // safe to rerun (a second run reports 0 changes). Super admin only.
+  app.post("/api/admin/accounting/repair-ledgers", requireSuperAdmin, async (req, res) => {
+    try {
+      const repair = req.query.mode === "repair";
+      const now = new Date().toISOString();
+      const invoices = (await getDocs(collection(db, "customerInvoices"))).docs.map((d) => d.data() as CustomerInvoice);
+      const payments = (await getDocs(collection(db, "customerPayments"))).docs.map((d) => d.data() as CustomerPayment);
+      const statements = (await getDocs(collection(db, "costStatements"))).docs.map((d) => d.data() as CostStatement);
+      const invoiceLedgers = new Map((await getDocs(collection(db, "invoiceAccountingLedgers"))).docs.map((d) => [(d.data() as InvoiceAccountingLedger).id, d.data() as InvoiceAccountingLedger]));
+      const vendorPayments = (await getDocs(collection(db, "vendorPayments"))).docs.map((d) => d.data() as VendorPaymentTransaction);
+      const vendorLedgers = new Map((await getDocs(collection(db, "vendorPayableLedgers"))).docs.map((d) => [(d.data() as VendorPayableLedger).id, d.data() as VendorPayableLedger]));
+
+      const invoiceDiscrepancies: Array<{ invoiceId: string; storedAllocated: number | null; expectedAllocated: number }> = [];
+      for (const invoice of invoices) {
+        if (invoice.status === "draft") continue;
+        const expected = buildInvoiceLedger(invoice, payments, now, (invoiceLedgers.get(invoice.id)?.revision || 0) + 1);
+        const stored = invoiceLedgers.get(invoice.id) || null;
+        if (!stored || Math.abs(stored.allocatedAmount - expected.allocatedAmount) > 0.001 || Math.abs(stored.invoicedAmount - expected.invoicedAmount) > 0.001 || stored.status !== expected.status) {
+          invoiceDiscrepancies.push({ invoiceId: invoice.id, storedAllocated: stored ? stored.allocatedAmount : null, expectedAllocated: expected.allocatedAmount });
+          if (repair) await setDoc(doc(db, "invoiceAccountingLedgers", invoice.id), cleanUndefined(expected));
+        }
+      }
+      const vendorDiscrepancies: Array<{ ledgerId: string; storedPaid: number | null; expectedPaid: number }> = [];
+      for (const stmt of statements) {
+        for (const item of (stmt.items as CostItem[]) || []) {
+          const expected = buildVendorLedger({ shipmentId: stmt.shipmentId, item, payments: vendorPayments, nowIso: now, revision: (vendorLedgers.get(vendorLedgerId(stmt.shipmentId, item.id))?.revision || 0) + 1 });
+          const stored = vendorLedgers.get(expected.id) || null;
+          const hasPayments = vendorPayments.some((p) => p.costItemId === item.id && p.shipmentId === stmt.shipmentId);
+          if (!hasPayments && !stored) continue; // nothing to track yet
+          if (!stored || Math.abs(stored.paidAmount - expected.paidAmount) > 0.001 || Math.abs(stored.costAmount - expected.costAmount) > 0.001 || stored.status !== expected.status) {
+            vendorDiscrepancies.push({ ledgerId: expected.id, storedPaid: stored ? stored.paidAmount : null, expectedPaid: expected.paidAmount });
+            if (repair) await setDoc(doc(db, "vendorPayableLedgers", expected.id), cleanUndefined(expected));
+          }
+        }
+      }
+      if (repair && (invoiceDiscrepancies.length || vendorDiscrepancies.length)) {
+        await logActivity("", "Accounting", req.session!.id, `Ledger repair: fixed ${invoiceDiscrepancies.length} invoice + ${vendorDiscrepancies.length} vendor ledger(s)`, "", "");
+      }
+      res.json({ mode: repair ? "repair" : "dry-run", invoiceDiscrepancies, vendorDiscrepancies, invoiceLedgersChecked: invoices.length, vendorLedgersChecked: statements.reduce((s, st) => s + (((st.items as CostItem[]) || []).length), 0) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] ledger repair failed:", err);
+      res.status(500).json({ error: "Failed to reconcile ledgers." });
+    }
+  });
+
   // ══════════════════════════════════════════════════════════════════
   // Vendor Payables — vendor payment transactions against cost items.
   //
@@ -11081,64 +11197,72 @@ async function startServer() {
     }
   });
 
-  // Record a vendor payment (partial payments allowed). Server-authoritative:
-  // validates amount/currency/overpay against the live item + existing
-  // payments, prevents duplicate submission, snapshots vendor + bank.
+  // Ensure the vendor payable ledger exists for a cost item, seeded
+  // deterministically from source (item cost + active payments). This one-time
+  // bootstrap (idempotent — the same base value every time) lets the
+  // transaction below read a ledger by ref; the CONTENDED increment happens
+  // inside runAccountingTransaction, never here.
+  async function ensureVendorLedger(shipmentId: string, item: Pick<CostItem, "id" | "totalAmount" | "currency">, nowIso: string): Promise<void> {
+    const id = vendorLedgerId(shipmentId, item.id);
+    const snap = await getDoc(doc(db, "vendorPayableLedgers", id));
+    if (snap.exists()) return;
+    const payments = await loadVendorPaymentsForShipment(shipmentId);
+    await setDoc(doc(db, "vendorPayableLedgers", id), cleanUndefined(buildVendorLedger({ shipmentId, item, payments, nowIso })));
+  }
+
+  // Record a vendor payment (partial payments allowed). Overpayment is
+  // prevented by Firestore itself: the per-cost-item ledger is read + written
+  // inside runAccountingTransaction, so two instances can never both commit
+  // payments that exceed the cost amount (item 6).
   app.post("/api/cost-statements/:shipmentId/vendor-payments", requireCanWriteCostStatements, async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
       const body = req.body || {};
       const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
-      // Serialize the overpay check → write per shipment so two concurrent
-      // vendor payments can never exceed the cost-item balance (item 4).
-      await accountingMutex.run(`vendor:${req.params.shipmentId}`, async () => {
-      const existing = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      if (!item) return res.status(404).json({ code: "item_not_found", error: "Cost item not found." });
       const allowOverpayment = body.allowOverpayment === true; // reserved for a future authorized workflow
-      const v = validateVendorPayment({ item, existingPayments: existing, amount: body.amount, currency: body.currency, allowOverpayment });
-      if (!v.ok) return res.status(v.code === "item_not_found" ? 404 : 400).json({ code: v.code, error: v.error });
       const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
       const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
-      if (isDuplicateVendorPayment(existing, { costItemId: item!.id, amount: v.amount, paymentDate, reference })) {
+      const existing = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      if (isDuplicateVendorPayment(existing, { costItemId: item.id, amount: Number(body.amount), paymentDate, reference })) {
         return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
       }
-      // Snapshot the paying bank account (from Template Settings) if given.
       let bankAccountSnapshot: string | undefined;
       if (typeof body.bankAccountId === "string" && body.bankAccountId) {
         const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
         if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
       }
       const now = new Date().toISOString();
-      const payment: VendorPaymentTransaction = {
-        id: `vpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        shipmentId: req.params.shipmentId,
-        shipmentNumber: stmt.shipmentNumber,
-        costStatementId: req.params.shipmentId,
-        costItemId: item!.id,
-        vendorId: typeof body.vendorId === "string" ? body.vendorId : item!.vendorId,
-        vendorName: item!.supplierName || "",
-        amount: v.amount,
-        currency: item!.currency,
-        paymentDate,
-        // Urgency is a priority, never a payment method (item 12): "urgent" is
-        // stripped from the method and recorded as priority instead.
-        paymentMethod: sanitizePaymentMethod(body.paymentMethod),
-        priority: resolveRequestedPriority(body) === "urgent" || String(body.paymentMethod || "").toLowerCase() === "urgent" ? "urgent" : "normal",
-        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
-        bankAccountSnapshot,
-        reference: reference || undefined,
-        attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
-        attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
-        internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : undefined,
-        createdBy: req.session!.id,
-        createdAt: now,
-        status: "active",
-      };
-      await setDoc(doc(db, "vendorPayments", payment.id), cleanUndefined(payment));
-      await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${v.amount} ${item!.currency})`, "", "");
-      const summary = summarizeVendorPayable(item!, [...existing, payment]);
-      res.status(201).json({ payment: cleanUndefined(payment), summary });
+      const ledgerKey = vendorLedgerId(req.params.shipmentId, item.id);
+      await ensureVendorLedger(req.params.shipmentId, item, now);
+      const paymentId = `vpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const result = await runAccountingTransaction(async (tx) => {
+        let ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
+        if (!ledger) ledger = buildVendorLedger({ shipmentId: req.params.shipmentId, item, payments: existing, nowIso: now });
+        const decision = decideVendorPayment({ ledger, amount: Number(body.amount), currency: body.currency, allowOverpayment });
+        if (!decision.ok) return { http: 400, body: { code: decision.code, error: decision.error } };
+        const payment: VendorPaymentTransaction = {
+          id: paymentId, shipmentId: req.params.shipmentId, shipmentNumber: stmt.shipmentNumber,
+          costStatementId: req.params.shipmentId, costItemId: item.id,
+          vendorId: typeof body.vendorId === "string" ? body.vendorId : item.vendorId,
+          vendorName: item.supplierName || "", amount: Number(body.amount), currency: item.currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          priority: resolveRequestedPriority(body) === "urgent" || String(body.paymentMethod || "").toLowerCase() === "urgent" ? "urgent" : "normal",
+          bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+          bankAccountSnapshot, reference: reference || undefined,
+          attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+          attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+          internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : undefined,
+          createdBy: req.session!.id, createdAt: now, status: "active",
+        };
+        const nextLedger = applyVendorLedgerDelta(ledger, Number(body.amount), now);
+        tx.set("vendorPayments", payment.id, payment);
+        tx.set("vendorPayableLedgers", ledgerKey, nextLedger);
+        return { http: 201, body: { payment: cleanUndefined(payment), summary: summarizeVendorPayable(item, [...existing, payment]) } };
       });
+      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", "");
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] vendor payment failed:", err);
@@ -11147,29 +11271,32 @@ async function startServer() {
   });
 
   // Reverse a vendor payment (never deletes; requires a reason). Desktop-only.
-  // Atomic + idempotent (item 5): decided against the FRESH record inside a
-  // single-document transaction, so concurrent reversals serialize and a
-  // repeat on an already-reversed payment replays idempotently (200).
+  // Atomic + idempotent (items 5/6): the payment reversal AND the ledger
+  // subtraction happen in ONE Firestore transaction, so ledger and payment can
+  // never diverge. A repeat on an already-reversed payment replays 200.
   app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
       const actor = req.session!.id;
       let didReverse = false;
-      const result = await mutateDocumentAtomic<VendorPaymentTransaction>("vendorPayments", req.params.paymentId, (payment) => {
-        if (!payment) return { httpStatus: 404, body: { error: "Payment not found." } };
-        if (payment.shipmentId !== req.params.shipmentId) return { httpStatus: 404, body: { error: "Payment not found for this statement." } };
-        if (payment.status === "reversed") return { httpStatus: 200, body: { payment: cleanUndefined(payment), idempotent: true } }; // idempotent replay
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<VendorPaymentTransaction>("vendorPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.shipmentId !== req.params.shipmentId) return { http: 404, body: { error: "Payment not found for this statement." } };
+        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
         const decision = canReverseVendorPayment(payment, reason);
-        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        didReverse = true;
+        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const ledgerKey = vendorLedgerId(payment.shipmentId, payment.costItemId);
+        const ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
         const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-        return { httpStatus: 200, body: { payment: cleanUndefined(reversed) }, save: reversed };
+        tx.set("vendorPayments", payment.id, reversed);
+        if (ledger) tx.set("vendorPayableLedgers", ledgerKey, applyVendorLedgerDelta(ledger, -Number(payment.amount), now));
+        didReverse = true;
+        return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
-      if (result.httpStatus === 200 && didReverse) {
-        await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
-      }
-      res.status(result.httpStatus).json(result.body);
+      if (result.http === 200 && didReverse) await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] vendor payment reversal failed:", err);
@@ -11359,6 +11486,10 @@ async function startServer() {
         issuedAt: now, issuedBy: req.session!.id,
       };
       await setDoc(doc(db, "customerInvoices", issued.id), cleanUndefined(issued));
+      // Initialize the invoice allocation ledger (item 2). Rebuild from source
+      // so a re-issue never loses any allocations already recorded.
+      const priorPayments = await loadPaymentsForCompany(issued.companyName);
+      await setDoc(doc(db, "invoiceAccountingLedgers", issued.id), cleanUndefined(buildInvoiceLedger(issued, priorPayments, now)));
       await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
       res.json({ invoice: cleanUndefined(issued) });
     } catch (err) {
@@ -11379,10 +11510,21 @@ async function startServer() {
       const decision = canCancelInvoice(invoice.status, reason);
       if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
       const now = new Date().toISOString();
-      const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
-      await setDoc(doc(db, "customerInvoices", cancelled.id), cleanUndefined(cancelled));
-      await logActivity("", "Accounting", req.session!.id, `Invoice ${cancelled.invoiceNumber} cancelled`, "", "");
-      res.json({ invoice: cleanUndefined(cancelled) });
+      // Cancel + mark the ledger cancelled atomically, but REJECT if the invoice
+      // still has active allocations (item 2): those must be reversed/unallocated
+      // first. Both writes happen in one transaction so they never diverge.
+      const result = await runAccountingTransaction(async (tx) => {
+        const ledger = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", invoice.id);
+        if (ledger && ledger.allocatedAmount > 0.001) {
+          return { http: 409, body: { code: "allocations_exist", error: "Cancel is blocked while active payments are allocated to this invoice. Reverse or re-allocate them first." } };
+        }
+        const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
+        tx.set("customerInvoices", cancelled.id, cancelled);
+        if (ledger) tx.set("invoiceAccountingLedgers", ledger.id, { ...ledger, status: "cancelled", revision: (ledger.revision || 1) + 1, updatedAt: now });
+        return { http: 200, body: { invoice: cleanUndefined(cancelled) } };
+      });
+      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", "");
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to cancel invoice." });
@@ -11403,6 +11545,15 @@ async function startServer() {
   async function loadPaymentsForCompany(companyName: string): Promise<CustomerPayment[]> {
     const snap = await getDocs(collection(db, "customerPayments"));
     return snap.docs.map((d) => d.data() as CustomerPayment).filter((p) => p.companyName === companyName);
+  }
+  // Ensure an invoice's allocation ledger exists, seeded deterministically from
+  // source (invoice + active payments' allocations). One-time bootstrap so the
+  // allocation transaction can read the ledger by ref; the CONTENDED allocation
+  // math happens inside runAccountingTransaction, never here.
+  async function ensureInvoiceLedger(invoice: CustomerInvoice, payments: CustomerPayment[], nowIso: string): Promise<void> {
+    const snap = await getDoc(doc(db, "invoiceAccountingLedgers", invoice.id));
+    if (snap.exists()) return;
+    await setDoc(doc(db, "invoiceAccountingLedgers", invoice.id), cleanUndefined(buildInvoiceLedger(invoice, payments, nowIso)));
   }
   const readCompany = (req: express.Request): string =>
     (typeof req.query.company === "string" && req.query.company) ||
@@ -11448,13 +11599,9 @@ async function startServer() {
       if (!["USD", "IQD", "TRY", "EUR"].includes(currency)) return res.status(400).json({ code: "invalid_currency", error: "Currency must be one of USD, IQD, TRY, EUR." });
       const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
       const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
-      // Serialize the read→validate→write for this customer so two concurrent
-      // payments can never over-allocate the same invoice (items 1/2).
-      await accountingMutex.run(`cust:${company}`, async () => {
-      const invoices = await loadInvoicesForCompany(company);
-      const existing = await loadPaymentsForCompany(company);
-      // Phase 1: a NEW payment must carry an immutable clientId (prefer the
-      // supplied id, else resolve from the customers list by company name).
+      const now = new Date().toISOString();
+      // Resolve the immutable payer clientId (Phase 1) — reads outside the tx
+      // (identity is not the contended resource).
       let payerClientId = "";
       const directId = requireClientId(body.clientId);
       if (directId.ok) payerClientId = directId.clientId;
@@ -11463,60 +11610,94 @@ async function startServer() {
         if (!legacy.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required and could not be resolved from the customer list." });
         payerClientId = legacy.clientId;
       }
-      // Phase 2: real idempotency — a repeated request with the same key
-      // returns the original payment; the same key with a different payload
-      // is a conflict. Prevents double-recording on retry.
-      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
-      const scopedKey = idemKey ? scopeIdempotencyKey("customer-payment", idemKey) : undefined;
-      const reqFingerprint = fingerprintPayload({ clientId: payerClientId, amount, currency, paymentDate, reference });
-      const idem = resolveIdempotency<CustomerPayment>({
-        existing, scopedKey,
-        fingerprintOf: (p) => fingerprintPayload({ clientId: p.clientId || "", amount: p.amount, currency: p.currency, paymentDate: p.paymentDate, reference: p.reference || "" }),
-        requestFingerprint: reqFingerprint,
-      });
-      if (idem.kind === "replay") return res.status(200).json({ payment: cleanUndefined(idem.record), idempotent: true });
-      if (idem.kind === "conflict") return res.status(409).json({ code: idem.code, error: idem.error });
+      const invoicesAll = await loadInvoicesForCompany(company);
+      const existing = await loadPaymentsForCompany(company);
       if (isDuplicatePayment(existing, { companyName: company, amount, paymentDate, reference, currency })) {
         return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
       }
-      let allocations: PaymentAllocation[];
-      if (body.allocationMode === "manual" && Array.isArray(body.allocations)) {
-        const v = validateAllocations({ paymentId: null, paymentAmount: amount, paymentCurrency: currency, paymentClientId: payerClientId, allocations: body.allocations, invoices, payments: existing });
-        if (!v.ok) return res.status(v.code === "customer_mismatch" ? 409 : 400).json({ code: v.code, error: v.error });
-        allocations = v.allocations;
-      } else {
-        // Auto-allocate only to this customer's own issued invoices (identity-safe).
-        const ownInvoices = invoices.filter((i) => (i.clientId || "") === payerClientId);
-        allocations = autoAllocate(amount, currency, buildOutstandingList(ownInvoices, existing)).allocations;
+      const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
+      // Determine target invoices, then ensure their ledgers exist (bootstrap
+      // from source, deterministic + idempotent) so the transaction can read
+      // them by ref — the CONTENDED allocation math happens inside the tx.
+      const manual = body.allocationMode === "manual" && Array.isArray(body.allocations);
+      const ownIssued = invoicesAll
+        .filter((i) => (i.clientId || "") === payerClientId && i.status === "issued")
+        .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
+      const targetIds: string[] = manual ? body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
+      for (const id of targetIds) {
+        const inv = invoiceById.get(id);
+        if (inv) await ensureInvoiceLedger(inv, existing, now);
       }
+      // Bank snapshot (outside tx — not contended).
       let bankAccountSnapshot: string | undefined;
       if (typeof body.bankAccountId === "string" && body.bankAccountId) {
         const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
         if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
       }
-      const now = new Date().toISOString();
-      const payment: CustomerPayment = {
-        id: `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        companyName: company,
-        clientId: payerClientId,
-        amount, currency, paymentDate,
-        paymentMethod: sanitizePaymentMethod(body.paymentMethod),
-        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
-        bankAccountSnapshot,
-        reference: reference || undefined,
-        attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
-        attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
-        notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
-        allocations,
-        status: "active",
-        idempotencyKey: scopedKey,
-        createdBy: req.session!.id,
-        createdAt: now,
-      };
-      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(payment));
-      await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
-      res.status(201).json({ payment: cleanUndefined(payment) });
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("customer-payment", idemKey) : undefined;
+      const reqFingerprint = fingerprintPayload({ clientId: payerClientId, amount, currency, paymentDate, reference });
+      const paymentId = `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // ── Production correctness boundary: one Firestore transaction reads the
+      //    target invoice ledgers, validates ownership/currency/available, and
+      //    writes the payment + updated ledgers + idempotency record together.
+      const result = await runAccountingTransaction(async (tx) => {
+        // Idempotency (persisted inside the tx): replay or conflict.
+        if (scopedKey) {
+          const rec = await tx.get<{ paymentId: string; fingerprint: string }>("accountingIdempotency", scopedKey);
+          if (rec) {
+            if (rec.fingerprint !== reqFingerprint) return { http: 409, body: { code: "idempotency_conflict", error: "This idempotency key was already used with a different request." } };
+            const prior = await tx.get<CustomerPayment>("customerPayments", rec.paymentId);
+            return { http: 200, body: { payment: cleanUndefined(prior), idempotent: true } };
+          }
+        }
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        for (const id of targetIds) {
+          let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
+          if (!l) { const inv = invoiceById.get(id); if (inv) l = initInvoiceLedgerFromInvoice(inv, now); }
+          if (l) ledgersById.set(id, l);
+        }
+        let allocations: PaymentAllocation[];
+        let ledgerWrites: InvoiceAccountingLedger[];
+        if (manual) {
+          // Validate the manual set: positive amounts, no dupes, sum ≤ payment.
+          const seen = new Set<string>();
+          let sum = 0;
+          for (const a of body.allocations) {
+            const amt = typeof a.amount === "number" && Number.isFinite(a.amount) ? Math.round((a.amount + Number.EPSILON) * 100) / 100 : NaN;
+            if (!(amt > 0)) return { http: 400, body: { code: "invalid_amount", error: "Each allocation amount must be positive." } };
+            if (seen.has(a.invoiceId)) return { http: 400, body: { code: "duplicate_allocation", error: "Duplicate allocation to one invoice." } };
+            seen.add(a.invoiceId); sum = Math.round((sum + amt + Number.EPSILON) * 100) / 100;
+          }
+          if (sum > Math.round((amount + Number.EPSILON) * 100) / 100) return { http: 400, body: { code: "over_payment", error: "Total allocations exceed the payment amount." } };
+          const applied = applyAllocationDeltas({ payerClientId, currency, ledgersById, deltas: body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, delta: a.amount })), nowIso: now });
+          if (!applied.ok) return { http: applied.code === "customer_mismatch" ? 409 : applied.code === "allocation_conflict" || applied.code === "over_invoice" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+          allocations = body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, invoiceNumber: invoiceById.get(a.invoiceId)?.invoiceNumber || a.invoiceId, amount: Math.round((a.amount + Number.EPSILON) * 100) / 100 }));
+          ledgerWrites = applied.ledgers;
+        } else {
+          const candidates = ownIssued.map((i) => ledgersById.get(i.id)).filter((l): l is InvoiceAccountingLedger => !!l);
+          const invoiceNumbers = new Map(invoicesAll.map((i) => [i.id, i.invoiceNumber]));
+          const auto = autoAllocateFromLedgers({ amount, currency, payerClientId, candidates, invoiceNumbers, nowIso: now });
+          allocations = auto.allocations;
+          ledgerWrites = auto.ledgers;
+        }
+        const payment: CustomerPayment = {
+          id: paymentId, companyName: company, clientId: payerClientId, amount, currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+          bankAccountSnapshot, reference: reference || undefined,
+          attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+          attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+          notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
+          allocations, status: "active", idempotencyKey: scopedKey, createdBy: req.session!.id, createdAt: now,
+        };
+        tx.set("customerPayments", payment.id, payment);
+        for (const l of ledgerWrites) tx.set("invoiceAccountingLedgers", l.id, l);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "customer-payment", paymentId, fingerprint: reqFingerprint, createdAt: now });
+        return { http: 201, body: { payment: cleanUndefined(payment) } };
       });
+      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] customer payment failed:", err);
@@ -11524,33 +11705,72 @@ async function startServer() {
     }
   });
 
-  // Re-allocate an active payment (manual set or auto re-run).
+  // Re-allocate an active payment (manual set or auto re-run). Production-safe
+  // across instances (item 4): ONE Firestore transaction restores this
+  // payment's prior allocations to their invoice ledgers, validates + applies
+  // the new allocations, and writes the payment + all touched ledgers together.
   app.post("/api/customer-accounts/payments/:paymentId/allocate", requireCanWriteCostStatements, async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
       if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
-      const payment = snap.data() as CustomerPayment;
-      if (payment.status !== "active") return res.status(409).json({ code: "not_active", error: "Only an active payment can be re-allocated." });
-      // Serialize allocation replacement per customer so a re-allocation can't
-      // race a payment creation into over-allocating an invoice (item 2).
-      await accountingMutex.run(`cust:${payment.companyName}`, async () => {
-      const invoices = await loadInvoicesForCompany(payment.companyName);
-      const allPayments = await loadPaymentsForCompany(payment.companyName);
-      let allocations: PaymentAllocation[];
-      if (req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations)) {
-        const v = validateAllocations({ paymentId: payment.id, paymentAmount: payment.amount, paymentCurrency: payment.currency, paymentClientId: payment.clientId, allocations: req.body.allocations, invoices, payments: allPayments });
-        if (!v.ok) return res.status(v.code === "customer_mismatch" ? 409 : 400).json({ code: v.code, error: v.error });
-        allocations = v.allocations;
-      } else {
-        const others = allPayments.filter((p) => p.id !== payment.id);
-        const ownInvoices = payment.clientId ? invoices.filter((i) => (i.clientId || "") === payment.clientId) : invoices;
-        allocations = autoAllocate(payment.amount, payment.currency, buildOutstandingList(ownInvoices, others)).allocations;
-      }
-      const next: CustomerPayment = { ...payment, allocations, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
-      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(next));
-      await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${payment.companyName}`, "", "");
-      res.json({ payment: cleanUndefined(next) });
+      const paymentPre = snap.data() as CustomerPayment;
+      if (paymentPre.status !== "active") return res.status(409).json({ code: "not_active", error: "Only an active payment can be re-allocated." });
+      const now = new Date().toISOString();
+      const company = paymentPre.companyName;
+      const payerClientId = paymentPre.clientId || "";
+      const invoicesAll = await loadInvoicesForCompany(company);
+      const existing = await loadPaymentsForCompany(company);
+      const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
+      const manual = req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations);
+      const ownIssued = invoicesAll
+        .filter((i) => (i.clientId || "") === payerClientId && i.status === "issued")
+        .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
+      const oldIds = (paymentPre.allocations || []).map((a) => a.invoiceId);
+      const newIds = manual ? req.body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
+      const allIds = [...new Set([...oldIds, ...newIds])];
+      for (const id of allIds) { const inv = invoiceById.get(id); if (inv) await ensureInvoiceLedger(inv, existing, now); }
+      const invoiceNumbers = new Map(invoicesAll.map((i) => [i.id, i.invoiceNumber]));
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.status !== "active") return { http: 409, body: { code: "not_active", error: "Only an active payment can be re-allocated." } };
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        for (const id of allIds) {
+          let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
+          if (!l) { const inv = invoiceById.get(id); if (inv) l = initInvoiceLedgerFromInvoice(inv, now); }
+          if (l) ledgersById.set(id, l);
+        }
+        // Restore (subtract) this payment's prior allocations.
+        const restored = applyAllocationDeltas({ payerClientId, currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
+        for (const l of restored.ledgers) ledgersById.set(l.id, l);
+        let allocations: PaymentAllocation[];
+        if (manual) {
+          const seen = new Set<string>(); let sum = 0;
+          for (const a of req.body.allocations) {
+            const amt = typeof a.amount === "number" && Number.isFinite(a.amount) ? Math.round((a.amount + Number.EPSILON) * 100) / 100 : NaN;
+            if (!(amt > 0)) return { http: 400, body: { code: "invalid_amount", error: "Each allocation amount must be positive." } };
+            if (seen.has(a.invoiceId)) return { http: 400, body: { code: "duplicate_allocation", error: "Duplicate allocation to one invoice." } };
+            seen.add(a.invoiceId); sum = Math.round((sum + amt + Number.EPSILON) * 100) / 100;
+          }
+          if (sum > Math.round((payment.amount + Number.EPSILON) * 100) / 100) return { http: 400, body: { code: "over_payment", error: "Total allocations exceed the payment amount." } };
+          const applied = applyAllocationDeltas({ payerClientId, currency: payment.currency, ledgersById, deltas: req.body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, delta: a.amount })), nowIso: now });
+          if (!applied.ok) return { http: applied.code === "customer_mismatch" || applied.code === "over_invoice" || applied.code === "allocation_conflict" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+          for (const l of applied.ledgers) ledgersById.set(l.id, l);
+          allocations = req.body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, invoiceNumber: invoiceNumbers.get(a.invoiceId) || a.invoiceId, amount: Math.round((a.amount + Number.EPSILON) * 100) / 100 }));
+        } else {
+          const candidates = ownIssued.map((i) => ledgersById.get(i.id)).filter((l): l is InvoiceAccountingLedger => !!l);
+          const auto = autoAllocateFromLedgers({ amount: payment.amount, currency: payment.currency, payerClientId, candidates, invoiceNumbers, nowIso: now });
+          for (const l of auto.ledgers) ledgersById.set(l.id, l);
+          allocations = auto.allocations;
+        }
+        const next: CustomerPayment = { ...payment, allocations, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("customerPayments", payment.id, next);
+        for (const l of ledgersById.values()) tx.set("invoiceAccountingLedgers", l.id, l);
+        return { http: 200, body: { payment: cleanUndefined(next) } };
       });
+      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${company}`, "", "");
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to re-allocate payment." });
@@ -11558,26 +11778,37 @@ async function startServer() {
   });
 
   // Reverse a customer payment (reason required; never deletes). Atomic +
-  // idempotent (item 3): the reversal is decided against the FRESH record
-  // inside a single-document transaction, so two concurrent reversals
-  // serialize — one flips active→reversed, the other re-reads "reversed" and
-  // replays idempotently (200) instead of writing twice or erroring.
+  // idempotent (items 3/5): the payment reversal AND the subtraction of its
+  // allocations from the referenced invoice ledgers happen in ONE Firestore
+  // transaction, so ledger and payment can never diverge. A repeat on an
+  // already-reversed payment replays 200. Original allocations are preserved.
   app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
       const actor = req.session!.id;
       let didReverse = false;
-      const result = await mutateDocumentAtomic<CustomerPayment>("customerPayments", req.params.paymentId, (payment) => {
-        if (!payment) return { httpStatus: 404, body: { error: "Payment not found." } };
-        if (payment.status === "reversed") return { httpStatus: 200, body: { payment: cleanUndefined(payment), idempotent: true } }; // idempotent replay
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
         const decision = canReversePayment(payment, reason);
-        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        didReverse = true;
+        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        // Subtract this payment's active allocations from each invoice ledger.
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        for (const a of payment.allocations || []) {
+          const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
+          if (l) ledgersById.set(a.invoiceId, l);
+        }
+        const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
         const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-        return { httpStatus: 200, body: { payment: cleanUndefined(reversed) }, save: reversed };
+        tx.set("customerPayments", payment.id, reversed);
+        for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+        didReverse = true;
+        return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
-      if (result.httpStatus === 200 && didReverse) {
+      if (result.http === 200 && didReverse) {
         // Void any issued receipt for this payment (never delete). Different
         // collection than the reversed payment; safe + idempotent (voiding an
         // already-void receipt is a no-op) so a retry can't corrupt state.
@@ -11589,7 +11820,7 @@ async function startServer() {
         }
         await logActivity("", "Accounting", actor, `Customer payment reversed (${req.params.paymentId})`, "", "");
       }
-      res.status(result.httpStatus).json(result.body);
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to reverse customer payment." });
