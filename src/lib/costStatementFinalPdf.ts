@@ -31,13 +31,22 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   // Header band (MARAS brand orange).
   doc.setFillColor(234, 88, 12);
   doc.rect(0, 0, W, 26, "F");
+  // Phase 10: Company Profile logo (data: URI only — no network here).
+  let titleX = M;
+  if (model.brandLogoUrl && model.brandLogoUrl.startsWith("data:image")) {
+    try {
+      doc.addImage(model.brandLogoUrl, model.brandLogoUrl.includes("image/png") ? "PNG" : "JPEG", M, 4, 18, 18);
+      titleX = M + 22;
+    } catch { /* fall back to text-only header */ }
+  }
   doc.setTextColor(255, 255, 255);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(15);
-  text(model.title, M, 12);
-  doc.setFontSize(9);
+  text(model.brandName || model.title, titleX, 11);
+  doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
-  text(model.internalNotice, M, 19);
+  if (model.brandName) text(model.title, titleX, 16);
+  text(model.internalNotice, titleX, model.brandName ? 21 : 19);
 
   // FINAL badge.
   doc.setFillColor(22, 101, 52);
@@ -159,6 +168,25 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
     text(a.name, M + 45, y);
     text(a.approvedAt ? `${a.status} — ${a.approvedAt}` : a.status, W - M - 2, y, { align: "right" });
     y += 6;
+  }
+
+  // Phase 10: signature + stamp (from Company Profile, data: URIs only).
+  const sy = Math.min(y + 8, 250);
+  if (model.brandSignatureUrl?.startsWith("data:image")) { try { doc.addImage(model.brandSignatureUrl, "PNG", M, sy, 40, 14); } catch { /* ignore */ } }
+  doc.setDrawColor(148, 163, 184); doc.line(M, sy + 16, M + 55, sy + 16);
+  doc.setFontSize(7.5); text("Authorized Signature", M, sy + 20);
+  if (model.brandStampUrl?.startsWith("data:image")) { try { doc.addImage(model.brandStampUrl, "PNG", W - M - 30, sy, 28, 28); } catch { /* ignore */ } }
+
+  // Phase 10: footer with company footer text + page numbers on every page.
+  const H = 297;
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(226, 232, 240); doc.line(M, H - 14, W - M, H - 14);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(100, 116, 139);
+    if (model.brandFooterText) doc.text(sanitize(model.brandFooterText), M, H - 9);
+    doc.text(`Page ${p} / ${pages}`, W - M, H - 9, { align: "right" });
+    doc.setTextColor(15, 23, 42);
   }
 
   const ab = doc.output("arraybuffer");

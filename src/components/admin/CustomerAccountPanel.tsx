@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { Landmark, Plus, RotateCcw, ReceiptText, Loader2, Wallet } from "lucide-react";
+import { Landmark, Plus, RotateCcw, ReceiptText, Loader2, Wallet, Printer } from "lucide-react";
 import type { Language, BankAccount, Currency, CustomerInvoice, CustomerPayment } from "../../types";
 import { apiFetch } from "../../lib/api";
 import type { InvoiceOutstanding, CurrencyAccountSummary } from "../../lib/customerPayments";
 import type { CustomerAccountStatement } from "../../lib/customerAccountStatement";
+import { openAccountingPdf } from "../../lib/openAccountingPdf";
 
 /**
  * Customer Account (AR) panel — Desktop/Admin Web, internal accounting.
@@ -182,6 +183,9 @@ export default function CustomerAccountPanel({ companyName, bankAccounts, canWri
             <select value={stmtCurrency} onChange={(e) => setStmtCurrency(e.target.value as Currency)} className="text-[11px] border border-slate-200 rounded-md px-1.5 py-0.5 bg-white cursor-pointer">
               {summary.map((s) => <option key={s.currency} value={s.currency}>{s.currency}</option>)}
             </select>
+            {stmtCurrency && (
+              <button onClick={() => openAccountingPdf(`/api/customer-accounts/statement/pdf?company=${q}&currency=${stmtCurrency}&lang=${lang}`)} className="text-[10px] font-bold text-slate-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Printer className="w-3 h-3" />PDF</button>
+            )}
           </div>
           {statement && (
             <div className="rounded-lg border border-slate-200 overflow-x-auto">

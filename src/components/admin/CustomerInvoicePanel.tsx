@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { FileText, Plus, Send, Ban, Loader2 } from "lucide-react";
+import { FileText, Plus, Send, Ban, Loader2, Printer } from "lucide-react";
 import type { Language, BankAccount, CustomerInvoice, InvoicePricingMode, Currency } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { INVOICE_PRICING_MODES } from "../../lib/customerInvoice";
+import { openAccountingPdf } from "../../lib/openAccountingPdf";
 
 /**
  * Customer Invoice panel — inside the Cost Statement detail (Desktop/Admin
@@ -110,12 +111,11 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
             <span className="text-slate-500">{MODE_LABEL[inv.pricingMode]?.[lang] || inv.pricingMode}</span>
             <span className="text-slate-700">{tr("selling", lang)}: <strong>{money(inv.sellingAmount)} {inv.currency}</strong></span>
             {typeof inv.grossProfit === "number" && <span className="text-slate-400">{tr("profit", lang)}: {money(inv.grossProfit)}</span>}
-            {canWrite && (
-              <div className="ml-auto flex items-center gap-2">
-                {inv.status === "draft" && <button onClick={() => issue(inv)} className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Send className="w-3 h-3" />{tr("issue", lang)}</button>}
-                {inv.status === "issued" && <button onClick={() => cancelInvoice(inv)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Ban className="w-3 h-3" />{tr("cancelInv", lang)}</button>}
-              </div>
-            )}
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="text-[10px] font-bold text-slate-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Printer className="w-3 h-3" />PDF</button>
+              {canWrite && inv.status === "draft" && <button onClick={() => issue(inv)} className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Send className="w-3 h-3" />{tr("issue", lang)}</button>}
+              {canWrite && inv.status === "issued" && <button onClick={() => cancelInvoice(inv)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Ban className="w-3 h-3" />{tr("cancelInv", lang)}</button>}
+            </div>
           </div>
         ))}
       </div>

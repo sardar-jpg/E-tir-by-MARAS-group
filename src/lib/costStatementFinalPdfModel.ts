@@ -8,7 +8,7 @@
  * Reuses the canonical accounting math (costStatementMath.ts) — no new
  * formulas, no FX conversion, gross profit only when currencies match.
  */
-import type { CostStatement } from "../types";
+import type { CostStatement, CompanyProfile, Language } from "../types";
 import {
   deriveExpenseSummary,
   deriveCustomerSummary,
@@ -49,6 +49,15 @@ export interface FinalPdfModel {
   approvals: FinalPdfApprovalLine[];
   finalStatementRevision: number;
   finalizedAt: string;
+  // Phase 10 branding (optional; snapshot from the Company Profile at
+  // finalization so the internal cost statement carries the same header/
+  // footer/signature/stamp as other documents). Direction supports RTL.
+  brandName?: string;
+  brandLogoUrl?: string;
+  brandFooterText?: string;
+  brandSignatureUrl?: string;
+  brandStampUrl?: string;
+  direction?: "ltr" | "rtl";
 }
 
 const STAGE_LABELS: Record<ApprovalStage, string> = {
@@ -63,6 +72,8 @@ export function buildFinalPdfModel(params: {
   cycleNumber: number;
   finalizedAt: string;
   finalStatementRevision: number;
+  company?: CompanyProfile | null;
+  language?: Language;
 }): FinalPdfModel {
   const s = params.statement;
   const expense = deriveExpenseSummary(s.totalCost || 0, s.paidAmount || 0);
@@ -122,5 +133,11 @@ export function buildFinalPdfModel(params: {
     approvals,
     finalStatementRevision: params.finalStatementRevision,
     finalizedAt: params.finalizedAt,
+    brandName: params.company?.companyName || params.company?.companyNameEn || undefined,
+    brandLogoUrl: params.company?.logoUrl,
+    brandFooterText: params.company?.footerText,
+    brandSignatureUrl: params.company?.signatureUrl,
+    brandStampUrl: params.company?.stampUrl,
+    direction: params.language === "ar" ? "rtl" : "ltr",
   };
 }

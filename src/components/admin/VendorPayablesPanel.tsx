@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Wallet, Plus, RotateCcw, Paperclip, Loader2 } from "lucide-react";
+import { Wallet, Plus, RotateCcw, Paperclip, Loader2, Printer } from "lucide-react";
 import type { Language, CostItem, BankAccount, VendorPaymentTransaction } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { summarizeVendorPayable, matchesPayableFilter, type VendorPayableSummary } from "../../lib/vendorPayments";
+import { openAccountingPdf } from "../../lib/openAccountingPdf";
 
 /**
  * Vendor Payables panel — lives inside the existing Cost Statement detail
@@ -142,11 +143,14 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
                       {p.reference && <span>· {p.reference}</span>}
                       {p.bankAccountSnapshot && <span>· {p.bankAccountSnapshot}</span>}
                       {p.attachmentUrl && <a href={p.attachmentUrl} target="_blank" rel="noreferrer" className="text-orange-600 no-underline flex items-center gap-0.5"><Paperclip className="w-3 h-3" />{tr("viewProof", lang)}</a>}
-                      {p.status === "reversed" ? (
-                        <span className="ml-auto text-[10px] font-bold">{tr("reversed", lang)}{p.reversalReason ? ` — ${p.reversalReason}` : ""}</span>
-                      ) : canWrite ? (
-                        <button onClick={() => reverse(p)} className="ml-auto text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><RotateCcw className="w-3 h-3" />{tr("reverse", lang)}</button>
-                      ) : null}
+                      <span className="ml-auto flex items-center gap-2">
+                        <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/vendor-payments/${p.id}/voucher?lang=${lang}`)} className="text-[10px] font-bold text-slate-500 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Printer className="w-3 h-3" />Voucher</button>
+                        {p.status === "reversed" ? (
+                          <span className="text-[10px] font-bold">{tr("reversed", lang)}{p.reversalReason ? ` — ${p.reversalReason}` : ""}</span>
+                        ) : canWrite ? (
+                          <button onClick={() => reverse(p)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><RotateCcw className="w-3 h-3" />{tr("reverse", lang)}</button>
+                        ) : null}
+                      </span>
                     </div>
                   ))}
                 </div>

@@ -96,6 +96,10 @@ import {
 import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
+import {
+  buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
+} from "./src/lib/accountingPdfModel";
+import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -2075,7 +2079,8 @@ import {
   CustomerInvoice,
   CustomerPayment,
   PaymentAllocation,
-  PaymentReceipt
+  PaymentReceipt,
+  Language
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -10299,7 +10304,8 @@ async function startServer() {
     finalRevision: number,
     generatedBy: string
   ): Promise<{ url: string; path: string; fileName: string }> {
-    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision });
+    const company = await loadCompanyProfile().catch(() => ({} as CompanyProfile));
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company });
     const buffer = await renderFinalCostStatementPdf(model);
     const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
     const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
@@ -11420,6 +11426,97 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to load receipt." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Professional accounting PDFs (Phase 10). One direction-aware renderer
+  // (renderAccountingPdf) draws every document from SAVED data + the
+  // configured Company Profile + bank. Customer-facing documents strip
+  // internal cost/profit (done in the pure model builders). Streamed inline
+  // as application/pdf for clean print + download. Internal-only routes.
+  // ══════════════════════════════════════════════════════════════════
+  const pdfLang = (req: express.Request): Language => {
+    const l = typeof req.query.lang === "string" ? req.query.lang : "en";
+    return (l === "ar" || l === "tr" ? l : "en") as Language;
+  };
+  const sendPdf = (res: express.Response, buffer: Buffer, fileName: string) => {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${fileName.replace(/[^A-Za-z0-9._-]/g, "-")}"`);
+    res.send(buffer);
+  };
+
+  // Customer Invoice PDF (draft preview or issued — the badge/watermark differ).
+  app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      const company = invoice.companySnapshot || (await loadCompanyProfile());
+      let bank: BankAccount | null = null;
+      if (!invoice.bankAccountSnapshot) bank = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), invoice.currency);
+      const model = buildInvoicePdfModel({ invoice, company, bank, language: pdfLang(req), nowIso: new Date().toISOString() });
+      sendPdf(res, await renderAccountingPdf(model), `Invoice_${invoice.invoiceNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice pdf failed:", err);
+      res.status(500).json({ error: "Failed to render invoice PDF." });
+    }
+  });
+
+  // Payment Receipt PDF.
+  app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued") || allReceipts.find((r) => r.paymentId === req.params.paymentId);
+      if (!receipt) return res.status(404).json({ error: "No receipt for this payment." });
+      const company = receipt.companySnapshot || (await loadCompanyProfile());
+      const [invoices, payments] = [await loadInvoicesForCompany(receipt.companyName), await loadPaymentsForCompany(receipt.companyName)];
+      const model = buildReceiptPdfModel({ receipt, company, language: pdfLang(req), nowIso: new Date().toISOString(), advanceCredit: advanceCreditFor(invoices, payments, receipt.currency) });
+      sendPdf(res, await renderAccountingPdf(model), `Receipt_${receipt.receiptNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] receipt pdf failed:", err);
+      res.status(500).json({ error: "Failed to render receipt PDF." });
+    }
+  });
+
+  // Customer Account Statement PDF.
+  app.get("/api/customer-accounts/statement/pdf", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : customerStatementCurrencies(invoices, payments)[0]) as Currency;
+      if (!currency) return res.status(404).json({ error: "No account activity for this customer." });
+      const statement = buildCustomerAccountStatement({ companyName: company, currency, invoices, payments, from: typeof req.query.from === "string" ? req.query.from : "", to: typeof req.query.to === "string" ? req.query.to : "" });
+      const model = buildStatementPdfModel({ statement, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString() });
+      sendPdf(res, await renderAccountingPdf(model), `Statement_${company}_${currency}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] statement pdf failed:", err);
+      res.status(500).json({ error: "Failed to render statement PDF." });
+    }
+  });
+
+  // Vendor Payment Voucher PDF (INTERNAL only).
+  app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "vendorPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as VendorPaymentTransaction;
+      if (payment.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Payment not found for this statement." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === payment.costItemId);
+      const remaining = item ? summarizeVendorPayable(item, await loadVendorPaymentsForShipment(req.params.shipmentId)).remaining : undefined;
+      const model = buildVoucherPdfModel({ payment, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString(), remainingPayable: remaining, costItemDescription: item ? (item.supplierName || item.description || item.costType) : undefined });
+      sendPdf(res, await renderAccountingPdf(model), `Voucher_${payment.shipmentNumber}_${payment.id}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] voucher pdf failed:", err);
+      res.status(500).json({ error: "Failed to render voucher PDF." });
     }
   });
 
