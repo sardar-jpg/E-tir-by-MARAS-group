@@ -100,6 +100,7 @@ import { nextAccountingSequence, receiptSequenceDocId, accountingYearOf, formatR
 import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriority } from "./src/lib/expensePriority";
 import { decideSetDefaultBank } from "./src/lib/bankDefault";
 import { planCostStatementRepair } from "./src/lib/shipmentCostStatement";
+import { KeyedMutex } from "./src/lib/asyncMutex";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
@@ -10387,6 +10388,15 @@ async function startServer() {
     return { httpStatus: outcome.httpStatus, body: outcome.body };
   }
 
+  // Serializes multi-document accounting mutations (customer-account and
+  // vendor-payment create/allocate) per contended resource key, so the
+  // read→validate→write cannot interleave and two concurrent requests can
+  // never over-allocate an invoice or overpay a cost item (items 1/2/4). Real
+  // serialization in memory mode + within a single instance (item 14);
+  // cross-instance Firestore additionally needs per-invoice/per-cost-item
+  // ledger aggregates (documented as remaining hardening).
+  const accountingMutex = new KeyedMutex();
+
   /** Super + Accounts admins to notify when a statement is finalized. */
   function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
     const ids = new Set<string>();
@@ -11080,6 +11090,9 @@ async function startServer() {
       if (!stmt) return;
       const body = req.body || {};
       const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
+      // Serialize the overpay check → write per shipment so two concurrent
+      // vendor payments can never exceed the cost-item balance (item 4).
+      await accountingMutex.run(`vendor:${req.params.shipmentId}`, async () => {
       const existing = await loadVendorPaymentsForShipment(req.params.shipmentId);
       const allowOverpayment = body.allowOverpayment === true; // reserved for a future authorized workflow
       const v = validateVendorPayment({ item, existingPayments: existing, amount: body.amount, currency: body.currency, allowOverpayment });
@@ -11125,6 +11138,7 @@ async function startServer() {
       await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${v.amount} ${item!.currency})`, "", "");
       const summary = summarizeVendorPayable(item!, [...existing, payment]);
       res.status(201).json({ payment: cleanUndefined(payment), summary });
+      });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] vendor payment failed:", err);
@@ -11434,6 +11448,9 @@ async function startServer() {
       if (!["USD", "IQD", "TRY", "EUR"].includes(currency)) return res.status(400).json({ code: "invalid_currency", error: "Currency must be one of USD, IQD, TRY, EUR." });
       const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
       const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      // Serialize the read→validate→write for this customer so two concurrent
+      // payments can never over-allocate the same invoice (items 1/2).
+      await accountingMutex.run(`cust:${company}`, async () => {
       const invoices = await loadInvoicesForCompany(company);
       const existing = await loadPaymentsForCompany(company);
       // Phase 1: a NEW payment must carry an immutable clientId (prefer the
@@ -11499,6 +11516,7 @@ async function startServer() {
       await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(payment));
       await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
       res.status(201).json({ payment: cleanUndefined(payment) });
+      });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] customer payment failed:", err);
@@ -11513,6 +11531,9 @@ async function startServer() {
       if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
       const payment = snap.data() as CustomerPayment;
       if (payment.status !== "active") return res.status(409).json({ code: "not_active", error: "Only an active payment can be re-allocated." });
+      // Serialize allocation replacement per customer so a re-allocation can't
+      // race a payment creation into over-allocating an invoice (item 2).
+      await accountingMutex.run(`cust:${payment.companyName}`, async () => {
       const invoices = await loadInvoicesForCompany(payment.companyName);
       const allPayments = await loadPaymentsForCompany(payment.companyName);
       let allocations: PaymentAllocation[];
@@ -11529,6 +11550,7 @@ async function startServer() {
       await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(next));
       await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${payment.companyName}`, "", "");
       res.json({ payment: cleanUndefined(next) });
+      });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to re-allocate payment." });

@@ -73,19 +73,20 @@ describe("shipment creation wires the draft cost statement (Core Business Rule)"
   const at = SERVER.indexOf("async function createShipmentRecord");
   const region = at >= 0 ? SERVER.slice(at, at + 10000) : "";
 
-  it("createShipmentRecord builds + persists a draft under the shipment id, without duplicating an existing one", () => {
+  it("createShipmentRecord builds a draft under the shipment id (one per shipment)", () => {
     expect(at, "createShipmentRecord must exist").toBeGreaterThan(-1);
     expect(region).toContain("buildDraftCostStatement(newShipment");
+    // The draft's document id IS the shipment id (exactly one statement).
     expect(region).toContain('doc(db, "costStatements", id)');
-    // No-duplicate guard: only create when one does not already exist.
-    expect(region).toContain("existingStmt.exists()");
   });
 
-  it("a draft-write failure never fails shipment creation (logged, not thrown)", () => {
-    // The draft block is wrapped so the shipment (already written) is never
-    // rolled back by an accounting hiccup; the lazy upsert is the fallback.
-    const draftBlock = region.slice(region.indexOf("existingStmt"));
-    expect(draftBlock).toContain("catch");
-    expect(draftBlock).toContain("console.warn");
+  it("shipment + cost statement are created all-or-nothing (item 10)", () => {
+    // Firestore: a write batch (atomic commit) of both docs; memory: write
+    // both, roll the shipment back if the cost-statement write throws. A
+    // shipment is never left active without its cost statement.
+    expect(region).toContain("batch.commit()");
+    expect(region).toContain('collection("costStatements").doc(id)');
+    // Memory rollback path removes the shipment on a statement-write failure.
+    expect(region).toContain("store.shipments.splice");
   });
 });
