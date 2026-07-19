@@ -2307,6 +2307,13 @@ if (adminApp && adminProjectId) {
     const customId = firebaseConfig?.firestoreDatabaseId;
     initialId = customId && customId !== "(default)" ? customId : "(default)";
     db = customId && customId !== "(default)" ? getAdminFirestore(adminApp, customId) : getAdminFirestore(adminApp);
+    // Persistence robustness: the memory fallback tolerates `undefined` fields
+    // and much of the code relies on cleanUndefined() piecemeal, but any write
+    // that slips an undefined nested value through would otherwise be REJECTED
+    // by real Firestore ("Cannot use undefined as a Firestore value"). Dropping
+    // undefined (same effect as cleanUndefined) keeps Firestore writes robust and
+    // consistent with memory-mode behavior. Set once, immediately after init.
+    try { (db as any).settings({ ignoreUndefinedProperties: true }); } catch { /* settings already applied */ }
   } catch (err: any) {
     console.warn("Firestore (Admin SDK) initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
     useMemoryFallback = true;
@@ -12395,13 +12402,17 @@ async function startServer() {
   // Persist bytes to the approved storage. Returns the storagePath; a memory
   // adapter keeps the buffer in uploadedFiles so downloads work deterministically
   // in tests. In strict production without a bucket it throws (never fakes it).
+  // Opt-in deterministic test storage adapter (Firestore-emulator acceptance
+  // only). Strictly gated behind an env var that is UNSET in production, so the
+  // production fail-closed behavior below is unchanged. Never enabled by default.
+  const ATTACHMENT_TEST_ADAPTER = process.env.ACCOUNTING_ATTACHMENT_TEST_ADAPTER === "1";
   async function storeAttachmentBytes(storagePath: string, attachmentId: string, buffer: Buffer, mimeType: string): Promise<void> {
     if (!useMemoryFallback && storageBucketRef) {
       const file = storageBucketRef.file(storagePath);
       await file.save(buffer, { metadata: { contentType: mimeType } });
       return;
     }
-    if (useMemoryFallback) { uploadedFiles.set(attachmentId, { filename: storagePath, mimeType, buffer }); return; }
+    if (useMemoryFallback || ATTACHMENT_TEST_ADAPTER) { uploadedFiles.set(attachmentId, { filename: storagePath, mimeType, buffer }); return; }
     const err: any = new Error("attachment_storage_unavailable");
     err.code = "attachment_storage_unavailable";
     throw err;
