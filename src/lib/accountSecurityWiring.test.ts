@@ -174,13 +174,24 @@ describe("global identity uniqueness is enforced on every account-mutation route
 });
 
 describe("owner protection", () => {
-  it("no API route can create/update its way to a second super admin, and no admin-update route exists at all", () => {
-    expect(SERVER).not.toContain('app.put("/api/admins');
+  it("no API route can create/update its way to a second super admin; the only admin-update route sets permissions only", () => {
+    // No adminType-mutating admin update route exists.
     expect(SERVER).not.toContain('app.patch("/api/admins');
     const R = region('app.post("/api/admins"', 3600);
     // The only path to a created adminType is the strict validator, whose
     // unit tests prove "super" is rejected, never downgraded.
     expect(R).toContain("adminType: typeCheck.adminType");
+    // The one PUT admin route (increment 4) manages ACCOUNTING PERMISSIONS
+    // only — Super Admin only, owner/super target rejected, and it writes a
+    // sanitized `permissions` array; it never touches adminType.
+    expect(SERVER).toContain('app.put("/api/admins/:id/permissions", requireSuperAdmin');
+    const PERM = region('app.put("/api/admins/:id/permissions"', 1200);
+    expect(PERM).toContain("sanitizeAccountingPermissions(req.body?.permissions)");
+    expect(PERM).toContain("permissions: after");
+    expect(PERM).not.toContain("adminType:"); // never mutates the role
+    // Escalation guards: owner/super target rejected, self-edit rejected.
+    expect(SERVER).toContain("The Super Admin account's permissions cannot be modified.");
+    expect(PERM).toContain("You cannot modify your own permissions.");
   });
 
   it("owner deletion stays blocked on BOTH delete routes, and blocked attempts are audit-trailed", () => {

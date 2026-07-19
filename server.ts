@@ -77,8 +77,62 @@ import {
   type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
 } from "./src/lib/costApprovalWorkflow";
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
+import { buildDraftCostStatement } from "./src/lib/costStatementDraft";
+import {
+  validateCompanyProfile, validateBankAccount,
+  resolveDefaultBankAccountForCurrency,
+} from "./src/lib/accountingTemplateSettings";
+import {
+  summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
+} from "./src/lib/vendorPayments";
+import {
+  computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
+  canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
+} from "./src/lib/customerInvoice";
+import {
+  buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
+  isDuplicatePayment, summarizeCustomerAccount,
+} from "./src/lib/customerPayments";
+import { canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
+import { requireClientId } from "./src/lib/customerIdentity";
+import { normalizeIdempotencyKey, scopeIdempotencyKey, fingerprintPayload, resolveIdempotency } from "./src/lib/idempotency";
+import { nextAccountingSequence, receiptSequenceDocId, accountingYearOf, formatReceiptNumber, type AccountingSequenceDoc } from "./src/lib/accountingSequence";
+import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriority } from "./src/lib/expensePriority";
+import { decideSetDefaultBank } from "./src/lib/bankDefault";
+import { planCostStatementRepair } from "./src/lib/shipmentCostStatement";
+import { KeyedMutex } from "./src/lib/asyncMutex";
+import { buildCostItemFromInput, decideItemAppend } from "./src/lib/costStatementItem";
+import { resolveStatementRevision } from "./src/lib/costStatementMath";
+import {
+  vendorLedgerId, buildVendorLedger, decideVendorPayment, applyVendorLedgerDelta, type VendorPayableLedger,
+} from "./src/lib/vendorPayableLedger";
+import {
+  invoiceLedgerId, buildInvoiceLedger, initInvoiceLedgerFromInvoice, availableToAllocate,
+  applyAllocationDeltas, autoAllocateFromLedgers, deriveInvoiceStatus, type InvoiceAccountingLedger,
+} from "./src/lib/invoiceLedger";
+import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
+import { buildBankAccountSnapshot, resolveInvoiceBank } from "./src/lib/bankSnapshot";
+import {
+  validateAttachmentUpload, buildAttachmentMetadata, applyAttachmentRemoval,
+  randomAttachmentStorageName, attachmentStoragePath,
+  ATTACHMENT_PARENT_TYPES, type AccountingAttachment, type AccountingAttachmentParentType,
+} from "./src/lib/accountingAttachments";
+import {
+  AUDIT_ACTIONS, buildAuditRecord, maskBankForAudit, filterAuditRecords, paginateAudit,
+  redactAuditForNonSensitive, buildAuditCsv, type AuditRecord, type AuditActor, type AuditAction,
+} from "./src/lib/accountingAudit";
+import { buildArOverview } from "./src/lib/accountsReceivableOverview";
+import {
+  buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
+  applyTemplateToModel, buildSamplePreviewModel,
+} from "./src/lib/accountingPdfModel";
+import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
+import {
+  validateTemplateConfig, defaultTemplateConfig, TEMPLATE_DOC_TYPES, type TemplateDocType, type TemplateConfig,
+} from "./src/lib/accountingTemplateConfig";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
+import { resolveEffectivePermissions, sanitizeAccountingPermissions, diffPermissions, isKnownAccountingPermission, type AccountingPermission } from "./src/lib/accountingPermissions";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory, validateDocumentReference, INVALID_DOCUMENT_INPUT_CODE } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
@@ -427,6 +481,37 @@ let memoryStore: {
   // ("cost_approval_workflow") holding the three stage→admin assignments.
   // Same PR #44 lesson: every collection needs a memory-fallback entry.
   accountingSettings: any[];
+  // Template Settings (accounting): configurable bank accounts, one doc per
+  // account. Same PR #44 lesson: every collection needs a memory-fallback
+  // entry. (Company Profile is a single doc under accountingSettings.)
+  bankAccounts: BankAccount[];
+  // Vendor Payables: one doc per vendor payment transaction (a cost item
+  // may have several). Same PR #44 lesson — needs an entry here.
+  vendorPayments: VendorPaymentTransaction[];
+  // Customer Invoices: one doc per invoice (a shipment may have several).
+  customerInvoices: CustomerInvoice[];
+  // Customer Payments: account-based (per company), allocated to invoices.
+  customerPayments: CustomerPayment[];
+  // Payment Receipts: one active receipt per customer payment.
+  paymentReceipts: PaymentReceipt[];
+  // Company profile version history (issued-document integrity).
+  companyProfileVersions: CompanyProfileVersion[];
+  // Per-document-type template config version history (Phase 11).
+  templateConfigVersions: any[];
+  // Cross-instance transaction-safe ledgers (PR #140 increment 3). Rebuildable
+  // aggregates read+written INSIDE accounting transactions so Firestore (not an
+  // in-process mutex) enforces over-allocation / overpayment across instances.
+  // Same PR #44 lesson — every collection needs a memory-fallback entry.
+  invoiceAccountingLedgers: any[];
+  vendorPayableLedgers: any[];
+  // Idempotency records persisted inside accounting transactions.
+  accountingIdempotency: any[];
+  // Accounting proof/supporting attachment METADATA (raw bytes go to storage,
+  // never here). Same PR #44 lesson — every collection needs an entry.
+  accountingAttachments: any[];
+  // Canonical append-only accounting audit log (Increment 7). Immutable history
+  // of sensitive accounting actions; never the financial ledger.
+  auditLogs: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -463,6 +548,18 @@ function getMemoryStore() {
       adminDashboardLayouts: [],
       accountIdentityKeys: [],
       accountingSettings: [],
+      bankAccounts: [],
+      vendorPayments: [],
+      customerInvoices: [],
+      customerPayments: [],
+      paymentReceipts: [],
+      companyProfileVersions: [],
+      templateConfigVersions: [],
+      invoiceAccountingLedgers: [],
+      vendorPayableLedgers: [],
+      accountingIdempotency: [],
+      accountingAttachments: [],
+      auditLogs: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -1774,6 +1871,59 @@ function getShipmentSequenceCounterMemory(): InMemorySequenceCounter {
   return mStore.shipmentSequenceCounter;
 }
 
+// Receipt numbering (PR #140 review, item 6): collision-safe per-YEAR
+// sequence handed out from counters/receipt-<year>, mirroring the shipment
+// sequence allocator above. Firestore mode uses a runTransaction on the
+// counter doc; memory mode uses a per-year single-threaded counter (no await
+// between read and increment) so two concurrent receipt creations can never
+// receive the same number. Returns the 1-based number to format.
+const receiptSequenceCountersMemory = new Map<number, InMemorySequenceCounter>();
+function getReceiptSequenceCounterMemory(year: number): InMemorySequenceCounter {
+  let c = receiptSequenceCountersMemory.get(year);
+  if (!c) {
+    // Bootstraps from receipts already issued for this year so numbering
+    // continues after a restart instead of colliding with existing numbers.
+    const store = (getMemoryStore().paymentReceipts as PaymentReceipt[]) || [];
+    const suffix = `RCPT-${year}-`;
+    const highest = store.reduce((max, r) => {
+      if (typeof r.receiptNumber === "string" && r.receiptNumber.startsWith(suffix)) {
+        const n = parseInt(r.receiptNumber.slice(suffix.length), 10);
+        if (Number.isFinite(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    c = new InMemorySequenceCounter(highest + 1); // next() returns `highest+1` first
+    receiptSequenceCountersMemory.set(year, c);
+  }
+  return c;
+}
+async function allocateNextReceiptSequence(year: number): Promise<number> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getReceiptSequenceCounterMemory(year).next();
+  }
+  const counterRef = (db as any).collection("counters").doc(receiptSequenceDocId(year));
+  try {
+    return await withTimeout(
+      (db as any).runTransaction(async (tx: any) => {
+        const snap = await tx.get(counterRef);
+        const data = snap.exists ? (snap.data() as AccountingSequenceDoc) : undefined;
+        const { issued, next } = nextAccountingSequence(data);
+        tx.set(counterRef, next, { merge: true });
+        return issued;
+      }),
+      5000,
+      "Firestore receipt sequence transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore receipt sequence transaction failed or timed out. Switching to Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getReceiptSequenceCounterMemory(year).next();
+  }
+}
+
 async function allocateNextShipmentSequence(): Promise<number> {
   if (useMemoryFallback || !db) {
     if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
@@ -2025,7 +2175,18 @@ import {
   AllianceOfferResponse,
   AllianceAuditAction,
   AllianceAuditEntry,
-  DriverActiveJobLock
+  DriverActiveJobLock,
+  CompanyProfile,
+  BankAccount,
+  BankAccountSnapshot,
+  CompanyProfileVersion,
+  VendorPaymentTransaction,
+  CostItem,
+  CustomerInvoice,
+  CustomerPayment,
+  PaymentAllocation,
+  PaymentReceipt,
+  Language
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -2146,6 +2307,13 @@ if (adminApp && adminProjectId) {
     const customId = firebaseConfig?.firestoreDatabaseId;
     initialId = customId && customId !== "(default)" ? customId : "(default)";
     db = customId && customId !== "(default)" ? getAdminFirestore(adminApp, customId) : getAdminFirestore(adminApp);
+    // Persistence robustness: the memory fallback tolerates `undefined` fields
+    // and much of the code relies on cleanUndefined() piecemeal, but any write
+    // that slips an undefined nested value through would otherwise be REJECTED
+    // by real Firestore ("Cannot use undefined as a Firestore value"). Dropping
+    // undefined (same effect as cleanUndefined) keeps Firestore writes robust and
+    // consistent with memory-mode behavior. Set once, immediately after init.
+    try { (db as any).settings({ ignoreUndefinedProperties: true }); } catch { /* settings already applied */ }
   } catch (err: any) {
     console.warn("Firestore (Admin SDK) initialization failed, utilizing default Memory Fallback. Error:", err instanceof Error ? err.message : String(err));
     useMemoryFallback = true;
@@ -4239,6 +4407,54 @@ async function startServer() {
     next();
   }
 
+  // ── Granular accounting permissions (PR #140 review increment 4) ─────────
+  // The SINGLE server authorization source for accounting actions. Super Admin
+  // bypasses (all permissions); every other employee's effective permissions
+  // are resolved FRESH from their admin record (never from the token, so a
+  // permission change takes effect immediately and can't be forged). The
+  // resolved set is cached on the request so a route checking several
+  // permissions loads the record once.
+  async function loadEffectivePermissionsForSession(session: AuthSessionPayload): Promise<Set<AccountingPermission>> {
+    if (session.adminType === "super") return resolveEffectivePermissions({ role: "admin", adminType: "super" });
+    let record: { adminType?: string; active?: boolean; permissions?: unknown } | null = null;
+    try {
+      const snap = await getDoc(doc(db, "admins", session.id));
+      if (snap.exists()) record = snap.data() as any;
+    } catch { /* missing record → resolver denies safely below */ }
+    return resolveEffectivePermissions({
+      role: "admin",
+      adminType: session.adminType, // token is authoritative for the type
+      active: record?.active,
+      permissions: record?.permissions,
+    });
+  }
+
+  /**
+   * Route middleware factory: require a specific accounting permission. On
+   * denial returns the error contract { error, code:"permission_denied",
+   * requiredPermission } with HTTP 403 (never leaks role/user details).
+   */
+  function requirePermission(permission: AccountingPermission) {
+    return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (respondIfSessionVerificationUnavailable(req, res)) return;
+      if (!req.session || req.session.role !== "admin") {
+        return res.status(401).json({ error: "Authentication required." });
+      }
+      try {
+        const cache = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+        const perms = cache ?? (await loadEffectivePermissionsForSession(req.session));
+        (req as any)._effectiveAccountingPerms = perms;
+        if (!perms.has(permission)) {
+          return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: permission });
+        }
+        next();
+      } catch (err) {
+        if (respondIfServiceUnavailable(err, res)) return;
+        return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: permission });
+      }
+    };
+  }
+
   /**
    * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs and
    * POST /api/logs used requireRole("admin"), which let any admin type read
@@ -4786,7 +5002,32 @@ async function startServer() {
       );
     }
 
-    await setDoc(doc(db, "shipments", id), newShipment);
+    // Core Business Rule (item 10): every shipment gets a linked,
+    // MAR-numbered internal cost record whose document id IS the shipment id,
+    // so there is EXACTLY ONE statement per shipment. The shipment and its
+    // draft cost statement are now created ALL-OR-NOTHING: a Firestore write
+    // batch (atomic commit) in Firestore mode, or a memory write that rolls
+    // the shipment back if the statement write fails. A shipment is never
+    // left active without its cost statement.
+    const draft = buildDraftCostStatement(newShipment, newShipment.createdAt);
+    if (!useMemoryFallback && db && typeof (db as any).batch === "function") {
+      const batch = (db as any).batch();
+      batch.set((db as any).collection("shipments").doc(id), newShipment);
+      batch.set((db as any).collection("costStatements").doc(id), draft);
+      await withTimeout(batch.commit(), 8000, "Shipment + cost statement batch commit timed out");
+    } else {
+      // Memory (or a db without batch): write both, roll back the shipment if
+      // the cost-statement write throws — never a shipment without a statement.
+      await setDoc(doc(db, "shipments", id), newShipment);
+      try {
+        await setDoc(doc(db, "costStatements", id), draft);
+      } catch (stmtErr) {
+        const store = getMemoryStore();
+        const si = store.shipments.findIndex((s) => s.id === id);
+        if (si >= 0) store.shipments.splice(si, 1);
+        throw stmtErr;
+      }
+    }
 
     await logActivity(
       id,
@@ -7522,6 +7763,60 @@ async function startServer() {
     }
   });
 
+  // ── Employee accounting permissions (Settings → Team, Super Admin only) ──
+  // The ONLY place employee permissions are managed. Privilege-escalation
+  // protected: only Super Admin may read/modify; the Super Admin/owner account
+  // is never a target; an employee can never edit their own or a peer's
+  // permissions (requireSuperAdmin already blocks non-super callers).
+  const ownerEmailLc = () => (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+  async function loadTargetAdminOr404(id: string, res: express.Response): Promise<any | null> {
+    const snap = await getDoc(doc(db, "admins", id));
+    if (!snap.exists()) { res.status(404).json({ error: "Employee not found." }); return null; }
+    const record = snap.data() as any;
+    if (isProtectedOwnerAccount(record, ownerEmailLc()) || record.adminType === "super") {
+      res.status(403).json({ error: "The Super Admin account's permissions cannot be modified." });
+      return null;
+    }
+    return record;
+  }
+  app.get("/api/admins/:id/permissions", requireSuperAdmin, async (req, res) => {
+    try {
+      const record = await loadTargetAdminOr404(req.params.id, res);
+      if (!record) return;
+      const explicit = Array.isArray(record.permissions) ? sanitizeAccountingPermissions(record.permissions) : null;
+      const effective = [...resolveEffectivePermissions({ role: "admin", adminType: record.adminType, active: record.active, permissions: record.permissions })];
+      res.json({ id: req.params.id, adminType: record.adminType, permissions: explicit, effective, usesLegacyDefault: explicit === null && record.adminType === "accounts" });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load permissions." });
+    }
+  });
+  app.put("/api/admins/:id/permissions", requireSuperAdmin, async (req, res) => {
+    try {
+      if (req.params.id === req.session!.id) return res.status(403).json({ error: "You cannot modify your own permissions.", code: "permission_denied" });
+      const record = await loadTargetAdminOr404(req.params.id, res);
+      if (!record) return;
+      const before = Array.isArray(record.permissions) ? sanitizeAccountingPermissions(record.permissions) : [];
+      const after = sanitizeAccountingPermissions(req.body?.permissions); // unknown keys dropped
+      const { added, removed } = diffPermissions(before, after);
+      await setDoc(doc(db, "admins", req.params.id), { ...record, permissions: after, permissionsUpdatedAt: new Date().toISOString(), permissionsUpdatedBy: req.session!.id });
+      // Audit the change (ids + before/after + delta + timestamp; never any
+      // credential material).
+      if (added.length || removed.length) {
+        await logActivity("", "Permissions", req.session!.id,
+          `Accounting permissions updated for ${record.name || req.params.id} — added: [${added.join(", ") || "none"}], removed: [${removed.join(", ") || "none"}]`,
+          "", "").catch(() => {});
+        // Audit the exact granted/revoked keys (never any credential material).
+        if (added.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionGranted, entityType: "employee", entityId: req.params.id, result: "success", metadata: { grantedKeys: added }, afterSnapshot: { grantedKeys: added } });
+        if (removed.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionRevoked, entityType: "employee", entityId: req.params.id, result: "success", metadata: { revokedKeys: removed }, afterSnapshot: { revokedKeys: removed } });
+      }
+      res.json({ id: req.params.id, permissions: after, added, removed });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update permissions." });
+    }
+  });
+
   // Lets a sub-admin (operation or accounts type) change their own
   // password. The super-admin's password lives in the
   // SUPER_ADMIN_PASSWORD_HASH environment variable, not a Firestore
@@ -9844,7 +10139,7 @@ async function startServer() {
   });
 
   // Cost Statements APIs
-  app.get("/api/cost-statements", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements", requirePermission("costs.view"), async (req, res) => {
     try {
       const col = collection(db, "costStatements");
       const snapshot = await getDocs(col);
@@ -9856,7 +10151,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/cost-statements/:shipmentId", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId", requirePermission("costs.view"), async (req, res) => {
     try {
       const dRef = doc(db, "costStatements", req.params.shipmentId);
       const dDoc = await getDoc(dRef);
@@ -9898,7 +10193,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit"), async (req, res) => {
     try {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
@@ -10202,6 +10497,148 @@ async function startServer() {
     return { httpStatus: outcome.httpStatus, body: outcome.body };
   }
 
+  /**
+   * Generic single-document atomic mutation (PR #140 review increment 2).
+   * Reads doc `id` from `collectionName`, runs the pure/synchronous `decide`
+   * against the FRESH value, and conditionally writes — Firestore mode inside
+   * one runTransaction (serialized commits, the loser re-reads the winner's
+   * write), memory mode as a synchronous read→decide→write with no await in
+   * between (single-threaded serialization). `decide` MUST be pure and must
+   * return the full record to persist in `save`. Used for atomic + idempotent
+   * reversals, default-bank exclusivity, etc.
+   */
+  async function mutateDocumentAtomic<T extends Record<string, any>>(
+    collectionName: string,
+    id: string,
+    decide: (current: T | null) => { httpStatus: number; body: any; save?: T }
+  ): Promise<{ httpStatus: number; body: any }> {
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      const ref = doc(db, collectionName, id);
+      return await withTimeout(
+        (db as any).runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const current = snap.exists ? (snap.data() as T) : null;
+          const outcome = decide(current);
+          if (outcome.save) tx.set(ref, cleanUndefined(outcome.save));
+          return { httpStatus: outcome.httpStatus, body: outcome.body };
+        }),
+        8000,
+        "Accounting document transaction timed out"
+      );
+    }
+    const store = (getMemoryStore() as any)[collectionName] as any[];
+    const idx = Array.isArray(store) ? store.findIndex((r) => r.id === id) : -1;
+    const current = idx >= 0 ? (store[idx] as T) : null;
+    const outcome = decide(current);
+    if (outcome.save && Array.isArray(store)) {
+      if (idx >= 0) store[idx] = outcome.save; else store.push(outcome.save);
+    }
+    return { httpStatus: outcome.httpStatus, body: outcome.body };
+  }
+
+  // Serializes multi-document accounting mutations in MEMORY-FALLBACK mode
+  // only (item 14). In Firestore mode the correctness boundary is
+  // runAccountingTransaction below — Firestore itself, not this mutex.
+  const accountingMutex = new KeyedMutex();
+
+  /**
+   * Multi-document accounting transaction (PR #140 increment 3, item 1).
+   * The PRODUCTION correctness boundary for ledger-guarded mutations
+   * (customer allocation, vendor overpay). Firestore mode runs `work` inside a
+   * real runTransaction: `tx.get(collection, id)` reads a document and
+   * `tx.set(...)` stages a write; Firestore serializes commits and retries the
+   * whole callback on contention, so two server instances can never both read
+   * the same ledger and commit conflicting totals. Memory mode serializes all
+   * accounting transactions and applies staged writes all-or-nothing (a throw
+   * discards every staged write). ALL reads must precede writes (Firestore
+   * rule) — the ledger flows read every needed doc first, then write.
+   */
+  interface AcctTx {
+    get<T = any>(collection: string, id: string): Promise<T | null>;
+    set(collection: string, id: string, data: any): void;
+  }
+  async function runAccountingTransaction<T>(work: (tx: AcctTx) => Promise<T>): Promise<T> {
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      return await withTimeout(
+        (db as any).runTransaction(async (fsTx: any) => {
+          const tx: AcctTx = {
+            async get(collection, id) { const s = await fsTx.get(doc(db, collection, id)); return s.exists ? (s.data() as any) : null; },
+            set(collection, id, data) { fsTx.set(doc(db, collection, id), cleanUndefined(data)); },
+          };
+          return await work(tx);
+        }),
+        10000,
+        "Accounting transaction timed out"
+      );
+    }
+    // Memory fallback: serialized + all-or-nothing.
+    return await accountingMutex.run("__acct_tx__", async () => {
+      const staged: Array<{ collection: string; id: string; data: any }> = [];
+      const tx: AcctTx = {
+        async get(collection, id) {
+          const store = (getMemoryStore() as any)[collection] as any[];
+          const found = Array.isArray(store) ? store.find((r) => r.id === id) : undefined;
+          return found ? (JSON.parse(JSON.stringify(found)) as any) : null; // clone: work must not mutate the live store pre-commit
+        },
+        set(collection, id, data) { staged.push({ collection, id, data: { ...data, id } }); },
+      };
+      const result = await work(tx); // a throw here leaves `staged` unapplied
+      for (const w of staged) {
+        const store = (getMemoryStore() as any)[w.collection] as any[];
+        if (!Array.isArray(store)) continue;
+        const idx = store.findIndex((r) => r.id === w.id);
+        if (idx >= 0) store[idx] = w.data; else store.push(w.data);
+      }
+      return result;
+    });
+  }
+
+  // ── Accounting audit log (Increment 7) — append-only, server-authoritative ──
+  let auditSeq = 0;
+  function nextAuditId(): string { return `aud-${Date.now()}-${(auditSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  // Resolve the actor from the AUTHENTICATED session (never from the body).
+  function auditActorFromReq(req: express.Request): AuditActor {
+    const ua = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 200) : undefined;
+    const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+    return {
+      actorId: req.session?.id || "unknown",
+      actorNameSnapshot: (req.session as any)?.name || undefined,
+      actorRoleSnapshot: req.session?.adminType || req.session?.role || undefined,
+      actorPermissionSnapshot: perms ? [...perms].sort() : undefined,
+      source: /mobile|android|iphone/i.test(ua || "") ? "staff_mobile" : "admin_web",
+    };
+  }
+  type AuditFields = Omit<Parameters<typeof buildAuditRecord>[0], "auditId" | "nowIso" | "actor">;
+  // Stage an audit record INSIDE an accounting transaction (commits atomically
+  // with the financial mutation — a rolled-back tx discards the audit too).
+  function stageAudit(tx: AcctTx, actor: AuditActor, nowIso: string, fields: AuditFields): void {
+    const rec = buildAuditRecord({ auditId: nextAuditId(), nowIso, actor, ...fields });
+    tx.set("auditLogs", rec.id, rec);
+  }
+  // Best-effort append for non-transactional / rejected-action logging.
+  async function recordAudit(req: express.Request, fields: AuditFields): Promise<void> {
+    try {
+      const rec = buildAuditRecord({ auditId: nextAuditId(), nowIso: new Date().toISOString(), actor: auditActorFromReq(req), ...fields });
+      await setDoc(doc(db, "auditLogs", rec.id), cleanUndefined(rec));
+    } catch (e) { console.error("[audit] append failed:", e instanceof Error ? e.message : e); }
+  }
+
+  /**
+   * Recalculate + stage the payment-derived invoice status (issued /
+   * partially_paid / paid) for each touched ledger, INSIDE an accounting
+   * transaction. `invoicesById` must have been pre-read via tx.get (Firestore
+   * requires every read before any write). draft/cancelled invoices are never
+   * changed by a ledger recalculation.
+   */
+  function stageInvoiceStatusUpdates(tx: AcctTx, invoicesById: Map<string, CustomerInvoice>, ledgers: InvoiceAccountingLedger[], nowIso: string): void {
+    for (const l of ledgers) {
+      const inv = invoicesById.get(l.invoiceId);
+      if (!inv || inv.status === "draft" || inv.status === "cancelled") continue;
+      const next = deriveInvoiceStatus(inv.status, l.invoicedAmount, l.allocatedAmount);
+      if (next !== inv.status) tx.set("customerInvoices", inv.id, { ...inv, status: next, updatedAt: nowIso });
+    }
+  }
+
   /** Super + Accounts admins to notify when a statement is finalized. */
   function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
     const ids = new Set<string>();
@@ -10225,7 +10662,9 @@ async function startServer() {
     finalRevision: number,
     generatedBy: string
   ): Promise<{ url: string; path: string; fileName: string }> {
-    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision });
+    const company = await loadCompanyProfile().catch(() => ({} as CompanyProfile));
+    const tpl = await loadTemplateConfig("cost_statement").catch(() => null);
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage });
     const buffer = await renderFinalCostStatementPdf(model);
     const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
     const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
@@ -10244,7 +10683,7 @@ async function startServer() {
   }
 
   // GET workflow settings (any accounting viewer); PUT (Super Admin only).
-  app.get("/api/admin/accounting/approval-workflow", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const usable = isWorkflowConfigUsable(config, await loadActiveAdminIds());
@@ -10283,7 +10722,7 @@ async function startServer() {
   // completeness) is re-checked against that fresh value, so two
   // simultaneous submissions serialize — the loser sees the winner's
   // pending state and is rejected.
-  app.post("/api/cost-statements/:shipmentId/submit", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/submit", requirePermission("costs.edit"), async (req, res) => {
     try {
       // Config + actor name are not the contended resource; load them once
       // up-front and pass them into the pure, synchronous `decide`.
@@ -10350,7 +10789,7 @@ async function startServer() {
   //   3. atomic COMMIT — re-read, dedupe on the key (hasFinalVersionFor),
   //      append the version, mark final_closed. A crash between 2 and 3
   //      leaves the doc recoverable in "finalizing"; a retry resumes.
-  app.post("/api/cost-statements/:shipmentId/approve", requireRole("admin"), async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/approve", requirePermission("costs.approve"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const actorName = await resolveWorkflowActorName(req.session!);
@@ -10495,7 +10934,7 @@ async function startServer() {
   // assigned approver inside the transaction, so an approve-vs-reject race
   // resolves to exactly one winner (the loser re-reads a no-longer-pending
   // status and is rejected).
-  app.post("/api/cost-statements/:shipmentId/reject", requireRole("admin"), async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const actorName = await resolveWorkflowActorName(req.session!);
@@ -10540,7 +10979,7 @@ async function startServer() {
   // Request reopening of a finalized statement. Atomic: canRequestReopen
   // re-checks final_closed inside the transaction, so only one request can
   // move the doc to reopen_requested.
-  app.post("/api/cost-statements/:shipmentId/reopen-request", requireCanViewCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
@@ -10577,7 +11016,7 @@ async function startServer() {
   // status and requester separation inside the transaction, so two
   // simultaneous decisions resolve to exactly one winner (the loser
   // re-reads a no-longer-reopen_requested status and is rejected).
-  app.post("/api/cost-statements/:shipmentId/reopen-decision", requireSuperAdmin, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const approve = req.body?.approve === true;
@@ -10621,7 +11060,7 @@ async function startServer() {
 
   // Final PDF proxy — authorized internal accounting/admin roles ONLY.
   // Never exposed to drivers, clients, or the public share view.
-  app.get("/api/cost-statements/:shipmentId/final-pdf", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/final-pdf", requirePermission("costs.view"), async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
@@ -10636,6 +11075,1595 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to load final PDF." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Template Settings (Accounting) — Company Profile + Bank Accounts.
+  //
+  // Desktop is the source of truth. Reading is allowed to any accounting
+  // viewer (super/accounts) so both Desktop and the lightweight Mobile
+  // assistant can render the configured branding + bank details on the
+  // documents they show; WRITING is Super-Admin-only (bank-account /
+  // template management must remain on Desktop, per the product rule).
+  // All decisions live in the pure accountingTemplateSettings module.
+  // ══════════════════════════════════════════════════════════════════
+  const COMPANY_PROFILE_SETTINGS_ID = "company_profile";
+
+  async function loadCompanyProfile(): Promise<CompanyProfile> {
+    const snap = await getDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID));
+    return snap.exists() ? (snap.data() as CompanyProfile) : {};
+  }
+  async function loadBankAccounts(): Promise<BankAccount[]> {
+    const snap = await getDocs(collection(db, "bankAccounts"));
+    return snap.docs.map((d) => d.data() as BankAccount);
+  }
+
+  app.get("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.view"), async (req, res) => {
+    try {
+      res.json({ profile: await loadCompanyProfile() });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load company profile." });
+    }
+  });
+  app.put("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.manage"), async (req, res) => {
+    try {
+      const validated = validateCompanyProfile(req.body || {});
+      if (!validated.ok) return res.status(400).json({ error: validated.error });
+      const now = new Date().toISOString();
+      // Atomic publish (item 14): read current + version, archive current
+      // exactly once (deterministic id → immutable, never a duplicate archive),
+      // assign the next version, and write the new current — all in ONE
+      // transaction, so two simultaneous publishes get DISTINCT versions.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        const current = (await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID)) || {};
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) {
+          tx.set("companyProfileVersions", `cpv-${currentVersion}`, { ...current, id: `cpv-${currentVersion}`, version: currentVersion, archivedAt: now });
+        }
+        const profile: CompanyProfile = { ...validated.profile, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", COMPANY_PROFILE_SETTINGS_ID, profile);
+        return { http: 200, body: { profile: cleanUndefined(profile) }, version: profile.version };
+      });
+      await recordAudit(req, { action: AUDIT_ACTIONS.companyProfilePublished, entityType: "company_profile", entityId: COMPANY_PROFILE_SETTINGS_ID, result: "success", afterSnapshot: { version: outcome.version } });
+      await logActivity("", "Accounting", req.session!.id, `Company profile updated (v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to save company profile." });
+    }
+  });
+  // Company profile version history (change log) + restore a prior version.
+  app.get("/api/admin/accounting/company-profile/versions", requirePermission("accountingCompanyProfile.view"), async (req, res) => {
+    try {
+      const snap = await getDocs(collection(db, "companyProfileVersions"));
+      const versions = snap.docs.map((d) => d.data() as CompanyProfileVersion).sort((a, b) => b.version - a.version);
+      res.json({ versions });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load version history." });
+    }
+  });
+  app.post("/api/admin/accounting/company-profile/restore/:version", requirePermission("accountingCompanyProfile.restore"), async (req, res) => {
+    try {
+      const target = Number(req.params.version);
+      const snap = await getDocs(collection(db, "companyProfileVersions"));
+      const prior = snap.docs.map((d) => d.data() as CompanyProfileVersion).find((v) => v.version === target);
+      if (!prior) return res.status(404).json({ error: "That version was not found." });
+      const now = new Date().toISOString();
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("company-profile-restore", idemKey) : undefined;
+      // Atomic restore-as-NEW-version (item 15): archive current, then publish
+      // the prior CONTENT under a fresh version — the historical version being
+      // restored is NEVER mutated. Idempotent: a repeated restore with the same
+      // key replays instead of minting another version.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ version: number }>("accountingIdempotency", scopedKey);
+          if (rec) { const cur = await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID); return { http: 200, body: { profile: cleanUndefined(cur), idempotent: true }, version: rec.version }; }
+        }
+        const current = (await tx.get<CompanyProfile>("accountingSettings", COMPANY_PROFILE_SETTINGS_ID)) || {};
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("companyProfileVersions", `cpv-${currentVersion}`, { ...current, id: `cpv-${currentVersion}`, version: currentVersion, archivedAt: now });
+        const { id: _id, version: _v, archivedAt: _a, ...content } = prior;
+        const restored: CompanyProfile & { sourceRestoredVersion?: number } = { ...content, version: currentVersion + 1, sourceRestoredVersion: target, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", COMPANY_PROFILE_SETTINGS_ID, restored);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "company-profile-restore", version: restored.version, createdAt: now });
+        return { http: 200, body: { profile: cleanUndefined(restored) }, version: restored.version };
+      });
+      await logActivity("", "Accounting", req.session!.id, `Company profile restored from v${target} (now v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to restore version." });
+    }
+  });
+
+  app.get("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.view"), async (req, res) => {
+    try {
+      const accounts = await loadBankAccounts();
+      accounts.sort((a, b) => (a.currency || "").localeCompare(b.currency || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ accounts });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load bank accounts." });
+    }
+  });
+  // Enforce one-active-default-per-currency (item 7): computes the exclusive
+  // set with the target as sole default and demotes every OTHER same-currency
+  // account. Rejects an inactive default. Each call writes the FULL currency's
+  // flags, so two concurrent default changes still leave exactly one default
+  // (last commit wins entirely). The target account is written by the caller.
+  async function enforceDefaultBankExclusivity(account: BankAccount): Promise<{ ok: true } | { ok: false; code: string; error: string }> {
+    const all = await loadBankAccounts();
+    const withTarget = all.some((a) => a.id === account.id) ? all.map((a) => (a.id === account.id ? account : a)) : [...all, account];
+    const d = decideSetDefaultBank({ target: account, allAccounts: withTarget });
+    if (!d.ok) return d;
+    for (const w of d.writes) {
+      if (w.id !== account.id) await setDoc(doc(db, "bankAccounts", w.id), cleanUndefined(w));
+    }
+    return { ok: true };
+  }
+
+  app.post("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.manage"), async (req, res) => {
+    try {
+      const result = validateBankAccount(req.body || {});
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const now = new Date().toISOString();
+      const account: BankAccount = { ...result.value, id: `bank-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: now, createdBy: req.session!.id };
+      // Reject an inactive account being made default before persisting anything.
+      if (account.isDefaultForCurrency && !account.active) {
+        return res.status(400).json({ code: "inactive_default", error: "An inactive bank account cannot be set as the default." });
+      }
+      await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
+      if (account.isDefaultForCurrency) {
+        const ex = await enforceDefaultBankExclusivity(account);
+        if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
+      }
+      await recordAudit(req, { action: AUDIT_ACTIONS.bankAccountCreated, entityType: "bank_account", entityId: account.id, result: "success", currency: account.currency, afterSnapshot: maskBankForAudit(account) });
+      await logActivity("", "Accounting", req.session!.id, `Bank account added (${account.bankName}, ${account.currency})`, "", "");
+      res.status(201).json({ account: cleanUndefined(account) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to add bank account." });
+    }
+  });
+  // Update / deactivate a bank account. Accounts are NEVER hard-deleted
+  // (data-integrity rule): set active:false to retire one — historical
+  // documents that referenced it keep their own snapshot.
+  app.put("/api/admin/accounting/bank-accounts/:id", requirePermission("bankAccounts.manage"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "bankAccounts", req.params.id));
+      if (!snap.exists()) return res.status(404).json({ error: "Bank account not found." });
+      const existing = snap.data() as BankAccount;
+      const result = validateBankAccount({ ...existing, ...(req.body || {}) });
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const account: BankAccount = { ...result.value, id: existing.id, createdAt: existing.createdAt, createdBy: existing.createdBy, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      // Reject an inactive account being made default (item 7). Deactivating a
+      // current default is allowed and simply leaves no default for that
+      // currency (surfaced via GET default-bank-account returning null).
+      if (account.isDefaultForCurrency && !account.active) {
+        return res.status(400).json({ code: "inactive_default", error: "An inactive bank account cannot be set as the default." });
+      }
+      await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
+      if (account.isDefaultForCurrency && account.active) {
+        const ex = await enforceDefaultBankExclusivity(account);
+        if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
+      }
+      const deactivated = existing.active && !account.active;
+      const defaultChanged = existing.isDefaultForCurrency !== account.isDefaultForCurrency;
+      await recordAudit(req, {
+        action: deactivated ? AUDIT_ACTIONS.bankAccountDeactivated : defaultChanged ? AUDIT_ACTIONS.bankAccountDefaultChanged : AUDIT_ACTIONS.bankAccountUpdated,
+        entityType: "bank_account", entityId: account.id, result: "success", currency: account.currency,
+        beforeSnapshot: maskBankForAudit(existing), afterSnapshot: maskBankForAudit(account),
+      });
+      await logActivity("", "Accounting", req.session!.id, `Bank account updated (${account.bankName}, ${account.currency})`, "", "");
+      res.json({ account: cleanUndefined(account) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update bank account." });
+    }
+  });
+
+  // Suggested default bank for a document currency (used by issue flows on
+  // Desktop and by Mobile's read-only invoice view). The authorized user
+  // can still override the choice before issuing a document.
+  app.get("/api/admin/accounting/default-bank-account", requirePermission("bankAccounts.view"), async (req, res) => {
+    try {
+      const currency = typeof req.query.currency === "string" ? req.query.currency : "";
+      const account = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), currency as Currency);
+      res.json({ account: account ? cleanUndefined(account) : null });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to resolve default bank account." });
+    }
+  });
+
+  // Idempotent repair (item 10): create the missing draft cost statement for
+  // any legacy shipment that has none (id === shipmentId). Never overwrites an
+  // existing statement; safe to rerun (a second run reports 0 created).
+  app.post("/api/admin/accounting/repair-cost-statements", requirePermission("accountingRepair.execute"), async (req, res) => {
+    try {
+      const [shipmentsSnap, statementsSnap] = [await getDocs(collection(db, "shipments")), await getDocs(collection(db, "costStatements"))];
+      const shipments = shipmentsSnap.docs.map((d) => d.data() as Shipment);
+      const existingIds = statementsSnap.docs.map((d) => (d.data() as CostStatement).shipmentId || (d as any).id).filter(Boolean);
+      const missing = planCostStatementRepair(shipments, existingIds);
+      const created: string[] = [];
+      for (const shipmentId of missing) {
+        const shipment = shipments.find((s) => s.id === shipmentId);
+        if (!shipment) continue;
+        // Guard against a race: re-check existence right before writing.
+        const existing = await getDoc(doc(db, "costStatements", shipmentId));
+        if (existing.exists()) continue;
+        await setDoc(doc(db, "costStatements", shipmentId), buildDraftCostStatement(shipment, shipment.createdAt || new Date().toISOString()));
+        created.push(shipmentId);
+      }
+      if (created.length) await logActivity("", "Accounting", req.session!.id, `Repaired ${created.length} missing cost statement(s)`, "", "");
+      res.json({ scanned: shipments.length, missing: missing.length, created: created.length, createdIds: created });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost-statement repair failed:", err);
+      res.status(500).json({ error: "Failed to repair cost statements." });
+    }
+  });
+
+  // Ledger reconciliation + repair (item 7). Recomputes the expected invoice
+  // and vendor ledgers from SOURCE records (invoices/payments/cost statements),
+  // reports discrepancies, and — only when ?mode=repair — creates missing and
+  // fixes incorrect ledgers. DRY-RUN by default; never touches source records;
+  // safe to rerun (a second run reports 0 changes). Super admin only.
+  app.post("/api/admin/accounting/repair-ledgers", requirePermission("accountingRepair.view"), async (req, res) => {
+    try {
+      const repair = req.query.mode === "repair";
+      const repairReason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      // Dry-run viewing needs accountingRepair.view (the gate above); actually
+      // executing a repair additionally needs accountingRepair.execute AND a
+      // non-empty reason (dry-run is always the default first pass).
+      if (repair) {
+        const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+        if (!perms || !perms.has("accountingRepair.execute")) {
+          await recordAudit(req, { action: AUDIT_ACTIONS.reconciliationRepairDenied, entityType: "reconciliation", entityId: "ledgers", result: "rejected", errorCode: "permission_denied" });
+          return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: "accountingRepair.execute" });
+        }
+        if (!repairReason.trim()) {
+          return res.status(400).json({ code: "reason_required", error: "A reason is required to execute a repair." });
+        }
+      }
+      const now = new Date().toISOString();
+      const invoices = (await getDocs(collection(db, "customerInvoices"))).docs.map((d) => d.data() as CustomerInvoice);
+      const payments = (await getDocs(collection(db, "customerPayments"))).docs.map((d) => d.data() as CustomerPayment);
+      const statements = (await getDocs(collection(db, "costStatements"))).docs.map((d) => d.data() as CostStatement);
+      const invoiceLedgers = new Map((await getDocs(collection(db, "invoiceAccountingLedgers"))).docs.map((d) => [(d.data() as InvoiceAccountingLedger).id, d.data() as InvoiceAccountingLedger]));
+      const vendorPayments = (await getDocs(collection(db, "vendorPayments"))).docs.map((d) => d.data() as VendorPaymentTransaction);
+      const vendorLedgers = new Map((await getDocs(collection(db, "vendorPayableLedgers"))).docs.map((d) => [(d.data() as VendorPayableLedger).id, d.data() as VendorPayableLedger]));
+
+      const invoiceDiscrepancies: Array<{ invoiceId: string; storedAllocated: number | null; expectedAllocated: number }> = [];
+      for (const invoice of invoices) {
+        if (invoice.status === "draft") continue;
+        const expected = buildInvoiceLedger(invoice, payments, now, (invoiceLedgers.get(invoice.id)?.revision || 0) + 1);
+        const stored = invoiceLedgers.get(invoice.id) || null;
+        if (!stored || Math.abs(stored.allocatedAmount - expected.allocatedAmount) > 0.001 || Math.abs(stored.invoicedAmount - expected.invoicedAmount) > 0.001 || stored.status !== expected.status) {
+          invoiceDiscrepancies.push({ invoiceId: invoice.id, storedAllocated: stored ? stored.allocatedAmount : null, expectedAllocated: expected.allocatedAmount });
+          if (repair) await setDoc(doc(db, "invoiceAccountingLedgers", invoice.id), cleanUndefined(expected));
+        }
+      }
+      const vendorDiscrepancies: Array<{ ledgerId: string; storedPaid: number | null; expectedPaid: number }> = [];
+      for (const stmt of statements) {
+        for (const item of (stmt.items as CostItem[]) || []) {
+          const expected = buildVendorLedger({ shipmentId: stmt.shipmentId, item, payments: vendorPayments, nowIso: now, revision: (vendorLedgers.get(vendorLedgerId(stmt.shipmentId, item.id))?.revision || 0) + 1 });
+          const stored = vendorLedgers.get(expected.id) || null;
+          const hasPayments = vendorPayments.some((p) => p.costItemId === item.id && p.shipmentId === stmt.shipmentId);
+          if (!hasPayments && !stored) continue; // nothing to track yet
+          if (!stored || Math.abs(stored.paidAmount - expected.paidAmount) > 0.001 || Math.abs(stored.costAmount - expected.costAmount) > 0.001 || stored.status !== expected.status) {
+            vendorDiscrepancies.push({ ledgerId: expected.id, storedPaid: stored ? stored.paidAmount : null, expectedPaid: expected.paidAmount });
+            if (repair) await setDoc(doc(db, "vendorPayableLedgers", expected.id), cleanUndefined(expected));
+          }
+        }
+      }
+      const discrepancyCount = invoiceDiscrepancies.length + vendorDiscrepancies.length;
+      // Every reconciliation run is audited; a repair execution is a distinct,
+      // reason-bearing audit event (dry-run never mutates).
+      await recordAudit(req, {
+        action: repair ? AUDIT_ACTIONS.reconciliationRepairExecuted : AUDIT_ACTIONS.reconciliationExecuted,
+        entityType: "reconciliation", entityId: "ledgers", result: "success", reason: repair ? repairReason : undefined,
+        metadata: { mode: repair ? "repair" : "dry-run", invoiceDiscrepancies: invoiceDiscrepancies.length, vendorDiscrepancies: vendorDiscrepancies.length },
+      });
+      if (discrepancyCount > 0) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.reconciliationDiscrepancyFound, entityType: "reconciliation", entityId: "ledgers", result: "success", metadata: { invoiceDiscrepancies: invoiceDiscrepancies.length, vendorDiscrepancies: vendorDiscrepancies.length } });
+      }
+      if (repair && discrepancyCount) {
+        await logActivity("", "Accounting", req.session!.id, `Ledger repair: fixed ${invoiceDiscrepancies.length} invoice + ${vendorDiscrepancies.length} vendor ledger(s)`, "", "");
+      }
+      res.json({ mode: repair ? "repair" : "dry-run", invoiceDiscrepancies, vendorDiscrepancies, invoiceLedgersChecked: invoices.length, vendorLedgersChecked: statements.reduce((s, st) => s + (((st.items as CostItem[]) || []).length), 0) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] ledger repair failed:", err);
+      res.status(500).json({ error: "Failed to reconcile ledgers." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting audit log — read-only, append-only. Server-side filtered +
+  // cursor-paginated (never dumps the collection to the browser). The
+  // before/after snapshots are hidden unless the caller also has
+  // audit.viewSensitive. There is NO update or delete route.
+  // ══════════════════════════════════════════════════════════════════
+  function readAuditFilters(q: any) {
+    const s = (v: any) => (typeof v === "string" && v ? v : undefined);
+    return {
+      from: s(q.from), to: s(q.to), actorId: s(q.actorId), action: s(q.action),
+      entityType: s(q.entityType), entityId: s(q.entityId), reference: s(q.reference),
+      clientId: s(q.clientId), result: s(q.result) as any, source: s(q.source) as any,
+    };
+  }
+  app.get("/api/admin/accounting/audit", requirePermission("audit.view"), async (req, res) => {
+    try {
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+      const canSensitive = !!perms && perms.has("audit.viewSensitive");
+      const all = (await getDocs(collection(db, "auditLogs"))).docs.map((d) => d.data() as AuditRecord);
+      const filtered = filterAuditRecords(all, readAuditFilters(req.query));
+      const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 50;
+      const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+      const page = paginateAudit(filtered, { limit, cursor });
+      const records = canSensitive ? page.records : page.records.map(redactAuditForNonSensitive);
+      res.json({ records: records.map(cleanUndefined), nextCursor: page.nextCursor, total: filtered.length, canViewSensitive: canSensitive });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load the audit log." });
+    }
+  });
+  app.get("/api/admin/accounting/audit/export.csv", requirePermission("audit.export"), async (req, res) => {
+    try {
+      const all = (await getDocs(collection(db, "auditLogs"))).docs.map((d) => d.data() as AuditRecord);
+      const filtered = filterAuditRecords(all, readAuditFilters(req.query));
+      // Bound the export so a huge collection can't blow memory (documented limit).
+      const bounded = paginateAudit(filtered, { limit: 200 }).records;
+      const csv = buildAuditCsv(bounded);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="audit_export.csv"`);
+      res.send(csv);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to export the audit log." });
+    }
+  });
+
+  // Item-level cost-statement add (PR #140 increment 3, items 9–11). Adds ONE
+  // cost item — the mobile quick-expense flow must NEVER PUT the whole
+  // costItems array (that clobbers concurrent additions). The append happens
+  // inside mutateCostStatementAtomic (single-document transaction): the
+  // statement is re-read, the lock + optimistic revision are re-checked, and
+  // idempotency is honored — all against the transaction-fresh value, so two
+  // concurrent additions both land and a stale expectedRevision is rejected.
+  app.post("/api/cost-statements/:shipmentId/items", requirePermission("costs.create"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const built = buildCostItemFromInput(body.item || {}, `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("cost-item", idemKey) : undefined;
+      const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
+      const now = new Date().toISOString();
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        if (!isFinancialEditingAllowed(status)) {
+          return { httpStatus: 409, body: { code: "accounting_locked", error: "This statement is in the approval workflow or finalized and cannot be edited." } };
+        }
+        const items = ((stmt.items as CostItem[]) || []);
+        const storedRevision = resolveStatementRevision(stmt);
+        const decision = decideItemAppend({ items, storedRevision, expectedRevision, scopedIdempotencyKey: scopedKey });
+        if (decision.kind === "replay") return { httpStatus: 200, body: { item: cleanUndefined(decision.item), revision: storedRevision, idempotent: true } };
+        if (decision.kind === "conflict") return { httpStatus: 409, body: { code: decision.code, error: decision.error } };
+        const item: CostItem = { ...built.item, idempotencyKey: scopedKey };
+        const nextItems = [...items, item];
+        const newTotalCost = Math.round((nextItems.reduce((s, it) => s + (Number.isFinite(it.totalAmount) ? it.totalAmount : 0), 0) + Number.EPSILON) * 100) / 100;
+        const summary = deriveExpenseSummary(newTotalCost, Number.isFinite(stmt.paidAmount) ? stmt.paidAmount : 0);
+        const nextRevision = storedRevision + 1;
+        const saved: CostStatement = { ...stmt, items: nextItems, totalCost: summary.totalCost, remainingBalance: summary.remainingBalance, paymentStatus: summary.paymentStatus, revision: nextRevision, updatedAt: now };
+        return { httpStatus: 201, body: { item: cleanUndefined(item), revision: nextRevision }, save: saved };
+      });
+      if (result.httpStatus === 201) await logActivity("", "Accounting", req.session!.id, `Cost item added to ${req.params.shipmentId}`, "", "");
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost item add failed:", err);
+      res.status(500).json({ error: "Failed to add cost item." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Vendor Payables — vendor payment transactions against cost items.
+  //
+  // A cost line may be settled by MULTIPLE partial payments, so payments
+  // are discrete records (vendorPayments), never a single paid flag. Paid/
+  // remaining/status are DERIVED server-side (summarizeVendorPayable).
+  // Internal to MARAS only (canView/WriteCostStatements → super/accounts);
+  // never in customer/driver/public views. Completed payments are never
+  // edited/deleted — corrections are reversals (status → "reversed") with a
+  // reason + full audit trail. All numeric/currency/overpay rules come from
+  // the pure vendorPayments module. Desktop is the source of truth.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadVendorPaymentsForShipment(shipmentId: string): Promise<VendorPaymentTransaction[]> {
+    // Consistent with the rest of the accounting reads (getDocs + JS
+    // filter). Vendor payments are keyed by shipment; a future scale pass
+    // can add a Firestore composite index/query if the collection grows.
+    const snap = await getDocs(collection(db, "vendorPayments"));
+    return snap.docs.map((d) => d.data() as VendorPaymentTransaction).filter((p) => p.shipmentId === shipmentId);
+  }
+
+  // List a statement's vendor payments + per-cost-item payable summaries.
+  app.get("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      // Normalize legacy paymentMethod:"urgent" records into the priority model
+      // on read (item 12) without ever rewriting the invalid stored value.
+      const payments = (await loadVendorPaymentsForShipment(req.params.shipmentId)).map(normalizeExpensePriority);
+      const items = (stmt.items as CostItem[]) || [];
+      const summaries = items.map((it) => summarizeVendorPayable(it, payments));
+      res.json({ payments, summaries });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load vendor payments." });
+    }
+  });
+
+  // Record a vendor payment (partial payments allowed). Overpayment is
+  // prevented by Firestore itself: the per-cost-item ledger is read + written
+  // inside runAccountingTransaction, so two instances can never both commit
+  // payments that exceed the cost amount (item 6).
+  app.post("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.create"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const body = req.body || {};
+      const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
+      if (!item) return res.status(404).json({ code: "item_not_found", error: "Cost item not found." });
+      const allowOverpayment = body.allowOverpayment === true; // reserved for a future authorized workflow
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      const existing = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      if (isDuplicateVendorPayment(existing, { costItemId: item.id, amount: Number(body.amount), paymentDate, reference })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      let bankAccountSnapshot: string | undefined;
+      if (typeof body.bankAccountId === "string" && body.bankAccountId) {
+        const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
+        if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
+      }
+      const now = new Date().toISOString();
+      const ledgerKey = vendorLedgerId(req.params.shipmentId, item.id);
+      const paymentId = `vpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const result = await runAccountingTransaction(async (tx) => {
+        // The ledger is created lazily on the first payment for a cost item
+        // (new items start at paidAmount 0). The CONTENDED increment is inside
+        // this transaction; Firestore serializes concurrent first-payments.
+        let ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
+        if (!ledger) ledger = buildVendorLedger({ shipmentId: req.params.shipmentId, item, payments: [], nowIso: now });
+        const decision = decideVendorPayment({ ledger, amount: Number(body.amount), currency: body.currency, allowOverpayment });
+        if (!decision.ok) {
+          stageAudit(tx, auditActorFromReq(req), now, { action: AUDIT_ACTIONS.vendorPaymentOverpaymentRejected, entityType: "vendor_payment", entityId: item.id, result: "rejected", orderId: stmt.shipmentNumber, currency: item.currency, errorCode: decision.code });
+          return { http: 400, body: { code: decision.code, error: decision.error } };
+        }
+        const payment: VendorPaymentTransaction = {
+          id: paymentId, shipmentId: req.params.shipmentId, shipmentNumber: stmt.shipmentNumber,
+          costStatementId: req.params.shipmentId, costItemId: item.id,
+          vendorId: typeof body.vendorId === "string" ? body.vendorId : item.vendorId,
+          vendorName: item.supplierName || "", amount: Number(body.amount), currency: item.currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          priority: resolveRequestedPriority(body) === "urgent" || String(body.paymentMethod || "").toLowerCase() === "urgent" ? "urgent" : "normal",
+          bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+          bankAccountSnapshot, reference: reference || undefined,
+          attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+          attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+          internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : undefined,
+          createdBy: req.session!.id, createdAt: now, status: "active",
+        };
+        const nextLedger = applyVendorLedgerDelta(ledger, Number(body.amount), now);
+        tx.set("vendorPayments", payment.id, payment);
+        tx.set("vendorPayableLedgers", ledgerKey, nextLedger);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.vendorPaymentCreated, entityType: "vendor_payment", entityId: payment.id, result: "success",
+          parentEntityType: "cost_statement", parentEntityId: req.params.shipmentId, orderId: stmt.shipmentNumber,
+          vendorId: payment.vendorId, currency: item.currency,
+          afterSnapshot: { amount: payment.amount, currency: item.currency, costItemId: item.id, method: payment.paymentMethod, reference: payment.reference },
+        });
+        return { http: 201, body: { payment: cleanUndefined(payment), summary: summarizeVendorPayable(item, [...existing, payment]) } };
+      });
+      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", "");
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] vendor payment failed:", err);
+      res.status(500).json({ error: "Failed to record vendor payment." });
+    }
+  });
+
+  // Reverse a vendor payment (never deletes; requires a reason). Desktop-only.
+  // Atomic + idempotent (items 5/6): the payment reversal AND the ledger
+  // subtraction happen in ONE Firestore transaction, so ledger and payment can
+  // never diverge. A repeat on an already-reversed payment replays 200.
+  app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requirePermission("vendorPayments.reverse"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const now = new Date().toISOString();
+      const actor = req.session!.id;
+      let didReverse = false;
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<VendorPaymentTransaction>("vendorPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.shipmentId !== req.params.shipmentId) return { http: 404, body: { error: "Payment not found for this statement." } };
+        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
+        const decision = canReverseVendorPayment(payment, reason);
+        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const ledgerKey = vendorLedgerId(payment.shipmentId, payment.costItemId);
+        const ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
+        const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+        tx.set("vendorPayments", payment.id, reversed);
+        if (ledger) tx.set("vendorPayableLedgers", ledgerKey, applyVendorLedgerDelta(ledger, -Number(payment.amount), now));
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.vendorPaymentReversed, entityType: "vendor_payment", entityId: payment.id, result: "success",
+          parentEntityType: "cost_statement", parentEntityId: payment.shipmentId, orderId: payment.shipmentNumber,
+          vendorId: payment.vendorId, currency: payment.currency, reason,
+          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+        });
+        didReverse = true;
+        return { http: 200, body: { payment: cleanUndefined(reversed) } };
+      });
+      if (result.http === 200 && didReverse) await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] vendor payment reversal failed:", err);
+      res.status(500).json({ error: "Failed to reverse vendor payment." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Customer Invoices — issue a customer-facing selling document from a
+  // shipment's cost statement. Server owns the selling amount (pricing mode
+  // + inputs) and the PRIVATE cost/profit; issued invoices are immutable
+  // (cancel, never delete). Internal-only routes (super/accounts). Uses
+  // Template Settings bank accounts for the payment details snapshot.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadInvoicesForShipment(shipmentId: string): Promise<CustomerInvoice[]> {
+    const snap = await getDocs(collection(db, "customerInvoices"));
+    return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.shipmentId === shipmentId);
+  }
+  // Build an invoice record from the statement + a validated pricing body.
+  // Legacy pricing fields from the pre-Increment-5 schema. All existing invoices
+  // are test data, so these are REJECTED (never silently mapped) — the API only
+  // accepts the final manual | cost_plus model.
+  const LEGACY_INVOICE_FIELDS = ["marginPercent", "fixedProfit", "contractAmount", "unitPrice", "unitQuantity"] as const;
+  function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
+    const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
+    const costBasis = Number.isFinite(stmt.totalCost) ? stmt.totalCost : 0;
+    const mode = body.pricingMode;
+    // Reject the removed pricing model outright (no dual-read, no aliasing).
+    if (!isInvoicePricingMode(mode)) {
+      return { ok: false, code: "invalid_pricing_mode", error: "pricingMode must be 'manual' or 'cost_plus'." };
+    }
+    for (const f of LEGACY_INVOICE_FIELDS) {
+      if (body[f] !== undefined) return { ok: false, code: "legacy_field_rejected", error: `The field '${f}' is no longer supported. Use pricingMode 'manual' (manualAmount) or 'cost_plus' (markupType + markupValue).` };
+    }
+    // cost_plus: the cost base is the APPROVED internal statement cost (server-
+    // derived) — a browser-supplied costBaseAmount is never trusted.
+    const pricing = computeInvoicePricing(mode, {
+      manualAmount: typeof body.manualAmount === "number" ? body.manualAmount : undefined,
+      costBaseAmount: costBasis,
+      markupType: body.markupType,
+      markupValue: typeof body.markupValue === "number" ? body.markupValue : undefined,
+    });
+    if (!pricing.ok) return { ok: false, code: pricing.code, error: pricing.error };
+    const grossProfit = computeInvoiceGrossProfit({ sellingAmount: pricing.pricing.sellingAmount, costBasis, invoiceCurrency, costCurrency: stmt.currency });
+    return {
+      ok: true,
+      value: {
+        shipmentId: stmt.shipmentId,
+        shipmentNumber: stmt.shipmentNumber,
+        clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+        companyName: stmt.companyName || shipment?.companyName || "",
+        currency: invoiceCurrency,
+        pricingMode: mode,
+        costBasis,
+        manualAmount: mode === "manual" ? pricing.pricing.sellingAmount : undefined,
+        costBaseAmount: mode === "cost_plus" ? pricing.pricing.costBaseAmount : undefined,
+        markupType: pricing.pricing.markupType,
+        markupValue: pricing.pricing.markupValue,
+        markupAmount: mode === "cost_plus" ? pricing.pricing.markupAmount : undefined,
+        sellingAmount: pricing.pricing.sellingAmount,
+        grossProfit,
+        dueDate: typeof body.dueDate === "string" ? body.dueDate.slice(0, 10) : undefined,
+        paymentTerms: typeof body.paymentTerms === "string" ? body.paymentTerms.slice(0, 500) : undefined,
+        description: typeof body.description === "string" ? body.description.slice(0, 500) : "",
+        notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : "",
+        internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : "",
+        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+        revision: 1,
+      },
+    };
+  }
+
+  app.get("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.view"), async (req, res) => {
+    try {
+      const invoices = await loadInvoicesForShipment(req.params.shipmentId);
+      invoices.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ invoices });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load invoices." });
+    }
+  });
+
+  // Create a DRAFT invoice (pricing computed server-side).
+  app.post("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.create"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
+      const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
+      const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      // A NEW invoice MUST carry an immutable clientId (production structure —
+      // no companyName-based legacy resolution). Rejected if absent.
+      const direct = requireClientId((req.body || {}).clientId);
+      if (!direct.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required." });
+      const resolvedClientId = direct.clientId;
+      const existing = await loadInvoicesForShipment(req.params.shipmentId);
+      const now = new Date().toISOString();
+      const invoice: CustomerInvoice = {
+        ...built.value,
+        clientId: resolvedClientId,
+        id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        invoiceNumber: buildInvoiceNumber(stmt.shipmentNumber, existing.length + 1),
+        status: "draft",
+        createdAt: now,
+        createdBy: req.session!.id,
+      };
+      await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
+      await logActivity("", "Accounting", req.session!.id, `Draft invoice ${invoice.invoiceNumber} created (${invoice.sellingAmount} ${invoice.currency})`, "", "");
+      res.status(201).json({ invoice: cleanUndefined(invoice) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice create failed:", err);
+      res.status(500).json({ error: "Failed to create invoice." });
+    }
+  });
+
+  // Edit a DRAFT invoice (recompute pricing; immutable once issued).
+  app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requirePermission("invoices.editDraft"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const existing = snap.data() as CustomerInvoice;
+      if (existing.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      if (!isInvoiceEditable(existing.status)) return res.status(409).json({ code: "not_draft", error: "Only a draft invoice can be edited." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
+      const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
+      const built = buildInvoiceFromBody(stmt, shipment, { ...existing, ...(req.body || {}) });
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      const invoice: CustomerInvoice = {
+        ...built.value,
+        id: existing.id,
+        invoiceNumber: existing.invoiceNumber,
+        clientId: existing.clientId, // immutable identity — never changes on edit
+        status: "draft",
+        createdAt: existing.createdAt,
+        createdBy: existing.createdBy,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.session!.id,
+        revision: (existing.revision || 1) + 1,
+      };
+      await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
+      res.json({ invoice: cleanUndefined(invoice) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update invoice." });
+    }
+  });
+
+  // Issue a draft invoice. One atomic, idempotent operation (section 8): resolve
+  // + validate the bank, snapshot bank + company, finalize the invoice number,
+  // init the ledger, and flip status to issued — all together or not at all.
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requirePermission("invoices.issue"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("invoice-issue", idemKey) : undefined;
+      // Idempotent replay: a repeat with the same key returns the ALREADY issued
+      // invoice unchanged (no second number/ledger/snapshot).
+      if (scopedKey) {
+        const rec = await getDoc(doc(db, "accountingIdempotency", scopedKey));
+        if (rec.exists()) {
+          const priorId = (rec.data() as any).invoiceId;
+          const prior = priorId ? await getDoc(doc(db, "customerInvoices", priorId)) : null;
+          if (prior && prior.exists()) return res.json({ invoice: cleanUndefined(prior.data()), idempotent: true });
+        }
+      }
+      const decision = canIssueInvoice({ status: invoice.status, pricingMode: invoice.pricingMode, costStatementStatus: resolveAccountingStatus(stmt as any), sellingAmount: invoice.sellingAmount });
+      if (!decision.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: decision.code });
+        return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
+      }
+      // Resolve + validate the bank account (explicit selection or currency
+      // default). An issued invoice always carries valid payment instructions.
+      const accounts = await loadBankAccounts();
+      const selectedBankId = typeof req.body?.bankAccountId === "string" && req.body.bankAccountId ? req.body.bankAccountId : invoice.bankAccountId;
+      const bankResolution = resolveInvoiceBank({ accounts, selectedBankId, invoiceCurrency: invoice.currency });
+      if (!bankResolution.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, currency: invoice.currency, errorCode: bankResolution.code });
+        return res.status(400).json({ code: bankResolution.code, error: bankResolution.error });
+      }
+      const bankAccountSnapshot = buildBankAccountSnapshot(bankResolution.account);
+      const now = new Date().toISOString();
+      // Issued-document integrity: snapshot the company branding + version so
+      // later Template Settings changes never alter this issued invoice.
+      const companySnapshot = await loadCompanyProfile();
+      const issued: CustomerInvoice = {
+        ...invoice, status: "issued", bankAccountId: bankResolution.account.id, bankAccountSnapshot,
+        companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
+        companyProfileVersion: typeof companySnapshot.version === "number" ? companySnapshot.version : undefined,
+        issuedAt: now, issuedBy: req.session!.id,
+      };
+      // Atomic: re-validate draft state inside the tx, then write invoice +
+      // ledger + idempotency record together (no partially-issued record).
+      const result = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ invoiceId: string }>("accountingIdempotency", scopedKey);
+          if (rec) {
+            const prior = await tx.get<CustomerInvoice>("customerInvoices", rec.invoiceId);
+            if (prior) return { http: 200, body: { invoice: cleanUndefined(prior), idempotent: true } };
+          }
+        }
+        const current = await tx.get<CustomerInvoice>("customerInvoices", invoice.id);
+        if (!current) return { http: 404, body: { error: "Invoice not found." } };
+        if (current.status !== "draft") return { http: 409, body: { code: "not_draft", error: "Only a draft invoice can be issued." } };
+        tx.set("customerInvoices", issued.id, issued);
+        tx.set("invoiceAccountingLedgers", issued.id, initInvoiceLedgerFromInvoice(issued, now));
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "invoice-issue", invoiceId: issued.id, createdAt: now });
+        // Audit is staged INSIDE the same tx — a rollback discards it too (no
+        // false-success audit), and idempotent replays above never reach here.
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.invoiceIssued, entityType: "customer_invoice", entityId: issued.id, result: "success",
+          invoiceId: issued.id, clientId: issued.clientId, orderId: issued.shipmentNumber, currency: issued.currency,
+          idempotencyKey: scopedKey,
+          afterSnapshot: { status: "issued", number: issued.invoiceNumber, sellingAmount: issued.sellingAmount, bankAccountId: issued.bankAccountId, companyProfileVersion: issued.companyProfileVersion },
+        });
+        return { http: 200, body: { invoice: cleanUndefined(issued) } };
+      });
+      if (result.http === 200 && !(result.body as any).idempotent) {
+        await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
+      }
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice issue failed:", err);
+      res.status(500).json({ error: "Failed to issue invoice." });
+    }
+  });
+
+  // Cancel an issued invoice (reason required; never deletes).
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requirePermission("invoices.cancel"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const decision = canCancelInvoice(invoice.status, reason);
+      if (!decision.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, reason: reason || undefined, errorCode: decision.code });
+        return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      }
+      const now = new Date().toISOString();
+      // Cancel + mark the ledger cancelled atomically, but REJECT if the invoice
+      // still has active allocations (section 10): those must be reversed first.
+      // Both writes happen in one transaction so they never diverge.
+      const result = await runAccountingTransaction(async (tx) => {
+        const ledger = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", invoice.id);
+        if (ledger && ledger.allocatedAmount > 0.001) {
+          return { http: 409, body: { code: "invoice_has_allocations", error: "Reverse all invoice allocations before cancellation." } };
+        }
+        const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
+        tx.set("customerInvoices", cancelled.id, cancelled);
+        if (ledger) tx.set("invoiceAccountingLedgers", ledger.id, { ...ledger, status: "cancelled", revision: (ledger.revision || 1) + 1, updatedAt: now });
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.invoiceCancelled, entityType: "customer_invoice", entityId: cancelled.id, result: "success",
+          invoiceId: cancelled.id, clientId: cancelled.clientId, currency: cancelled.currency, reason: reason,
+          beforeSnapshot: { status: invoice.status }, afterSnapshot: { status: "cancelled", number: cancelled.invoiceNumber },
+        });
+        return { http: 200, body: { invoice: cleanUndefined(cancelled) } };
+      });
+      if (result.http === 409) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: "invoice_has_allocations" });
+      }
+      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", "");
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to cancel invoice." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Customer Payments + allocation — account-based (per customer company).
+  // A payment is allocated across invoices (auto oldest-first, or manual);
+  // any unallocated amount is advance credit. Per-invoice paid/outstanding
+  // and per-currency account totals are derived server-side. Payments are
+  // never edited/deleted — corrections are reversals. Internal-only.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadInvoicesForCompany(companyName: string): Promise<CustomerInvoice[]> {
+    const snap = await getDocs(collection(db, "customerInvoices"));
+    return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.companyName === companyName);
+  }
+  async function loadPaymentsForCompany(companyName: string): Promise<CustomerPayment[]> {
+    const snap = await getDocs(collection(db, "customerPayments"));
+    return snap.docs.map((d) => d.data() as CustomerPayment).filter((p) => p.companyName === companyName);
+  }
+  const readCompany = (req: express.Request): string =>
+    (typeof req.query.company === "string" && req.query.company) ||
+    (typeof req.body?.company === "string" && req.body.company) || "";
+
+  // Outstanding invoices for a customer (for allocation).
+  app.get("/api/customer-accounts/invoices", requirePermission("customerPayments.view"), async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      res.json({ invoices, outstanding: buildOutstandingList(invoices, payments) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load customer invoices." });
+    }
+  });
+
+  // Payments + per-currency account summary for a customer.
+  app.get("/api/customer-accounts/payments", requirePermission("customerPayments.view"), async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      payments.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ payments, summary: summarizeCustomerAccount(invoices, payments) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load customer payments." });
+    }
+  });
+
+  // Record a customer payment. allocationMode: "auto" (oldest-first) or
+  // "manual" (body.allocations). Overpayment is retained as advance credit.
+  app.post("/api/customer-accounts/payments", requirePermission("customerPayments.create"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const amount = typeof body.amount === "number" && Number.isFinite(body.amount) ? body.amount : NaN;
+      if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ code: "invalid_amount", error: "Payment amount must be a positive number." });
+      const currency = body.currency as Currency;
+      if (!["USD", "IQD", "TRY", "EUR"].includes(currency)) return res.status(400).json({ code: "invalid_currency", error: "Currency must be one of USD, IQD, TRY, EUR." });
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      const now = new Date().toISOString();
+      // A NEW payment MUST carry an immutable clientId (production structure —
+      // no companyName-based legacy resolution). Rejected if absent.
+      const directId = requireClientId(body.clientId);
+      if (!directId.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required." });
+      const payerClientId = directId.clientId;
+      const invoicesAll = await loadInvoicesForCompany(company);
+      const existing = await loadPaymentsForCompany(company);
+      if (isDuplicatePayment(existing, { companyName: company, amount, paymentDate, reference, currency })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
+      // Determine target invoices. Their ledgers are read by ref inside the
+      // transaction; a missing ledger is initialized to zero allocations there
+      // (initInvoiceLedgerFromInvoice), and the CONTENDED allocation math is
+      // done inside runAccountingTransaction — never before it.
+      const manual = body.allocationMode === "manual" && Array.isArray(body.allocations);
+      const ownIssued = invoicesAll
+        .filter((i) => (i.clientId || "") === payerClientId && isAllocatableInvoiceStatus(i.status))
+        .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
+      const targetIds: string[] = manual ? body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
+      // Bank snapshot (outside tx — not contended).
+      let bankAccountSnapshot: string | undefined;
+      if (typeof body.bankAccountId === "string" && body.bankAccountId) {
+        const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
+        if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
+      }
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("customer-payment", idemKey) : undefined;
+      const reqFingerprint = fingerprintPayload({ clientId: payerClientId, amount, currency, paymentDate, reference });
+      const paymentId = `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // ── Production correctness boundary: one Firestore transaction reads the
+      //    target invoice ledgers, validates ownership/currency/available, and
+      //    writes the payment + updated ledgers + idempotency record together.
+      const result = await runAccountingTransaction(async (tx) => {
+        // Idempotency (persisted inside the tx): replay or conflict.
+        if (scopedKey) {
+          const rec = await tx.get<{ paymentId: string; fingerprint: string }>("accountingIdempotency", scopedKey);
+          if (rec) {
+            if (rec.fingerprint !== reqFingerprint) return { http: 409, body: { code: "idempotency_conflict", error: "This idempotency key was already used with a different request." } };
+            const prior = await tx.get<CustomerPayment>("customerPayments", rec.paymentId);
+            return { http: 200, body: { payment: cleanUndefined(prior), idempotent: true } };
+          }
+        }
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        // Pre-read the target invoices (reads before writes) so their derived
+        // status can be restaged after the ledgers change.
+        const invoicesTxById = new Map<string, CustomerInvoice>();
+        for (const id of targetIds) {
+          let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
+          const inv = (await tx.get<CustomerInvoice>("customerInvoices", id)) || invoiceById.get(id) || null;
+          if (inv) invoicesTxById.set(id, inv);
+          if (!l && inv) l = initInvoiceLedgerFromInvoice(inv, now);
+          if (l) ledgersById.set(id, l);
+        }
+        let allocations: PaymentAllocation[];
+        let ledgerWrites: InvoiceAccountingLedger[];
+        if (manual) {
+          // Validate the manual set: positive amounts, no dupes, sum ≤ payment.
+          const seen = new Set<string>();
+          let sum = 0;
+          for (const a of body.allocations) {
+            const amt = typeof a.amount === "number" && Number.isFinite(a.amount) ? Math.round((a.amount + Number.EPSILON) * 100) / 100 : NaN;
+            if (!(amt > 0)) return { http: 400, body: { code: "invalid_amount", error: "Each allocation amount must be positive." } };
+            if (seen.has(a.invoiceId)) return { http: 400, body: { code: "duplicate_allocation", error: "Duplicate allocation to one invoice." } };
+            seen.add(a.invoiceId); sum = Math.round((sum + amt + Number.EPSILON) * 100) / 100;
+          }
+          if (sum > Math.round((amount + Number.EPSILON) * 100) / 100) return { http: 400, body: { code: "over_payment", error: "Total allocations exceed the payment amount." } };
+          const applied = applyAllocationDeltas({ payerClientId, currency, ledgersById, deltas: body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, delta: a.amount })), nowIso: now });
+          if (!applied.ok) return { http: applied.code === "customer_mismatch" ? 409 : applied.code === "allocation_conflict" || applied.code === "over_invoice" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+          allocations = body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, invoiceNumber: invoiceById.get(a.invoiceId)?.invoiceNumber || a.invoiceId, amount: Math.round((a.amount + Number.EPSILON) * 100) / 100 }));
+          ledgerWrites = applied.ledgers;
+        } else {
+          const candidates = ownIssued.map((i) => ledgersById.get(i.id)).filter((l): l is InvoiceAccountingLedger => !!l);
+          const invoiceNumbers = new Map(invoicesAll.map((i) => [i.id, i.invoiceNumber]));
+          const auto = autoAllocateFromLedgers({ amount, currency, payerClientId, candidates, invoiceNumbers, nowIso: now });
+          allocations = auto.allocations;
+          ledgerWrites = auto.ledgers;
+        }
+        const payment: CustomerPayment = {
+          id: paymentId, companyName: company, clientId: payerClientId, amount, currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+          bankAccountSnapshot, reference: reference || undefined,
+          attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+          attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+          notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
+          allocations, status: "active", idempotencyKey: scopedKey, createdBy: req.session!.id, createdAt: now,
+        };
+        tx.set("customerPayments", payment.id, payment);
+        for (const l of ledgerWrites) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, ledgerWrites, now);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "customer-payment", paymentId, fingerprint: reqFingerprint, createdAt: now });
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentCreated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payerClientId, currency, idempotencyKey: scopedKey,
+          afterSnapshot: { amount, currency, method: payment.paymentMethod, reference: payment.reference, allocationCount: allocations.length, allocated: allocations.reduce((s, a) => s + a.amount, 0) },
+        });
+        return { http: 201, body: { payment: cleanUndefined(payment) } };
+      });
+      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] customer payment failed:", err);
+      res.status(500).json({ error: "Failed to record customer payment." });
+    }
+  });
+
+  // Re-allocate an active payment (manual set or auto re-run). Production-safe
+  // across instances (item 4): ONE Firestore transaction restores this
+  // payment's prior allocations to their invoice ledgers, validates + applies
+  // the new allocations, and writes the payment + all touched ledgers together.
+  app.post("/api/customer-accounts/payments/:paymentId/allocate", requirePermission("customerPayments.allocate"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const paymentPre = snap.data() as CustomerPayment;
+      if (paymentPre.status !== "active") return res.status(409).json({ code: "not_active", error: "Only an active payment can be re-allocated." });
+      const now = new Date().toISOString();
+      const company = paymentPre.companyName;
+      const payerClientId = paymentPre.clientId || "";
+      const invoicesAll = await loadInvoicesForCompany(company);
+      const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
+      const manual = req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations);
+      const ownIssued = invoicesAll
+        .filter((i) => (i.clientId || "") === payerClientId && isAllocatableInvoiceStatus(i.status))
+        .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
+      const oldIds = (paymentPre.allocations || []).map((a) => a.invoiceId);
+      const newIds = manual ? req.body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
+      const allIds = [...new Set([...oldIds, ...newIds])];
+      const invoiceNumbers = new Map(invoicesAll.map((i) => [i.id, i.invoiceNumber]));
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.status !== "active") return { http: 409, body: { code: "not_active", error: "Only an active payment can be re-allocated." } };
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        const invoicesTxById = new Map<string, CustomerInvoice>();
+        for (const id of allIds) {
+          let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
+          const inv = (await tx.get<CustomerInvoice>("customerInvoices", id)) || invoiceById.get(id) || null;
+          if (inv) invoicesTxById.set(id, inv);
+          if (!l && inv) l = initInvoiceLedgerFromInvoice(inv, now);
+          if (l) ledgersById.set(id, l);
+        }
+        // Restore (subtract) this payment's prior allocations.
+        const restored = applyAllocationDeltas({ payerClientId, currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
+        for (const l of restored.ledgers) ledgersById.set(l.id, l);
+        let allocations: PaymentAllocation[];
+        if (manual) {
+          const seen = new Set<string>(); let sum = 0;
+          for (const a of req.body.allocations) {
+            const amt = typeof a.amount === "number" && Number.isFinite(a.amount) ? Math.round((a.amount + Number.EPSILON) * 100) / 100 : NaN;
+            if (!(amt > 0)) return { http: 400, body: { code: "invalid_amount", error: "Each allocation amount must be positive." } };
+            if (seen.has(a.invoiceId)) return { http: 400, body: { code: "duplicate_allocation", error: "Duplicate allocation to one invoice." } };
+            seen.add(a.invoiceId); sum = Math.round((sum + amt + Number.EPSILON) * 100) / 100;
+          }
+          if (sum > Math.round((payment.amount + Number.EPSILON) * 100) / 100) return { http: 400, body: { code: "over_payment", error: "Total allocations exceed the payment amount." } };
+          const applied = applyAllocationDeltas({ payerClientId, currency: payment.currency, ledgersById, deltas: req.body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, delta: a.amount })), nowIso: now });
+          if (!applied.ok) return { http: applied.code === "customer_mismatch" || applied.code === "over_invoice" || applied.code === "allocation_conflict" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+          for (const l of applied.ledgers) ledgersById.set(l.id, l);
+          allocations = req.body.allocations.map((a: any) => ({ invoiceId: a.invoiceId, invoiceNumber: invoiceNumbers.get(a.invoiceId) || a.invoiceId, amount: Math.round((a.amount + Number.EPSILON) * 100) / 100 }));
+        } else {
+          const candidates = ownIssued.map((i) => ledgersById.get(i.id)).filter((l): l is InvoiceAccountingLedger => !!l);
+          const auto = autoAllocateFromLedgers({ amount: payment.amount, currency: payment.currency, payerClientId, candidates, invoiceNumbers, nowIso: now });
+          for (const l of auto.ledgers) ledgersById.set(l.id, l);
+          allocations = auto.allocations;
+        }
+        const next: CustomerPayment = { ...payment, allocations, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("customerPayments", payment.id, next);
+        const touched = [...ledgersById.values()];
+        for (const l of touched) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, touched, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentAllocated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payerClientId, currency: payment.currency,
+          afterSnapshot: { allocationCount: allocations.length, allocated: allocations.reduce((s, a) => s + a.amount, 0) },
+        });
+        return { http: 200, body: { payment: cleanUndefined(next) } };
+      });
+      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${company}`, "", "");
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to re-allocate payment." });
+    }
+  });
+
+  // Reverse a customer payment (reason required; never deletes). Atomic +
+  // idempotent (items 3/5): the payment reversal AND the subtraction of its
+  // allocations from the referenced invoice ledgers happen in ONE Firestore
+  // transaction, so ledger and payment can never diverge. A repeat on an
+  // already-reversed payment replays 200. Original allocations are preserved.
+  app.post("/api/customer-accounts/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const now = new Date().toISOString();
+      const actor = req.session!.id;
+      let didReverse = false;
+      const result = await runAccountingTransaction(async (tx) => {
+        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
+        if (!payment) return { http: 404, body: { error: "Payment not found." } };
+        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
+        const decision = canReversePayment(payment, reason);
+        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        // Subtract this payment's active allocations from each invoice ledger.
+        const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        const invoicesTxById = new Map<string, CustomerInvoice>();
+        for (const a of payment.allocations || []) {
+          const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
+          if (l) ledgersById.set(a.invoiceId, l);
+          const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
+          if (inv) invoicesTxById.set(a.invoiceId, inv);
+        }
+        const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
+        const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+        tx.set("customerPayments", payment.id, reversed);
+        for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
+          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+        });
+        didReverse = true;
+        return { http: 200, body: { payment: cleanUndefined(reversed) } };
+      });
+      if (result.http === 200 && didReverse) {
+        // Void any issued receipt for this payment (never delete). Different
+        // collection than the reversed payment; safe + idempotent (voiding an
+        // already-void receipt is a no-op) so a retry can't corrupt state.
+        const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
+        for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
+          if (r.paymentId === req.params.paymentId && r.status === "issued") {
+            await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+          }
+        }
+        await logActivity("", "Accounting", actor, `Customer payment reversed (${req.params.paymentId})`, "", "");
+      }
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to reverse customer payment." });
+    }
+  });
+
+  // Customer Account Statement — customer-facing ledger (opening balance,
+  // invoices as debits, payments as credits, running + closing balance),
+  // per currency and date range. Distinct from the internal Cost Statement.
+  app.get("/api/customer-accounts/statement", requirePermission("customerStatements.view"), async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      const currencies = customerStatementCurrencies(invoices, payments);
+      const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : currencies[0]) as Currency;
+      if (!currency) return res.json({ currencies: [], statement: null });
+      const statement = buildCustomerAccountStatement({
+        companyName: company, currency, invoices, payments,
+        from: typeof req.query.from === "string" ? req.query.from : "",
+        to: typeof req.query.to === "string" ? req.query.to : "",
+      });
+      res.json({ currencies, statement });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to build account statement." });
+    }
+  });
+
+  // ── Payment Receipts ──────────────────────────────────────────────
+  // Generate a customer receipt from an active payment (idempotent: one
+  // active receipt per payment). Snapshots company branding + bank; lists
+  // the MAR invoices covered. Voided (never deleted) when the payment is
+  // reversed (handled in the reverse route above). Internal-only routes.
+  app.post("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.create"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as CustomerPayment;
+      const decision = canIssueReceipt(payment);
+      if (!decision.ok) return res.status(decision.code === "not_found" ? 404 : 409).json({ code: decision.code, error: decision.error });
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const existingActive = findActiveReceiptForPayment(allReceipts, payment.id);
+      if (existingActive) return res.status(200).json({ receipt: cleanUndefined(existingActive), idempotent: true });
+      // Phase 2: honor an explicit idempotency key too (belt-and-suspenders on
+      // top of the one-active-receipt-per-payment rule above).
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedReceiptKey = idemKey ? scopeIdempotencyKey("receipt", idemKey) : undefined;
+      const rcptFingerprint = fingerprintPayload({ paymentId: payment.id, amount: payment.amount, currency: payment.currency });
+      const rcptIdem = resolveIdempotency<PaymentReceipt>({
+        existing: allReceipts, scopedKey: scopedReceiptKey,
+        fingerprintOf: (r) => fingerprintPayload({ paymentId: r.paymentId, amount: r.amount, currency: r.currency }),
+        requestFingerprint: rcptFingerprint,
+      });
+      if (rcptIdem.kind === "replay") return res.status(200).json({ receipt: cleanUndefined(rcptIdem.record), idempotent: true });
+      if (rcptIdem.kind === "conflict") return res.status(409).json({ code: rcptIdem.code, error: rcptIdem.error });
+      const now = new Date().toISOString();
+      // Collision-safe, transaction-backed per-year receipt number
+      // (RCPT-YYYY-000001) — never a non-atomic count of existing receipts.
+      const receiptYear = accountingYearOf(now);
+      const receiptSeq = await allocateNextReceiptSequence(receiptYear);
+      const companySnapshot = await loadCompanyProfile();
+      const receipt: PaymentReceipt = {
+        id: `rcpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        receiptNumber: formatReceiptNumber(receiptYear, receiptSeq),
+        paymentId: payment.id,
+        companyName: payment.companyName,
+        clientId: payment.clientId,
+        amount: payment.amount,
+        currency: payment.currency,
+        paymentDate: payment.paymentDate,
+        paymentMethod: payment.paymentMethod,
+        reference: payment.reference,
+        bankAccountSnapshot: payment.bankAccountSnapshot,
+        allocations: payment.allocations || [],
+        companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
+        status: "issued",
+        idempotencyKey: scopedReceiptKey,
+        issuedBy: req.session!.id,
+        issuedAt: now,
+      };
+      await setDoc(doc(db, "paymentReceipts", receipt.id), cleanUndefined(receipt));
+      await logActivity("", "Accounting", req.session!.id, `Receipt ${receipt.receiptNumber} issued for ${payment.companyName} (${payment.amount} ${payment.currency})`, "", "");
+      res.status(201).json({ receipt: cleanUndefined(receipt) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] receipt issue failed:", err);
+      res.status(500).json({ error: "Failed to issue receipt." });
+    }
+  });
+  app.get("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.view"), async (req, res) => {
+    try {
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued")
+        || allReceipts.find((r) => r.paymentId === req.params.paymentId);
+      if (!receipt) return res.status(404).json({ error: "No receipt for this payment." });
+      res.json({ receipt });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load receipt." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Professional accounting PDFs (Phase 10). One direction-aware renderer
+  // (renderAccountingPdf) draws every document from SAVED data + the
+  // configured Company Profile + bank. Customer-facing documents strip
+  // internal cost/profit (done in the pure model builders). Streamed inline
+  // as application/pdf for clean print + download. Internal-only routes.
+  // ══════════════════════════════════════════════════════════════════
+  // ── Controlled template customization (Phase 11) ──────────────────
+  // One bounded config per document type (accountingSettings/template_<type>),
+  // versioned like the company profile. The PDF renderers honor it; issued
+  // documents keep their own snapshots so history is unaffected.
+  async function loadTemplateConfig(docType: TemplateDocType): Promise<TemplateConfig> {
+    const snap = await getDoc(doc(db, "accountingSettings", `template_${docType}`));
+    const stored = snap.exists() ? (snap.data() as any) : {};
+    // validateTemplateConfig only normalizes the editable fields; re-attach
+    // the persisted version metadata so versioning/restore work.
+    const cfg = validateTemplateConfig(docType, stored);
+    if (typeof stored.version === "number") cfg.version = stored.version;
+    if (stored.updatedAt) cfg.updatedAt = stored.updatedAt;
+    if (stored.updatedBy) cfg.updatedBy = stored.updatedBy;
+    return cfg;
+  }
+  const isTemplateDocType = (v: string): v is TemplateDocType => (TEMPLATE_DOC_TYPES as readonly string[]).includes(v);
+
+  app.get("/api/admin/accounting/templates/:docType", requirePermission("accountingTemplates.view"), async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      res.json({ config: await loadTemplateConfig(req.params.docType), defaults: defaultTemplateConfig(req.params.docType) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load template." }); }
+  });
+  app.put("/api/admin/accounting/templates/:docType", requirePermission("accountingTemplates.publish"), async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const docType = req.params.docType;
+      const now = new Date().toISOString();
+      // Atomic publish (item 16): archive current (deterministic id → immutable),
+      // bump version, write new current — one transaction; concurrent publishes
+      // get distinct versions.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        const current = (await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`)) || defaultTemplateConfig(docType);
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("templateConfigVersions", `tpl-${docType}-${currentVersion}`, { ...current, id: `tpl-${docType}-${currentVersion}`, docType, version: currentVersion, archivedAt: now });
+        const config: TemplateConfig = { ...validateTemplateConfig(docType, req.body || {}), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", `template_${docType}`, config);
+        return { http: 200, body: { config }, version: config.version };
+      });
+      await recordAudit(req, { action: AUDIT_ACTIONS.templatePublished, entityType: "document_template", entityId: docType, result: "success", afterSnapshot: { docType, version: outcome.version } });
+      await logActivity("", "Accounting", req.session!.id, `Template updated: ${docType} (v${outcome.version})`, "", "");
+      res.status(outcome.http).json(outcome.body);
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to save template." }); }
+  });
+  app.get("/api/admin/accounting/templates/:docType/versions", requirePermission("accountingTemplates.view"), async (req, res) => {
+    try {
+      const snap = await getDocs(collection(db, "templateConfigVersions"));
+      const versions = snap.docs.map((d) => d.data() as any).filter((v) => v.docType === req.params.docType).sort((a, b) => b.version - a.version);
+      res.json({ versions });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load versions." }); }
+  });
+  app.post("/api/admin/accounting/templates/:docType/restore/:version", requirePermission("accountingTemplates.restore"), async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const docType = req.params.docType;
+      const target = Number(req.params.version);
+      const snap = await getDocs(collection(db, "templateConfigVersions"));
+      const prior = snap.docs.map((d) => d.data() as any).find((v) => v.docType === docType && v.version === target);
+      if (!prior) return res.status(404).json({ error: "Version not found." });
+      const now = new Date().toISOString();
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey(`template-restore-${docType}`, idemKey) : undefined;
+      // Atomic restore-as-NEW-version (item 17): the historical version is never
+      // mutated; a fresh version is published with sourceRestoredVersion.
+      const outcome = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ version: number }>("accountingIdempotency", scopedKey);
+          if (rec) { const cur = await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`); return { http: 200, body: { config: cur, idempotent: true }, version: rec.version }; }
+        }
+        const current = (await tx.get<TemplateConfig>("accountingSettings", `template_${docType}`)) || defaultTemplateConfig(docType);
+        const currentVersion = typeof current.version === "number" ? current.version : 0;
+        if (currentVersion > 0) tx.set("templateConfigVersions", `tpl-${docType}-${currentVersion}`, { ...current, id: `tpl-${docType}-${currentVersion}`, docType, version: currentVersion, archivedAt: now });
+        const restored: TemplateConfig & { sourceRestoredVersion?: number } = { ...validateTemplateConfig(docType, prior), version: currentVersion + 1, sourceRestoredVersion: target, updatedAt: now, updatedBy: req.session!.id };
+        tx.set("accountingSettings", `template_${docType}`, restored);
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: `template-restore-${docType}`, version: restored.version, createdAt: now });
+        return { http: 200, body: { config: restored }, version: restored.version };
+      });
+      await recordAudit(req, { action: AUDIT_ACTIONS.templateRestored, entityType: "document_template", entityId: docType, result: "success", metadata: { fromVersion: target }, afterSnapshot: { docType } });
+      await logActivity("", "Accounting", req.session!.id, `Template restored: ${docType} from v${target}`, "", "");
+      res.status(outcome.http).json(outcome.body);
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to restore template." }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Attachments (Increment 6, section 13) — proof/supporting
+  // files for accounting records. Raw bytes go to the storage adapter
+  // (Firebase Storage in prod, the in-memory uploadedFiles map in memory
+  // mode); Firestore holds ONLY the metadata. Internal-only (never customer/
+  // driver/public). Metadata is never hard-deleted (soft-remove with reason).
+  // ══════════════════════════════════════════════════════════════════
+  async function loadAccountingAttachment(id: string): Promise<AccountingAttachment | null> {
+    const snap = await getDoc(doc(db, "accountingAttachments", id));
+    return snap.exists() ? (snap.data() as AccountingAttachment) : null;
+  }
+  // Persist bytes to the approved storage. Returns the storagePath; a memory
+  // adapter keeps the buffer in uploadedFiles so downloads work deterministically
+  // in tests. In strict production without a bucket it throws (never fakes it).
+  // Opt-in deterministic test storage adapter (Firestore-emulator acceptance
+  // only). Strictly gated behind an env var that is UNSET in production, so the
+  // production fail-closed behavior below is unchanged. Never enabled by default.
+  const ATTACHMENT_TEST_ADAPTER = process.env.ACCOUNTING_ATTACHMENT_TEST_ADAPTER === "1";
+  async function storeAttachmentBytes(storagePath: string, attachmentId: string, buffer: Buffer, mimeType: string): Promise<void> {
+    if (!useMemoryFallback && storageBucketRef) {
+      const file = storageBucketRef.file(storagePath);
+      await file.save(buffer, { metadata: { contentType: mimeType } });
+      return;
+    }
+    if (useMemoryFallback || ATTACHMENT_TEST_ADAPTER) { uploadedFiles.set(attachmentId, { filename: storagePath, mimeType, buffer }); return; }
+    const err: any = new Error("attachment_storage_unavailable");
+    err.code = "attachment_storage_unavailable";
+    throw err;
+  }
+
+  app.post("/api/accounting/attachments", requirePermission("accountingAttachments.upload"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const parentType = body.parentType as AccountingAttachmentParentType;
+      const parentId = typeof body.parentId === "string" ? body.parentId : "";
+      if (!ATTACHMENT_PARENT_TYPES.includes(parentType) || !parentId) {
+        return res.status(400).json({ code: "document_state_invalid", error: "A valid parentType and parentId are required." });
+      }
+      const dataUrl = body.base64DataUrl || body.file || body.base64;
+      const originalFileName = typeof body.originalFileName === "string" ? body.originalFileName : (typeof body.fileName === "string" ? body.fileName : "proof");
+      if (typeof dataUrl !== "string") return res.status(400).json({ code: "document_state_invalid", error: "File data is required." });
+      const match = dataUrl.match(/^data:(.*?);base64,(.*)$/);
+      const base64 = match ? match[2] : dataUrl;
+      const buffer = Buffer.from(base64, "base64");
+      // Trust the SNIFFED content type, not the client-declared MIME.
+      const validation = validateAttachmentUpload({ originalFileName, bytes: new Uint8Array(buffer), sizeBytes: buffer.length });
+      if (!validation.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.attachmentUploaded, entityType: "accounting_attachment", entityId: parentId, result: "rejected", parentEntityType: parentType, parentEntityId: parentId, errorCode: validation.code });
+        return res.status(validation.code === "attachment_too_large" ? 413 : 415).json({ code: validation.code, error: validation.error });
+      }
+      // Idempotent upload: same key returns the existing metadata (no duplicate).
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      if (idemKey) {
+        const all = (await getDocs(collection(db, "accountingAttachments"))).docs.map((d) => d.data() as AccountingAttachment);
+        const prior = all.find((a) => a.idempotencyKey === idemKey && a.parentId === parentId);
+        if (prior) return res.status(200).json({ attachment: cleanUndefined(prior), idempotent: true });
+      }
+      const now = new Date().toISOString();
+      const attachmentId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const storageName = randomAttachmentStorageName(validation.mimeType, crypto.randomUUID());
+      const storagePath = attachmentStoragePath(parentType, parentId, storageName);
+      try {
+        await storeAttachmentBytes(storagePath, attachmentId, buffer, validation.mimeType);
+      } catch (storageErr: any) {
+        if (storageErr?.code === "attachment_storage_unavailable") {
+          return res.status(503).json({ code: "attachment_storage_unavailable", error: "Attachment storage is unavailable. Your file was NOT saved — please try again." });
+        }
+        throw storageErr;
+      }
+      const meta = buildAttachmentMetadata({
+        attachmentId, parentType, parentId, storageName, originalFileName,
+        mimeType: validation.mimeType, sizeBytes: buffer.length, storagePath,
+        uploadedAt: now, uploadedBy: req.session!.id,
+        description: typeof body.description === "string" ? body.description : undefined,
+        idempotencyKey: idemKey || undefined,
+      });
+      await setDoc(doc(db, "accountingAttachments", attachmentId), cleanUndefined(meta));
+      // Audit AFTER metadata is persisted — never claim uploaded before the
+      // storage write + metadata write both succeeded. No raw bytes recorded.
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.attachmentUploaded, entityType: "accounting_attachment", entityId: attachmentId, result: "success",
+        parentEntityType: parentType, parentEntityId: parentId, idempotencyKey: idemKey || undefined,
+        afterSnapshot: { fileName: meta.fileName, originalFileName: meta.originalFileName, mimeType: meta.mimeType, sizeBytes: meta.sizeBytes, status: meta.status },
+      });
+      await logActivity("", "Accounting", req.session!.id, `Attachment uploaded for ${parentType} ${parentId}`, "", "");
+      res.status(201).json({ attachment: cleanUndefined(meta) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] attachment upload failed:", err instanceof Error ? err.message : err);
+      res.status(500).json({ code: "attachment_storage_unavailable", error: "Failed to store the attachment." });
+    }
+  });
+
+  app.get("/api/accounting/attachments", requirePermission("accountingAttachments.view"), async (req, res) => {
+    try {
+      const parentType = req.query.parentType as AccountingAttachmentParentType;
+      const parentId = typeof req.query.parentId === "string" ? req.query.parentId : "";
+      if (!ATTACHMENT_PARENT_TYPES.includes(parentType) || !parentId) return res.status(400).json({ code: "document_state_invalid", error: "A valid parentType and parentId are required." });
+      const all = (await getDocs(collection(db, "accountingAttachments"))).docs.map((d) => d.data() as AccountingAttachment);
+      const list = all.filter((a) => a.parentType === parentType && a.parentId === parentId)
+        .sort((a, b) => (a.uploadedAt || "").localeCompare(b.uploadedAt || ""));
+      res.json({ attachments: list.map(cleanUndefined) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load attachments." });
+    }
+  });
+
+  app.get("/api/accounting/attachments/:id/download", requirePermission("accountingAttachments.view"), async (req, res) => {
+    try {
+      const meta = await loadAccountingAttachment(req.params.id);
+      if (!meta || meta.status !== "active") return res.status(404).json({ code: "document_not_available", error: "Attachment not available." });
+      // Authorization is enforced here on EVERY download (never a public token).
+      let buffer: Buffer | null = null;
+      if (!useMemoryFallback && storageBucketRef) {
+        const [data] = await storageBucketRef.file(meta.storagePath).download();
+        buffer = data as Buffer;
+      } else {
+        const mem = uploadedFiles.get(meta.attachmentId);
+        buffer = mem ? mem.buffer : null;
+      }
+      if (!buffer) return res.status(404).json({ code: "document_not_available", error: "Attachment file not found." });
+      res.setHeader("Content-Type", meta.mimeType);
+      res.setHeader("Content-Disposition", `inline; filename="${meta.originalFileName.replace(/[^A-Za-z0-9._-]/g, "-")}"`);
+      res.send(buffer);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to download the attachment." });
+    }
+  });
+
+  app.post("/api/accounting/attachments/:id/remove", requirePermission("accountingAttachments.remove"), async (req, res) => {
+    try {
+      const meta = await loadAccountingAttachment(req.params.id);
+      if (!meta) return res.status(404).json({ code: "document_not_available", error: "Attachment not found." });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const outcome = applyAttachmentRemoval(meta, { reason, actor: req.session!.id, nowIso: new Date().toISOString() });
+      if (!outcome.ok) return res.status(outcome.code === "removal_reason_required" ? 400 : 409).json({ code: outcome.code, error: outcome.error });
+      // Soft-remove: metadata is preserved forever (never hard-deleted).
+      await setDoc(doc(db, "accountingAttachments", meta.id), cleanUndefined(outcome.attachment));
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.attachmentRemoved, entityType: "accounting_attachment", entityId: meta.id, result: "success",
+        parentEntityType: meta.parentType, parentEntityId: meta.parentId, reason,
+        beforeSnapshot: { status: "active" }, afterSnapshot: { status: "removed", fileName: meta.fileName },
+      });
+      await logActivity("", "Accounting", req.session!.id, `Attachment removed (${meta.parentType} ${meta.parentId}): ${reason.slice(0, 120)}`, "", "");
+      res.json({ attachment: cleanUndefined(outcome.attachment) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to remove the attachment." });
+    }
+  });
+
+  const pdfLang = (req: express.Request): Language => {
+    const l = typeof req.query.lang === "string" ? req.query.lang : "en";
+    return (l === "ar" || l === "tr" ? l : "en") as Language;
+  };
+  const sendPdf = (res: express.Response, buffer: Buffer, fileName: string) => {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${fileName.replace(/[^A-Za-z0-9._-]/g, "-")}"`);
+    res.send(buffer);
+  };
+
+  // Customer Invoice PDF (draft preview or issued — the badge/watermark differ).
+  // ISSUED invoices render ONLY from their immutable snapshots (company + bank);
+  // the live master bank is used only for a DRAFT preview.
+  app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requirePermission("invoices.print"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ code: "document_not_available", error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ code: "document_not_available", error: "Invoice not found for this shipment." });
+      const company = invoice.companySnapshot || (await loadCompanyProfile());
+      // Draft previews may resolve the current default bank; an issued invoice
+      // uses ONLY its snapshot (never a live lookup).
+      let bank: BankAccount | null = null;
+      if (invoice.status === "draft" && !invoice.bankAccountSnapshot) bank = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), invoice.currency);
+      const model = applyTemplateToModel(buildInvoicePdfModel({ invoice, company, bank, language: pdfLang(req), nowIso: new Date().toISOString() }), await loadTemplateConfig("invoice"));
+      sendPdf(res, await renderAccountingPdf(model), `Invoice_${invoice.invoiceNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render invoice PDF." });
+    }
+  });
+
+  // Payment Receipt PDF.
+  app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requirePermission("receipts.print"), async (req, res) => {
+    try {
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued") || allReceipts.find((r) => r.paymentId === req.params.paymentId);
+      if (!receipt) return res.status(404).json({ error: "No receipt for this payment." });
+      const company = receipt.companySnapshot || (await loadCompanyProfile());
+      const [invoices, payments] = [await loadInvoicesForCompany(receipt.companyName), await loadPaymentsForCompany(receipt.companyName)];
+      const model = applyTemplateToModel(buildReceiptPdfModel({ receipt, company, language: pdfLang(req), nowIso: new Date().toISOString(), advanceCredit: advanceCreditFor(invoices, payments, receipt.currency) }), await loadTemplateConfig("receipt"));
+      sendPdf(res, await renderAccountingPdf(model), `Receipt_${receipt.receiptNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] receipt pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render receipt PDF." });
+    }
+  });
+
+  // Customer Account Statement PDF.
+  app.get("/api/customer-accounts/statement/pdf", requirePermission("customerStatements.export"), async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : customerStatementCurrencies(invoices, payments)[0]) as Currency;
+      if (!currency) return res.status(404).json({ error: "No account activity for this customer." });
+      const statement = buildCustomerAccountStatement({ companyName: company, currency, invoices, payments, from: typeof req.query.from === "string" ? req.query.from : "", to: typeof req.query.to === "string" ? req.query.to : "" });
+      const model = applyTemplateToModel(buildStatementPdfModel({ statement, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString() }), await loadTemplateConfig("statement"));
+      sendPdf(res, await renderAccountingPdf(model), `Statement_${company}_${currency}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] statement pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render statement PDF." });
+    }
+  });
+
+  // Vendor Payment Voucher PDF (INTERNAL only).
+  app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requirePermission("vendorPayments.printVoucher"), async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "vendorPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as VendorPaymentTransaction;
+      if (payment.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Payment not found for this statement." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === payment.costItemId);
+      const remaining = item ? summarizeVendorPayable(item, await loadVendorPaymentsForShipment(req.params.shipmentId)).remaining : undefined;
+      const model = applyTemplateToModel(buildVoucherPdfModel({ payment, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString(), remainingPayable: remaining, costItemDescription: item ? (item.supplierName || item.description || item.costType) : undefined }), await loadTemplateConfig("voucher"));
+      sendPdf(res, await renderAccountingPdf(model), `Voucher_${payment.shipmentNumber}_${payment.id}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] voucher pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render voucher PDF." });
+    }
+  });
+
+  // Final Cost Statement PDF (INTERNAL only) — live render of the authoritative
+  // statement in the requested language. The immutable finalized PDF snapshot is
+  // served separately via /final-pdf; this is the on-demand print surface.
+  app.get("/api/cost-statements/:shipmentId/pdf", requirePermission("costStatements.print"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const history = (stmt.approvalHistory as ApprovalHistoryEntry[] | undefined) || [];
+      const model = buildFinalPdfModel({
+        statement: stmt, approvalHistory: history,
+        cycleNumber: typeof (stmt as any).cycleNumber === "number" ? (stmt as any).cycleNumber : 1,
+        finalizedAt: (stmt as any).finalizedAt || new Date().toISOString(),
+        finalStatementRevision: typeof stmt.revision === "number" ? stmt.revision : 1,
+        company: await loadCompanyProfile(), language: pdfLang(req),
+      });
+      sendPdf(res, await renderFinalCostStatementPdf(model), `CostStatement_${stmt.shipmentNumber}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost statement pdf failed:", err);
+      res.status(500).json({ code: "pdf_generation_failed", error: "Failed to render cost statement PDF." });
+    }
+  });
+
+  // Template preview — renders a SAMPLE document with the submitted (draft)
+  // config so the user can preview before saving/publishing. Never persists.
+  app.post("/api/admin/accounting/templates/:docType/preview", requirePermission("accountingTemplates.view"), async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const config = validateTemplateConfig(req.params.docType, req.body || {});
+      const model = applyTemplateToModel(buildSamplePreviewModel(req.params.docType, await loadCompanyProfile(), pdfLang(req)), config);
+      sendPdf(res, await renderAccountingPdf(model), `Preview_${req.params.docType}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] template preview failed:", err);
+      res.status(500).json({ error: "Failed to render preview." });
     }
   });
 
@@ -11380,6 +13408,31 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to load the financial overview." });
+    }
+  });
+
+  // Accounts-receivable dashboard overview — per-currency invoiced/collected/
+  // outstanding/advance-credit from the REAL customer invoices + payments,
+  // plus operational queues (drafts to issue, payments to allocate).
+  // Accounting-only, never mixed across currencies.
+  app.get("/api/admin/dashboard/receivables", requireRole("admin"), async (req, res) => {
+    try {
+      if (!canViewCostStatements(req.session!.adminType as any)) {
+        return res.status(403).json({ error: "Receivables overview requires accounting access." });
+      }
+      const [invSnap, paySnap] = await Promise.all([
+        getDocs(collection(db, "customerInvoices")),
+        getDocs(collection(db, "customerPayments")),
+      ]);
+      const receivables = buildArOverview(
+        invSnap.docs.map((d) => d.data() as CustomerInvoice),
+        paySnap.docs.map((d) => d.data() as CustomerPayment)
+      );
+      res.json({ receivables });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load the receivables overview." });
     }
   });
 

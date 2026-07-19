@@ -473,6 +473,249 @@ export interface CostItem {
   documentUrl?: string;
   documentName?: string;
   internalNotes?: string;
+  // Vendor Payables (optional, legacy-safe): a cost line may be paid to a
+  // vendor via one or more VendorPaymentTransaction records. paid/remaining/
+  // status are NEVER stored here — they are derived server-side from the
+  // active (non-reversed) transactions (see src/lib/vendorPayments.ts).
+  vendorId?: string;
+  dueDate?: string;
+  paymentTerms?: string;
+  /** Priority of this expense line (PR #140 increment 3) — never a payment method. */
+  priority?: 'normal' | 'urgent';
+  /** Stable client key for the item-level add API (idempotent append). */
+  idempotencyKey?: string;
+}
+
+/**
+ * A single vendor payment against one CostItem. A vendor cost may be paid
+ * in multiple partial payments, so these are discrete records (never a
+ * single paid flag on the item). Internal to MARAS — never exposed to
+ * customers/drivers/public. Completed payments are never edited/deleted;
+ * corrections are made by writing a reversal (status → "reversed").
+ */
+export interface VendorPaymentTransaction {
+  id: string;
+  shipmentId: string;
+  /** MAR order number snapshot, for cross-document consistency + search. */
+  shipmentNumber: string;
+  /** Cost statement doc id (== shipmentId in this architecture). */
+  costStatementId: string;
+  costItemId: string;
+  vendorId?: string;
+  /** Vendor/supplier name snapshot at payment time. */
+  vendorName: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  /**
+   * Urgency is a PRIORITY, not a payment method (PR #140 review, item 12).
+   * Legacy records that stored paymentMethod:"urgent" are normalized on read
+   * (normalizeExpensePriority, expensePriority.ts); new writes never persist
+   * "urgent" as a method.
+   */
+  priority?: 'normal' | 'urgent';
+  /** Paying bank/cash account (from Template Settings) + snapshot. */
+  bankAccountId?: string;
+  bankAccountSnapshot?: string;
+  reference?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
+  internalNotes?: string;
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
+  createdBy: string;
+  createdAt: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  status: 'active' | 'reversed';
+  reversedBy?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+}
+
+/** Derived, server-authoritative payable status for a single cost item. */
+export type VendorPayableStatus = 'Unpaid' | 'Partially Paid' | 'Paid' | 'Overpaid';
+
+// ═══════════════════════════════════════════════════════════════════
+// Customer Invoices — customer-facing selling document, linked to a
+// shipment (MAR number) and customer. Internal cost + profit are stored on
+// the invoice but are PRIVATE (never in the customer projection / PDF).
+// Issued invoices are immutable; corrections are cancellations (never
+// deletes). Pricing math lives in src/lib/customerInvoice.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Final pricing model (Increment 5): exactly two modes.
+ *  - manual:    the user enters an agreed selling amount (or line items). The
+ *               internal shipment cost stays private; nothing is derived from it.
+ *  - cost_plus: the server takes the authorized internal cost base and adds a
+ *               markup (percentage OR fixed). Only the selling price is shown to
+ *               the customer; costBaseAmount and markup stay internal.
+ */
+export type InvoicePricingMode = 'manual' | 'cost_plus';
+
+/** How a cost_plus markup is expressed. */
+export type InvoiceMarkupType = 'percentage' | 'fixed';
+
+/**
+ * Canonical invoice lifecycle. draft/issued/cancelled are set explicitly;
+ * partially_paid/paid are SERVER-DERIVED from the transactional invoice ledger
+ * and are never selectable by the client. Overdue is calculated from dueDate
+ * when needed — it is never a stored lifecycle status.
+ */
+export type CustomerInvoiceStatus = 'draft' | 'issued' | 'partially_paid' | 'paid' | 'cancelled';
+
+/**
+ * Immutable snapshot of the bank account copied onto an invoice AT ISSUE TIME.
+ * Once written, editing/deactivating/deleting the master bank account never
+ * changes it — issued documents always render from this snapshot.
+ */
+export interface BankAccountSnapshot {
+  /** The master bank account this was copied from (reference only). */
+  bankAccountId?: string;
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+  iban?: string;
+  swiftCode?: string;
+  branchName?: string;
+  bankAddress?: string;
+  currency: Currency;
+  country?: string;
+  paymentInstructions?: string;
+}
+
+export interface CustomerInvoice {
+  id: string;
+  /** Derived from the MAR order number — no second numbering system. */
+  invoiceNumber: string;
+  shipmentId: string;
+  shipmentNumber: string;
+  clientId?: string;
+  companyName: string;
+  currency: Currency;
+  pricingMode: InvoicePricingMode;
+  // ── Pricing inputs (only the relevant ones are used per mode) ──
+  /** PRIVATE internal snapshot of the approved total shipment cost. Never shown to customer. */
+  costBasis: number;
+  /** manual mode: the agreed customer selling amount. */
+  manualAmount?: number;
+  /** cost_plus mode: PRIVATE authorized cost base the markup is applied to (server-derived). */
+  costBaseAmount?: number;
+  /** cost_plus mode: percentage or fixed markup. */
+  markupType?: InvoiceMarkupType;
+  /** cost_plus mode: the percentage value or the fixed amount, per markupType. */
+  markupValue?: number;
+  /** cost_plus mode: PRIVATE server-computed markup amount. Never shown to customer. */
+  markupAmount?: number;
+  /** Optional payment due date (used to CALCULATE overdue; never a stored status). */
+  dueDate?: string;
+  /** Optional customer-visible payment terms text. */
+  paymentTerms?: string;
+  // ── Server-computed ──
+  /** Customer-facing invoice total. */
+  sellingAmount: number;
+  /** PRIVATE derived gross profit (selling − cost), or null if not comparable. */
+  grossProfit?: number | null;
+  description?: string;
+  /** Customer-visible note. */
+  notes?: string;
+  /** PRIVATE internal note. */
+  internalNotes?: string;
+  status: CustomerInvoiceStatus;
+  bankAccountId?: string;
+  bankAccountSnapshot?: BankAccountSnapshot;
+  /** Company branding snapshot captured at issue time (issued-doc integrity). */
+  companySnapshot?: CompanyProfile;
+  /** The company-profile version this document was issued against. */
+  companyProfileVersion?: number;
+  issuedAt?: string;
+  issuedBy?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancellationReason?: string;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  revision?: number;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Customer Payments — account-based (per customer, by company name), not
+// per-invoice. A payment is allocated across one or more invoices (auto,
+// oldest-first, or manual); any unallocated balance is advance credit.
+// Completed payments are never edited/deleted — corrections are reversals.
+// Allocation/summary math lives in src/lib/customerPayments.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+/** One allocation of a payment to a specific invoice. */
+export interface PaymentAllocation {
+  invoiceId: string;
+  invoiceNumber: string;
+  amount: number;
+}
+
+export interface CustomerPayment {
+  id: string;
+  /** Customer identity — the shipment/invoice company name (consistent everywhere). */
+  companyName: string;
+  clientId?: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  bankAccountId?: string;
+  bankAccountSnapshot?: string;
+  reference?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
+  notes?: string;
+  /** Current allocations to invoices (replaceable while active). */
+  allocations: PaymentAllocation[];
+  status: 'active' | 'reversed';
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  reversedBy?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+}
+
+/**
+ * A customer-facing acknowledgment of a received payment, generated from a
+ * CustomerPayment (one active receipt per payment). Snapshots company/bank
+ * at issue time and lists the MAR invoices the payment covered. Voided (not
+ * deleted) if the underlying payment is reversed.
+ */
+export interface PaymentReceipt {
+  id: string;
+  receiptNumber: string;
+  paymentId: string;
+  companyName: string;
+  clientId?: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  reference?: string;
+  bankAccountSnapshot?: string;
+  /** Invoices (by MAR-derived number) this payment was allocated to. */
+  allocations: PaymentAllocation[];
+  /** Snapshot of the issuing company branding at receipt time. */
+  companySnapshot?: CompanyProfile;
+  status: 'issued' | 'void';
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
+  issuedBy: string;
+  issuedAt: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  voidReason?: string;
 }
 
 export interface CostStatement {
@@ -575,6 +818,67 @@ export interface CostStatement {
   reopenRequestedBy?: string;
   reopenRequestedAt?: string;
   reopenReason?: string;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Template Settings (Accounting) — Desktop is the source of truth. These
+// power document branding + bank details for customer-facing accounting
+// documents (invoices, receipts, statements) and the internal cost
+// statement PDF. Managed ONLY on Desktop (super-admin); Mobile never edits
+// them. Validation + default-bank resolution live in
+// src/lib/accountingTemplateSettings.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Single company-profile settings document (accountingSettings/company_profile). */
+export interface CompanyProfile {
+  companyName?: string;
+  companyNameEn?: string;
+  companyNameAr?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  registrationDetails?: string;
+  taxDetails?: string;
+  logoUrl?: string;
+  stampUrl?: string;
+  signatureUrl?: string;
+  footerText?: string;
+  /** Published version counter — bumped on every save; issued documents
+   *  snapshot the profile so template changes never alter historical docs. */
+  version?: number;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+/** An archived, previously-published company profile version. */
+export interface CompanyProfileVersion extends CompanyProfile {
+  id: string;
+  version: number;
+  archivedAt: string;
+}
+
+/** A configurable bank account (bankAccounts collection, one doc per account). */
+export interface BankAccount {
+  id: string;
+  bankName: string;
+  accountHolderName: string;
+  accountNumber: string;
+  iban?: string;
+  swift?: string;
+  currency: Currency;
+  branch?: string;
+  country?: string;
+  additionalInstructions?: string;
+  /** Inactive accounts are retained (never deleted) but not selectable/suggested. */
+  active: boolean;
+  /** At most one active default per currency (enforced server-side). */
+  isDefaultForCurrency?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 

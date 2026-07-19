@@ -2,6 +2,8 @@ import type { FormEvent } from 'react';
 import { UserPlus, Plus, Trash2, Users, ShieldCheck } from 'lucide-react';
 import type { Language } from '../../../types';
 import PasswordInput from '../../PasswordInput';
+import EmployeePermissionsEditor from '../EmployeePermissionsEditor';
+import AuditLogViewer from '../AuditLogViewer';
 
 interface AdminTeamSectionProps {
   lang: Language;
@@ -145,6 +147,11 @@ export default function AdminTeamSection({
                       </div>
                     )}
                   </div>
+
+                  {/* Accounting permissions — Super Admin manages them here in
+                      Settings → Team (the ONLY place); operational screens only
+                      read the saved permissions. Server re-enforces the rules. */}
+                  <EmployeePermissionsEditor employeeId={adm.id} lang={lang} />
                 </div>
               );
             })}
@@ -266,6 +273,10 @@ export default function AdminTeamSection({
           </div>
         </div>
       )}
+
+      {/* Increment 7 — the accounting audit log lives in this Super-Admin-gated
+          Settings area (read-only; server-side filtering + pagination). */}
+      <AuditLogViewer lang={lang} canExport />
     </div>
   );
 }

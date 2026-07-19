@@ -142,6 +142,30 @@ export function canWriteCostStatements(adminType: AdminType | undefined): boolea
   return adminType === "super" || adminType === "accounts";
 }
 
+// ── Named accounting capabilities (full accounting suite) ────────────────
+// These NAME the granular accounting actions on top of the existing
+// adminType model — they are NOT a new authorization system. Every server
+// route already enforces the SAME rule (requireCanWriteCostStatements for
+// accounting writes; requireSuperAdmin for template/bank settings). The
+// named helpers exist so the Desktop UI shows/hides each action with one
+// canonical rule per capability, and so the boundary is documented + tested
+// in one place. "Focused permissions only where needed" — no per-user
+// capability matrix, matching the product guidance.
+//
+// Accounting writers (super + accounts): create/edit costs, record vendor
+// payments + reversals, set profit + issue/cancel invoices, record customer
+// payments + allocation/reversal, generate receipts, view statements.
+// NOTE (PR #140 review increment 4, item 12): the former broad accounting
+// aliases (canManageAccounting / canRecordVendorPayment / canIssueInvoice /
+// canAllocatePayment / canCreateReceipt / canManageBankAccounts /
+// canManageTemplates / …) that all mapped to the same adminType role check
+// were REMOVED. Accounting authorization now has ONE source of truth: the
+// granular permission registry + resolver in src/lib/accountingPermissions.ts
+// (hasPermission / resolveEffectivePermissions), enforced on the server via
+// requirePermission(<key>) and mirrored in the UI from the same effective
+// permission set. canViewCostStatements / canWriteCostStatements above remain
+// only as the coarse tab-visibility gates they always were.
+
 /**
  * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs (and the
  * POST that appends to it) used requireRole("admin") — any adminType could

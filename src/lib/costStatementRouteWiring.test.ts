@@ -23,7 +23,7 @@ describe("cost-statement write route — Phase B wiring", () => {
   const ROUTE = region('app.post("/api/cost-statements/:shipmentId"', 11000);
 
   it("keeps the super/accounts-only write gate (PR #61) and the unconditional shipment existence check (PR #106)", () => {
-    expect(ROUTE).toContain("requireCanWriteCostStatements");
+    expect(ROUTE).toContain('requirePermission("costs.edit")');
     expect(ROUTE).toContain('res.status(404).json({ error: "Shipment not found" })');
     expect(ROUTE).not.toContain("useMemoryFallback ?");
   });
@@ -74,8 +74,8 @@ describe("cost-statement write route — Phase B wiring", () => {
 
 describe("read routes keep the PR #58 permission boundary", () => {
   it("GET list and GET by shipment both require canViewCostStatements (super/accounts only)", () => {
-    expect(region('app.get("/api/cost-statements", ', 200)).toContain("requireCanViewCostStatements");
-    expect(region('app.get("/api/cost-statements/:shipmentId"', 200)).toContain("requireCanViewCostStatements");
+    expect(region('app.get("/api/cost-statements", ', 200)).toContain('requirePermission("costs.view")');
+    expect(region('app.get("/api/cost-statements/:shipmentId"', 200)).toContain('requirePermission("costs.view")');
   });
 });
 

@@ -16,19 +16,19 @@ const region = (needle: string, length: number): string => {
 };
 
 describe("route permissions", () => {
-  it("settings: view = accounting viewers, write = Super Admin only", () => {
-    expect(SERVER).toContain('app.get("/api/admin/accounting/approval-workflow", requireCanViewCostStatements');
+  it("settings: view = costs.view; workflow config write = Super Admin only", () => {
+    expect(SERVER).toContain('app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view")');
     expect(SERVER).toContain('app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin');
     expect(region('app.put("/api/admin/accounting/approval-workflow"', 900)).toContain("validateWorkflowConfig(");
   });
-  it("submit requires accounting write; approve/reject allow any admin (assigned-approver enforced in the pure logic, since approvers may be operation-type)", () => {
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/submit", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/approve", requireRole("admin")');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reject", requireRole("admin")');
+  it("submit requires costs.edit; approve/reject require costs.approve (assigned-approver still enforced in the pure logic)", () => {
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/submit", requirePermission("costs.edit")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/approve", requirePermission("costs.approve")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve")');
   });
   it("reopen request = accounting write; reopen decision = Super Admin only", () => {
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-request", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-decision", requireSuperAdmin');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen")');
   });
 });
 
@@ -60,7 +60,7 @@ describe("actor identity is server-derived, decisions go through the pure module
     expect(HELPER).toContain("getMemoryStore().costStatements");
   });
   it("edit route is locked while pending/finalizing/closed — enforced inside the atomic section", () => {
-    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements', 4200);
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 4200);
     expect(EDIT).toContain("assertEditableInAtomicSection");
     expect(EDIT).toContain("isFinancialEditingAllowed(currentStatus)");
     expect(EDIT).toContain('code: lockErr.code');
@@ -98,7 +98,7 @@ describe("final closure integrity + idempotent, crash-recoverable finalization",
 
 describe("access boundaries — final PDF never reaches driver/client/public", () => {
   it("the final-pdf route is accounting-only and the share view never carries cost data", () => {
-    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/final-pdf", requireCanViewCostStatements');
+    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/final-pdf", requirePermission("costs.view")');
     const SHARE = readFileSync(join(ROOT, "src", "lib", "publicShareView.ts"), "utf-8");
     expect(SHARE).not.toContain("finalPdfUrl");
     expect(SHARE).not.toContain("accountingStatus");
