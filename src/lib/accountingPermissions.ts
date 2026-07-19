@@ -27,6 +27,7 @@ export const ACCOUNTING_PERMISSION_KEYS = [
   "accountingAttachments.view", "accountingAttachments.upload", "accountingAttachments.remove",
   "accountingRepair.view", "accountingRepair.execute",
   "accountingAudit.view",
+  "audit.view", "audit.export", "audit.viewSensitive", "audit.runReconciliation", "audit.executeRepair",
 ] as const;
 
 export type AccountingPermission = (typeof ACCOUNTING_PERMISSION_KEYS)[number];
@@ -148,6 +149,16 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
       p("accountingAudit.view", "View accounting audit", "عرض تدقيق المحاسبة", "Muhasebe denetimini görüntüle"),
     ],
   },
+  {
+    id: "auditLog", label: { en: "Audit Log", ar: "سجل التدقيق", tr: "Denetim Günlüğü" },
+    permissions: [
+      p("audit.view", "View audit log", "عرض سجل التدقيق", "Denetim günlüğünü görüntüle"),
+      p("audit.viewSensitive", "View masked before/after detail", "عرض التفاصيل قبل/بعد المقنّعة", "Maskeli öncesi/sonrası ayrıntıyı görüntüle"),
+      p("audit.export", "Export audit log", "تصدير سجل التدقيق", "Denetim günlüğünü dışa aktar"),
+      p("audit.runReconciliation", "Run reconciliation", "تشغيل التسوية", "Mutabakatı çalıştır"),
+      p("audit.executeRepair", "Execute reconciliation repair", "تنفيذ إصلاح التسوية", "Mutabakat onarımını çalıştır"),
+    ],
+  },
 ];
 
 // ── Legacy accounts-role defaults (only when NO explicit permissions exist) ──
@@ -168,6 +179,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
   "accountingCompanyProfile.view",
   "accountingAttachments.view", "accountingAttachments.upload",
   "accountingRepair.view",
+  "audit.view",
 ];
 
 // Sensitive permissions NEVER granted by the legacy default (documented +
@@ -183,6 +195,7 @@ export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] =
   "accountingAttachments.remove",
   "accountingRepair.execute",
   "accountingAudit.view",
+  "audit.viewSensitive", "audit.export", "audit.runReconciliation", "audit.executeRepair",
 ];
 
 /** The subject whose permissions we resolve (a subset of the admin record). */

@@ -117,6 +117,10 @@ import {
   randomAttachmentStorageName, attachmentStoragePath,
   ATTACHMENT_PARENT_TYPES, type AccountingAttachment, type AccountingAttachmentParentType,
 } from "./src/lib/accountingAttachments";
+import {
+  AUDIT_ACTIONS, buildAuditRecord, maskBankForAudit, filterAuditRecords, paginateAudit,
+  redactAuditForNonSensitive, buildAuditCsv, type AuditRecord, type AuditActor, type AuditAction,
+} from "./src/lib/accountingAudit";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
   buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
@@ -505,6 +509,9 @@ let memoryStore: {
   // Accounting proof/supporting attachment METADATA (raw bytes go to storage,
   // never here). Same PR #44 lesson — every collection needs an entry.
   accountingAttachments: any[];
+  // Canonical append-only accounting audit log (Increment 7). Immutable history
+  // of sensitive accounting actions; never the financial ledger.
+  auditLogs: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -552,6 +559,7 @@ function getMemoryStore() {
       vendorPayableLedgers: [],
       accountingIdempotency: [],
       accountingAttachments: [],
+      auditLogs: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -7791,6 +7799,9 @@ async function startServer() {
         await logActivity("", "Permissions", req.session!.id,
           `Accounting permissions updated for ${record.name || req.params.id} — added: [${added.join(", ") || "none"}], removed: [${removed.join(", ") || "none"}]`,
           "", "").catch(() => {});
+        // Audit the exact granted/revoked keys (never any credential material).
+        if (added.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionGranted, entityType: "employee", entityId: req.params.id, result: "success", metadata: { grantedKeys: added }, afterSnapshot: { grantedKeys: added } });
+        if (removed.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionRevoked, entityType: "employee", entityId: req.params.id, result: "success", metadata: { revokedKeys: removed }, afterSnapshot: { revokedKeys: removed } });
       }
       res.json({ id: req.params.id, permissions: after, added, removed });
     } catch (err) {
@@ -10575,6 +10586,36 @@ async function startServer() {
     });
   }
 
+  // ── Accounting audit log (Increment 7) — append-only, server-authoritative ──
+  let auditSeq = 0;
+  function nextAuditId(): string { return `aud-${Date.now()}-${(auditSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  // Resolve the actor from the AUTHENTICATED session (never from the body).
+  function auditActorFromReq(req: express.Request): AuditActor {
+    const ua = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 200) : undefined;
+    const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+    return {
+      actorId: req.session?.id || "unknown",
+      actorNameSnapshot: (req.session as any)?.name || undefined,
+      actorRoleSnapshot: req.session?.adminType || req.session?.role || undefined,
+      actorPermissionSnapshot: perms ? [...perms].sort() : undefined,
+      source: /mobile|android|iphone/i.test(ua || "") ? "staff_mobile" : "admin_web",
+    };
+  }
+  type AuditFields = Omit<Parameters<typeof buildAuditRecord>[0], "auditId" | "nowIso" | "actor">;
+  // Stage an audit record INSIDE an accounting transaction (commits atomically
+  // with the financial mutation — a rolled-back tx discards the audit too).
+  function stageAudit(tx: AcctTx, actor: AuditActor, nowIso: string, fields: AuditFields): void {
+    const rec = buildAuditRecord({ auditId: nextAuditId(), nowIso, actor, ...fields });
+    tx.set("auditLogs", rec.id, rec);
+  }
+  // Best-effort append for non-transactional / rejected-action logging.
+  async function recordAudit(req: express.Request, fields: AuditFields): Promise<void> {
+    try {
+      const rec = buildAuditRecord({ auditId: nextAuditId(), nowIso: new Date().toISOString(), actor: auditActorFromReq(req), ...fields });
+      await setDoc(doc(db, "auditLogs", rec.id), cleanUndefined(rec));
+    } catch (e) { console.error("[audit] append failed:", e instanceof Error ? e.message : e); }
+  }
+
   /**
    * Recalculate + stage the payment-derived invoice status (issued /
    * partially_paid / paid) for each touched ledger, INSIDE an accounting
@@ -11078,6 +11119,7 @@ async function startServer() {
         tx.set("accountingSettings", COMPANY_PROFILE_SETTINGS_ID, profile);
         return { http: 200, body: { profile: cleanUndefined(profile) }, version: profile.version };
       });
+      await recordAudit(req, { action: AUDIT_ACTIONS.companyProfilePublished, entityType: "company_profile", entityId: COMPANY_PROFILE_SETTINGS_ID, result: "success", afterSnapshot: { version: outcome.version } });
       await logActivity("", "Accounting", req.session!.id, `Company profile updated (v${outcome.version})`, "", "");
       res.status(outcome.http).json(outcome.body);
     } catch (err) {
@@ -11172,6 +11214,7 @@ async function startServer() {
         const ex = await enforceDefaultBankExclusivity(account);
         if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
       }
+      await recordAudit(req, { action: AUDIT_ACTIONS.bankAccountCreated, entityType: "bank_account", entityId: account.id, result: "success", currency: account.currency, afterSnapshot: maskBankForAudit(account) });
       await logActivity("", "Accounting", req.session!.id, `Bank account added (${account.bankName}, ${account.currency})`, "", "");
       res.status(201).json({ account: cleanUndefined(account) });
     } catch (err) {
@@ -11201,6 +11244,13 @@ async function startServer() {
         const ex = await enforceDefaultBankExclusivity(account);
         if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
       }
+      const deactivated = existing.active && !account.active;
+      const defaultChanged = existing.isDefaultForCurrency !== account.isDefaultForCurrency;
+      await recordAudit(req, {
+        action: deactivated ? AUDIT_ACTIONS.bankAccountDeactivated : defaultChanged ? AUDIT_ACTIONS.bankAccountDefaultChanged : AUDIT_ACTIONS.bankAccountUpdated,
+        entityType: "bank_account", entityId: account.id, result: "success", currency: account.currency,
+        beforeSnapshot: maskBankForAudit(existing), afterSnapshot: maskBankForAudit(account),
+      });
       await logActivity("", "Accounting", req.session!.id, `Bank account updated (${account.bankName}, ${account.currency})`, "", "");
       res.json({ account: cleanUndefined(account) });
     } catch (err) {
@@ -11259,12 +11309,18 @@ async function startServer() {
   app.post("/api/admin/accounting/repair-ledgers", requirePermission("accountingRepair.view"), async (req, res) => {
     try {
       const repair = req.query.mode === "repair";
+      const repairReason = typeof req.body?.reason === "string" ? req.body.reason : "";
       // Dry-run viewing needs accountingRepair.view (the gate above); actually
-      // executing a repair additionally needs accountingRepair.execute.
+      // executing a repair additionally needs accountingRepair.execute AND a
+      // non-empty reason (dry-run is always the default first pass).
       if (repair) {
         const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
         if (!perms || !perms.has("accountingRepair.execute")) {
+          await recordAudit(req, { action: AUDIT_ACTIONS.reconciliationRepairDenied, entityType: "reconciliation", entityId: "ledgers", result: "rejected", errorCode: "permission_denied" });
           return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: "accountingRepair.execute" });
+        }
+        if (!repairReason.trim()) {
+          return res.status(400).json({ code: "reason_required", error: "A reason is required to execute a repair." });
         }
       }
       const now = new Date().toISOString();
@@ -11298,7 +11354,18 @@ async function startServer() {
           }
         }
       }
-      if (repair && (invoiceDiscrepancies.length || vendorDiscrepancies.length)) {
+      const discrepancyCount = invoiceDiscrepancies.length + vendorDiscrepancies.length;
+      // Every reconciliation run is audited; a repair execution is a distinct,
+      // reason-bearing audit event (dry-run never mutates).
+      await recordAudit(req, {
+        action: repair ? AUDIT_ACTIONS.reconciliationRepairExecuted : AUDIT_ACTIONS.reconciliationExecuted,
+        entityType: "reconciliation", entityId: "ledgers", result: "success", reason: repair ? repairReason : undefined,
+        metadata: { mode: repair ? "repair" : "dry-run", invoiceDiscrepancies: invoiceDiscrepancies.length, vendorDiscrepancies: vendorDiscrepancies.length },
+      });
+      if (discrepancyCount > 0) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.reconciliationDiscrepancyFound, entityType: "reconciliation", entityId: "ledgers", result: "success", metadata: { invoiceDiscrepancies: invoiceDiscrepancies.length, vendorDiscrepancies: vendorDiscrepancies.length } });
+      }
+      if (repair && discrepancyCount) {
         await logActivity("", "Accounting", req.session!.id, `Ledger repair: fixed ${invoiceDiscrepancies.length} invoice + ${vendorDiscrepancies.length} vendor ledger(s)`, "", "");
       }
       res.json({ mode: repair ? "repair" : "dry-run", invoiceDiscrepancies, vendorDiscrepancies, invoiceLedgersChecked: invoices.length, vendorLedgersChecked: statements.reduce((s, st) => s + (((st.items as CostItem[]) || []).length), 0) });
@@ -11306,6 +11373,52 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] ledger repair failed:", err);
       res.status(500).json({ error: "Failed to reconcile ledgers." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting audit log — read-only, append-only. Server-side filtered +
+  // cursor-paginated (never dumps the collection to the browser). The
+  // before/after snapshots are hidden unless the caller also has
+  // audit.viewSensitive. There is NO update or delete route.
+  // ══════════════════════════════════════════════════════════════════
+  function readAuditFilters(q: any) {
+    const s = (v: any) => (typeof v === "string" && v ? v : undefined);
+    return {
+      from: s(q.from), to: s(q.to), actorId: s(q.actorId), action: s(q.action),
+      entityType: s(q.entityType), entityId: s(q.entityId), reference: s(q.reference),
+      clientId: s(q.clientId), result: s(q.result) as any, source: s(q.source) as any,
+    };
+  }
+  app.get("/api/admin/accounting/audit", requirePermission("audit.view"), async (req, res) => {
+    try {
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+      const canSensitive = !!perms && perms.has("audit.viewSensitive");
+      const all = (await getDocs(collection(db, "auditLogs"))).docs.map((d) => d.data() as AuditRecord);
+      const filtered = filterAuditRecords(all, readAuditFilters(req.query));
+      const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 50;
+      const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+      const page = paginateAudit(filtered, { limit, cursor });
+      const records = canSensitive ? page.records : page.records.map(redactAuditForNonSensitive);
+      res.json({ records: records.map(cleanUndefined), nextCursor: page.nextCursor, total: filtered.length, canViewSensitive: canSensitive });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load the audit log." });
+    }
+  });
+  app.get("/api/admin/accounting/audit/export.csv", requirePermission("audit.export"), async (req, res) => {
+    try {
+      const all = (await getDocs(collection(db, "auditLogs"))).docs.map((d) => d.data() as AuditRecord);
+      const filtered = filterAuditRecords(all, readAuditFilters(req.query));
+      // Bound the export so a huge collection can't blow memory (documented limit).
+      const bounded = paginateAudit(filtered, { limit: 200 }).records;
+      const csv = buildAuditCsv(bounded);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="audit_export.csv"`);
+      res.send(csv);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to export the audit log." });
     }
   });
 
@@ -11423,7 +11536,10 @@ async function startServer() {
         let ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
         if (!ledger) ledger = buildVendorLedger({ shipmentId: req.params.shipmentId, item, payments: [], nowIso: now });
         const decision = decideVendorPayment({ ledger, amount: Number(body.amount), currency: body.currency, allowOverpayment });
-        if (!decision.ok) return { http: 400, body: { code: decision.code, error: decision.error } };
+        if (!decision.ok) {
+          stageAudit(tx, auditActorFromReq(req), now, { action: AUDIT_ACTIONS.vendorPaymentOverpaymentRejected, entityType: "vendor_payment", entityId: item.id, result: "rejected", orderId: stmt.shipmentNumber, currency: item.currency, errorCode: decision.code });
+          return { http: 400, body: { code: decision.code, error: decision.error } };
+        }
         const payment: VendorPaymentTransaction = {
           id: paymentId, shipmentId: req.params.shipmentId, shipmentNumber: stmt.shipmentNumber,
           costStatementId: req.params.shipmentId, costItemId: item.id,
@@ -11441,6 +11557,12 @@ async function startServer() {
         const nextLedger = applyVendorLedgerDelta(ledger, Number(body.amount), now);
         tx.set("vendorPayments", payment.id, payment);
         tx.set("vendorPayableLedgers", ledgerKey, nextLedger);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.vendorPaymentCreated, entityType: "vendor_payment", entityId: payment.id, result: "success",
+          parentEntityType: "cost_statement", parentEntityId: req.params.shipmentId, orderId: stmt.shipmentNumber,
+          vendorId: payment.vendorId, currency: item.currency,
+          afterSnapshot: { amount: payment.amount, currency: item.currency, costItemId: item.id, method: payment.paymentMethod, reference: payment.reference },
+        });
         return { http: 201, body: { payment: cleanUndefined(payment), summary: summarizeVendorPayable(item, [...existing, payment]) } };
       });
       if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", "");
@@ -11474,6 +11596,12 @@ async function startServer() {
         const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
         tx.set("vendorPayments", payment.id, reversed);
         if (ledger) tx.set("vendorPayableLedgers", ledgerKey, applyVendorLedgerDelta(ledger, -Number(payment.amount), now));
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.vendorPaymentReversed, entityType: "vendor_payment", entityId: payment.id, result: "success",
+          parentEntityType: "cost_statement", parentEntityId: payment.shipmentId, orderId: payment.shipmentNumber,
+          vendorId: payment.vendorId, currency: payment.currency, reason,
+          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+        });
         didReverse = true;
         return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
@@ -11655,13 +11783,19 @@ async function startServer() {
         }
       }
       const decision = canIssueInvoice({ status: invoice.status, pricingMode: invoice.pricingMode, costStatementStatus: resolveAccountingStatus(stmt as any), sellingAmount: invoice.sellingAmount });
-      if (!decision.ok) return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
+      if (!decision.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: decision.code });
+        return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
+      }
       // Resolve + validate the bank account (explicit selection or currency
       // default). An issued invoice always carries valid payment instructions.
       const accounts = await loadBankAccounts();
       const selectedBankId = typeof req.body?.bankAccountId === "string" && req.body.bankAccountId ? req.body.bankAccountId : invoice.bankAccountId;
       const bankResolution = resolveInvoiceBank({ accounts, selectedBankId, invoiceCurrency: invoice.currency });
-      if (!bankResolution.ok) return res.status(400).json({ code: bankResolution.code, error: bankResolution.error });
+      if (!bankResolution.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, currency: invoice.currency, errorCode: bankResolution.code });
+        return res.status(400).json({ code: bankResolution.code, error: bankResolution.error });
+      }
       const bankAccountSnapshot = buildBankAccountSnapshot(bankResolution.account);
       const now = new Date().toISOString();
       // Issued-document integrity: snapshot the company branding + version so
@@ -11689,6 +11823,14 @@ async function startServer() {
         tx.set("customerInvoices", issued.id, issued);
         tx.set("invoiceAccountingLedgers", issued.id, initInvoiceLedgerFromInvoice(issued, now));
         if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "invoice-issue", invoiceId: issued.id, createdAt: now });
+        // Audit is staged INSIDE the same tx — a rollback discards it too (no
+        // false-success audit), and idempotent replays above never reach here.
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.invoiceIssued, entityType: "customer_invoice", entityId: issued.id, result: "success",
+          invoiceId: issued.id, clientId: issued.clientId, orderId: issued.shipmentNumber, currency: issued.currency,
+          idempotencyKey: scopedKey,
+          afterSnapshot: { status: "issued", number: issued.invoiceNumber, sellingAmount: issued.sellingAmount, bankAccountId: issued.bankAccountId, companyProfileVersion: issued.companyProfileVersion },
+        });
         return { http: 200, body: { invoice: cleanUndefined(issued) } };
       });
       if (result.http === 200 && !(result.body as any).idempotent) {
@@ -11711,7 +11853,10 @@ async function startServer() {
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const decision = canCancelInvoice(invoice.status, reason);
-      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      if (!decision.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, reason: reason || undefined, errorCode: decision.code });
+        return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      }
       const now = new Date().toISOString();
       // Cancel + mark the ledger cancelled atomically, but REJECT if the invoice
       // still has active allocations (section 10): those must be reversed first.
@@ -11724,8 +11869,16 @@ async function startServer() {
         const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
         tx.set("customerInvoices", cancelled.id, cancelled);
         if (ledger) tx.set("invoiceAccountingLedgers", ledger.id, { ...ledger, status: "cancelled", revision: (ledger.revision || 1) + 1, updatedAt: now });
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.invoiceCancelled, entityType: "customer_invoice", entityId: cancelled.id, result: "success",
+          invoiceId: cancelled.id, clientId: cancelled.clientId, currency: cancelled.currency, reason: reason,
+          beforeSnapshot: { status: invoice.status }, afterSnapshot: { status: "cancelled", number: cancelled.invoiceNumber },
+        });
         return { http: 200, body: { invoice: cleanUndefined(cancelled) } };
       });
+      if (result.http === 409) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: "invoice_has_allocations" });
+      }
       if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", "");
       res.status(result.http).json(result.body);
     } catch (err) {
@@ -11886,6 +12039,11 @@ async function startServer() {
         for (const l of ledgerWrites) tx.set("invoiceAccountingLedgers", l.id, l);
         stageInvoiceStatusUpdates(tx, invoicesTxById, ledgerWrites, now);
         if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "customer-payment", paymentId, fingerprint: reqFingerprint, createdAt: now });
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentCreated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payerClientId, currency, idempotencyKey: scopedKey,
+          afterSnapshot: { amount, currency, method: payment.paymentMethod, reference: payment.reference, allocationCount: allocations.length, allocated: allocations.reduce((s, a) => s + a.amount, 0) },
+        });
         return { http: 201, body: { payment: cleanUndefined(payment) } };
       });
       if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
@@ -11962,6 +12120,11 @@ async function startServer() {
         const touched = [...ledgersById.values()];
         for (const l of touched) tx.set("invoiceAccountingLedgers", l.id, l);
         stageInvoiceStatusUpdates(tx, invoicesTxById, touched, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentAllocated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payerClientId, currency: payment.currency,
+          afterSnapshot: { allocationCount: allocations.length, allocated: allocations.reduce((s, a) => s + a.amount, 0) },
+        });
         return { http: 200, body: { payment: cleanUndefined(next) } };
       });
       if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${company}`, "", "");
@@ -12004,6 +12167,11 @@ async function startServer() {
         tx.set("customerPayments", payment.id, reversed);
         for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
         stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
+          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+        });
         didReverse = true;
         return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
@@ -12169,6 +12337,7 @@ async function startServer() {
         tx.set("accountingSettings", `template_${docType}`, config);
         return { http: 200, body: { config }, version: config.version };
       });
+      await recordAudit(req, { action: AUDIT_ACTIONS.templatePublished, entityType: "document_template", entityId: docType, result: "success", afterSnapshot: { docType, version: outcome.version } });
       await logActivity("", "Accounting", req.session!.id, `Template updated: ${docType} (v${outcome.version})`, "", "");
       res.status(outcome.http).json(outcome.body);
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to save template." }); }
@@ -12206,6 +12375,7 @@ async function startServer() {
         if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: `template-restore-${docType}`, version: restored.version, createdAt: now });
         return { http: 200, body: { config: restored }, version: restored.version };
       });
+      await recordAudit(req, { action: AUDIT_ACTIONS.templateRestored, entityType: "document_template", entityId: docType, result: "success", metadata: { fromVersion: target }, afterSnapshot: { docType } });
       await logActivity("", "Accounting", req.session!.id, `Template restored: ${docType} from v${target}`, "", "");
       res.status(outcome.http).json(outcome.body);
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to restore template." }); }
@@ -12253,7 +12423,10 @@ async function startServer() {
       const buffer = Buffer.from(base64, "base64");
       // Trust the SNIFFED content type, not the client-declared MIME.
       const validation = validateAttachmentUpload({ originalFileName, bytes: new Uint8Array(buffer), sizeBytes: buffer.length });
-      if (!validation.ok) return res.status(validation.code === "attachment_too_large" ? 413 : 415).json({ code: validation.code, error: validation.error });
+      if (!validation.ok) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.attachmentUploaded, entityType: "accounting_attachment", entityId: parentId, result: "rejected", parentEntityType: parentType, parentEntityId: parentId, errorCode: validation.code });
+        return res.status(validation.code === "attachment_too_large" ? 413 : 415).json({ code: validation.code, error: validation.error });
+      }
       // Idempotent upload: same key returns the existing metadata (no duplicate).
       const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
       if (idemKey) {
@@ -12281,6 +12454,13 @@ async function startServer() {
         idempotencyKey: idemKey || undefined,
       });
       await setDoc(doc(db, "accountingAttachments", attachmentId), cleanUndefined(meta));
+      // Audit AFTER metadata is persisted — never claim uploaded before the
+      // storage write + metadata write both succeeded. No raw bytes recorded.
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.attachmentUploaded, entityType: "accounting_attachment", entityId: attachmentId, result: "success",
+        parentEntityType: parentType, parentEntityId: parentId, idempotencyKey: idemKey || undefined,
+        afterSnapshot: { fileName: meta.fileName, originalFileName: meta.originalFileName, mimeType: meta.mimeType, sizeBytes: meta.sizeBytes, status: meta.status },
+      });
       await logActivity("", "Accounting", req.session!.id, `Attachment uploaded for ${parentType} ${parentId}`, "", "");
       res.status(201).json({ attachment: cleanUndefined(meta) });
     } catch (err) {
@@ -12337,6 +12517,11 @@ async function startServer() {
       if (!outcome.ok) return res.status(outcome.code === "removal_reason_required" ? 400 : 409).json({ code: outcome.code, error: outcome.error });
       // Soft-remove: metadata is preserved forever (never hard-deleted).
       await setDoc(doc(db, "accountingAttachments", meta.id), cleanUndefined(outcome.attachment));
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.attachmentRemoved, entityType: "accounting_attachment", entityId: meta.id, result: "success",
+        parentEntityType: meta.parentType, parentEntityId: meta.parentId, reason,
+        beforeSnapshot: { status: "active" }, afterSnapshot: { status: "removed", fileName: meta.fileName },
+      });
       await logActivity("", "Accounting", req.session!.id, `Attachment removed (${meta.parentType} ${meta.parentId}): ${reason.slice(0, 120)}`, "", "");
       res.json({ attachment: cleanUndefined(outcome.attachment) });
     } catch (err) {
