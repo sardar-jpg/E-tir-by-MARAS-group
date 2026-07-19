@@ -13,7 +13,8 @@ import {
   Client,
   Vendor,
   CostStatement,
-  CostItem
+  CostItem,
+  BankAccount
 } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -40,6 +41,7 @@ import DriverRouteEditor from "./admin/DriverRouteEditor";
 import { resolveExportItems, resolveExportNotes, resolveExportHeaderStatus } from "../lib/costStatementExportView";
 import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../lib/costStatementMath";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
+import { resolveDefaultBankAccountForCurrency } from "../lib/accountingTemplateSettings";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
 import { resolveMoreMenuTabIds, resolvePrimaryMobileTabs } from "../lib/mobileAdminNav";
 import { formatUnreadBadge, dropSeenUnreadMessages, applyUnreadPollResponse, type ConfirmedSeenScope } from "../lib/chatUnreadAccess";
@@ -855,6 +857,8 @@ export default function AdminPanel({
 
   // Accounts & Cost Statements states
   const [costStatements, setCostStatements] = useState<CostStatement[]>([]);
+  // Template Settings: configured bank accounts for customer-document payment details.
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [selectedCostStatement, setSelectedCostStatement] = useState<CostStatement | null>(null);
 
   // Real coordinate-based progress calculator helper
@@ -1689,8 +1693,13 @@ MARAS Group etir Center`;
         resLogs = await apiFetch("/api/logs");
       }
       let resCostStatements: Response | null = null;
+      let resBankAccounts: Response | null = null;
       if (canViewCostStatements(resolvedAdminTypeForSWR)) {
         resCostStatements = await apiFetch("/api/cost-statements");
+        // Template Settings: configured bank accounts power the payment
+        // details on customer-facing documents (with a safe hardcoded
+        // fallback when none are configured). Tolerant of failure.
+        resBankAccounts = await apiFetch("/api/admin/accounting/bank-accounts").catch(() => null);
       }
 
       let resAdmins: Response | null = null;
@@ -1731,6 +1740,7 @@ MARAS Group etir Center`;
       if (resVendors.ok) setVendors(await safeJson(resVendors));
       if (resLogs && resLogs.ok) setActivityLogs(await safeJson(resLogs));
       if (resCostStatements && resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
+      if (resBankAccounts && resBankAccounts.ok) { try { setBankAccounts((await safeJson(resBankAccounts)).accounts || []); } catch { /* keep prior */ } }
       if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
       
       if (resUnreadChat.ok) {
@@ -3289,10 +3299,32 @@ MARAS Group etir Center`;
         <div className="flex flex-col md:flex-row md:justify-between items-start gap-4 pt-4 border-t border-slate-200">
           <div className="text-[9px] text-slate-400 leading-normal max-w-sm mt-1 font-sans">
             <p className="font-semibold text-slate-500 mb-1">Standard Wire Payment Details:</p>
-            Bank: Iraqi Islamic Trade Bank (ITB) Erbil<br />
-            IBAN: IQ43 ITBH 1100 0004 9912 3001<br />
-            SWIFT Code: ITBHIQ2AXXX<br />
-            Please quote shipment origin ref key as transfer reference.
+            {(() => {
+              // Template Settings: prefer the configured default bank for the
+              // document currency; fall back to the legacy hardcoded block
+              // only when no bank account is configured yet.
+              const bank = resolveDefaultBankAccountForCurrency(bankAccounts, custCur as Currency);
+              if (bank) {
+                return (
+                  <>
+                    Bank: {bank.bankName}{bank.branch ? ` — ${bank.branch}` : ""}<br />
+                    {bank.accountHolderName && <>Account holder: {bank.accountHolderName}<br /></>}
+                    Account: {bank.accountNumber}<br />
+                    {bank.iban && <>IBAN: {bank.iban}<br /></>}
+                    {bank.swift && <>SWIFT Code: {bank.swift}<br /></>}
+                    {bank.additionalInstructions || "Please quote the shipment reference on your transfer."}
+                  </>
+                );
+              }
+              return (
+                <>
+                  Bank: Iraqi Islamic Trade Bank (ITB) Erbil<br />
+                  IBAN: IQ43 ITBH 1100 0004 9912 3001<br />
+                  SWIFT Code: ITBHIQ2AXXX<br />
+                  Please quote shipment origin ref key as transfer reference.
+                </>
+              );
+            })()}
           </div>
           <div className="w-full md:w-56 space-y-1.5 text-[11px] font-mono leading-relaxed divide-y divide-slate-100">
             <div className="flex justify-between items-center text-slate-600 pb-1.5">

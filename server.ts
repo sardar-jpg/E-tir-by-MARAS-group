@@ -77,6 +77,11 @@ import {
   type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
 } from "./src/lib/costApprovalWorkflow";
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
+import { buildDraftCostStatement } from "./src/lib/costStatementDraft";
+import {
+  validateCompanyProfile, validateBankAccount, applyDefaultBankExclusivity,
+  resolveDefaultBankAccountForCurrency,
+} from "./src/lib/accountingTemplateSettings";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -427,6 +432,10 @@ let memoryStore: {
   // ("cost_approval_workflow") holding the three stage→admin assignments.
   // Same PR #44 lesson: every collection needs a memory-fallback entry.
   accountingSettings: any[];
+  // Template Settings (accounting): configurable bank accounts, one doc per
+  // account. Same PR #44 lesson: every collection needs a memory-fallback
+  // entry. (Company Profile is a single doc under accountingSettings.)
+  bankAccounts: BankAccount[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -463,6 +472,7 @@ function getMemoryStore() {
       adminDashboardLayouts: [],
       accountIdentityKeys: [],
       accountingSettings: [],
+      bankAccounts: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2025,7 +2035,9 @@ import {
   AllianceOfferResponse,
   AllianceAuditAction,
   AllianceAuditEntry,
-  DriverActiveJobLock
+  DriverActiveJobLock,
+  CompanyProfile,
+  BankAccount
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -4787,6 +4799,30 @@ async function startServer() {
     }
 
     await setDoc(doc(db, "shipments", id), newShipment);
+
+    // Core Business Rule: every shipment gets a linked, MAR-numbered
+    // internal cost record from the moment it is created — so accounting
+    // never has to hunt for a shipment to attach a cost statement to, and
+    // the Costs registry reflects the shipment immediately. The draft is
+    // empty (accountants fill in the cost lines later) and always
+    // `accountingStatus: "draft"` — never final. It reuses the SAME shape
+    // the edit route produces for a brand-new statement (buildDraftCost
+    // Statement), and its document id IS the shipment id, so there is
+    // exactly one statement per shipment (no duplicates). This never fails
+    // shipment creation: a draft-write hiccup is logged and the lazy
+    // upsert on POST /api/cost-statements/:shipmentId remains the fallback.
+    try {
+      const existingStmt = await getDoc(doc(db, "costStatements", id));
+      if (!existingStmt.exists()) {
+        const draft = buildDraftCostStatement(newShipment, newShipment.createdAt);
+        await setDoc(doc(db, "costStatements", id), draft);
+      }
+    } catch (draftErr) {
+      console.warn(
+        `[accounting] draft cost statement for ${shipmentNumber} was not created at shipment creation (recoverable — it will be created on first save):`,
+        draftErr instanceof Error ? draftErr.message : draftErr
+      );
+    }
 
     await logActivity(
       id,
@@ -10636,6 +10672,125 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to load final PDF." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Template Settings (Accounting) — Company Profile + Bank Accounts.
+  //
+  // Desktop is the source of truth. Reading is allowed to any accounting
+  // viewer (super/accounts) so both Desktop and the lightweight Mobile
+  // assistant can render the configured branding + bank details on the
+  // documents they show; WRITING is Super-Admin-only (bank-account /
+  // template management must remain on Desktop, per the product rule).
+  // All decisions live in the pure accountingTemplateSettings module.
+  // ══════════════════════════════════════════════════════════════════
+  const COMPANY_PROFILE_SETTINGS_ID = "company_profile";
+
+  async function loadCompanyProfile(): Promise<CompanyProfile> {
+    const snap = await getDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID));
+    return snap.exists() ? (snap.data() as CompanyProfile) : {};
+  }
+  async function loadBankAccounts(): Promise<BankAccount[]> {
+    const snap = await getDocs(collection(db, "bankAccounts"));
+    return snap.docs.map((d) => d.data() as BankAccount);
+  }
+
+  app.get("/api/admin/accounting/company-profile", requireCanViewCostStatements, async (req, res) => {
+    try {
+      res.json({ profile: await loadCompanyProfile() });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load company profile." });
+    }
+  });
+  app.put("/api/admin/accounting/company-profile", requireSuperAdmin, async (req, res) => {
+    try {
+      const result = validateCompanyProfile(req.body || {});
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const profile: CompanyProfile = { ...result.profile, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      await setDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID), cleanUndefined(profile));
+      await logActivity("", "Accounting", req.session!.id, "Company profile (template settings) updated", "Şirket profili (şablon ayarları) güncellendi", "تم تحديث ملف الشركة (إعدادات القوالب)");
+      res.json({ profile: cleanUndefined(profile) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to save company profile." });
+    }
+  });
+
+  app.get("/api/admin/accounting/bank-accounts", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const accounts = await loadBankAccounts();
+      accounts.sort((a, b) => (a.currency || "").localeCompare(b.currency || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ accounts });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load bank accounts." });
+    }
+  });
+  app.post("/api/admin/accounting/bank-accounts", requireSuperAdmin, async (req, res) => {
+    try {
+      const result = validateBankAccount(req.body || {});
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const now = new Date().toISOString();
+      const account: BankAccount = { ...result.value, id: `bank-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: now, createdBy: req.session!.id };
+      // Persist the new account first, then enforce one-default-per-currency
+      // across the full set (demoting any previous default of this currency).
+      await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
+      if (account.isDefaultForCurrency) {
+        const all = await loadBankAccounts();
+        for (const demoted of applyDefaultBankExclusivity(all, account.id, account.currency)) {
+          if (demoted.id !== account.id && all.find((a) => a.id === demoted.id)?.isDefaultForCurrency && !demoted.isDefaultForCurrency) {
+            await setDoc(doc(db, "bankAccounts", demoted.id), cleanUndefined(demoted));
+          }
+        }
+      }
+      await logActivity("", "Accounting", req.session!.id, `Bank account added (${account.bankName}, ${account.currency})`, "", "");
+      res.status(201).json({ account: cleanUndefined(account) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to add bank account." });
+    }
+  });
+  // Update / deactivate a bank account. Accounts are NEVER hard-deleted
+  // (data-integrity rule): set active:false to retire one — historical
+  // documents that referenced it keep their own snapshot.
+  app.put("/api/admin/accounting/bank-accounts/:id", requireSuperAdmin, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "bankAccounts", req.params.id));
+      if (!snap.exists()) return res.status(404).json({ error: "Bank account not found." });
+      const existing = snap.data() as BankAccount;
+      const result = validateBankAccount({ ...existing, ...(req.body || {}) });
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const account: BankAccount = { ...result.value, id: existing.id, createdAt: existing.createdAt, createdBy: existing.createdBy, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
+      if (account.isDefaultForCurrency && account.active) {
+        const all = await loadBankAccounts();
+        for (const demoted of applyDefaultBankExclusivity(all, account.id, account.currency)) {
+          if (demoted.id !== account.id && all.find((a) => a.id === demoted.id)?.isDefaultForCurrency && !demoted.isDefaultForCurrency) {
+            await setDoc(doc(db, "bankAccounts", demoted.id), cleanUndefined(demoted));
+          }
+        }
+      }
+      await logActivity("", "Accounting", req.session!.id, `Bank account updated (${account.bankName}, ${account.currency})`, "", "");
+      res.json({ account: cleanUndefined(account) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update bank account." });
+    }
+  });
+
+  // Suggested default bank for a document currency (used by issue flows on
+  // Desktop and by Mobile's read-only invoice view). The authorized user
+  // can still override the choice before issuing a document.
+  app.get("/api/admin/accounting/default-bank-account", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const currency = typeof req.query.currency === "string" ? req.query.currency : "";
+      const account = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), currency as Currency);
+      res.json({ account: account ? cleanUndefined(account) : null });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to resolve default bank account." });
     }
   });
 

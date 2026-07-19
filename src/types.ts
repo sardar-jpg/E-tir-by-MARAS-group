@@ -579,6 +579,57 @@ export interface CostStatement {
 
 
 // ═══════════════════════════════════════════════════════════════════
+// Template Settings (Accounting) — Desktop is the source of truth. These
+// power document branding + bank details for customer-facing accounting
+// documents (invoices, receipts, statements) and the internal cost
+// statement PDF. Managed ONLY on Desktop (super-admin); Mobile never edits
+// them. Validation + default-bank resolution live in
+// src/lib/accountingTemplateSettings.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Single company-profile settings document (accountingSettings/company_profile). */
+export interface CompanyProfile {
+  companyName?: string;
+  companyNameEn?: string;
+  companyNameAr?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  registrationDetails?: string;
+  taxDetails?: string;
+  logoUrl?: string;
+  stampUrl?: string;
+  signatureUrl?: string;
+  footerText?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+/** A configurable bank account (bankAccounts collection, one doc per account). */
+export interface BankAccount {
+  id: string;
+  bankName: string;
+  accountHolderName: string;
+  accountNumber: string;
+  iban?: string;
+  swift?: string;
+  currency: Currency;
+  branch?: string;
+  country?: string;
+  additionalInstructions?: string;
+  /** Inactive accounts are retained (never deleted) but not selectable/suggested. */
+  active: boolean;
+  /** At most one active default per currency (enforced server-side). */
+  isDefaultForCurrency?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
 // Driver Alliance Phase 1 — controlled internal freight-offer system.
 // NOT an auction: one offer goes to matched available drivers, each
 // invited driver submits at most one USD price (or rejects), Operations

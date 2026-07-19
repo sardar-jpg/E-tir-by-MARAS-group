@@ -3,6 +3,8 @@ import { Settings, UserPlus, Mail, ShieldCheck, Ship, Loader2, AlertCircle } fro
 import type { Language } from '../../../types';
 import { apiFetch } from '../../../lib/api';
 import CostApprovalSettingsCard from '../CostApprovalSettingsCard';
+import CompanyProfileSettingsCard from '../CompanyProfileSettingsCard';
+import BankAccountsSettingsCard from '../BankAccountsSettingsCard';
 import {
   NOTIFICATION_PREFERENCE_CATEGORIES,
   DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
@@ -366,6 +368,12 @@ export default function AdminSettingsSection({
             {lang === 'tr' ? 'Muhasebe Ayarları' : (lang === 'ar' ? 'إعدادات المحاسبة' : 'Accounting Settings')}
           </h3>
           <CostApprovalSettingsCard lang={lang} />
+          {/* Template Settings foundation — Company Profile + Bank Accounts.
+              Desktop-only source of truth for document branding + bank
+              details (super admin). Consumed by both Desktop and Mobile via
+              the same accounting API. */}
+          <CompanyProfileSettingsCard lang={lang} />
+          <BankAccountsSettingsCard lang={lang} />
         </div>
       )}
 
