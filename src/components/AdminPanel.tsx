@@ -54,6 +54,7 @@ import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/Executiv
 import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
 import VendorPayablesPanel from "./admin/VendorPayablesPanel";
 import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
+import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -6047,6 +6048,20 @@ MARAS Group etir Center`;
             setActiveTab={setActiveTab}
           />
         </React.Suspense>
+      )}
+
+      {/* Customer Account (AR) — shown for the client whose orders are
+          expanded. Internal accounting (super/accounts): invoices, payments,
+          allocation, receipts, and the account statement. */}
+      {activeTab === 'clients' && expandedClientOrdersCompanyName && canViewCostStatements(resolvedAdminType) && (
+        <div className="mt-3">
+          <CustomerAccountPanel
+            companyName={expandedClientOrdersCompanyName}
+            bankAccounts={bankAccounts}
+            canWrite={canViewCostStatements(resolvedAdminType)}
+            lang={lang}
+          />
+        </div>
       )}
 
       {/* Vendors Tab */}

@@ -94,6 +94,7 @@ import {
   isDuplicatePayment, summarizeCustomerAccount,
 } from "./src/lib/customerPayments";
 import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
+import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -11280,6 +11281,29 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to reverse customer payment." });
+    }
+  });
+
+  // Customer Account Statement — customer-facing ledger (opening balance,
+  // invoices as debits, payments as credits, running + closing balance),
+  // per currency and date range. Distinct from the internal Cost Statement.
+  app.get("/api/customer-accounts/statement", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      const currencies = customerStatementCurrencies(invoices, payments);
+      const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : currencies[0]) as Currency;
+      if (!currency) return res.json({ currencies: [], statement: null });
+      const statement = buildCustomerAccountStatement({
+        companyName: company, currency, invoices, payments,
+        from: typeof req.query.from === "string" ? req.query.from : "",
+        to: typeof req.query.to === "string" ? req.query.to : "",
+      });
+      res.json({ currencies, statement });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to build account statement." });
     }
   });
 
