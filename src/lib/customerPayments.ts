@@ -98,6 +98,14 @@ export function validateAllocations(params: {
   paymentId: string | null;
   paymentAmount: number;
   paymentCurrency: Currency;
+  /**
+   * Immutable identity of the paying customer. When provided (always, for new
+   * writes), every targeted invoice MUST belong to the same clientId — a
+   * payment can never be allocated to another customer's invoice, even if the
+   * two customers share a display companyName. Optional only so legacy/pure
+   * callers that pre-date customer isolation still type-check.
+   */
+  paymentClientId?: string;
   allocations: { invoiceId: string; amount: unknown }[];
   invoices: CustomerInvoice[];
   payments: CustomerPayment[];
@@ -106,10 +114,20 @@ export function validateAllocations(params: {
   const result: PaymentAllocation[] = [];
   let total = 0;
   const seen = new Set<string>();
+  const payerClientId = typeof params.paymentClientId === "string" ? params.paymentClientId.trim() : "";
   for (const a of params.allocations) {
     const inv = byId.get(a.invoiceId);
     if (!inv) return { ok: false, code: "invoice_not_found", error: "An allocation targets an invoice that does not exist." };
     if (!isBillableInvoice(inv)) return { ok: false, code: "invoice_not_billable", error: `Invoice ${inv.invoiceNumber} is not issued.` };
+    // Cross-customer isolation (Phase 1): identity is by immutable clientId,
+    // never companyName. Reject the moment a payer clientId is known and the
+    // invoice's clientId differs (or the invoice has no resolvable identity).
+    if (payerClientId) {
+      const invClientId = typeof inv.clientId === "string" ? inv.clientId.trim() : "";
+      if (!invClientId || invClientId !== payerClientId) {
+        return { ok: false, code: "customer_mismatch", error: "Payment and invoice belong to different customers." };
+      }
+    }
     if (inv.currency !== params.paymentCurrency) return { ok: false, code: "currency_mismatch", error: `Invoice ${inv.invoiceNumber} is ${inv.currency}, payment is ${params.paymentCurrency}.` };
     if (seen.has(a.invoiceId)) return { ok: false, code: "duplicate_allocation", error: `Duplicate allocation to invoice ${inv.invoiceNumber}.` };
     seen.add(a.invoiceId);

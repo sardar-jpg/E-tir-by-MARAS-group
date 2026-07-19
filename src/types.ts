@@ -511,6 +511,8 @@ export interface VendorPaymentTransaction {
   attachmentUrl?: string;
   attachmentName?: string;
   internalNotes?: string;
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
   createdBy: string;
   createdAt: string;
   approvedBy?: string;
@@ -635,6 +637,8 @@ export interface CustomerPayment {
   /** Current allocations to invoices (replaceable while active). */
   allocations: PaymentAllocation[];
   status: 'active' | 'reversed';
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
   createdBy: string;
   createdAt: string;
   updatedAt?: string;
@@ -667,6 +671,8 @@ export interface PaymentReceipt {
   /** Snapshot of the issuing company branding at receipt time. */
   companySnapshot?: CompanyProfile;
   status: 'issued' | 'void';
+  /** Stable client-supplied retry key (scoped by action) — see idempotency.ts. */
+  idempotencyKey?: string;
   issuedBy: string;
   issuedAt: string;
   voidedBy?: string;

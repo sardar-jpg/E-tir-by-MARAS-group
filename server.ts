@@ -94,6 +94,8 @@ import {
   isDuplicatePayment, summarizeCustomerAccount,
 } from "./src/lib/customerPayments";
 import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
+import { requireClientId, indexClientsByCompany, resolveRecordClientId } from "./src/lib/customerIdentity";
+import { normalizeIdempotencyKey, scopeIdempotencyKey, fingerprintPayload, resolveIdempotency } from "./src/lib/idempotency";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
@@ -11017,6 +11019,13 @@ async function startServer() {
     const snap = await getDocs(collection(db, "customerInvoices"));
     return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.shipmentId === shipmentId);
   }
+  // Phase 1 (customer isolation): a companyName → immutable clientId index,
+  // used to require identity on new writes and to resolve legacy records
+  // (never using companyName as a permanent identity).
+  async function loadClientsIndex(): Promise<Map<string, string>> {
+    const snap = await getDocs(collection(db, "clients"));
+    return indexClientsByCompany(snap.docs.map((d) => d.data() as Client));
+  }
   // Build an invoice record from the statement + a validated pricing body.
   function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
     const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
@@ -11081,10 +11090,24 @@ async function startServer() {
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
       if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      // Phase 1: a NEW invoice must carry an immutable clientId. Prefer the
+      // one supplied by the client; otherwise resolve it from the customers
+      // list by the shipment's companyName. Never fall back to companyName as
+      // identity — reject if it cannot be established.
+      const invoiceCompany = stmt.companyName || shipment?.companyName || "";
+      let resolvedClientId = "";
+      const direct = requireClientId((req.body || {}).clientId);
+      if (direct.ok) resolvedClientId = direct.clientId;
+      else {
+        const legacy = resolveRecordClientId({ companyName: invoiceCompany }, await loadClientsIndex());
+        if (!legacy.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required and could not be resolved from the customer list." });
+        resolvedClientId = legacy.clientId;
+      }
       const existing = await loadInvoicesForShipment(req.params.shipmentId);
       const now = new Date().toISOString();
       const invoice: CustomerInvoice = {
         ...built.value,
+        clientId: resolvedClientId,
         id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         invoiceNumber: buildInvoiceNumber(stmt.shipmentNumber, existing.length + 1),
         status: "draft",
@@ -11119,6 +11142,7 @@ async function startServer() {
         ...built.value,
         id: existing.id,
         invoiceNumber: existing.invoiceNumber,
+        clientId: existing.clientId, // immutable identity — never changes on edit
         status: "draft",
         createdAt: existing.createdAt,
         createdBy: existing.createdBy,
@@ -11257,16 +11281,41 @@ async function startServer() {
       const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
       const invoices = await loadInvoicesForCompany(company);
       const existing = await loadPaymentsForCompany(company);
+      // Phase 1: a NEW payment must carry an immutable clientId (prefer the
+      // supplied id, else resolve from the customers list by company name).
+      let payerClientId = "";
+      const directId = requireClientId(body.clientId);
+      if (directId.ok) payerClientId = directId.clientId;
+      else {
+        const legacy = resolveRecordClientId({ companyName: company }, await loadClientsIndex());
+        if (!legacy.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required and could not be resolved from the customer list." });
+        payerClientId = legacy.clientId;
+      }
+      // Phase 2: real idempotency — a repeated request with the same key
+      // returns the original payment; the same key with a different payload
+      // is a conflict. Prevents double-recording on retry.
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("customer-payment", idemKey) : undefined;
+      const reqFingerprint = fingerprintPayload({ clientId: payerClientId, amount, currency, paymentDate, reference });
+      const idem = resolveIdempotency<CustomerPayment>({
+        existing, scopedKey,
+        fingerprintOf: (p) => fingerprintPayload({ clientId: p.clientId || "", amount: p.amount, currency: p.currency, paymentDate: p.paymentDate, reference: p.reference || "" }),
+        requestFingerprint: reqFingerprint,
+      });
+      if (idem.kind === "replay") return res.status(200).json({ payment: cleanUndefined(idem.record), idempotent: true });
+      if (idem.kind === "conflict") return res.status(409).json({ code: idem.code, error: idem.error });
       if (isDuplicatePayment(existing, { companyName: company, amount, paymentDate, reference, currency })) {
         return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
       }
       let allocations: PaymentAllocation[];
       if (body.allocationMode === "manual" && Array.isArray(body.allocations)) {
-        const v = validateAllocations({ paymentId: null, paymentAmount: amount, paymentCurrency: currency, allocations: body.allocations, invoices, payments: existing });
-        if (!v.ok) return res.status(400).json({ code: v.code, error: v.error });
+        const v = validateAllocations({ paymentId: null, paymentAmount: amount, paymentCurrency: currency, paymentClientId: payerClientId, allocations: body.allocations, invoices, payments: existing });
+        if (!v.ok) return res.status(v.code === "customer_mismatch" ? 409 : 400).json({ code: v.code, error: v.error });
         allocations = v.allocations;
       } else {
-        allocations = autoAllocate(amount, currency, buildOutstandingList(invoices, existing)).allocations;
+        // Auto-allocate only to this customer's own issued invoices (identity-safe).
+        const ownInvoices = invoices.filter((i) => (i.clientId || "") === payerClientId);
+        allocations = autoAllocate(amount, currency, buildOutstandingList(ownInvoices, existing)).allocations;
       }
       let bankAccountSnapshot: string | undefined;
       if (typeof body.bankAccountId === "string" && body.bankAccountId) {
@@ -11277,7 +11326,7 @@ async function startServer() {
       const payment: CustomerPayment = {
         id: `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         companyName: company,
-        clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+        clientId: payerClientId,
         amount, currency, paymentDate,
         paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.slice(0, 60) : "",
         bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
@@ -11288,6 +11337,7 @@ async function startServer() {
         notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
         allocations,
         status: "active",
+        idempotencyKey: scopedKey,
         createdBy: req.session!.id,
         createdAt: now,
       };
@@ -11312,12 +11362,13 @@ async function startServer() {
       const allPayments = await loadPaymentsForCompany(payment.companyName);
       let allocations: PaymentAllocation[];
       if (req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations)) {
-        const v = validateAllocations({ paymentId: payment.id, paymentAmount: payment.amount, paymentCurrency: payment.currency, allocations: req.body.allocations, invoices, payments: allPayments });
-        if (!v.ok) return res.status(400).json({ code: v.code, error: v.error });
+        const v = validateAllocations({ paymentId: payment.id, paymentAmount: payment.amount, paymentCurrency: payment.currency, paymentClientId: payment.clientId, allocations: req.body.allocations, invoices, payments: allPayments });
+        if (!v.ok) return res.status(v.code === "customer_mismatch" ? 409 : 400).json({ code: v.code, error: v.error });
         allocations = v.allocations;
       } else {
         const others = allPayments.filter((p) => p.id !== payment.id);
-        allocations = autoAllocate(payment.amount, payment.currency, buildOutstandingList(invoices, others)).allocations;
+        const ownInvoices = payment.clientId ? invoices.filter((i) => (i.clientId || "") === payment.clientId) : invoices;
+        allocations = autoAllocate(payment.amount, payment.currency, buildOutstandingList(ownInvoices, others)).allocations;
       }
       const next: CustomerPayment = { ...payment, allocations, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
       await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(next));
@@ -11394,6 +11445,18 @@ async function startServer() {
       const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
       const existingActive = findActiveReceiptForPayment(allReceipts, payment.id);
       if (existingActive) return res.status(200).json({ receipt: cleanUndefined(existingActive), idempotent: true });
+      // Phase 2: honor an explicit idempotency key too (belt-and-suspenders on
+      // top of the one-active-receipt-per-payment rule above).
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedReceiptKey = idemKey ? scopeIdempotencyKey("receipt", idemKey) : undefined;
+      const rcptFingerprint = fingerprintPayload({ paymentId: payment.id, amount: payment.amount, currency: payment.currency });
+      const rcptIdem = resolveIdempotency<PaymentReceipt>({
+        existing: allReceipts, scopedKey: scopedReceiptKey,
+        fingerprintOf: (r) => fingerprintPayload({ paymentId: r.paymentId, amount: r.amount, currency: r.currency }),
+        requestFingerprint: rcptFingerprint,
+      });
+      if (rcptIdem.kind === "replay") return res.status(200).json({ receipt: cleanUndefined(rcptIdem.record), idempotent: true });
+      if (rcptIdem.kind === "conflict") return res.status(409).json({ code: rcptIdem.code, error: rcptIdem.error });
       const companyReceiptCount = allReceipts.filter((r) => r.companyName === payment.companyName).length;
       const now = new Date().toISOString();
       const companySnapshot = await loadCompanyProfile();
@@ -11412,6 +11475,7 @@ async function startServer() {
         allocations: payment.allocations || [],
         companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
         status: "issued",
+        idempotencyKey: scopedReceiptKey,
         issuedBy: req.session!.id,
         issuedAt: now,
       };

@@ -11,7 +11,7 @@ import { buildCustomerAccountStatement } from "./customerAccountStatement";
 
 // Arabic company + customer names, plus Latin MAR/currency tokens that must
 // stay intact inside the RTL document.
-const company: CompanyProfile = { companyName: "شركة مرص للشحن", companyNameEn: "MARAS Cargo", address: "أربيل، العراق", email: "info@maras.iq", footerText: "شكراً لتعاملكم معنا" };
+const company: CompanyProfile = { companyName: "شركة مراس للشحن", companyNameEn: "MARAS Cargo", address: "أربيل، العراق", email: "info@maras.iq", footerText: "شكراً لتعاملكم معنا" };
 const invoice: CustomerInvoice = {
   id: "i1", invoiceNumber: "MAR-2026-1001", shipmentId: "s1", shipmentNumber: "MAR-2026-1001", companyName: "عميل تجريبي",
   currency: "IQD", pricingMode: "manual", costBasis: 0, sellingAmount: 1500000, description: "خدمة شحن من إسطنبول إلى بغداد",

@@ -107,7 +107,7 @@ const LBL = {
   issued: { en: "ISSUED", ar: "صادر", tr: "DÜZENLENDİ" },
   paid: { en: "PAID", ar: "مدفوع", tr: "ÖDENDİ" },
   void: { en: "VOID", ar: "ملغى", tr: "İPTAL" },
-  internal: { en: "INTERNAL — MARAS ACCOUNTING ONLY", ar: "داخلي — محاسبة مرص فقط", tr: "DAHİLİ — YALNIZCA MARAS MUHASEBE" },
+  internal: { en: "INTERNAL — MARAS ACCOUNTING ONLY", ar: "داخلي — محاسبة مراس فقط", tr: "DAHİLİ — YALNIZCA MARAS MUHASEBE" },
   invoiceNo: { en: "Invoice No", ar: "رقم الفاتورة", tr: "Fatura No" },
   receiptNo: { en: "Receipt No", ar: "رقم الإيصال", tr: "Makbuz No" },
   voucherNo: { en: "Voucher No", ar: "رقم السند", tr: "Fiş No" },

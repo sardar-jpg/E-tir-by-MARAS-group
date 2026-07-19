@@ -73,6 +73,37 @@ describe("manual allocation validation", () => {
   });
 });
 
+describe("cross-customer isolation (Phase 1): allocation is guarded by clientId", () => {
+  // Two invoices that share the SAME display companyName ("Acme") but belong
+  // to DIFFERENT customers by immutable clientId.
+  const invA = inv("A1", 1000, { clientId: "cA" });
+  const invB = inv("B1", 1000, { clientId: "cB" });
+  it("customer A's payment CANNOT be allocated to customer B's invoice", () => {
+    const r = validateAllocations({
+      paymentId: null, paymentAmount: 1000, paymentCurrency: "USD", paymentClientId: "cA",
+      allocations: [{ invoiceId: "B1", amount: 500 }], invoices: [invA, invB], payments: [],
+    });
+    expect(r.ok).toBe(false);
+    expect((r as { code: string }).code).toBe("customer_mismatch");
+  });
+  it("customer A's payment CAN be allocated to customer A's own invoice", () => {
+    const r = validateAllocations({
+      paymentId: null, paymentAmount: 1000, paymentCurrency: "USD", paymentClientId: "cA",
+      allocations: [{ invoiceId: "A1", amount: 500 }], invoices: [invA, invB], payments: [],
+    });
+    expect(r.ok).toBe(true);
+  });
+  it("a legacy invoice with no clientId is rejected once a payer identity is known", () => {
+    const legacy = inv("L1", 1000); // no clientId
+    const r = validateAllocations({
+      paymentId: null, paymentAmount: 1000, paymentCurrency: "USD", paymentClientId: "cA",
+      allocations: [{ invoiceId: "L1", amount: 500 }], invoices: [legacy], payments: [],
+    });
+    expect(r.ok).toBe(false);
+    expect((r as { code: string }).code).toBe("customer_mismatch");
+  });
+});
+
 describe("reversal excludes a payment from all balances", () => {
   it("reversed payments do not count toward paid/allocations", () => {
     const invoices = [inv("I1", 5000)];
