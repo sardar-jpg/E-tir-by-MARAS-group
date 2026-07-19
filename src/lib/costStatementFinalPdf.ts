@@ -10,8 +10,10 @@
  * sanitizer mirrors the client export so Turkish characters render safely.
  */
 import type { FinalPdfModel } from "./costStatementFinalPdfModel";
+import { toVisualArabic } from "./arabicShaping";
+import { registerArabicFont, ARABIC_FONT_NAME } from "./arabicPdfFont";
 
-const sanitize = (v: unknown): string =>
+const sanitizeLatin = (v: unknown): string =>
   String(v ?? "")
     .replace(/ı/g, "i").replace(/İ/g, "I").replace(/ş/g, "s").replace(/Ş/g, "S")
     .replace(/ğ/g, "g").replace(/Ğ/g, "G").replace(/ç/g, "c").replace(/Ç/g, "C")
@@ -26,6 +28,12 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   const M = 15;
   let y = 0;
 
+  // Arabic support (same approach as the shared accounting renderer): embed
+  // IBM Plex Sans Arabic + shape to visual order; fall back to Latin if the
+  // font asset is missing. Font family switches to Arabic when direction=rtl.
+  const arabic = model.direction === "rtl" && registerArabicFont(doc);
+  const FONT = arabic ? ARABIC_FONT_NAME : "helvetica";
+  const sanitize = arabic ? (v: unknown) => toVisualArabic(String(v ?? "")) : sanitizeLatin;
   const text = (v: unknown, x: number, yy: number, opts?: any) => doc.text(sanitize(v), x, yy, opts);
 
   // Header band (MARAS brand orange).
@@ -40,18 +48,18 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
     } catch { /* fall back to text-only header */ }
   }
   doc.setTextColor(255, 255, 255);
-  doc.setFont("helvetica", "bold");
+  doc.setFont(FONT, "bold");
   doc.setFontSize(15);
   text(model.brandName || model.title, titleX, 11);
   doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
+  doc.setFont(FONT, "normal");
   if (model.brandName) text(model.title, titleX, 16);
   text(model.internalNotice, titleX, model.brandName ? 21 : 19);
 
   // FINAL badge.
   doc.setFillColor(22, 101, 52);
   doc.roundedRect(W - M - 62, 5, 62, 16, 2, 2, "F");
-  doc.setFont("helvetica", "bold");
+  doc.setFont(FONT, "bold");
   doc.setFontSize(10);
   text(model.finalLabel, W - M - 31, 14, { align: "center" });
 
@@ -74,15 +82,15 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
     const row = Math.floor(i / 2);
     const x = M + col * 95;
     const ry = y + row * 6;
-    doc.setFont("helvetica", "bold");
+    doc.setFont(FONT, "bold");
     text(`${meta[i][0]}:`, x, ry);
-    doc.setFont("helvetica", "normal");
+    doc.setFont(FONT, "normal");
     text(meta[i][1], x + 38, ry);
   }
   y += Math.ceil(meta.length / 2) * 6 + 6;
 
   // Cost items table.
-  doc.setFont("helvetica", "bold");
+  doc.setFont(FONT, "bold");
   doc.setFontSize(10);
   text("Cost Item Breakdown", M, y);
   y += 4;
@@ -95,7 +103,7 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   text("Unit", M + 140, y + 5, { align: "right" });
   text("Line Total", W - M - 2, y + 5, { align: "right" });
   y += 9;
-  doc.setFont("helvetica", "normal");
+  doc.setFont(FONT, "normal");
   for (const it of model.items) {
     if (y > 250) { doc.addPage(); y = 20; }
     text(it.description.slice(0, 34), M + 2, y);
@@ -123,9 +131,9 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   totals.push(["Gross Profit", model.grossProfit === null ? "N/A" : `${money(model.grossProfit)} ${model.currency}`]);
   doc.setFontSize(9);
   for (const [label, val] of totals) {
-    doc.setFont("helvetica", "bold");
+    doc.setFont(FONT, "bold");
     text(`${label}:`, W - M - 70, y);
-    doc.setFont("helvetica", "normal");
+    doc.setFont(FONT, "normal");
     text(val, W - M - 2, y, { align: "right" });
     y += 6;
   }
@@ -140,11 +148,11 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   // Notes.
   if (model.notes) {
     y += 2;
-    doc.setFont("helvetica", "bold");
+    doc.setFont(FONT, "bold");
     doc.setFontSize(9);
     text("Notes", M, y);
     y += 5;
-    doc.setFont("helvetica", "normal");
+    doc.setFont(FONT, "normal");
     doc.setFontSize(8);
     for (const line of doc.splitTextToSize(sanitize(model.notes), W - 2 * M) as string[]) {
       if (y > 260) { doc.addPage(); y = 20; }
@@ -156,15 +164,15 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   // Approval section.
   if (y > 235) { doc.addPage(); y = 20; }
   y += 4;
-  doc.setFont("helvetica", "bold");
+  doc.setFont(FONT, "bold");
   doc.setFontSize(10);
   text("Approval Record", M, y);
   y += 6;
   doc.setFontSize(9);
   for (const a of model.approvals) {
-    doc.setFont("helvetica", "bold");
+    doc.setFont(FONT, "bold");
     text(`${a.label}:`, M, y);
-    doc.setFont("helvetica", "normal");
+    doc.setFont(FONT, "normal");
     text(a.name, M + 45, y);
     text(a.approvedAt ? `${a.status} — ${a.approvedAt}` : a.status, W - M - 2, y, { align: "right" });
     y += 6;
@@ -183,7 +191,7 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
   for (let p = 1; p <= pages; p++) {
     doc.setPage(p);
     doc.setDrawColor(226, 232, 240); doc.line(M, H - 14, W - M, H - 14);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(100, 116, 139);
+    doc.setFont(FONT, "normal"); doc.setFontSize(7.5); doc.setTextColor(100, 116, 139);
     if (model.brandFooterText) doc.text(sanitize(model.brandFooterText), M, H - 9);
     doc.text(`Page ${p} / ${pages}`, W - M, H - 9, { align: "right" });
     doc.setTextColor(15, 23, 42);

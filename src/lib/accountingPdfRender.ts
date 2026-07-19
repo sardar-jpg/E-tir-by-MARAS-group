@@ -12,8 +12,10 @@
  * when a licensed font asset is supplied. English/Turkish render fully.
  */
 import type { AccountingPdfModel, PdfColumn } from "./accountingPdfModel";
+import { toVisualArabic } from "./arabicShaping";
+import { registerArabicFont, ARABIC_FONT_NAME } from "./arabicPdfFont";
 
-const sanitize = (v: unknown): string =>
+const sanitizeLatin = (v: unknown): string =>
   String(v ?? "")
     .replace(/ı/g, "i").replace(/İ/g, "I").replace(/ş/g, "s").replace(/Ş/g, "S")
     .replace(/ğ/g, "g").replace(/Ğ/g, "G").replace(/ç/g, "c").replace(/Ç/g, "C")
@@ -30,10 +32,16 @@ export async function renderAccountingPdf(model: AccountingPdfModel): Promise<Bu
   const rtl = model.direction === "rtl";
   const startX = rtl ? W - M : M;
   // Phase 11 controlled template options (bounded; safe defaults).
-  const FONT = model.render?.fontFamily || "helvetica";
+  const templateFont = model.render?.fontFamily || "helvetica";
   const HS = model.render?.headingSize || 15;
   const accent = model.render?.accent || [234, 88, 12];
   const logoMm = model.render?.logoSizeMm || 22;
+  // Arabic: register IBM Plex Sans Arabic + shape text to visual order.
+  // Falls back to the Latin font + sanitizer if the font asset is missing.
+  const wantArabic = model.language === "ar";
+  const arabic = wantArabic && registerArabicFont(doc);
+  const FONT = arabic ? ARABIC_FONT_NAME : templateFont;
+  const sanitize = arabic ? (v: unknown) => toVisualArabic(String(v ?? "")) : sanitizeLatin;
   const text = (v: unknown, x: number, y: number, opts?: any) => doc.text(sanitize(v), x, y, opts);
   // Direction-aware line: label+value laid out from the leading edge.
   const label = (v: unknown, y: number) => text(v, startX, y, { align: rtl ? "right" : "left" });
