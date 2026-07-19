@@ -18,12 +18,14 @@ describe("customer invoice routes — permissions + lifecycle", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requirePermission("invoices.issue")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requirePermission("invoices.cancel")');
   });
-  it("selling amount + profit are computed server-side via the pure module (never trusted from body)", () => {
-    expect(SERVER).toContain("computeInvoiceSelling(");
+  it("selling amount + markup + profit are computed server-side via the pure module (never trusted from body)", () => {
+    expect(SERVER).toContain("computeInvoicePricing(");
     expect(SERVER).toContain("computeInvoiceGrossProfit(");
     expect(SERVER).toContain("canIssueInvoice(");
     expect(SERVER).toContain("canCancelInvoice(");
     expect(SERVER).toContain("buildInvoiceNumber(");
+    // Legacy percentage_margin field is rejected, never mapped.
+    expect(SERVER).toContain("legacy_field_rejected");
   });
   it("issued invoices are immutable — cancel path, no delete route", () => {
     expect(SERVER).toContain("isInvoiceEditable(existing.status)");

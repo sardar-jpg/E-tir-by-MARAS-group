@@ -10,9 +10,26 @@
  * authoritative and the ledger is always recomputable from them
  * (buildInvoiceLedger). Pure: no clock, db, or session.
  */
-import type { Currency, CustomerInvoice, CustomerPayment } from "../types";
+import type { Currency, CustomerInvoice, CustomerInvoiceStatus, CustomerPayment } from "../types";
 
 export type InvoiceLedgerStatus = "open" | "paid" | "cancelled";
+
+/**
+ * Derive the customer invoice lifecycle status from its ledger totals
+ * (server-authoritative). draft and cancelled are terminal here and never
+ * change from a ledger recalculation. Otherwise: zero allocated → issued,
+ * partial → partially_paid, fully covered → paid. Over-allocation is prevented
+ * upstream by the ledger, so allocated ≥ invoiced maps to paid.
+ */
+export function deriveInvoiceStatus(current: CustomerInvoiceStatus, invoicedAmount: number, allocatedAmount: number): CustomerInvoiceStatus {
+  if (current === "cancelled") return "cancelled";
+  if (current === "draft") return "draft";
+  const inv = round2(invoicedAmount);
+  const al = round2(allocatedAmount);
+  if (al <= 0.001) return "issued";
+  if (al + 0.001 < inv) return "partially_paid";
+  return "paid";
+}
 
 export interface InvoiceAccountingLedger {
   id: string; // === invoiceId

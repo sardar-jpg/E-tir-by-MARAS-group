@@ -1,26 +1,33 @@
 import { useState, useEffect, useCallback } from "react";
 import { FileText, Plus, Send, Ban, Loader2, Printer } from "lucide-react";
-import type { Language, BankAccount, CustomerInvoice, InvoicePricingMode, Currency } from "../../types";
+import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, InvoicePricingMode, InvoiceMarkupType, Currency } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { INVOICE_PRICING_MODES } from "../../lib/customerInvoice";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 
 /**
  * Customer Invoice panel — inside the Cost Statement detail (Desktop/Admin
- * Web, internal accounting). Create/edit a DRAFT invoice with a pricing
- * mode, issue it (immutable, snapshots the bank), or cancel an issued one.
- * The selling amount + gross profit are always recomputed server-side; this
- * panel only submits inputs. Cost/profit shown here are INTERNAL (this is
- * the admin view — the customer PDF/projection strips them).
+ * Web, internal accounting). Create/edit a DRAFT invoice (manual price or
+ * cost-plus markup), issue it (immutable, snapshots the bank), or cancel an
+ * issued one. The selling amount + markup + gross profit are always recomputed
+ * server-side; this panel only submits inputs. partially_paid / paid are
+ * server-derived and shown read-only. Cost/profit shown here are INTERNAL
+ * (admin view — the customer PDF/projection strips them).
  */
 const MODE_LABEL: Record<InvoicePricingMode, { en: string; tr: string; ar: string }> = {
-  contract: { en: "Contract price", tr: "Sözleşme fiyatı", ar: "سعر العقد" },
-  fixed_profit: { en: "Cost + fixed profit", tr: "Maliyet + sabit kâr", ar: "التكلفة + ربح ثابت" },
-  percentage_margin: { en: "Cost + margin %", tr: "Maliyet + marj %", ar: "التكلفة + هامش %" },
-  per_truck: { en: "Per truck", tr: "Kamyon başına", ar: "لكل شاحنة" },
-  per_container: { en: "Per container", tr: "Konteyner başına", ar: "لكل حاوية" },
-  per_service: { en: "Per service", tr: "Hizmet başına", ar: "لكل خدمة" },
   manual: { en: "Manual price", tr: "Manuel fiyat", ar: "سعر يدوي" },
+  cost_plus: { en: "Cost + markup", tr: "Maliyet + kâr payı", ar: "التكلفة + هامش" },
+};
+const MARKUP_LABEL: Record<InvoiceMarkupType, { en: string; tr: string; ar: string }> = {
+  percentage: { en: "Percentage %", tr: "Yüzde %", ar: "نسبة مئوية %" },
+  fixed: { en: "Fixed amount", tr: "Sabit tutar", ar: "مبلغ ثابت" },
+};
+const STATUS_LABEL: Record<CustomerInvoiceStatus, { en: string; tr: string; ar: string }> = {
+  draft: { en: "Draft", tr: "Taslak", ar: "مسودة" },
+  issued: { en: "Issued", tr: "Düzenlendi", ar: "صادرة" },
+  partially_paid: { en: "Partially paid", tr: "Kısmen ödendi", ar: "مدفوعة جزئياً" },
+  paid: { en: "Paid", tr: "Ödendi", ar: "مدفوعة" },
+  cancelled: { en: "Cancelled", tr: "İptal edildi", ar: "ملغاة" },
 };
 const T = {
   title: { en: "Customer Invoices", tr: "Müşteri Faturaları", ar: "فواتير العملاء" },
@@ -39,7 +46,13 @@ const T = {
 };
 const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
 const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
-const STATUS_STYLE: Record<string, string> = { draft: "bg-slate-100 text-slate-600", issued: "bg-emerald-100 text-emerald-700", cancelled: "bg-red-100 text-red-700" };
+const STATUS_STYLE: Record<CustomerInvoiceStatus, string> = {
+  draft: "bg-slate-100 text-slate-600",
+  issued: "bg-emerald-100 text-emerald-700",
+  partially_paid: "bg-amber-100 text-amber-700",
+  paid: "bg-blue-100 text-blue-700",
+  cancelled: "bg-red-100 text-red-700",
+};
 
 export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang }: {
   shipmentId: string;
@@ -53,8 +66,8 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [form, setForm] = useState<{ pricingMode: InvoicePricingMode; fixedProfit: string; marginPercent: string; unitPrice: string; unitQuantity: string; manualAmount: string; contractAmount: string; description: string; bankAccountId: string }>({
-    pricingMode: "fixed_profit", fixedProfit: "", marginPercent: "", unitPrice: "", unitQuantity: "", manualAmount: "", contractAmount: "", description: "", bankAccountId: "",
+  const [form, setForm] = useState<{ pricingMode: InvoicePricingMode; markupType: InvoiceMarkupType; markupValue: string; manualAmount: string; description: string; bankAccountId: string }>({
+    pricingMode: "manual", markupType: "percentage", markupValue: "", manualAmount: "", description: "", bankAccountId: "",
   });
 
   const load = useCallback(async () => {
@@ -68,9 +81,12 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const createDraft = async () => {
     setErr(null); setBusy(true);
     try {
+      const payload = form.pricingMode === "cost_plus"
+        ? { pricingMode: "cost_plus", markupType: form.markupType, markupValue: numOrU(form.markupValue), description: form.description, bankAccountId: form.bankAccountId || undefined }
+        : { pricingMode: "manual", manualAmount: numOrU(form.manualAmount), description: form.description, bankAccountId: form.bankAccountId || undefined };
       const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pricingMode: form.pricingMode, fixedProfit: numOrU(form.fixedProfit), marginPercent: numOrU(form.marginPercent), unitPrice: numOrU(form.unitPrice), unitQuantity: numOrU(form.unitQuantity), manualAmount: numOrU(form.manualAmount), contractAmount: numOrU(form.contractAmount), description: form.description, bankAccountId: form.bankAccountId || undefined }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) { setCreating(false); await load(); }
       else { const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); }
@@ -107,14 +123,14 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
         {invoices.map((inv) => (
           <div key={inv.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 px-3 py-2 text-xs">
             <span className="font-black text-slate-800 font-mono">{inv.invoiceNumber}</span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${STATUS_STYLE[inv.status]}`}>{inv.status}</span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${STATUS_STYLE[inv.status]}`}>{STATUS_LABEL[inv.status]?.[lang] || inv.status}</span>
             <span className="text-slate-500">{MODE_LABEL[inv.pricingMode]?.[lang] || inv.pricingMode}</span>
             <span className="text-slate-700">{tr("selling", lang)}: <strong>{money(inv.sellingAmount)} {inv.currency}</strong></span>
             {typeof inv.grossProfit === "number" && <span className="text-slate-400">{tr("profit", lang)}: {money(inv.grossProfit)}</span>}
             <div className="ml-auto flex items-center gap-2">
               <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="text-[10px] font-bold text-slate-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Printer className="w-3 h-3" />PDF</button>
               {canWrite && inv.status === "draft" && <button onClick={() => issue(inv)} className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Send className="w-3 h-3" />{tr("issue", lang)}</button>}
-              {canWrite && inv.status === "issued" && <button onClick={() => cancelInvoice(inv)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Ban className="w-3 h-3" />{tr("cancelInv", lang)}</button>}
+              {canWrite && (inv.status === "issued" || inv.status === "partially_paid" || inv.status === "paid") && <button onClick={() => cancelInvoice(inv)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Ban className="w-3 h-3" />{tr("cancelInv", lang)}</button>}
             </div>
           </div>
         ))}
@@ -129,12 +145,14 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
                 {INVOICE_PRICING_MODES.map((m) => <option key={m} value={m}>{MODE_LABEL[m][lang] || MODE_LABEL[m].en}</option>)}
               </select>
             </div>
-            {mode === "contract" && <NumInput label="Contract amount" v={form.contractAmount} onChange={(v) => setForm({ ...form, contractAmount: v })} />}
-            {mode === "fixed_profit" && <NumInput label="Fixed profit" v={form.fixedProfit} onChange={(v) => setForm({ ...form, fixedProfit: v })} />}
-            {mode === "percentage_margin" && <NumInput label="Margin %" v={form.marginPercent} onChange={(v) => setForm({ ...form, marginPercent: v })} />}
-            {(mode === "per_truck" || mode === "per_container" || mode === "per_service") && <>
-              <NumInput label="Unit price" v={form.unitPrice} onChange={(v) => setForm({ ...form, unitPrice: v })} />
-              <NumInput label="Quantity" v={form.unitQuantity} onChange={(v) => setForm({ ...form, unitQuantity: v })} />
+            {mode === "cost_plus" && <>
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{MARKUP_LABEL[form.markupType][lang] || MARKUP_LABEL[form.markupType].en}</label>
+                <select value={form.markupType} onChange={(e) => setForm({ ...form, markupType: e.target.value as InvoiceMarkupType })} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
+                  {(["percentage", "fixed"] as InvoiceMarkupType[]).map((t) => <option key={t} value={t}>{MARKUP_LABEL[t][lang] || MARKUP_LABEL[t].en}</option>)}
+                </select>
+              </div>
+              <NumInput label={form.markupType === "percentage" ? "%" : currency} v={form.markupValue} onChange={(v) => setForm({ ...form, markupValue: v })} />
             </>}
             {mode === "manual" && <NumInput label={`Selling price (${currency})`} v={form.manualAmount} onChange={(v) => setForm({ ...form, manualAmount: v })} />}
             <div className="md:col-span-2">

@@ -56,7 +56,7 @@ export function buildCustomerAccountStatement(params: {
   const to = (params.to || "9999-12-31").slice(0, 10);
   const inCur = <T extends { currency: Currency }>(x: T) => x.currency === params.currency;
 
-  const issuedInvoices = params.invoices.filter((i) => i.status === "issued" && inCur(i));
+  const issuedInvoices = params.invoices.filter((i) => (i.status === "issued" || i.status === "partially_paid" || i.status === "paid") && inCur(i));
   const activePayments = params.payments.filter((p) => p.status === "active" && inCur(p));
 
   // Opening balance = everything strictly before `from`.
@@ -105,7 +105,7 @@ export function buildCustomerAccountStatement(params: {
 /** The distinct currencies a customer has activity in (for a currency picker). */
 export function customerStatementCurrencies(invoices: CustomerInvoice[], payments: CustomerPayment[]): Currency[] {
   const set = new Set<Currency>();
-  for (const i of invoices) if (i.status === "issued") set.add(i.currency);
+  for (const i of invoices) if (i.status === "issued" || i.status === "partially_paid" || i.status === "paid") set.add(i.currency);
   for (const p of payments) if (p.status === "active") set.add(p.currency);
   return [...set].sort();
 }

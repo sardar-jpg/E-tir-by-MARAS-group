@@ -17,9 +17,13 @@ function round2(n: number): number {
 export function isActivePayment(p: Pick<CustomerPayment, "status">): boolean {
   return p.status === "active";
 }
-/** Only issued, non-cancelled invoices are billable/allocatable. */
+/**
+ * Issued-and-live invoices are billable (appear in receivables). This includes
+ * partially_paid and paid — payment-derived statuses that are still issued
+ * documents, not drafts or cancellations.
+ */
 export function isBillableInvoice(inv: Pick<CustomerInvoice, "status">): boolean {
-  return inv.status === "issued";
+  return inv.status === "issued" || inv.status === "partially_paid" || inv.status === "paid";
 }
 
 /** Total ACTIVE amount allocated to a given invoice across all payments. */

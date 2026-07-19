@@ -8,11 +8,10 @@
  * profit is only computed when the invoice currency equals the cost-basis
  * currency; otherwise it is null (never a converted/mixed number).
  */
-import type { CustomerInvoice, InvoicePricingMode, Currency } from "../types";
+import type { CustomerInvoice, CustomerInvoiceStatus, InvoicePricingMode, InvoiceMarkupType, Currency } from "../types";
 
-export const INVOICE_PRICING_MODES: readonly InvoicePricingMode[] = [
-  "contract", "fixed_profit", "percentage_margin", "per_truck", "per_container", "per_service", "manual",
-];
+export const INVOICE_PRICING_MODES: readonly InvoicePricingMode[] = ["manual", "cost_plus"];
+export const INVOICE_MARKUP_TYPES: readonly InvoiceMarkupType[] = ["percentage", "fixed"];
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -21,61 +20,61 @@ function finite(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-export interface InvoicePricingInputs {
-  costBasis: number;
-  contractAmount?: number;
-  fixedProfit?: number;
-  marginPercent?: number;
-  unitPrice?: number;
-  unitQuantity?: number;
-  manualAmount?: number;
+export function isInvoicePricingMode(v: unknown): v is InvoicePricingMode {
+  return v === "manual" || v === "cost_plus";
 }
 
-export type InvoiceSellingResult =
-  | { ok: true; sellingAmount: number }
+export interface InvoicePricingInputs {
+  /** manual mode. */
+  manualAmount?: number;
+  /** cost_plus mode: the authorized internal cost base (server-supplied, never trusted from the browser). */
+  costBaseAmount?: number;
+  markupType?: InvoiceMarkupType;
+  markupValue?: number;
+}
+
+/** The full, server-authoritative pricing breakdown persisted on the invoice. */
+export interface InvoicePricing {
+  costBaseAmount: number; // 0 for manual (internal cost is tracked separately as costBasis)
+  markupType?: InvoiceMarkupType;
+  markupValue?: number;
+  markupAmount: number; // 0 for manual
+  sellingAmount: number;
+}
+
+export type InvoicePricingResult =
+  | { ok: true; pricing: InvoicePricing }
   | { ok: false; code: string; error: string };
 
 /**
- * Compute the customer-facing selling amount for a pricing mode. Cost-based
- * modes (fixed_profit, percentage_margin) add to the cost basis; per-unit
- * modes multiply; contract/manual take an explicit amount. Always ≥ 0.
+ * Compute the customer-facing selling amount + markup breakdown for a pricing
+ * mode (server-authoritative — never trust a browser-supplied total).
+ *
+ *  manual:    sellingAmount = manualAmount (no markup, no cost exposure).
+ *  cost_plus: markupAmount = percentage → costBaseAmount × markupValue / 100
+ *                            fixed      → markupValue
+ *             sellingAmount = costBaseAmount + markupAmount.
  */
-export function computeInvoiceSelling(mode: InvoicePricingMode, inputs: InvoicePricingInputs): InvoiceSellingResult {
-  const cost = finite(inputs.costBasis) ?? 0;
-  const nonNeg = (v: number) => (v >= 0 ? { ok: true as const, sellingAmount: round2(v) } : { ok: false as const, code: "negative", error: "Selling amount cannot be negative." });
-  switch (mode) {
-    case "contract": {
-      const c = finite(inputs.contractAmount);
-      if (c === null) return { ok: false, code: "missing_contract", error: "Contract amount is required for contract pricing." };
-      return nonNeg(c);
-    }
-    case "fixed_profit": {
-      const p = finite(inputs.fixedProfit);
-      if (p === null) return { ok: false, code: "missing_profit", error: "A fixed profit amount is required." };
-      return nonNeg(cost + p);
-    }
-    case "percentage_margin": {
-      const m = finite(inputs.marginPercent);
-      if (m === null) return { ok: false, code: "missing_margin", error: "A margin percentage is required." };
-      return nonNeg(cost + cost * (m / 100));
-    }
-    case "per_truck":
-    case "per_container":
-    case "per_service": {
-      const up = finite(inputs.unitPrice);
-      const q = finite(inputs.unitQuantity);
-      if (up === null || up < 0) return { ok: false, code: "missing_unit_price", error: "A valid unit price is required." };
-      if (q === null || q <= 0) return { ok: false, code: "missing_quantity", error: "A valid quantity is required." };
-      return nonNeg(up * q);
-    }
-    case "manual": {
-      const a = finite(inputs.manualAmount);
-      if (a === null) return { ok: false, code: "missing_manual", error: "A manual selling price is required." };
-      return nonNeg(a);
-    }
-    default:
-      return { ok: false, code: "invalid_mode", error: "Unknown pricing mode." };
+export function computeInvoicePricing(mode: InvoicePricingMode, inputs: InvoicePricingInputs): InvoicePricingResult {
+  if (mode === "manual") {
+    const a = finite(inputs.manualAmount);
+    if (a === null) return { ok: false, code: "missing_manual", error: "A manual selling amount is required." };
+    if (a < 0) return { ok: false, code: "negative", error: "Selling amount cannot be negative." };
+    return { ok: true, pricing: { costBaseAmount: 0, markupAmount: 0, sellingAmount: round2(a) } };
   }
+  if (mode === "cost_plus") {
+    const base = finite(inputs.costBaseAmount);
+    if (base === null || base < 0) return { ok: false, code: "missing_cost_base", error: "A valid cost base amount is required for cost-plus pricing." };
+    const type = inputs.markupType;
+    if (type !== "percentage" && type !== "fixed") return { ok: false, code: "missing_markup_type", error: "A markup type (percentage or fixed) is required." };
+    const value = finite(inputs.markupValue);
+    if (value === null || value < 0) return { ok: false, code: "missing_markup_value", error: "A valid markup value is required." };
+    const markupAmount = type === "percentage" ? round2(base * (value / 100)) : round2(value);
+    const sellingAmount = round2(base + markupAmount);
+    if (sellingAmount < 0) return { ok: false, code: "negative", error: "Selling amount cannot be negative." };
+    return { ok: true, pricing: { costBaseAmount: round2(base), markupType: type, markupValue: round2(value), markupAmount, sellingAmount } };
+  }
+  return { ok: false, code: "invalid_mode", error: "Unknown pricing mode." };
 }
 
 /**
@@ -93,38 +92,51 @@ export function computeInvoiceGrossProfit(params: {
   return round2(params.sellingAmount - params.costBasis);
 }
 
-/** A draft invoice can be edited; issued/cancelled are immutable. */
-export function isInvoiceEditable(status: CustomerInvoice["status"]): boolean {
+/** A draft invoice can be edited; every other status is financially immutable. */
+export function isInvoiceEditable(status: CustomerInvoiceStatus): boolean {
   return status === "draft";
+}
+
+/** Statuses that count as issued-and-live for receivables/allocation. */
+export function isReceivableInvoiceStatus(status: CustomerInvoiceStatus): boolean {
+  return status === "issued" || status === "partially_paid" || status === "paid";
+}
+/** Statuses that can still receive (more) payment allocation. */
+export function isAllocatableInvoiceStatus(status: CustomerInvoiceStatus): boolean {
+  return status === "issued" || status === "partially_paid";
 }
 
 export type InvoiceDecision = { ok: true } | { ok: false; code: string; error: string };
 
 /**
- * Whether an invoice may be issued. Cost-derived pricing (fixed_profit /
- * percentage_margin) requires the internal cost to be signed off first
- * (the cost statement final_closed) — "after the cost is reviewed and
- * approved, add profit". Contract/manual/per-unit pricing don't depend on
- * cost and may be issued once the statement exists.
+ * Whether an invoice may be issued. cost_plus pricing requires the internal
+ * cost to be signed off first (the cost statement final_closed) — "after the
+ * cost is reviewed and approved, add the markup". Manual pricing doesn't depend
+ * on the internal cost and may be issued once the statement exists.
  */
 export function canIssueInvoice(params: {
-  status: CustomerInvoice["status"];
+  status: CustomerInvoiceStatus;
   pricingMode: InvoicePricingMode;
   costStatementStatus: string | undefined;
   sellingAmount: number;
 }): InvoiceDecision {
   if (params.status !== "draft") return { ok: false, code: "not_draft", error: "Only a draft invoice can be issued." };
   if (!(params.sellingAmount > 0)) return { ok: false, code: "zero_amount", error: "The invoice amount must be greater than zero." };
-  const costDerived = params.pricingMode === "fixed_profit" || params.pricingMode === "percentage_margin";
-  if (costDerived && params.costStatementStatus !== "final_closed") {
-    return { ok: false, code: "cost_not_approved", error: "Cost-based pricing requires the cost statement to be approved and closed first." };
+  if (params.pricingMode === "cost_plus" && params.costStatementStatus !== "final_closed") {
+    return { ok: false, code: "cost_not_approved", error: "Cost-plus pricing requires the cost statement to be approved and closed first." };
   }
   return { ok: true };
 }
 
-export function canCancelInvoice(status: CustomerInvoice["status"], reason: string): InvoiceDecision {
-  if (status !== "issued") return { ok: false, code: "not_issued", error: "Only an issued invoice can be cancelled." };
+/**
+ * Whether an invoice is in a cancellable lifecycle state (draft is deleted, not
+ * cancelled; an already-cancelled invoice can't be re-cancelled). Whether it
+ * currently has ACTIVE allocations is a separate ledger check enforced inside
+ * the cancellation transaction (invoice_has_allocations).
+ */
+export function canCancelInvoice(status: CustomerInvoiceStatus, reason: string): InvoiceDecision {
   if (!reason || !reason.trim()) return { ok: false, code: "reason_required", error: "A cancellation reason is required." };
+  if (!isReceivableInvoiceStatus(status)) return { ok: false, code: "not_cancellable", error: "Only an issued invoice can be cancelled." };
   return { ok: true };
 }
 

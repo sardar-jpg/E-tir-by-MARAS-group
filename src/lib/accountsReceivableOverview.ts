@@ -45,7 +45,8 @@ export function buildArOverview(invoices: CustomerInvoice[], payments: CustomerP
   };
 
   for (const inv of invoices) {
-    if (inv.status !== "issued") continue;
+    // Issued-and-live invoices (issued / partially_paid / paid) are receivables.
+    if (inv.status !== "issued" && inv.status !== "partially_paid" && inv.status !== "paid") continue;
     const b = bucket(inv.currency);
     const paid = allocatedToInvoice(inv.id, payments);
     b.totalInvoiced = round2(b.totalInvoiced + inv.sellingAmount);

@@ -545,26 +545,45 @@ export type VendorPayableStatus = 'Unpaid' | 'Partially Paid' | 'Paid' | 'Overpa
 // deletes). Pricing math lives in src/lib/customerInvoice.ts.
 // ═══════════════════════════════════════════════════════════════════
 
-export type InvoicePricingMode =
-  | 'contract'            // the shipment's agreed contract price
-  | 'fixed_profit'        // cost + a fixed profit amount
-  | 'percentage_margin'   // cost + a markup % on cost
-  | 'per_truck'           // unit price × trucks
-  | 'per_container'       // unit price × containers
-  | 'per_service'         // unit price × services
-  | 'manual';             // a manually approved selling price
+/**
+ * Final pricing model (Increment 5): exactly two modes.
+ *  - manual:    the user enters an agreed selling amount (or line items). The
+ *               internal shipment cost stays private; nothing is derived from it.
+ *  - cost_plus: the server takes the authorized internal cost base and adds a
+ *               markup (percentage OR fixed). Only the selling price is shown to
+ *               the customer; costBaseAmount and markup stay internal.
+ */
+export type InvoicePricingMode = 'manual' | 'cost_plus';
 
-export type CustomerInvoiceStatus = 'draft' | 'issued' | 'cancelled';
+/** How a cost_plus markup is expressed. */
+export type InvoiceMarkupType = 'percentage' | 'fixed';
 
-/** Snapshot of the bank account chosen for an issued document. */
+/**
+ * Canonical invoice lifecycle. draft/issued/cancelled are set explicitly;
+ * partially_paid/paid are SERVER-DERIVED from the transactional invoice ledger
+ * and are never selectable by the client. Overdue is calculated from dueDate
+ * when needed — it is never a stored lifecycle status.
+ */
+export type CustomerInvoiceStatus = 'draft' | 'issued' | 'partially_paid' | 'paid' | 'cancelled';
+
+/**
+ * Immutable snapshot of the bank account copied onto an invoice AT ISSUE TIME.
+ * Once written, editing/deactivating/deleting the master bank account never
+ * changes it — issued documents always render from this snapshot.
+ */
 export interface BankAccountSnapshot {
+  /** The master bank account this was copied from (reference only). */
+  bankAccountId?: string;
   bankName: string;
-  accountHolderName: string;
+  accountName: string;
   accountNumber: string;
   iban?: string;
-  swift?: string;
+  swiftCode?: string;
+  branchName?: string;
+  bankAddress?: string;
   currency: Currency;
-  branch?: string;
+  country?: string;
+  paymentInstructions?: string;
 }
 
 export interface CustomerInvoice {
@@ -578,14 +597,22 @@ export interface CustomerInvoice {
   currency: Currency;
   pricingMode: InvoicePricingMode;
   // ── Pricing inputs (only the relevant ones are used per mode) ──
-  /** PRIVATE internal snapshot of the approved total cost. Never shown to customer. */
+  /** PRIVATE internal snapshot of the approved total shipment cost. Never shown to customer. */
   costBasis: number;
-  contractAmount?: number;
-  fixedProfit?: number;
-  marginPercent?: number;
-  unitPrice?: number;
-  unitQuantity?: number;
+  /** manual mode: the agreed customer selling amount. */
   manualAmount?: number;
+  /** cost_plus mode: PRIVATE authorized cost base the markup is applied to (server-derived). */
+  costBaseAmount?: number;
+  /** cost_plus mode: percentage or fixed markup. */
+  markupType?: InvoiceMarkupType;
+  /** cost_plus mode: the percentage value or the fixed amount, per markupType. */
+  markupValue?: number;
+  /** cost_plus mode: PRIVATE server-computed markup amount. Never shown to customer. */
+  markupAmount?: number;
+  /** Optional payment due date (used to CALCULATE overdue; never a stored status). */
+  dueDate?: string;
+  /** Optional customer-visible payment terms text. */
+  paymentTerms?: string;
   // ── Server-computed ──
   /** Customer-facing invoice total. */
   sellingAmount: number;

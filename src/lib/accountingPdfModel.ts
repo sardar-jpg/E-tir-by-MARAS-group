@@ -92,7 +92,18 @@ function companyFrom(profile: CompanyProfile | null | undefined): PdfCompany {
 }
 function bankFrom(b: BankAccount | BankAccountSnapshot | null | undefined): PdfBank | null {
   if (!b) return null;
-  return { bankName: b.bankName, accountHolderName: b.accountHolderName, accountNumber: b.accountNumber, iban: b.iban, swift: b.swift, currency: b.currency, branch: b.branch };
+  // Accepts either a live master BankAccount (accountHolderName/swift/branch) or
+  // an issued-invoice BankAccountSnapshot (accountName/swiftCode/branchName).
+  const anyB = b as Partial<BankAccount & BankAccountSnapshot>;
+  return {
+    bankName: anyB.bankName || "",
+    accountHolderName: anyB.accountName ?? anyB.accountHolderName ?? "",
+    accountNumber: anyB.accountNumber || "",
+    iban: anyB.iban,
+    swift: anyB.swiftCode ?? anyB.swift,
+    currency: (anyB.currency as string) || "",
+    branch: anyB.branchName ?? anyB.branch,
+  };
 }
 
 // ── i18n label sets (English primary; Arabic/Turkish carried for RTL/LTR) ──
@@ -157,10 +168,17 @@ export function buildInvoicePdfModel(params: {
   const inv = params.invoice;
   const lang = params.language;
   const isDraft = inv.status === "draft";
+  const badge = isDraft
+    ? { text: pick(LBL.draft, lang), kind: "draft" as const }
+    : inv.status === "cancelled"
+    ? { text: pick(LBL.void, lang), kind: "void" as const }
+    : inv.status === "paid"
+    ? { text: pick(LBL.paid, lang), kind: "issued" as const }
+    : { text: pick(LBL.issued, lang), kind: "issued" as const };
   return {
     docType: "invoice",
     title: pick(LBL.invoice, lang),
-    badge: isDraft ? { text: pick(LBL.draft, lang), kind: "draft" } : inv.status === "cancelled" ? { text: pick(LBL.void, lang), kind: "void" } : { text: pick(LBL.issued, lang), kind: "issued" },
+    badge,
     language: lang, direction: directionFor(lang),
     company: companyFrom(inv.companySnapshot || params.company),
     parties: [{ label: pick(LBL.customer, lang), value: inv.companyName }],
@@ -186,11 +204,12 @@ export function buildInvoicePdfModel(params: {
   };
 }
 function invoiceLineRow(inv: CustomerInvoice, lang: Language): Record<string, string> {
-  const perUnit = inv.pricingMode === "per_truck" || inv.pricingMode === "per_container" || inv.pricingMode === "per_service";
+  // Customer-facing single line: only the selling total is shown (the cost base
+  // and markup of a cost_plus invoice stay internal and never reach this row).
   return {
     desc: inv.description || pick(LBL.invoice, lang),
-    qty: perUnit && typeof inv.unitQuantity === "number" ? String(inv.unitQuantity) : "1",
-    unit: perUnit && typeof inv.unitPrice === "number" ? money(inv.unitPrice) : money(inv.sellingAmount),
+    qty: "1",
+    unit: money(inv.sellingAmount),
     amount: money(inv.sellingAmount),
   };
 }

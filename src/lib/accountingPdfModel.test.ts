@@ -6,7 +6,7 @@ import { buildCustomerAccountStatement } from "./customerAccountStatement";
 const company: CompanyProfile = { companyName: "MARAS Group", email: "info@maras.iq", footerText: "Thank you", version: 2 };
 const invoice: CustomerInvoice = {
   id: "i1", invoiceNumber: "MAR-2026-1001", shipmentId: "s1", shipmentNumber: "MAR-2026-1001", companyName: "Acme",
-  currency: "USD", pricingMode: "fixed_profit", costBasis: 800, fixedProfit: 200, sellingAmount: 1000, grossProfit: 200,
+  currency: "USD", pricingMode: "cost_plus", costBasis: 800, costBaseAmount: 800, markupType: "percentage", markupValue: 25, markupAmount: 200, sellingAmount: 1000, grossProfit: 200,
   description: "Freight", notes: "Pay in 30 days", internalNotes: "margin 20%", status: "issued", createdAt: "t", issuedAt: "2026-07-01T00:00:00Z",
 };
 

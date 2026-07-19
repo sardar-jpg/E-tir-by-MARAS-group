@@ -86,8 +86,8 @@ import {
   summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
 } from "./src/lib/vendorPayments";
 import {
-  computeInvoiceSelling, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
-  canCancelInvoice, buildInvoiceNumber,
+  computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
+  canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
 } from "./src/lib/customerInvoice";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
@@ -108,9 +108,10 @@ import {
 } from "./src/lib/vendorPayableLedger";
 import {
   invoiceLedgerId, buildInvoiceLedger, initInvoiceLedgerFromInvoice, availableToAllocate,
-  applyAllocationDeltas, autoAllocateFromLedgers, type InvoiceAccountingLedger,
+  applyAllocationDeltas, autoAllocateFromLedgers, deriveInvoiceStatus, type InvoiceAccountingLedger,
 } from "./src/lib/invoiceLedger";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
+import { buildBankAccountSnapshot, resolveInvoiceBank } from "./src/lib/bankSnapshot";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
   buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
@@ -10565,6 +10566,22 @@ async function startServer() {
     });
   }
 
+  /**
+   * Recalculate + stage the payment-derived invoice status (issued /
+   * partially_paid / paid) for each touched ledger, INSIDE an accounting
+   * transaction. `invoicesById` must have been pre-read via tx.get (Firestore
+   * requires every read before any write). draft/cancelled invoices are never
+   * changed by a ledger recalculation.
+   */
+  function stageInvoiceStatusUpdates(tx: AcctTx, invoicesById: Map<string, CustomerInvoice>, ledgers: InvoiceAccountingLedger[], nowIso: string): void {
+    for (const l of ledgers) {
+      const inv = invoicesById.get(l.invoiceId);
+      if (!inv || inv.status === "draft" || inv.status === "cancelled") continue;
+      const next = deriveInvoiceStatus(inv.status, l.invoicedAmount, l.allocatedAmount);
+      if (next !== inv.status) tx.set("customerInvoices", inv.id, { ...inv, status: next, updatedAt: nowIso });
+    }
+  }
+
   /** Super + Accounts admins to notify when a statement is finalized. */
   function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
     const ids = new Set<string>();
@@ -11472,22 +11489,31 @@ async function startServer() {
     return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.shipmentId === shipmentId);
   }
   // Build an invoice record from the statement + a validated pricing body.
+  // Legacy pricing fields from the pre-Increment-5 schema. All existing invoices
+  // are test data, so these are REJECTED (never silently mapped) — the API only
+  // accepts the final manual | cost_plus model.
+  const LEGACY_INVOICE_FIELDS = ["marginPercent", "fixedProfit", "contractAmount", "unitPrice", "unitQuantity"] as const;
   function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
     const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
     const costBasis = Number.isFinite(stmt.totalCost) ? stmt.totalCost : 0;
     const mode = body.pricingMode;
-    const inputs = {
-      costBasis,
-      contractAmount: typeof body.contractAmount === "number" ? body.contractAmount : (shipment?.agreedAmount ?? stmt.agreedAmount),
-      fixedProfit: typeof body.fixedProfit === "number" ? body.fixedProfit : undefined,
-      marginPercent: typeof body.marginPercent === "number" ? body.marginPercent : undefined,
-      unitPrice: typeof body.unitPrice === "number" ? body.unitPrice : undefined,
-      unitQuantity: typeof body.unitQuantity === "number" ? body.unitQuantity : undefined,
+    // Reject the removed pricing model outright (no dual-read, no aliasing).
+    if (!isInvoicePricingMode(mode)) {
+      return { ok: false, code: "invalid_pricing_mode", error: "pricingMode must be 'manual' or 'cost_plus'." };
+    }
+    for (const f of LEGACY_INVOICE_FIELDS) {
+      if (body[f] !== undefined) return { ok: false, code: "legacy_field_rejected", error: `The field '${f}' is no longer supported. Use pricingMode 'manual' (manualAmount) or 'cost_plus' (markupType + markupValue).` };
+    }
+    // cost_plus: the cost base is the APPROVED internal statement cost (server-
+    // derived) — a browser-supplied costBaseAmount is never trusted.
+    const pricing = computeInvoicePricing(mode, {
       manualAmount: typeof body.manualAmount === "number" ? body.manualAmount : undefined,
-    };
-    const selling = computeInvoiceSelling(mode, inputs);
-    if (!selling.ok) return { ok: false, code: selling.code, error: selling.error };
-    const grossProfit = computeInvoiceGrossProfit({ sellingAmount: selling.sellingAmount, costBasis, invoiceCurrency, costCurrency: stmt.currency });
+      costBaseAmount: costBasis,
+      markupType: body.markupType,
+      markupValue: typeof body.markupValue === "number" ? body.markupValue : undefined,
+    });
+    if (!pricing.ok) return { ok: false, code: pricing.code, error: pricing.error };
+    const grossProfit = computeInvoiceGrossProfit({ sellingAmount: pricing.pricing.sellingAmount, costBasis, invoiceCurrency, costCurrency: stmt.currency });
     return {
       ok: true,
       value: {
@@ -11498,14 +11524,15 @@ async function startServer() {
         currency: invoiceCurrency,
         pricingMode: mode,
         costBasis,
-        contractAmount: inputs.contractAmount,
-        fixedProfit: inputs.fixedProfit,
-        marginPercent: inputs.marginPercent,
-        unitPrice: inputs.unitPrice,
-        unitQuantity: inputs.unitQuantity,
-        manualAmount: inputs.manualAmount,
-        sellingAmount: selling.sellingAmount,
+        manualAmount: mode === "manual" ? pricing.pricing.sellingAmount : undefined,
+        costBaseAmount: mode === "cost_plus" ? pricing.pricing.costBaseAmount : undefined,
+        markupType: pricing.pricing.markupType,
+        markupValue: pricing.pricing.markupValue,
+        markupAmount: mode === "cost_plus" ? pricing.pricing.markupAmount : undefined,
+        sellingAmount: pricing.pricing.sellingAmount,
         grossProfit,
+        dueDate: typeof body.dueDate === "string" ? body.dueDate.slice(0, 10) : undefined,
+        paymentTerms: typeof body.paymentTerms === "string" ? body.paymentTerms.slice(0, 500) : undefined,
         description: typeof body.description === "string" ? body.description.slice(0, 500) : "",
         notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : "",
         internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : "",
@@ -11595,7 +11622,9 @@ async function startServer() {
     }
   });
 
-  // Issue a draft invoice — snapshots the bank account; becomes immutable.
+  // Issue a draft invoice. One atomic, idempotent operation (section 8): resolve
+  // + validate the bank, snapshot bank + company, finalize the invoice number,
+  // init the ledger, and flip status to issued — all together or not at all.
   app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requirePermission("invoices.issue"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
@@ -11604,35 +11633,59 @@ async function startServer() {
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
-      const decision = canIssueInvoice({ status: invoice.status, pricingMode: invoice.pricingMode, costStatementStatus: resolveAccountingStatus(stmt as any), sellingAmount: invoice.sellingAmount });
-      if (!decision.ok) return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
-      // Snapshot the chosen bank account (issuer may override via body.bankAccountId).
-      let bankAccountSnapshot: BankAccountSnapshot | undefined;
-      const bankId = typeof req.body?.bankAccountId === "string" && req.body.bankAccountId ? req.body.bankAccountId : invoice.bankAccountId;
-      if (bankId) {
-        const bankSnap = await getDoc(doc(db, "bankAccounts", bankId));
-        if (bankSnap.exists()) {
-          const b = bankSnap.data() as BankAccount;
-          bankAccountSnapshot = { bankName: b.bankName, accountHolderName: b.accountHolderName, accountNumber: b.accountNumber, iban: b.iban, swift: b.swift, currency: b.currency, branch: b.branch };
+      const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("invoice-issue", idemKey) : undefined;
+      // Idempotent replay: a repeat with the same key returns the ALREADY issued
+      // invoice unchanged (no second number/ledger/snapshot).
+      if (scopedKey) {
+        const rec = await getDoc(doc(db, "accountingIdempotency", scopedKey));
+        if (rec.exists()) {
+          const priorId = (rec.data() as any).invoiceId;
+          const prior = priorId ? await getDoc(doc(db, "customerInvoices", priorId)) : null;
+          if (prior && prior.exists()) return res.json({ invoice: cleanUndefined(prior.data()), idempotent: true });
         }
       }
+      const decision = canIssueInvoice({ status: invoice.status, pricingMode: invoice.pricingMode, costStatementStatus: resolveAccountingStatus(stmt as any), sellingAmount: invoice.sellingAmount });
+      if (!decision.ok) return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
+      // Resolve + validate the bank account (explicit selection or currency
+      // default). An issued invoice always carries valid payment instructions.
+      const accounts = await loadBankAccounts();
+      const selectedBankId = typeof req.body?.bankAccountId === "string" && req.body.bankAccountId ? req.body.bankAccountId : invoice.bankAccountId;
+      const bankResolution = resolveInvoiceBank({ accounts, selectedBankId, invoiceCurrency: invoice.currency });
+      if (!bankResolution.ok) return res.status(400).json({ code: bankResolution.code, error: bankResolution.error });
+      const bankAccountSnapshot = buildBankAccountSnapshot(bankResolution.account);
       const now = new Date().toISOString();
       // Issued-document integrity: snapshot the company branding + version so
       // later Template Settings changes never alter this issued invoice.
       const companySnapshot = await loadCompanyProfile();
       const issued: CustomerInvoice = {
-        ...invoice, status: "issued", bankAccountId: bankId || invoice.bankAccountId, bankAccountSnapshot,
+        ...invoice, status: "issued", bankAccountId: bankResolution.account.id, bankAccountSnapshot,
         companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
         companyProfileVersion: typeof companySnapshot.version === "number" ? companySnapshot.version : undefined,
         issuedAt: now, issuedBy: req.session!.id,
       };
-      await setDoc(doc(db, "customerInvoices", issued.id), cleanUndefined(issued));
-      // Initialize the invoice allocation ledger (item 2) to zero allocations.
-      // A freshly issued invoice has no allocations yet; payments allocate against
-      // it afterwards inside runAccountingTransaction, which advances the ledger.
-      await setDoc(doc(db, "invoiceAccountingLedgers", issued.id), cleanUndefined(initInvoiceLedgerFromInvoice(issued, now)));
-      await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
-      res.json({ invoice: cleanUndefined(issued) });
+      // Atomic: re-validate draft state inside the tx, then write invoice +
+      // ledger + idempotency record together (no partially-issued record).
+      const result = await runAccountingTransaction(async (tx) => {
+        if (scopedKey) {
+          const rec = await tx.get<{ invoiceId: string }>("accountingIdempotency", scopedKey);
+          if (rec) {
+            const prior = await tx.get<CustomerInvoice>("customerInvoices", rec.invoiceId);
+            if (prior) return { http: 200, body: { invoice: cleanUndefined(prior), idempotent: true } };
+          }
+        }
+        const current = await tx.get<CustomerInvoice>("customerInvoices", invoice.id);
+        if (!current) return { http: 404, body: { error: "Invoice not found." } };
+        if (current.status !== "draft") return { http: 409, body: { code: "not_draft", error: "Only a draft invoice can be issued." } };
+        tx.set("customerInvoices", issued.id, issued);
+        tx.set("invoiceAccountingLedgers", issued.id, initInvoiceLedgerFromInvoice(issued, now));
+        if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "invoice-issue", invoiceId: issued.id, createdAt: now });
+        return { http: 200, body: { invoice: cleanUndefined(issued) } };
+      });
+      if (result.http === 200 && !(result.body as any).idempotent) {
+        await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
+      }
+      res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] invoice issue failed:", err);
@@ -11652,12 +11705,12 @@ async function startServer() {
       if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
       const now = new Date().toISOString();
       // Cancel + mark the ledger cancelled atomically, but REJECT if the invoice
-      // still has active allocations (item 2): those must be reversed/unallocated
-      // first. Both writes happen in one transaction so they never diverge.
+      // still has active allocations (section 10): those must be reversed first.
+      // Both writes happen in one transaction so they never diverge.
       const result = await runAccountingTransaction(async (tx) => {
         const ledger = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", invoice.id);
         if (ledger && ledger.allocatedAmount > 0.001) {
-          return { http: 409, body: { code: "allocations_exist", error: "Cancel is blocked while active payments are allocated to this invoice. Reverse or re-allocate them first." } };
+          return { http: 409, body: { code: "invoice_has_allocations", error: "Reverse all invoice allocations before cancellation." } };
         }
         const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
         tx.set("customerInvoices", cancelled.id, cancelled);
@@ -11749,7 +11802,7 @@ async function startServer() {
       // done inside runAccountingTransaction — never before it.
       const manual = body.allocationMode === "manual" && Array.isArray(body.allocations);
       const ownIssued = invoicesAll
-        .filter((i) => (i.clientId || "") === payerClientId && i.status === "issued")
+        .filter((i) => (i.clientId || "") === payerClientId && isAllocatableInvoiceStatus(i.status))
         .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
       const targetIds: string[] = manual ? body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
       // Bank snapshot (outside tx — not contended).
@@ -11776,9 +11829,14 @@ async function startServer() {
           }
         }
         const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        // Pre-read the target invoices (reads before writes) so their derived
+        // status can be restaged after the ledgers change.
+        const invoicesTxById = new Map<string, CustomerInvoice>();
         for (const id of targetIds) {
           let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
-          if (!l) { const inv = invoiceById.get(id); if (inv) l = initInvoiceLedgerFromInvoice(inv, now); }
+          const inv = (await tx.get<CustomerInvoice>("customerInvoices", id)) || invoiceById.get(id) || null;
+          if (inv) invoicesTxById.set(id, inv);
+          if (!l && inv) l = initInvoiceLedgerFromInvoice(inv, now);
           if (l) ledgersById.set(id, l);
         }
         let allocations: PaymentAllocation[];
@@ -11817,6 +11875,7 @@ async function startServer() {
         };
         tx.set("customerPayments", payment.id, payment);
         for (const l of ledgerWrites) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, ledgerWrites, now);
         if (scopedKey) tx.set("accountingIdempotency", scopedKey, { id: scopedKey, action: "customer-payment", paymentId, fingerprint: reqFingerprint, createdAt: now });
         return { http: 201, body: { payment: cleanUndefined(payment) } };
       });
@@ -11846,7 +11905,7 @@ async function startServer() {
       const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
       const manual = req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations);
       const ownIssued = invoicesAll
-        .filter((i) => (i.clientId || "") === payerClientId && i.status === "issued")
+        .filter((i) => (i.clientId || "") === payerClientId && isAllocatableInvoiceStatus(i.status))
         .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
       const oldIds = (paymentPre.allocations || []).map((a) => a.invoiceId);
       const newIds = manual ? req.body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
@@ -11857,9 +11916,12 @@ async function startServer() {
         if (!payment) return { http: 404, body: { error: "Payment not found." } };
         if (payment.status !== "active") return { http: 409, body: { code: "not_active", error: "Only an active payment can be re-allocated." } };
         const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        const invoicesTxById = new Map<string, CustomerInvoice>();
         for (const id of allIds) {
           let l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", id);
-          if (!l) { const inv = invoiceById.get(id); if (inv) l = initInvoiceLedgerFromInvoice(inv, now); }
+          const inv = (await tx.get<CustomerInvoice>("customerInvoices", id)) || invoiceById.get(id) || null;
+          if (inv) invoicesTxById.set(id, inv);
+          if (!l && inv) l = initInvoiceLedgerFromInvoice(inv, now);
           if (l) ledgersById.set(id, l);
         }
         // Restore (subtract) this payment's prior allocations.
@@ -11888,7 +11950,9 @@ async function startServer() {
         }
         const next: CustomerPayment = { ...payment, allocations, updatedAt: now, updatedBy: req.session!.id };
         tx.set("customerPayments", payment.id, next);
-        for (const l of ledgersById.values()) tx.set("invoiceAccountingLedgers", l.id, l);
+        const touched = [...ledgersById.values()];
+        for (const l of touched) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, touched, now);
         return { http: 200, body: { payment: cleanUndefined(next) } };
       });
       if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${company}`, "", "");
@@ -11918,15 +11982,19 @@ async function startServer() {
         if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
         // Subtract this payment's active allocations from each invoice ledger.
         const ledgersById = new Map<string, InvoiceAccountingLedger>();
+        const invoicesTxById = new Map<string, CustomerInvoice>();
         for (const a of payment.allocations || []) {
           const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
           if (l) ledgersById.set(a.invoiceId, l);
+          const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
+          if (inv) invoicesTxById.set(a.invoiceId, inv);
         }
         const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
         if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
         const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
         tx.set("customerPayments", payment.id, reversed);
         for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
         didReverse = true;
         return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
