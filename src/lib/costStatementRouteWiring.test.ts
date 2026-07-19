@@ -20,7 +20,7 @@ function region(needle: string, length: number): string {
 }
 
 describe("cost-statement write route — Phase B wiring", () => {
-  const ROUTE = region('app.post("/api/cost-statements/:shipmentId"', 9000);
+  const ROUTE = region('app.post("/api/cost-statements/:shipmentId"', 11000);
 
   it("keeps the super/accounts-only write gate (PR #61) and the unconditional shipment existence check (PR #106)", () => {
     expect(ROUTE).toContain("requireCanWriteCostStatements");

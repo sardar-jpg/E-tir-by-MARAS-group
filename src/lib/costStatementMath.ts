@@ -277,6 +277,24 @@ export class CostStatementRevisionConflictError extends Error {
 }
 
 /**
+ * Expected application-level rejection when a financial edit is attempted
+ * while the statement is locked by the approval workflow (pending, being
+ * finalized, or closed). Thrown INSIDE the atomic section so an edit that
+ * races an approval — which does not bump the revision — is still rejected
+ * instead of corrupting a now-pending/closed statement. The route answers
+ * 409 `accounting_locked` and runs no side effects.
+ */
+export class CostStatementAccountingLockedError extends Error {
+  readonly code = "accounting_locked";
+  readonly accountingStatus: string;
+  constructor(accountingStatus: string, message: string) {
+    super(message);
+    this.name = "CostStatementAccountingLockedError";
+    this.accountingStatus = accountingStatus;
+  }
+}
+
+/**
  * Memory-mode revisioned write: read + decide + replace happen
  * SYNCHRONOUSLY against the live memory array (no awaits in between), so
  * the decision is atomic within the Node event loop — the same guarantee
@@ -289,10 +307,18 @@ export function applyCostStatementRevisionedWriteMemory(
   store: CostStatement[],
   shipmentId: string,
   submittedRevision: unknown,
-  build: (nextRevision: number, existing: CostStatement | undefined) => CostStatement
+  build: (nextRevision: number, existing: CostStatement | undefined) => CostStatement,
+  /**
+   * Optional guard run against the freshly-read stored record INSIDE the
+   * atomic section (before the revision decision). It should throw to
+   * reject the write — used to enforce the approval-workflow edit lock so
+   * an edit that races an approval cannot corrupt a now-pending statement.
+   */
+  guard?: (existing: CostStatement | undefined) => void
 ): CostStatement {
   const idx = store.findIndex((s) => s.shipmentId === shipmentId);
   const existing = idx >= 0 ? store[idx] : undefined;
+  if (guard) guard(existing);
   const decision = decideStatementRevision(existing, submittedRevision);
   if (!decision.ok) throw new CostStatementRevisionConflictError(decision.storedRevision);
   const finalStatement = build(decision.nextRevision, existing);

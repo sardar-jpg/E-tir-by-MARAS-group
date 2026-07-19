@@ -40,7 +40,7 @@ import {
 } from "./src/lib/auth";
 import { assessProductionConfig } from "./src/lib/productionConfig";
 import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, shouldRecordSchedulerTimeout, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
-import { findGlobalIdentityCollision, identityConflictMessage, buildOwnerIdentityRecord, validateCreatedAdminType, type IdentityRecord } from "./src/lib/accountIdentity";
+import { findGlobalIdentityCollision, identityConflictMessage, buildOwnerIdentityRecord, validateCreatedAdminType, parseAdminType, type IdentityRecord } from "./src/lib/accountIdentity";
 import { evaluateSessionBacking, backingCollectionForRole, isOwnerSession, SESSION_VERIFICATION_UNAVAILABLE_CODE, SESSION_VERIFICATION_UNAVAILABLE_MESSAGE } from "./src/lib/sessionBacking";
 import { IDENTITY_KEYS_COLLECTION, OWNER_RESERVATION_SOURCE, IdentityConflictError, computeIdentityClaims, computeOwnerClaims, diffIdentityClaims, findClaimConflict, canReleaseReservation, buildReservationRecord, applyIdentityReservationMemory, type IdentityKeyClaim, type IdentityReservationRecord } from "./src/lib/identityReservation";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
@@ -67,7 +67,17 @@ import {
   checkPasswordConfirmation,
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
-import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError } from "./src/lib/costStatementMath";
+import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError, CostStatementAccountingLockedError } from "./src/lib/costStatementMath";
+import {
+  validateWorkflowConfig, isWorkflowConfigUsable, resolveAccountingStatus, resolveApprovalCycle,
+  isFinancialEditingAllowed, canSubmitForApproval, canApproveStage, canRejectStage,
+  canRequestReopen, canDecideReopen, pendingStageForStatus, assigneeForStage,
+  nextStatusAfterApproval, nextStageAfterApproval, appendHistory, approvalsForCycle,
+  buildFinalPdfFileName, APPROVAL_STAGES, decideFinalization, hasFinalVersionFor,
+  type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
+} from "./src/lib/costApprovalWorkflow";
+import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
+import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory, validateDocumentReference, INVALID_DOCUMENT_INPUT_CODE } from "./src/lib/documentAccess";
@@ -413,6 +423,10 @@ let memoryStore: {
   // lesson: every collection this server reads/writes needs an entry
   // here, or memory-fallback access silently no-ops.
   accountIdentityKeys: IdentityReservationRecord[];
+  // Cost Approval Workflow (PR #6): single settings doc
+  // ("cost_approval_workflow") holding the three stage→admin assignments.
+  // Same PR #44 lesson: every collection needs a memory-fallback entry.
+  accountingSettings: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -448,6 +462,7 @@ function getMemoryStore() {
       auditState: [],
       adminDashboardLayouts: [],
       accountIdentityKeys: [],
+      accountingSettings: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -9913,6 +9928,39 @@ async function startServer() {
       const input = validated.input;
       const expense = deriveExpenseSummary(input.totalCost, input.paidAmount);
 
+      // Cost Approval Workflow (PR #6): financial editing is locked while a
+      // statement is pending approval, being finalized, or finalized. Only
+      // draft / rejected_for_correction / reopened may be edited. This same
+      // rule is enforced INSIDE the atomic write section below
+      // (assertEditableInAtomicSection), so an edit that races an approval —
+      // which does NOT bump the revision — is still rejected against the
+      // transaction-fresh status and can never corrupt a now-pending or
+      // closed statement. The check here is only a fast, friendly early
+      // exit; the authoritative guard is the one inside the transaction.
+      const assertEditableInAtomicSection = (stored: CostStatement | undefined): void => {
+        if (!stored) return; // creating a new statement — always allowed
+        const currentStatus = resolveAccountingStatus(stored as any);
+        if (!isFinancialEditingAllowed(currentStatus)) {
+          throw new CostStatementAccountingLockedError(
+            currentStatus,
+            currentStatus === "final_closed"
+              ? "This statement is finalized and cannot be edited. Request a reopening to make changes."
+              : "This statement is in the approval workflow and cannot be edited until it is returned for correction."
+          );
+        }
+      };
+      const existingForEdit = await getDoc(doc(db, "costStatements", shipmentId));
+      if (existingForEdit.exists()) {
+        try {
+          assertEditableInAtomicSection(existingForEdit.data() as CostStatement);
+        } catch (lockErr) {
+          if (lockErr instanceof CostStatementAccountingLockedError) {
+            return res.status(409).json({ code: lockErr.code, error: lockErr.message });
+          }
+          throw lockErr;
+        }
+      }
+
       // Everything identity-shaped comes from the authoritative shipment,
       // never the client: the MAR reference, the customer identity, the
       // freight segment, and the accounting-safe snapshots (agreedAmount +
@@ -9943,6 +9991,27 @@ async function startServer() {
         agreedAmount: shipment.agreedAmount,
         agreedCurrency: shipment.currency,
         truckNumber: shipment.truckNumber,
+        // Cost Approval Workflow (PR #6): carry forward the workflow state
+        // across a financial edit — an edit never advances or resets
+        // approvals (only submit/approve/reject/reopen routes do that).
+        // A brand-new statement defaults to draft.
+        accountingStatus: existing?.accountingStatus || "draft",
+        approvalCycle: existing?.approvalCycle ?? 1,
+        approvalHistory: existing?.approvalHistory || [],
+        ...(existing?.submittedAt ? { submittedAt: existing.submittedAt } : {}),
+        ...(existing?.submittedBy ? { submittedBy: existing.submittedBy } : {}),
+        ...(existing?.submittedRevision !== undefined ? { submittedRevision: existing.submittedRevision } : {}),
+        ...(existing?.finalizedAt ? { finalizedAt: existing.finalizedAt } : {}),
+        ...(existing?.finalizedBy ? { finalizedBy: existing.finalizedBy } : {}),
+        ...(existing?.finalVersions ? { finalVersions: existing.finalVersions } : {}),
+        ...(existing?.finalPdfUrl ? {
+          finalPdfUrl: existing.finalPdfUrl,
+          finalPdfStoragePath: existing.finalPdfStoragePath,
+          finalPdfFileName: existing.finalPdfFileName,
+          finalPdfGeneratedAt: existing.finalPdfGeneratedAt,
+          finalPdfGeneratedBy: existing.finalPdfGeneratedBy,
+          finalPdfStatementRevision: existing.finalPdfStatementRevision,
+        } : {}),
       });
 
       // Optimistic concurrency (Accounting Phase B), same rule in both
@@ -9959,6 +10028,9 @@ async function startServer() {
           (db as any).runTransaction(async (tx: any) => {
             const snap = await tx.get(dRefTx);
             const stored = snap.exists ? (snap.data() as CostStatement) : undefined;
+            // Re-check the workflow edit lock against the transaction-fresh
+            // status (an approval may have landed since the early check).
+            assertEditableInAtomicSection(stored);
             const decision = decideStatementRevision(stored, data.revision);
             if (!decision.ok) throw new CostStatementRevisionConflictError(decision.storedRevision);
             const fin = buildFinal(decision.nextRevision, stored);
@@ -9973,7 +10045,8 @@ async function startServer() {
           getMemoryStore().costStatements,
           shipmentId,
           data.revision,
-          buildFinal
+          buildFinal,
+          assertEditableInAtomicSection
         );
       }
 
@@ -10003,9 +10076,566 @@ async function startServer() {
           error: err.message,
         });
       }
+      if (err instanceof CostStatementAccountingLockedError) {
+        return res.status(409).json({ code: err.code, error: err.message });
+      }
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to update cost statement" });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Cost Approval Workflow, Final PDF Closure & Controlled Reopening
+  // (PR #6). All decision logic is the pure costApprovalWorkflow module,
+  // so Firestore and memory modes cannot drift. Actor identity always
+  // comes from the verified session — never the request body.
+  // ══════════════════════════════════════════════════════════════════
+  const COST_WORKFLOW_SETTINGS_ID = "cost_approval_workflow";
+
+  async function loadWorkflowConfig(): Promise<CostApprovalWorkflowConfig> {
+    const snap = await getDoc(doc(db, "accountingSettings", COST_WORKFLOW_SETTINGS_ID));
+    return snap.exists() ? (snap.data() as CostApprovalWorkflowConfig) : {};
+  }
+  /**
+   * Active, selectable internal admin ids for approval-stage assignment.
+   *
+   * Canonical active-account rule (PR #6 review — BLOCKER 1): the admins
+   * collection has no separate disabled/active flag — an admin account
+   * exists (deletion via DELETE /api/admins removes it) and is a usable
+   * internal employee ONLY when it carries a recognized adminType
+   * (super/operation/accounts). A record missing/garbage adminType is a
+   * data defect the SEC-001 audit rule already flags, and must not be
+   * selectable as an approver. The env-configured protected owner is
+   * always active. This same filtered set drives both the Settings
+   * selectors and workflow-config validation, so a disabled/defective or
+   * deleted employee cannot be assigned, fails validation if saved, and
+   * (via isWorkflowConfigUsable at submit time) blocks submission if it
+   * was assigned before becoming unavailable.
+   */
+  async function loadActiveAdminIds(): Promise<string[]> {
+    const snap = await getDocs(collection(db, "admins"));
+    const ids = snap.docs
+      .map((d) => d.data() as { id?: string; adminType?: unknown })
+      .filter((a) => parseAdminType(a.adminType) !== null)
+      .map((a) => a.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+    if (ownerEmail) ids.push(ownerEmail);
+    return ids;
+  }
+  async function resolveWorkflowActorName(session: SessionPayload): Promise<string> {
+    const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "").toLowerCase();
+    if (ownerEmail && session.id === ownerEmail) return "MARAS Operations Office";
+    try {
+      const a = await getDoc(doc(db, "admins", session.id));
+      if (a.exists()) return (a.data() as any).name || "MARAS Admin";
+    } catch { /* fall through */ }
+    return "MARAS Admin";
+  }
+  /** Directed, admin-only accounting notification (ai_alert type; never reaches driver/client/public). */
+  async function notifyAccountingRecipient(recipientId: string | undefined, shipmentNumber: string, titleEn: string, msgEn: string): Promise<void> {
+    if (!recipientId) return;
+    const n: AppNotification = {
+      id: `notif-${Date.now()}-acct-${Math.floor(Math.random() * 100000)}`,
+      shipmentId: "", shipmentNumber,
+      type: "ai_alert",
+      titleEn, titleTr: titleEn, titleAr: titleEn,
+      messageEn: msgEn, messageTr: msgEn, messageAr: msgEn,
+      timestamp: new Date().toISOString(), read: false,
+      recipientUserId: recipientId,
+    };
+    await setDoc(doc(db, "notifications", n.id), n).catch((e) => console.warn("[accounting] notify failed:", e instanceof Error ? e.message : e));
+  }
+  async function loadCostStatementOr404(shipmentId: string, res: express.Response): Promise<CostStatement | null> {
+    const snap = await getDoc(doc(db, "costStatements", shipmentId));
+    if (!snap.exists()) { res.status(404).json({ error: "Cost statement not found." }); return null; }
+    return snap.data() as CostStatement;
+  }
+  /** Persist a workflow mutation to the cost statement doc (both modes). */
+  async function saveCostStatement(shipmentId: string, next: CostStatement): Promise<void> {
+    await setDoc(doc(db, "costStatements", shipmentId), next);
+  }
+
+  /**
+   * PR #6 review — BLOCKER 2: atomic workflow transition. The cost
+   * statement is (re-)read INSIDE a Firestore transaction and the pure
+   * `decide` callback re-evaluates status/stage/approver/revision/
+   * requester against that transaction-fresh value — never a copy loaded
+   * earlier — then optionally returns the next statement to commit. Two
+   * simultaneous transitions therefore serialize: the loser re-reads the
+   * winner's committed state and its guard rejects it. Memory fallback
+   * runs the identical `decide` synchronously against the live array (no
+   * await between read and write → atomic within the event loop), so both
+   * modes obey the same decision model. Config + actor name are pre-loaded
+   * and passed in as plain values (the statement is the contended
+   * resource, re-read here). `decide` MUST be pure/synchronous.
+   */
+  async function mutateCostStatementAtomic(
+    shipmentId: string,
+    decide: (stmt: CostStatement | null) => { httpStatus: number; body: any; save?: CostStatement }
+  ): Promise<{ httpStatus: number; body: any }> {
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      const ref = doc(db, "costStatements", shipmentId);
+      return await withTimeout(
+        (db as any).runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const stmt = snap.exists ? (snap.data() as CostStatement) : null;
+          const outcome = decide(stmt);
+          if (outcome.save) tx.set(ref, outcome.save);
+          return { httpStatus: outcome.httpStatus, body: outcome.body };
+        }),
+        8000,
+        "Cost statement workflow transaction timed out"
+      );
+    }
+    // Memory fallback — synchronous read+decide+write (matches the shim's
+    // `.id === shipmentId` keying; no await between read and write).
+    const store = getMemoryStore().costStatements as any[];
+    const idx = store.findIndex((s) => s.id === shipmentId || s.shipmentId === shipmentId);
+    const stmt = idx >= 0 ? (store[idx] as CostStatement) : null;
+    const outcome = decide(stmt);
+    if (outcome.save) {
+      const record = { ...(outcome.save as any), id: shipmentId };
+      if (idx >= 0) store[idx] = record; else store.push(record);
+    }
+    return { httpStatus: outcome.httpStatus, body: outcome.body };
+  }
+
+  /** Super + Accounts admins to notify when a statement is finalized. */
+  function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
+    const ids = new Set<string>();
+    for (const stage of APPROVAL_STAGES) { const id = assigneeForStage(config, stage); if (id) ids.add(id); }
+    return [...ids];
+  }
+
+  /**
+   * Build the final PDF from the AUTHORITATIVE stored statement snapshot
+   * and store it permanently. Firestore mode → Firebase Storage (same
+   * save + non-expiring download-token URL pattern as /api/upload); memory
+   * fallback → the in-memory uploadedFiles map served by /api/uploads/:id,
+   * so the flow completes deterministically in dev/tests. Throws on any
+   * failure so the caller leaves the statement un-closed and recoverable.
+   */
+  async function finalizeCostStatementPdf(
+    stmt: CostStatement,
+    approvalHistory: ApprovalHistoryEntry[],
+    cycleNumber: number,
+    finalizedAt: string,
+    finalRevision: number,
+    generatedBy: string
+  ): Promise<{ url: string; path: string; fileName: string }> {
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision });
+    const buffer = await renderFinalCostStatementPdf(model);
+    const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
+    const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
+    if (!useMemoryFallback && storageBucketRef) {
+      const downloadToken = crypto.randomUUID();
+      const file = storageBucketRef.file(path);
+      await file.save(buffer, { metadata: { contentType: "application/pdf", metadata: { firebaseStorageDownloadTokens: downloadToken } } });
+      const url = buildFirebaseDownloadUrl(storageBucketRef.name, path, downloadToken);
+      return { url, path, fileName };
+    }
+    // Memory/dev fallback: keep the generated bytes addressable so closure
+    // still has a real, retrievable PDF reference (not a fabricated one).
+    const fileId = `costpdf-${stmt.shipmentId}-${finalRevision}-${Date.now()}`;
+    uploadedFiles.set(fileId, { filename: fileName, mimeType: "application/pdf", buffer });
+    return { url: `/api/uploads/${fileId}`, path, fileName };
+  }
+
+  // GET workflow settings (any accounting viewer); PUT (Super Admin only).
+  app.get("/api/admin/accounting/approval-workflow", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const config = await loadWorkflowConfig();
+      const usable = isWorkflowConfigUsable(config, await loadActiveAdminIds());
+      res.json({ config, usable });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load approval workflow settings." });
+    }
+  });
+  app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const result = validateWorkflowConfig({
+        operations_manager: body.operations_manager,
+        accounts_manager: body.accounts_manager,
+        managing_director: body.managing_director,
+        activeAdminIds: await loadActiveAdminIds(),
+      });
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      const config: CostApprovalWorkflowConfig = {
+        ...result.config,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.session!.id,
+      };
+      await setDoc(doc(db, "accountingSettings", COST_WORKFLOW_SETTINGS_ID), config);
+      await logActivity("", "Accounting", req.session!.id, "Cost approval workflow assignments updated", "Maliyet onay iş akışı atamaları güncellendi", "تم تحديث تعيينات سير عمل اعتماد التكلفة");
+      res.json({ config });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to save approval workflow settings." });
+    }
+  });
+
+  // Submit for approval. Atomic: the statement is re-read inside the
+  // transaction and every precondition (status, config usability, revision,
+  // completeness) is re-checked against that fresh value, so two
+  // simultaneous submissions serialize — the loser sees the winner's
+  // pending state and is rejected.
+  app.post("/api/cost-statements/:shipmentId/submit", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      // Config + actor name are not the contended resource; load them once
+      // up-front and pass them into the pure, synchronous `decide`.
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const now = new Date().toISOString();
+      let notifyTarget: string | undefined;
+      let shipmentNumber = "";
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        const decision = canSubmitForApproval(status);
+        if (!decision.ok) return { httpStatus: 409, body: { code: decision.code, error: decision.error } };
+        const validated = validateCostStatementInput(stmt as any);
+        if (!validated.ok) return { httpStatus: 400, body: { error: `Cannot submit an incomplete statement: ${validated.error}` } };
+        if (!isWorkflowConfigUsable(config, activeAdminIds)) {
+          return { httpStatus: 409, body: { code: "workflow_not_configured", error: "The cost approval workflow is not fully configured with active employees. A Super Admin must set it in Settings first." } };
+        }
+        const cycleNumber = status === "draft" ? 1 : resolveApprovalCycle(stmt as any);
+        const revision = stmt.revision || 1;
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: "operations_manager", action: "submitted",
+          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+          statementRevision: revision, comment: "",
+        }, now, "submit");
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "pending_operations_approval",
+          approvalCycle: cycleNumber,
+          approvalHistory: history,
+          submittedAt: now, submittedBy: req.session!.id, submittedRevision: revision,
+        };
+        notifyTarget = assigneeForStage(config, "operations_manager");
+        shipmentNumber = stmt.shipmentNumber;
+        return { httpStatus: 200, body: { statement: next }, save: next };
+      });
+      if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting Operations Manager approval.`);
+        await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} submitted for approval`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] submit failed:", err);
+      res.status(500).json({ error: "Failed to submit for approval." });
+    }
+  });
+
+  // Approve the current stage.
+  //
+  // BLOCKER 2 (atomic transitions) + FINAL PDF IDEMPOTENCY. Non-final
+  // stages are a single atomic transition: the statement is re-read inside
+  // the transaction and canApproveStage re-checks stage/approver/revision
+  // against that fresh value, so two simultaneous approvals serialize (one
+  // winner). The Managing-Director stage cannot store its PDF inside a
+  // Firestore transaction, so it runs as three steps around a deterministic
+  // finalization identity (shipmentId:cycle:revision):
+  //   1. atomic RESERVE — decideFinalization moves the doc to "finalizing"
+  //      and records the MD approval + finalizationKey (begin), or resumes
+  //      an interrupted one (resume), or is an idempotent no-op if already
+  //      closed. A second MD approval loses the race and is rejected.
+  //   2. generate + store the PDF OUTSIDE the transaction.
+  //   3. atomic COMMIT — re-read, dedupe on the key (hasFinalVersionFor),
+  //      append the version, mark final_closed. A crash between 2 and 3
+  //      leaves the doc recoverable in "finalizing"; a retry resumes.
+  app.post("/api/cost-statements/:shipmentId/approve", requireRole("admin"), async (req, res) => {
+    try {
+      const config = await loadWorkflowConfig();
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const actingRevisionInput = typeof req.body?.revision === "number" ? req.body.revision : undefined;
+      const comment = typeof req.body?.comment === "string" ? req.body.comment.slice(0, 1000) : "";
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let completedStage: ApprovalStage | null = null;
+      let notifyTarget: string | undefined;
+      let idempotentClosed = false;
+      let finalizeCtx: { cycle: number; revision: number; key: string } | null = null;
+
+      // ── Phase 1: atomic stage decision / finalization reservation.
+      const phase1 = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        const storedRevision = stmt.revision || 1;
+        const actingRevision = actingRevisionInput ?? storedRevision;
+        const cycleNumber = resolveApprovalCycle(stmt as any);
+        const stage = pendingStageForStatus(status);
+        shipmentNumber = stmt.shipmentNumber;
+
+        // Final stage, or an in-progress/finished finalization.
+        if (status === "finalizing" || status === "final_closed" || stage === "managing_director") {
+          const fin = decideFinalization({
+            status, config, actorId: req.session!.id,
+            actingRevision, storedRevision, cycle: cycleNumber,
+            existingKey: stmt.finalizationKey, shipmentId: stmt.shipmentId,
+          });
+          if (fin.action === "already_closed") { idempotentClosed = true; return { httpStatus: 200, body: { statement: stmt } }; }
+          if (fin.action === "reject") return { httpStatus: fin.code === "wrong_approver" ? 403 : 409, body: { code: fin.code, error: fin.error } };
+          if (fin.action === "resume") {
+            // The MD approval + reservation were already committed; resume
+            // straight to PDF + commit without re-appending history.
+            finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+            return { httpStatus: 202, body: { resume: true } };
+          }
+          // begin: record the MD approval and reserve finalization atomically.
+          const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+            cycleNumber, stage: "managing_director", action: "approved",
+            actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+            statementRevision: storedRevision, comment,
+          }, now, "approve-managing_director");
+          const reserved: CostStatement = {
+            ...stmt, accountingStatus: "finalizing", approvalHistory: history,
+            finalizationKey: fin.key, finalizingAt: now, finalizingBy: req.session!.id,
+          };
+          finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+          return { httpStatus: 202, body: { reserved: true }, save: reserved };
+        }
+
+        // Non-final stage: one atomic transition.
+        const decision = canApproveStage({ status, config, actorId: req.session!.id, actingRevision, storedRevision });
+        if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : 409, body: { code: decision.code, error: decision.error } };
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: stage!, action: "approved",
+          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+          statementRevision: storedRevision, comment,
+        }, now, `approve-${stage}`);
+        const next: CostStatement = { ...stmt, accountingStatus: nextStatusAfterApproval(stage!), approvalHistory: history };
+        completedStage = stage!;
+        const nextStage = nextStageAfterApproval(stage!);
+        notifyTarget = nextStage ? assigneeForStage(config, nextStage) : undefined;
+        return { httpStatus: 200, body: { statement: next }, save: next };
+      });
+
+      if (phase1.httpStatus === 200) {
+        if (!idempotentClosed && completedStage) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval.`);
+          await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} approved at ${completedStage}`, "", "");
+        }
+        return res.json(phase1.body);
+      }
+      if (phase1.httpStatus !== 202 || !finalizeCtx) return res.status(phase1.httpStatus).json(phase1.body);
+
+      // ── Phase 2: generate + store the final PDF OUTSIDE the transaction,
+      // from the authoritative reserved snapshot. On failure the statement
+      // stays "finalizing" (recoverable) and we return 502 — never closed
+      // without a stored PDF.
+      const reservedStmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!reservedStmt) return;
+      const ctx = finalizeCtx as { cycle: number; revision: number; key: string };
+      const closedAt = reservedStmt.finalizingAt || now;
+      const closingHistory = appendHistory(reservedStmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+        cycleNumber: ctx.cycle, stage: "managing_director", action: "closed",
+        actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+        statementRevision: ctx.revision, comment: "",
+      }, closedAt, "closed");
+      let stored: { url: string; path: string; fileName: string };
+      try {
+        stored = await finalizeCostStatementPdf(reservedStmt, closingHistory, ctx.cycle, closedAt, ctx.revision, req.session!.id);
+      } catch (pdfErr) {
+        console.error("[accounting] final PDF generation/storage failed — leaving statement in 'finalizing' (recoverable):", pdfErr instanceof Error ? pdfErr.message : pdfErr);
+        return res.status(502).json({ code: "final_pdf_failed", error: "The statement was approved but the final PDF could not be generated or stored. It has NOT been closed — please retry." });
+      }
+
+      // ── Phase 3: atomic COMMIT — dedupe on the finalization key so a
+      // retry never appends a second version or re-closes.
+      const newVersion: FinalPdfVersion = {
+        cycleNumber: ctx.cycle, statementRevision: ctx.revision,
+        pdfUrl: stored.url, storagePath: stored.path, fileName: stored.fileName,
+        generatedAt: now, generatedBy: req.session!.id, closedAt,
+        approvalsSnapshot: approvalsForCycle(closingHistory, ctx.cycle),
+      };
+      const phase3 = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        if (status === "final_closed") return { httpStatus: 200, body: { statement: stmt } }; // another commit won — idempotent
+        if (status !== "finalizing" || stmt.finalizationKey !== ctx.key) {
+          return { httpStatus: 409, body: { code: "finalization_stale", error: "This finalization is no longer current. Reload and retry." } };
+        }
+        const alreadyHasVersion = hasFinalVersionFor(stmt.finalVersions as FinalPdfVersion[] | undefined, ctx.cycle, ctx.revision);
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "final_closed",
+          approvalHistory: closingHistory,
+          finalizedAt: closedAt, finalizedBy: req.session!.id,
+          finalPdfUrl: stored.url, finalPdfStoragePath: stored.path, finalPdfFileName: stored.fileName,
+          finalPdfGeneratedAt: now, finalPdfGeneratedBy: req.session!.id, finalPdfStatementRevision: ctx.revision,
+          finalVersions: alreadyHasVersion
+            ? (stmt.finalVersions as FinalPdfVersion[])
+            : [...((stmt.finalVersions as FinalPdfVersion[] | undefined) || []), newVersion],
+          finalizationKey: undefined, finalizingAt: undefined, finalizingBy: undefined,
+        };
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (phase3.httpStatus === 200 && !idempotentClosed) {
+        for (const id of assigneeIdsToNotifyOnFinal(config)) {
+          await notifyAccountingRecipient(id, shipmentNumber, "Cost statement finalized", `Statement for ${shipmentNumber} is now final and closed.`);
+        }
+        await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} finalized and closed`, "", "");
+      }
+      res.status(phase3.httpStatus).json(phase3.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] approve failed:", err);
+      res.status(500).json({ error: "Failed to approve." });
+    }
+  });
+
+  // Reject for correction. Atomic: canRejectStage re-checks the stage and
+  // assigned approver inside the transaction, so an approve-vs-reject race
+  // resolves to exactly one winner (the loser re-reads a no-longer-pending
+  // status and is rejected).
+  app.post("/api/cost-statements/:shipmentId/reject", requireRole("admin"), async (req, res) => {
+    try {
+      const config = await loadWorkflowConfig();
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      let rejectedStage: ApprovalStage | null = null;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        const decision = canRejectStage({ status, config, actorId: req.session!.id, reason });
+        if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const stage = pendingStageForStatus(status)!;
+        const cycleNumber = resolveApprovalCycle(stmt as any);
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage, action: "rejected",
+          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+          statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
+        }, now, `reject-${stage}`);
+        // Correction opens a NEW cycle on the next submission; bump the cycle
+        // now so a fresh submit starts its history under a new number and old
+        // approvals are retained but never reused.
+        const next: CostStatement = { ...stmt, accountingStatus: "rejected_for_correction", approvalCycle: cycleNumber + 1, approvalHistory: history };
+        shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = stmt.submittedBy;
+        rejectedStage = stage;
+        return { httpStatus: 200, body: { statement: next }, save: next };
+      });
+      if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement returned for correction", `Statement for ${shipmentNumber} was returned for correction.`);
+        await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} rejected for correction at ${rejectedStage}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] reject failed:", err);
+      res.status(500).json({ error: "Failed to reject." });
+    }
+  });
+
+  // Request reopening of a finalized statement. Atomic: canRequestReopen
+  // re-checks final_closed inside the transaction, so only one request can
+  // move the doc to reopen_requested.
+  app.post("/api/cost-statements/:shipmentId/reopen-request", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        const decision = canRequestReopen(status, reason);
+        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const cycleNumber = resolveApprovalCycle(stmt as any);
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: "reopen", action: "reopen_requested",
+          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+          statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
+        }, now, "reopen-req");
+        const next: CostStatement = { ...stmt, accountingStatus: "reopen_requested", approvalHistory: history, reopenRequestedBy: req.session!.id, reopenRequestedAt: now, reopenReason: reason.slice(0, 1000) };
+        shipmentNumber = stmt.shipmentNumber;
+        return { httpStatus: 200, body: { statement: next }, save: next };
+      });
+      if (result.httpStatus === 200) {
+        await logActivity("", "Accounting", req.session!.id, `Reopening requested for cost statement ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] reopen-request failed:", err);
+      res.status(500).json({ error: "Failed to request reopening." });
+    }
+  });
+
+  // Decide a reopening request (Super Admin only; requester cannot
+  // self-approve). Atomic: canDecideReopen re-checks the reopen_requested
+  // status and requester separation inside the transaction, so two
+  // simultaneous decisions resolve to exactly one winner (the loser
+  // re-reads a no-longer-reopen_requested status and is rejected).
+  app.post("/api/cost-statements/:shipmentId/reopen-decision", requireSuperAdmin, async (req, res) => {
+    try {
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const approve = req.body?.approve === true;
+      const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 1000) : "";
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        const decision = canDecideReopen({ status, requesterId: stmt.reopenRequestedBy, deciderId: req.session!.id });
+        if (!decision.ok) return { httpStatus: decision.code === "self_decision" ? 403 : 409, body: { code: decision.code, error: decision.error } };
+        const cycleNumber = resolveApprovalCycle(stmt as any);
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: "reopen", action: approve ? "reopen_approved" : "reopen_rejected",
+          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
+          statementRevision: stmt.revision || 1, comment: note,
+        }, now, approve ? "reopen-ok" : "reopen-no");
+        // On approval: reopen editing under a NEW cycle; the previous final
+        // PDF and all approvals are preserved (finalVersions untouched). On
+        // rejection: stays final_closed.
+        const next: CostStatement = approve
+          ? { ...stmt, accountingStatus: "reopened", approvalCycle: cycleNumber + 1, approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined }
+          : { ...stmt, accountingStatus: "final_closed", approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined };
+        shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = stmt.reopenRequestedBy;
+        const cleaned = cleanUndefined(next) as CostStatement;
+        return { httpStatus: 200, body: { statement: cleaned }, save: cleaned };
+      });
+      if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, approve ? "Reopening approved" : "Reopening rejected", `Reopening for ${shipmentNumber} was ${approve ? "approved" : "rejected"}.`);
+        await logActivity("", "Accounting", req.session!.id, `Reopening ${approve ? "approved" : "rejected"} for cost statement ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] reopen-decision failed:", err);
+      res.status(500).json({ error: "Failed to decide reopening." });
+    }
+  });
+
+  // Final PDF proxy — authorized internal accounting/admin roles ONLY.
+  // Never exposed to drivers, clients, or the public share view.
+  app.get("/api/cost-statements/:shipmentId/final-pdf", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const version = typeof req.query.version === "string" ? req.query.version : "";
+      let target = stmt.finalPdfUrl;
+      if (version) {
+        const match = (stmt.finalVersions as FinalPdfVersion[] | undefined)?.find((v) => String(v.statementRevision) === version || String(v.cycleNumber) === version);
+        target = match?.pdfUrl;
+      }
+      if (!target) return res.status(404).json({ error: "No final PDF is available for this statement." });
+      res.json({ url: target });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load final PDF." });
     }
   });
 
