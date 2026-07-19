@@ -82,6 +82,9 @@ import {
   validateCompanyProfile, validateBankAccount, applyDefaultBankExclusivity,
   resolveDefaultBankAccountForCurrency,
 } from "./src/lib/accountingTemplateSettings";
+import {
+  summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
+} from "./src/lib/vendorPayments";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -436,6 +439,9 @@ let memoryStore: {
   // account. Same PR #44 lesson: every collection needs a memory-fallback
   // entry. (Company Profile is a single doc under accountingSettings.)
   bankAccounts: BankAccount[];
+  // Vendor Payables: one doc per vendor payment transaction (a cost item
+  // may have several). Same PR #44 lesson — needs an entry here.
+  vendorPayments: VendorPaymentTransaction[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -473,6 +479,7 @@ function getMemoryStore() {
       accountIdentityKeys: [],
       accountingSettings: [],
       bankAccounts: [],
+      vendorPayments: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2037,7 +2044,9 @@ import {
   AllianceAuditEntry,
   DriverActiveJobLock,
   CompanyProfile,
-  BankAccount
+  BankAccount,
+  VendorPaymentTransaction,
+  CostItem
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -10791,6 +10800,121 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to resolve default bank account." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Vendor Payables — vendor payment transactions against cost items.
+  //
+  // A cost line may be settled by MULTIPLE partial payments, so payments
+  // are discrete records (vendorPayments), never a single paid flag. Paid/
+  // remaining/status are DERIVED server-side (summarizeVendorPayable).
+  // Internal to MARAS only (canView/WriteCostStatements → super/accounts);
+  // never in customer/driver/public views. Completed payments are never
+  // edited/deleted — corrections are reversals (status → "reversed") with a
+  // reason + full audit trail. All numeric/currency/overpay rules come from
+  // the pure vendorPayments module. Desktop is the source of truth.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadVendorPaymentsForShipment(shipmentId: string): Promise<VendorPaymentTransaction[]> {
+    // Consistent with the rest of the accounting reads (getDocs + JS
+    // filter). Vendor payments are keyed by shipment; a future scale pass
+    // can add a Firestore composite index/query if the collection grows.
+    const snap = await getDocs(collection(db, "vendorPayments"));
+    return snap.docs.map((d) => d.data() as VendorPaymentTransaction).filter((p) => p.shipmentId === shipmentId);
+  }
+
+  // List a statement's vendor payments + per-cost-item payable summaries.
+  app.get("/api/cost-statements/:shipmentId/vendor-payments", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const payments = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      const items = (stmt.items as CostItem[]) || [];
+      const summaries = items.map((it) => summarizeVendorPayable(it, payments));
+      res.json({ payments, summaries });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load vendor payments." });
+    }
+  });
+
+  // Record a vendor payment (partial payments allowed). Server-authoritative:
+  // validates amount/currency/overpay against the live item + existing
+  // payments, prevents duplicate submission, snapshots vendor + bank.
+  app.post("/api/cost-statements/:shipmentId/vendor-payments", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const body = req.body || {};
+      const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
+      const existing = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      const allowOverpayment = body.allowOverpayment === true; // reserved for a future authorized workflow
+      const v = validateVendorPayment({ item, existingPayments: existing, amount: body.amount, currency: body.currency, allowOverpayment });
+      if (!v.ok) return res.status(v.code === "item_not_found" ? 404 : 400).json({ code: v.code, error: v.error });
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      if (isDuplicateVendorPayment(existing, { costItemId: item!.id, amount: v.amount, paymentDate, reference })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      // Snapshot the paying bank account (from Template Settings) if given.
+      let bankAccountSnapshot: string | undefined;
+      if (typeof body.bankAccountId === "string" && body.bankAccountId) {
+        const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
+        if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
+      }
+      const now = new Date().toISOString();
+      const payment: VendorPaymentTransaction = {
+        id: `vpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        shipmentId: req.params.shipmentId,
+        shipmentNumber: stmt.shipmentNumber,
+        costStatementId: req.params.shipmentId,
+        costItemId: item!.id,
+        vendorId: typeof body.vendorId === "string" ? body.vendorId : item!.vendorId,
+        vendorName: item!.supplierName || "",
+        amount: v.amount,
+        currency: item!.currency,
+        paymentDate,
+        paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.slice(0, 60) : "",
+        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+        bankAccountSnapshot,
+        reference: reference || undefined,
+        attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+        attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+        internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : undefined,
+        createdBy: req.session!.id,
+        createdAt: now,
+        status: "active",
+      };
+      await setDoc(doc(db, "vendorPayments", payment.id), cleanUndefined(payment));
+      await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${v.amount} ${item!.currency})`, "", "");
+      const summary = summarizeVendorPayable(item!, [...existing, payment]);
+      res.status(201).json({ payment: cleanUndefined(payment), summary });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] vendor payment failed:", err);
+      res.status(500).json({ error: "Failed to record vendor payment." });
+    }
+  });
+
+  // Reverse a vendor payment (never deletes; requires a reason). Desktop-only.
+  app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "vendorPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as VendorPaymentTransaction;
+      if (payment.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Payment not found for this statement." });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const decision = canReverseVendorPayment(payment, reason);
+      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      const now = new Date().toISOString();
+      const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: req.session!.id, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+      await setDoc(doc(db, "vendorPayments", payment.id), cleanUndefined(reversed));
+      await logActivity("", "Accounting", req.session!.id, `Vendor payment reversed for ${payment.shipmentNumber} (${payment.amount} ${payment.currency})`, "", "");
+      res.json({ payment: cleanUndefined(reversed) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] vendor payment reversal failed:", err);
+      res.status(500).json({ error: "Failed to reverse vendor payment." });
     }
   });
 

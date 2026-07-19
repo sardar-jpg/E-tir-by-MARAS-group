@@ -473,7 +473,56 @@ export interface CostItem {
   documentUrl?: string;
   documentName?: string;
   internalNotes?: string;
+  // Vendor Payables (optional, legacy-safe): a cost line may be paid to a
+  // vendor via one or more VendorPaymentTransaction records. paid/remaining/
+  // status are NEVER stored here — they are derived server-side from the
+  // active (non-reversed) transactions (see src/lib/vendorPayments.ts).
+  vendorId?: string;
+  dueDate?: string;
+  paymentTerms?: string;
 }
+
+/**
+ * A single vendor payment against one CostItem. A vendor cost may be paid
+ * in multiple partial payments, so these are discrete records (never a
+ * single paid flag on the item). Internal to MARAS — never exposed to
+ * customers/drivers/public. Completed payments are never edited/deleted;
+ * corrections are made by writing a reversal (status → "reversed").
+ */
+export interface VendorPaymentTransaction {
+  id: string;
+  shipmentId: string;
+  /** MAR order number snapshot, for cross-document consistency + search. */
+  shipmentNumber: string;
+  /** Cost statement doc id (== shipmentId in this architecture). */
+  costStatementId: string;
+  costItemId: string;
+  vendorId?: string;
+  /** Vendor/supplier name snapshot at payment time. */
+  vendorName: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  /** Paying bank/cash account (from Template Settings) + snapshot. */
+  bankAccountId?: string;
+  bankAccountSnapshot?: string;
+  reference?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
+  internalNotes?: string;
+  createdBy: string;
+  createdAt: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  status: 'active' | 'reversed';
+  reversedBy?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+}
+
+/** Derived, server-authoritative payable status for a single cost item. */
+export type VendorPayableStatus = 'Unpaid' | 'Partially Paid' | 'Paid' | 'Overpaid';
 
 export interface CostStatement {
   shipmentId: string;

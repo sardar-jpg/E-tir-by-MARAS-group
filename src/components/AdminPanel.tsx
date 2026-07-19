@@ -52,6 +52,7 @@ import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
 import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
+import VendorPayablesPanel from "./admin/VendorPayablesPanel";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -7205,6 +7206,17 @@ MARAS Group etir Center`;
                   statement={selectedCostStatement}
                   actor={{ sessionId: ownAdminId, isSuperAdmin: resolvedAdminType === 'super', canWriteCostStatements: canViewCostStatements(resolvedAdminType) }}
                   onChanged={(next) => setSelectedCostStatement(next)}
+                />
+
+                {/* Vendor Payables (partial payments, reversal, filters) —
+                    Desktop-only, internal accounting. Lives inside the cost
+                    statement detail; server owns all figures. */}
+                <VendorPayablesPanel
+                  shipmentId={selectedCostStatement.shipmentId}
+                  items={selectedCostStatement.items || []}
+                  bankAccounts={bankAccounts}
+                  canWrite={canViewCostStatements(resolvedAdminType)}
+                  lang={lang}
                 />
 
                 {/* Section header */}
