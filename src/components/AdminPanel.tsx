@@ -51,6 +51,7 @@ import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
+import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
 import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
 import VendorPayablesPanel from "./admin/VendorPayablesPanel";
 import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
@@ -5329,10 +5330,14 @@ MARAS Group etir Center`;
         </React.Suspense>
               ))}
               {sectionId === 'financial' && canViewCostStatements(resolvedAdminType) && (
-                <ExecutiveFinancialSection
-                  lang={lang}
-                  onOpenShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
-                />
+                <>
+                  <ExecutiveFinancialSection
+                    lang={lang}
+                    onOpenShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
+                  />
+                  {/* Accounts-receivable overview from real invoices + payments. */}
+                  <div className="mt-3"><ReceivablesOverviewCard lang={lang} /></div>
+                </>
               )}
               {sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType) && (
                 <FinancialAlertsCard lang={lang} onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)} />

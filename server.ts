@@ -95,6 +95,7 @@ import {
 } from "./src/lib/customerPayments";
 import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
+import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -12163,6 +12164,31 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error(err);
       res.status(500).json({ error: "Failed to load the financial overview." });
+    }
+  });
+
+  // Accounts-receivable dashboard overview — per-currency invoiced/collected/
+  // outstanding/advance-credit from the REAL customer invoices + payments,
+  // plus operational queues (drafts to issue, payments to allocate).
+  // Accounting-only, never mixed across currencies.
+  app.get("/api/admin/dashboard/receivables", requireRole("admin"), async (req, res) => {
+    try {
+      if (!canViewCostStatements(req.session!.adminType as any)) {
+        return res.status(403).json({ error: "Receivables overview requires accounting access." });
+      }
+      const [invSnap, paySnap] = await Promise.all([
+        getDocs(collection(db, "customerInvoices")),
+        getDocs(collection(db, "customerPayments")),
+      ]);
+      const receivables = buildArOverview(
+        invSnap.docs.map((d) => d.data() as CustomerInvoice),
+        paySnap.docs.map((d) => d.data() as CustomerPayment)
+      );
+      res.json({ receivables });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error(err);
+      res.status(500).json({ error: "Failed to load the receivables overview." });
     }
   });
 
