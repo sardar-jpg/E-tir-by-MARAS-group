@@ -4073,6 +4073,23 @@ async function startServer() {
     return false;
   }
 
+  /**
+   * PR #138 (Stage 2 PR 5): throttled security-denial trail for blocked
+   * cross-account / cross-assignment attempts. One line per
+   * (kind, role, id) per 10 minutes — role, session id, and the DENIED
+   * TARGET reference only; never request bodies, locations, documents,
+   * tokens, or customer/accounting data.
+   */
+  const securityDenialLogAt = new Map<string, number>();
+  function logSecurityDenial(kind: string, session: { role?: string; id?: string } | undefined, detail: string): void {
+    const key = `${kind}:${session?.role || "?"}:${session?.id || "?"}`;
+    const last = securityDenialLogAt.get(key) || 0;
+    if (Date.now() - last > 10 * 60 * 1000) {
+      securityDenialLogAt.set(key, Date.now());
+      console.warn(`[security] denied ${kind} for ${session?.role || "unknown"} ${session?.id || "unknown"} — ${detail}`);
+    }
+  }
+
   /** Rejects the request unless a valid session of any role is present. */
   function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
@@ -4378,7 +4395,10 @@ async function startServer() {
           const driverId = req.session!.id;
           const owns = shipment.assignedDriverId === driverId ||
             (shipment.additionalDrivers && shipment.additionalDrivers.some((ad: any) => ad.driverId === driverId));
-          if (!owns) return res.status(403).json({ error: "You do not have access to this shipment." });
+          if (!owns) {
+            logSecurityDenial("shipment_access", req.session, `unassigned shipment ${shipmentId}`);
+            return res.status(403).json({ error: "You do not have access to this shipment." });
+          }
           req.shipment = shipment;
           return next();
         }
@@ -4387,6 +4407,7 @@ async function startServer() {
           const clientsSnap = await getDocs(clientsCol);
           const myClient = clientsSnap.docs.map(d => d.data() as Client).find(c => c.id === req.session!.id);
           if (!myClient || !isShipmentVisibleToClientCompany(shipment.companyName, myClient.companyName)) {
+            logSecurityDenial("shipment_access", req.session, `foreign-company shipment ${shipmentId}`);
             return res.status(403).json({ error: "You do not have access to this shipment." });
           }
           req.shipment = shipment;
@@ -5458,7 +5479,10 @@ async function startServer() {
         const driverId = req.session!.id;
         const owns = item.assignedDriverId === driverId ||
           (item.additionalDrivers && item.additionalDrivers.some((ad: any) => ad.driverId === driverId));
-        if (!owns) return res.status(403).json({ error: "You are not assigned to this shipment." });
+        if (!owns) {
+          logSecurityDenial("shipment_status_write", req.session, `unassigned shipment ${shipmentId}`);
+          return res.status(403).json({ error: "You are not assigned to this shipment." });
+        }
       } else if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update shipment status." });
       } else if (req.session!.role === "admin" && !canManageShipmentStatus(req.session)) {
@@ -6421,7 +6445,8 @@ async function startServer() {
       // to Owner only; superseded by the explicit "same permissions" rule
       // covering documents/uploads).
       const shipmentId = req.params.id;
-      const { name, url, category, uploadedBy, isSharedExternally, fileType, notes } = req.body;
+      const { name, url, category, isSharedExternally, fileType, notes } = req.body;
+      const uploaderName = (await resolveChatSenderIdentity(req)).senderName;
 
       // This route skips the chat trail and files a document directly (see
       // the comment above), so it's the more direct of the two upload paths
@@ -6453,7 +6478,11 @@ async function startServer() {
         // 'other' — never an unclassifiable string (the old unvalidated
         // cast let arbitrary body strings straight into storage).
         category: coerceDocumentCategoryForStorage(category),
-        uploadedBy: uploadedBy || "Admin",
+        // PR #138 (Stage 2 PR 5): attribution is SERVER-DERIVED from the
+        // verified session (same resolver the chat uses) — the
+        // client-supplied uploadedBy string is ignored, so a driver/client
+        // can never label an upload as "Admin" (or as another user).
+        uploadedBy: uploaderName,
         uploadedAt: new Date().toISOString(),
         // Optional unified-model metadata; omitted entirely when not
         // provided (Firestore rejects undefined fields in array elements).
@@ -6485,7 +6514,7 @@ async function startServer() {
           run: () => logActivity(
             shipmentId,
             shipmentItem.shipmentNumber,
-            uploadedBy || "Admin Panel",
+            uploaderName,
             `Uploaded file ${newDoc.name} in Document Center`,
             `Belge Merkezine ${newDoc.name} evrakını yükledi`,
             `تحميل ملف ${newDoc.name} في مركز المستندات للشحنة`
@@ -8650,12 +8679,22 @@ async function startServer() {
 
   app.put("/api/drivers/:id", requireAuth, async (req, res) => {
     try {
-      // A driver may only update their own profile; admins may update any.
+      // PR #138 (Stage 2 PR 5, audit finding M-2): the authenticated
+      // identity comes from the verified session ONLY — a driver may
+      // update exactly their own record, and the admin path is gated to
+      // full admins (super/operation), matching the roster-read
+      // permission. An accounts-type admin could previously WRITE driver
+      // profiles it wasn't even allowed to read.
       if (req.session!.role === "driver" && req.session!.id !== req.params.id) {
+        logSecurityDenial("driver_profile_write", req.session, `attempted update of drivers/${req.params.id}`);
         return res.status(403).json({ error: "You can only update your own profile." });
       }
       if (req.session!.role === "client") {
         return res.status(403).json({ error: "Clients cannot update driver profiles." });
+      }
+      if (req.session!.role === "admin" && resolveFullAdminStatus(req.session) !== 200) {
+        logSecurityDenial("driver_profile_write", req.session, `accounts-type admin attempted update of drivers/${req.params.id}`);
+        return res.status(403).json({ error: "Accounts-type admins cannot modify driver profiles." });
       }
       const { name, username, email, truckNumber, phone, truckType, latitude, longitude, lastUpdated, avatarUrl, workingRoutes, allianceInactive, availableForOffers } = req.body;
 
@@ -8697,27 +8736,19 @@ async function startServer() {
       }
       const dRef = doc(db, "drivers", req.params.id);
       const dDoc = await getDoc(dRef);
-      
-      let original: any = {};
-      if (dDoc.exists()) {
-        original = dDoc.data();
-      } else {
-        // Auto-create base profile if not found. No hardcoded password —
-        // a randomly generated, hashed one is used instead; this account
-        // can't be logged into by password until an admin sets one.
-        original = {
-          id: req.params.id,
-          name: name || "Simulated Specialist",
-          username: username || `driver_${req.params.id}`,
-          password: hashPassword(crypto.randomBytes(9).toString("base64url")),
-          email: email || "",
-          truckNumber: truckNumber || "TR-7733-IQ",
-          phone: phone || "+96400000000",
-          truckType: truckType || "reefer",
-          activeShipmentsCount: 1,
-          completedShipmentsCount: 0
-        };
+
+      // PR #138 (Stage 2 PR 5, audit finding M-1): this route UPDATES a
+      // driver — it never creates one. The old fallback fabricated a
+      // synthetic placeholder profile (fake name, fake truck plate, fake
+      // phone) for any unknown id, silently minting phantom drivers from
+      // typos or stale references. Real drivers are created only through
+      // POST /api/drivers and POST /api/drivers/self-register; a missing
+      // record here is a plain 404, and a deleted driver is never
+      // recreated from request data.
+      if (!dDoc.exists()) {
+        return res.status(404).json({ error: "Driver not found." });
       }
+      const original = dDoc.data() as Driver;
 
       const updatedDriver: any = {
         ...original
