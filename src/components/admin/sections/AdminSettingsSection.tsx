@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Settings, UserPlus, Mail, ShieldCheck, Ship, Loader2, AlertCircle } from 'lucide-react';
 import type { Language } from '../../../types';
 import { apiFetch } from '../../../lib/api';
+import CostApprovalSettingsCard from '../CostApprovalSettingsCard';
 import {
   NOTIFICATION_PREFERENCE_CATEGORIES,
   DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
@@ -353,6 +354,18 @@ export default function AdminSettingsSection({
               {lang === 'tr' ? 'Denetim Günlüklerini Aç' : (lang === 'ar' ? 'فتح سجلات التدقيق' : 'Open Audit Logs')}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Accounting Settings → Cost Approval Workflow (PR #6) — Super
+          Admin only. Assigns the three fixed approval stages to active
+          employees; the server re-validates every save. */}
+      {resolvedAdminType === 'super' && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-black text-slate-900">
+            {lang === 'tr' ? 'Muhasebe Ayarları' : (lang === 'ar' ? 'إعدادات المحاسبة' : 'Accounting Settings')}
+          </h3>
+          <CostApprovalSettingsCard lang={lang} />
         </div>
       )}
 

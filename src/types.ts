@@ -542,6 +542,33 @@ export interface CostStatement {
    * legacy statements.
    */
   agreedCurrency?: Currency;
+
+  // Cost Approval Workflow (PR #6). Optional so legacy statements are
+  // safe — absent accountingStatus resolves to "draft"
+  // (resolveAccountingStatus, src/lib/costApprovalWorkflow.ts), NEVER
+  // final. Separate from paymentStatus above: paymentStatus is the
+  // expense money state; these fields are the approval workflow state.
+  // The full field set + decision logic live in costApprovalWorkflow.ts
+  // (CostApprovalState); mirrored loosely here so the CostStatement type
+  // carries them.
+  accountingStatus?: string;
+  approvalCycle?: number;
+  approvalHistory?: unknown[];
+  submittedAt?: string;
+  submittedBy?: string;
+  submittedRevision?: number;
+  finalizedAt?: string;
+  finalizedBy?: string;
+  finalPdfUrl?: string;
+  finalPdfStoragePath?: string;
+  finalPdfFileName?: string;
+  finalPdfGeneratedAt?: string;
+  finalPdfGeneratedBy?: string;
+  finalPdfStatementRevision?: number;
+  finalVersions?: unknown[];
+  reopenRequestedBy?: string;
+  reopenRequestedAt?: string;
+  reopenReason?: string;
 }
 
 

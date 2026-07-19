@@ -49,6 +49,7 @@ import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
+import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -7163,6 +7164,16 @@ MARAS Group etir Center`;
                     </button>
                   </div>
                 )}
+
+                {/* Cost Approval Workflow (PR #6): status, three-stage
+                    progress, and actions. Server enforces every action and
+                    the financial-editing lock; this card mirrors state. */}
+                <CostApprovalWorkflowCard
+                  lang={lang}
+                  statement={selectedCostStatement}
+                  actor={{ sessionId: ownAdminId, isSuperAdmin: resolvedAdminType === 'super', canWriteCostStatements: canViewCostStatements(resolvedAdminType) }}
+                  onChanged={(next) => setSelectedCostStatement(next)}
+                />
 
                 {/* Section header */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
