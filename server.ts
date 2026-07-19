@@ -458,6 +458,8 @@ let memoryStore: {
   customerPayments: CustomerPayment[];
   // Payment Receipts: one active receipt per customer payment.
   paymentReceipts: PaymentReceipt[];
+  // Company profile version history (issued-document integrity).
+  companyProfileVersions: CompanyProfileVersion[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -499,6 +501,7 @@ function getMemoryStore() {
       customerInvoices: [],
       customerPayments: [],
       paymentReceipts: [],
+      companyProfileVersions: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2065,6 +2068,7 @@ import {
   CompanyProfile,
   BankAccount,
   BankAccountSnapshot,
+  CompanyProfileVersion,
   VendorPaymentTransaction,
   CostItem,
   CustomerInvoice,
@@ -10741,13 +10745,58 @@ async function startServer() {
     try {
       const result = validateCompanyProfile(req.body || {});
       if (!result.ok) return res.status(400).json({ error: result.error });
-      const profile: CompanyProfile = { ...result.profile, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      const now = new Date().toISOString();
+      // Template versioning: archive the currently-published profile before
+      // overwriting, and bump the version. Issued documents snapshot the
+      // profile, so historical documents are unaffected by this change.
+      const current = await loadCompanyProfile();
+      const currentVersion = typeof current.version === "number" ? current.version : 0;
+      if (currentVersion > 0) {
+        const archive: CompanyProfileVersion = { ...current, id: `cpv-${currentVersion}-${Date.now()}`, version: currentVersion, archivedAt: now } as CompanyProfileVersion;
+        await setDoc(doc(db, "companyProfileVersions", archive.id), cleanUndefined(archive));
+      }
+      const profile: CompanyProfile = { ...result.profile, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
       await setDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID), cleanUndefined(profile));
-      await logActivity("", "Accounting", req.session!.id, "Company profile (template settings) updated", "Şirket profili (şablon ayarları) güncellendi", "تم تحديث ملف الشركة (إعدادات القوالب)");
+      await logActivity("", "Accounting", req.session!.id, `Company profile updated (v${profile.version})`, "", "");
       res.json({ profile: cleanUndefined(profile) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to save company profile." });
+    }
+  });
+  // Company profile version history (change log) + restore a prior version.
+  app.get("/api/admin/accounting/company-profile/versions", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const snap = await getDocs(collection(db, "companyProfileVersions"));
+      const versions = snap.docs.map((d) => d.data() as CompanyProfileVersion).sort((a, b) => b.version - a.version);
+      res.json({ versions });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load version history." });
+    }
+  });
+  app.post("/api/admin/accounting/company-profile/restore/:version", requireSuperAdmin, async (req, res) => {
+    try {
+      const target = Number(req.params.version);
+      const snap = await getDocs(collection(db, "companyProfileVersions"));
+      const prior = snap.docs.map((d) => d.data() as CompanyProfileVersion).find((v) => v.version === target);
+      if (!prior) return res.status(404).json({ error: "That version was not found." });
+      const now = new Date().toISOString();
+      const current = await loadCompanyProfile();
+      const currentVersion = typeof current.version === "number" ? current.version : 0;
+      // Archive current, then republish the prior content as a NEW version.
+      if (currentVersion > 0) {
+        const archive: CompanyProfileVersion = { ...current, id: `cpv-${currentVersion}-${Date.now()}`, version: currentVersion, archivedAt: now } as CompanyProfileVersion;
+        await setDoc(doc(db, "companyProfileVersions", archive.id), cleanUndefined(archive));
+      }
+      const { id: _id, version: _v, archivedAt: _a, ...content } = prior;
+      const restored: CompanyProfile = { ...content, version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+      await setDoc(doc(db, "accountingSettings", COMPANY_PROFILE_SETTINGS_ID), cleanUndefined(restored));
+      await logActivity("", "Accounting", req.session!.id, `Company profile restored from v${target} (now v${restored.version})`, "", "");
+      res.json({ profile: cleanUndefined(restored) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to restore version." });
     }
   });
 
@@ -11092,7 +11141,15 @@ async function startServer() {
         }
       }
       const now = new Date().toISOString();
-      const issued: CustomerInvoice = { ...invoice, status: "issued", bankAccountId: bankId || invoice.bankAccountId, bankAccountSnapshot, issuedAt: now, issuedBy: req.session!.id };
+      // Issued-document integrity: snapshot the company branding + version so
+      // later Template Settings changes never alter this issued invoice.
+      const companySnapshot = await loadCompanyProfile();
+      const issued: CustomerInvoice = {
+        ...invoice, status: "issued", bankAccountId: bankId || invoice.bankAccountId, bankAccountSnapshot,
+        companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
+        companyProfileVersion: typeof companySnapshot.version === "number" ? companySnapshot.version : undefined,
+        issuedAt: now, issuedBy: req.session!.id,
+      };
       await setDoc(doc(db, "customerInvoices", issued.id), cleanUndefined(issued));
       await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
       res.json({ invoice: cleanUndefined(issued) });

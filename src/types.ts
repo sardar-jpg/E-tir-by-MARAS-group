@@ -586,6 +586,10 @@ export interface CustomerInvoice {
   status: CustomerInvoiceStatus;
   bankAccountId?: string;
   bankAccountSnapshot?: BankAccountSnapshot;
+  /** Company branding snapshot captured at issue time (issued-doc integrity). */
+  companySnapshot?: CompanyProfile;
+  /** The company-profile version this document was issued against. */
+  companyProfileVersion?: number;
   issuedAt?: string;
   issuedBy?: string;
   cancelledAt?: string;
@@ -797,8 +801,18 @@ export interface CompanyProfile {
   stampUrl?: string;
   signatureUrl?: string;
   footerText?: string;
+  /** Published version counter — bumped on every save; issued documents
+   *  snapshot the profile so template changes never alter historical docs. */
+  version?: number;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+/** An archived, previously-published company profile version. */
+export interface CompanyProfileVersion extends CompanyProfile {
+  id: string;
+  version: number;
+  archivedAt: string;
 }
 
 /** A configurable bank account (bankAccounts collection, one doc per account). */
