@@ -6,10 +6,10 @@ const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
 
 describe("accounting PDF routes", () => {
   it("invoice / receipt / statement / voucher PDFs are internal-only (accounting view)", () => {
-    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.get("/api/customer-accounts/statement/pdf", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requireCanViewCostStatements');
+    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requirePermission("invoices.print")');
+    expect(SERVER).toContain('app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requirePermission("receipts.print")');
+    expect(SERVER).toContain('app.get("/api/customer-accounts/statement/pdf", requirePermission("customerStatements.export")');
+    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requirePermission("vendorPayments.printVoucher")');
   });
   it("all documents render through the single shared renderer from saved data + company profile", () => {
     expect(SERVER).toContain("renderAccountingPdf(");

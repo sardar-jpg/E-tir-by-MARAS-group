@@ -1,80 +1,71 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  canManageAccounting, canRecordVendorPayment, canIssueInvoice, canAllocatePayment,
-  canCreateReceipt, canViewCustomerStatement, canManageBankAccounts, canManageTemplates,
-  canRestoreTemplateVersion, canManageApprovalWorkflow, canDecideReopening,
-} from "./adminAccess";
 
 /**
- * The full accounting suite's permission boundary in ONE place. The named
- * capabilities map onto the existing adminType model, and every sensitive
- * server route must enforce the matching gate — accounting writes for
- * super+accounts, template/bank/structural settings for super only. This
- * guards against a route accidentally widening access.
+ * Single-source-of-truth boundary (PR #140 review increment 4, item 12).
+ *
+ * The former broad accounting aliases in adminAccess.ts (all mapped to one
+ * adminType role check) were removed. Every accounting route is now gated by a
+ * SPECIFIC granular permission via requirePermission("<key>"), resolved from
+ * src/lib/accountingPermissions.ts. These wiring assertions pin that mapping so
+ * a route can never quietly fall back to a broad accounting-write gate.
  */
-describe("named accounting capabilities (atop adminType)", () => {
-  it("accounting writers = super + accounts; not operation/driver/undefined", () => {
-    for (const cap of [canManageAccounting, canRecordVendorPayment, canIssueInvoice, canAllocatePayment, canCreateReceipt, canViewCustomerStatement]) {
-      expect(cap("super")).toBe(true);
-      expect(cap("accounts")).toBe(true);
-      expect(cap("operation")).toBe(false);
-      expect(cap(undefined)).toBe(false);
-    }
-  });
-  it("template / bank / structural settings = super only", () => {
-    for (const cap of [canManageBankAccounts, canManageTemplates, canRestoreTemplateVersion, canManageApprovalWorkflow, canDecideReopening]) {
-      expect(cap("super")).toBe(true);
-      expect(cap("accounts")).toBe(false);
-      expect(cap("operation")).toBe(false);
-    }
+const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
+const ADMIN_ACCESS = readFileSync(join(__dirname, "adminAccess.ts"), "utf-8");
+
+/** The middleware token in `app.<method>("<route>", <token>` for an exact route. */
+function gate(method: string, route: string): string {
+  const re = new RegExp(`app\\.${method}\\("${route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}",\\s*(requirePermission\\("[^"]+"\\)|require[A-Za-z]+)`);
+  const m = SERVER.match(re);
+  return m ? m[1] : "(not found)";
+}
+
+describe("the broad accounting aliases are gone (one source of truth)", () => {
+  it("adminAccess.ts no longer defines competing accounting authorization", () => {
+    expect(ADMIN_ACCESS).not.toContain("export const canManageAccounting");
+    expect(ADMIN_ACCESS).not.toContain("export const canRecordVendorPayment");
+    expect(ADMIN_ACCESS).not.toContain("export const canManageBankAccounts");
+    expect(ADMIN_ACCESS).not.toContain("export const canManageTemplates");
   });
 });
 
-describe("server route gates match the capability model (no accidental widening)", () => {
-  const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
-  const WRITE = "requireCanWriteCostStatements";
-  const VIEW = "requireCanViewCostStatements";
-  const SUPER = "requireSuperAdmin";
-
-  const gate = (method: string, route: string) => {
-    const re = new RegExp(`app\\.${method}\\("${route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}",\\s*([A-Za-z]+)`);
-    const m = SERVER.match(re);
-    return m ? m[1] : "(not found)";
-  };
-
-  it("accounting-write routes (POST) are gated to writers (super+accounts)", () => {
-    for (const r of [
-      "/api/cost-statements/:shipmentId/vendor-payments",
-      "/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse",
-      "/api/cost-statements/:shipmentId/invoices",
-      "/api/cost-statements/:shipmentId/invoices/:invoiceId/issue",
-      "/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel",
-      "/api/customer-accounts/payments",
-      "/api/customer-accounts/payments/:paymentId/allocate",
-      "/api/customer-accounts/payments/:paymentId/reverse",
-      "/api/customer-accounts/payments/:paymentId/receipt",
-    ]) {
-      expect(gate("post", r), `${r} POST must require accounting write`).toBe(WRITE);
-    }
+describe("every accounting route is gated by its specific granular permission", () => {
+  const cases: Array<[string, string, string]> = [
+    ["post", "/api/cost-statements/:shipmentId/vendor-payments", 'requirePermission("vendorPayments.create")'],
+    ["post", "/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", 'requirePermission("vendorPayments.reverse")'],
+    ["post", "/api/cost-statements/:shipmentId/invoices", 'requirePermission("invoices.create")'],
+    ["post", "/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", 'requirePermission("invoices.issue")'],
+    ["post", "/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", 'requirePermission("invoices.cancel")'],
+    ["post", "/api/customer-accounts/payments", 'requirePermission("customerPayments.create")'],
+    ["post", "/api/customer-accounts/payments/:paymentId/allocate", 'requirePermission("customerPayments.allocate")'],
+    ["post", "/api/customer-accounts/payments/:paymentId/reverse", 'requirePermission("customerPayments.reverse")'],
+    ["post", "/api/customer-accounts/payments/:paymentId/receipt", 'requirePermission("receipts.create")'],
+    ["post", "/api/cost-statements/:shipmentId/items", 'requirePermission("costs.create")'],
+    ["get", "/api/cost-statements/:shipmentId/vendor-payments", 'requirePermission("vendorPayments.view")'],
+    ["get", "/api/customer-accounts/payments", 'requirePermission("customerPayments.view")'],
+    ["get", "/api/customer-accounts/statement", 'requirePermission("customerStatements.view")'],
+    ["put", "/api/admin/accounting/company-profile", 'requirePermission("accountingCompanyProfile.manage")'],
+    ["post", "/api/admin/accounting/company-profile/restore/:version", 'requirePermission("accountingCompanyProfile.restore")'],
+    ["post", "/api/admin/accounting/bank-accounts", 'requirePermission("bankAccounts.manage")'],
+    ["put", "/api/admin/accounting/templates/:docType", 'requirePermission("accountingTemplates.publish")'],
+    ["post", "/api/admin/accounting/templates/:docType/restore/:version", 'requirePermission("accountingTemplates.restore")'],
+    ["post", "/api/admin/accounting/repair-ledgers", 'requirePermission("accountingRepair.view")'],
+    ["post", "/api/admin/accounting/repair-cost-statements", 'requirePermission("accountingRepair.execute")'],
+  ];
+  for (const [method, route, expected] of cases) {
+    it(`${method.toUpperCase()} ${route} → ${expected}`, () => {
+      expect(gate(method, route)).toBe(expected);
+    });
+  }
+  it("no accounting route still uses the old broad write/view gate", () => {
+    // The coarse cost-statement gates remain only on the base cost-statement
+    // list/detail read + the workflow-config PUT stays super-only; no vendor/
+    // invoice/payment/receipt/template/bank route uses them.
+    expect(gate("post", "/api/cost-statements/:shipmentId/vendor-payments")).not.toContain("CostStatements");
+    expect(gate("post", "/api/customer-accounts/payments")).not.toContain("CostStatements");
   });
-  it("template / bank / restore settings are Super-Admin only", () => {
-    expect(gate("get", "/api/admin/accounting/company-profile")).toBe(VIEW); // the GET
-    expect(SERVER).toContain(`app.put("/api/admin/accounting/company-profile", ${SUPER}`);
-    expect(SERVER).toContain(`app.post("/api/admin/accounting/bank-accounts", ${SUPER}`);
-    expect(SERVER).toContain(`app.put("/api/admin/accounting/bank-accounts/:id", ${SUPER}`);
-    expect(SERVER).toContain(`app.post("/api/admin/accounting/company-profile/restore/:version", ${SUPER}`);
-    expect(SERVER).toContain(`app.put("/api/admin/accounting/approval-workflow", ${SUPER}`);
-  });
-  it("read-only account views (GET) require accounting view", () => {
-    for (const r of [
-      "/api/cost-statements/:shipmentId/vendor-payments",
-      "/api/customer-accounts/invoices",
-      "/api/customer-accounts/payments",
-      "/api/customer-accounts/statement",
-    ]) {
-      expect(gate("get", r), `${r} GET must require accounting view`).toBe(VIEW);
-    }
+  it("repair execute is additionally gated inside the handler", () => {
+    expect(SERVER).toContain('requiredPermission: "accountingRepair.execute"');
   });
 });

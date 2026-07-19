@@ -122,6 +122,7 @@ import {
 } from "./src/lib/accountingTemplateConfig";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
+import { resolveEffectivePermissions, sanitizeAccountingPermissions, diffPermissions, isKnownAccountingPermission, type AccountingPermission } from "./src/lib/accountingPermissions";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory, validateDocumentReference, INVALID_DOCUMENT_INPUT_CODE } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
@@ -4381,6 +4382,54 @@ async function startServer() {
     next();
   }
 
+  // ── Granular accounting permissions (PR #140 review increment 4) ─────────
+  // The SINGLE server authorization source for accounting actions. Super Admin
+  // bypasses (all permissions); every other employee's effective permissions
+  // are resolved FRESH from their admin record (never from the token, so a
+  // permission change takes effect immediately and can't be forged). The
+  // resolved set is cached on the request so a route checking several
+  // permissions loads the record once.
+  async function loadEffectivePermissionsForSession(session: AuthSessionPayload): Promise<Set<AccountingPermission>> {
+    if (session.adminType === "super") return resolveEffectivePermissions({ role: "admin", adminType: "super" });
+    let record: { adminType?: string; active?: boolean; permissions?: unknown } | null = null;
+    try {
+      const snap = await getDoc(doc(db, "admins", session.id));
+      if (snap.exists()) record = snap.data() as any;
+    } catch { /* missing record → resolver denies safely below */ }
+    return resolveEffectivePermissions({
+      role: "admin",
+      adminType: session.adminType, // token is authoritative for the type
+      active: record?.active,
+      permissions: record?.permissions,
+    });
+  }
+
+  /**
+   * Route middleware factory: require a specific accounting permission. On
+   * denial returns the error contract { error, code:"permission_denied",
+   * requiredPermission } with HTTP 403 (never leaks role/user details).
+   */
+  function requirePermission(permission: AccountingPermission) {
+    return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (respondIfSessionVerificationUnavailable(req, res)) return;
+      if (!req.session || req.session.role !== "admin") {
+        return res.status(401).json({ error: "Authentication required." });
+      }
+      try {
+        const cache = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+        const perms = cache ?? (await loadEffectivePermissionsForSession(req.session));
+        (req as any)._effectiveAccountingPerms = perms;
+        if (!perms.has(permission)) {
+          return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: permission });
+        }
+        next();
+      } catch (err) {
+        if (respondIfServiceUnavailable(err, res)) return;
+        return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: permission });
+      }
+    };
+  }
+
   /**
    * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs and
    * POST /api/logs used requireRole("admin"), which let any admin type read
@@ -7689,6 +7738,57 @@ async function startServer() {
     }
   });
 
+  // ── Employee accounting permissions (Settings → Team, Super Admin only) ──
+  // The ONLY place employee permissions are managed. Privilege-escalation
+  // protected: only Super Admin may read/modify; the Super Admin/owner account
+  // is never a target; an employee can never edit their own or a peer's
+  // permissions (requireSuperAdmin already blocks non-super callers).
+  const ownerEmailLc = () => (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+  async function loadTargetAdminOr404(id: string, res: express.Response): Promise<any | null> {
+    const snap = await getDoc(doc(db, "admins", id));
+    if (!snap.exists()) { res.status(404).json({ error: "Employee not found." }); return null; }
+    const record = snap.data() as any;
+    if (isProtectedOwnerAccount(record, ownerEmailLc()) || record.adminType === "super") {
+      res.status(403).json({ error: "The Super Admin account's permissions cannot be modified." });
+      return null;
+    }
+    return record;
+  }
+  app.get("/api/admins/:id/permissions", requireSuperAdmin, async (req, res) => {
+    try {
+      const record = await loadTargetAdminOr404(req.params.id, res);
+      if (!record) return;
+      const explicit = Array.isArray(record.permissions) ? sanitizeAccountingPermissions(record.permissions) : null;
+      const effective = [...resolveEffectivePermissions({ role: "admin", adminType: record.adminType, active: record.active, permissions: record.permissions })];
+      res.json({ id: req.params.id, adminType: record.adminType, permissions: explicit, effective, usesLegacyDefault: explicit === null && record.adminType === "accounts" });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load permissions." });
+    }
+  });
+  app.put("/api/admins/:id/permissions", requireSuperAdmin, async (req, res) => {
+    try {
+      if (req.params.id === req.session!.id) return res.status(403).json({ error: "You cannot modify your own permissions.", code: "permission_denied" });
+      const record = await loadTargetAdminOr404(req.params.id, res);
+      if (!record) return;
+      const before = Array.isArray(record.permissions) ? sanitizeAccountingPermissions(record.permissions) : [];
+      const after = sanitizeAccountingPermissions(req.body?.permissions); // unknown keys dropped
+      const { added, removed } = diffPermissions(before, after);
+      await setDoc(doc(db, "admins", req.params.id), { ...record, permissions: after, permissionsUpdatedAt: new Date().toISOString(), permissionsUpdatedBy: req.session!.id });
+      // Audit the change (ids + before/after + delta + timestamp; never any
+      // credential material).
+      if (added.length || removed.length) {
+        await logActivity("", "Permissions", req.session!.id,
+          `Accounting permissions updated for ${record.name || req.params.id} — added: [${added.join(", ") || "none"}], removed: [${removed.join(", ") || "none"}]`,
+          "", "").catch(() => {});
+      }
+      res.json({ id: req.params.id, permissions: after, added, removed });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update permissions." });
+    }
+  });
+
   // Lets a sub-admin (operation or accounts type) change their own
   // password. The super-admin's password lives in the
   // SUPER_ADMIN_PASSWORD_HASH environment variable, not a Firestore
@@ -10011,7 +10111,7 @@ async function startServer() {
   });
 
   // Cost Statements APIs
-  app.get("/api/cost-statements", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements", requirePermission("costs.view"), async (req, res) => {
     try {
       const col = collection(db, "costStatements");
       const snapshot = await getDocs(col);
@@ -10023,7 +10123,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/cost-statements/:shipmentId", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId", requirePermission("costs.view"), async (req, res) => {
     try {
       const dRef = doc(db, "costStatements", req.params.shipmentId);
       const dDoc = await getDoc(dRef);
@@ -10065,7 +10165,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit"), async (req, res) => {
     try {
       const { shipmentId } = req.params;
       const data = req.body as Partial<CostStatement>;
@@ -10509,7 +10609,7 @@ async function startServer() {
   }
 
   // GET workflow settings (any accounting viewer); PUT (Super Admin only).
-  app.get("/api/admin/accounting/approval-workflow", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const usable = isWorkflowConfigUsable(config, await loadActiveAdminIds());
@@ -10548,7 +10648,7 @@ async function startServer() {
   // completeness) is re-checked against that fresh value, so two
   // simultaneous submissions serialize — the loser sees the winner's
   // pending state and is rejected.
-  app.post("/api/cost-statements/:shipmentId/submit", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/submit", requirePermission("costs.edit"), async (req, res) => {
     try {
       // Config + actor name are not the contended resource; load them once
       // up-front and pass them into the pure, synchronous `decide`.
@@ -10615,7 +10715,7 @@ async function startServer() {
   //   3. atomic COMMIT — re-read, dedupe on the key (hasFinalVersionFor),
   //      append the version, mark final_closed. A crash between 2 and 3
   //      leaves the doc recoverable in "finalizing"; a retry resumes.
-  app.post("/api/cost-statements/:shipmentId/approve", requireRole("admin"), async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/approve", requirePermission("costs.approve"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const actorName = await resolveWorkflowActorName(req.session!);
@@ -10760,7 +10860,7 @@ async function startServer() {
   // assigned approver inside the transaction, so an approve-vs-reject race
   // resolves to exactly one winner (the loser re-reads a no-longer-pending
   // status and is rejected).
-  app.post("/api/cost-statements/:shipmentId/reject", requireRole("admin"), async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
       const actorName = await resolveWorkflowActorName(req.session!);
@@ -10805,7 +10905,7 @@ async function startServer() {
   // Request reopening of a finalized statement. Atomic: canRequestReopen
   // re-checks final_closed inside the transaction, so only one request can
   // move the doc to reopen_requested.
-  app.post("/api/cost-statements/:shipmentId/reopen-request", requireCanViewCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
@@ -10842,7 +10942,7 @@ async function startServer() {
   // status and requester separation inside the transaction, so two
   // simultaneous decisions resolve to exactly one winner (the loser
   // re-reads a no-longer-reopen_requested status and is rejected).
-  app.post("/api/cost-statements/:shipmentId/reopen-decision", requireSuperAdmin, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const approve = req.body?.approve === true;
@@ -10886,7 +10986,7 @@ async function startServer() {
 
   // Final PDF proxy — authorized internal accounting/admin roles ONLY.
   // Never exposed to drivers, clients, or the public share view.
-  app.get("/api/cost-statements/:shipmentId/final-pdf", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/final-pdf", requirePermission("costs.view"), async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
@@ -10925,7 +11025,7 @@ async function startServer() {
     return snap.docs.map((d) => d.data() as BankAccount);
   }
 
-  app.get("/api/admin/accounting/company-profile", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.view"), async (req, res) => {
     try {
       res.json({ profile: await loadCompanyProfile() });
     } catch (err) {
@@ -10933,7 +11033,7 @@ async function startServer() {
       res.status(500).json({ error: "Failed to load company profile." });
     }
   });
-  app.put("/api/admin/accounting/company-profile", requireSuperAdmin, async (req, res) => {
+  app.put("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.manage"), async (req, res) => {
     try {
       const validated = validateCompanyProfile(req.body || {});
       if (!validated.ok) return res.status(400).json({ error: validated.error });
@@ -10960,7 +11060,7 @@ async function startServer() {
     }
   });
   // Company profile version history (change log) + restore a prior version.
-  app.get("/api/admin/accounting/company-profile/versions", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/company-profile/versions", requirePermission("accountingCompanyProfile.view"), async (req, res) => {
     try {
       const snap = await getDocs(collection(db, "companyProfileVersions"));
       const versions = snap.docs.map((d) => d.data() as CompanyProfileVersion).sort((a, b) => b.version - a.version);
@@ -10970,7 +11070,7 @@ async function startServer() {
       res.status(500).json({ error: "Failed to load version history." });
     }
   });
-  app.post("/api/admin/accounting/company-profile/restore/:version", requireSuperAdmin, async (req, res) => {
+  app.post("/api/admin/accounting/company-profile/restore/:version", requirePermission("accountingCompanyProfile.restore"), async (req, res) => {
     try {
       const target = Number(req.params.version);
       const snap = await getDocs(collection(db, "companyProfileVersions"));
@@ -11005,7 +11105,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/admin/accounting/bank-accounts", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.view"), async (req, res) => {
     try {
       const accounts = await loadBankAccounts();
       accounts.sort((a, b) => (a.currency || "").localeCompare(b.currency || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
@@ -11031,7 +11131,7 @@ async function startServer() {
     return { ok: true };
   }
 
-  app.post("/api/admin/accounting/bank-accounts", requireSuperAdmin, async (req, res) => {
+  app.post("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.manage"), async (req, res) => {
     try {
       const result = validateBankAccount(req.body || {});
       if (!result.ok) return res.status(400).json({ error: result.error });
@@ -11056,7 +11156,7 @@ async function startServer() {
   // Update / deactivate a bank account. Accounts are NEVER hard-deleted
   // (data-integrity rule): set active:false to retire one — historical
   // documents that referenced it keep their own snapshot.
-  app.put("/api/admin/accounting/bank-accounts/:id", requireSuperAdmin, async (req, res) => {
+  app.put("/api/admin/accounting/bank-accounts/:id", requirePermission("bankAccounts.manage"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "bankAccounts", req.params.id));
       if (!snap.exists()) return res.status(404).json({ error: "Bank account not found." });
@@ -11086,7 +11186,7 @@ async function startServer() {
   // Suggested default bank for a document currency (used by issue flows on
   // Desktop and by Mobile's read-only invoice view). The authorized user
   // can still override the choice before issuing a document.
-  app.get("/api/admin/accounting/default-bank-account", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/default-bank-account", requirePermission("bankAccounts.view"), async (req, res) => {
     try {
       const currency = typeof req.query.currency === "string" ? req.query.currency : "";
       const account = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), currency as Currency);
@@ -11100,7 +11200,7 @@ async function startServer() {
   // Idempotent repair (item 10): create the missing draft cost statement for
   // any legacy shipment that has none (id === shipmentId). Never overwrites an
   // existing statement; safe to rerun (a second run reports 0 created).
-  app.post("/api/admin/accounting/repair-cost-statements", requireSuperAdmin, async (req, res) => {
+  app.post("/api/admin/accounting/repair-cost-statements", requirePermission("accountingRepair.execute"), async (req, res) => {
     try {
       const [shipmentsSnap, statementsSnap] = [await getDocs(collection(db, "shipments")), await getDocs(collection(db, "costStatements"))];
       const shipments = shipmentsSnap.docs.map((d) => d.data() as Shipment);
@@ -11130,9 +11230,17 @@ async function startServer() {
   // reports discrepancies, and — only when ?mode=repair — creates missing and
   // fixes incorrect ledgers. DRY-RUN by default; never touches source records;
   // safe to rerun (a second run reports 0 changes). Super admin only.
-  app.post("/api/admin/accounting/repair-ledgers", requireSuperAdmin, async (req, res) => {
+  app.post("/api/admin/accounting/repair-ledgers", requirePermission("accountingRepair.view"), async (req, res) => {
     try {
       const repair = req.query.mode === "repair";
+      // Dry-run viewing needs accountingRepair.view (the gate above); actually
+      // executing a repair additionally needs accountingRepair.execute.
+      if (repair) {
+        const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+        if (!perms || !perms.has("accountingRepair.execute")) {
+          return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: "accountingRepair.execute" });
+        }
+      }
       const now = new Date().toISOString();
       const invoices = (await getDocs(collection(db, "customerInvoices"))).docs.map((d) => d.data() as CustomerInvoice);
       const payments = (await getDocs(collection(db, "customerPayments"))).docs.map((d) => d.data() as CustomerPayment);
@@ -11182,7 +11290,7 @@ async function startServer() {
   // statement is re-read, the lock + optimistic revision are re-checked, and
   // idempotency is honored — all against the transaction-fresh value, so two
   // concurrent additions both land and a stale expectedRevision is rejected.
-  app.post("/api/cost-statements/:shipmentId/items", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/items", requirePermission("costs.create"), async (req, res) => {
     try {
       const body = req.body || {};
       const built = buildCostItemFromInput(body.item || {}, `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -11240,7 +11348,7 @@ async function startServer() {
   }
 
   // List a statement's vendor payments + per-cost-item payable summaries.
-  app.get("/api/cost-statements/:shipmentId/vendor-payments", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.view"), async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
@@ -11273,7 +11381,7 @@ async function startServer() {
   // prevented by Firestore itself: the per-cost-item ledger is read + written
   // inside runAccountingTransaction, so two instances can never both commit
   // payments that exceed the cost amount (item 6).
-  app.post("/api/cost-statements/:shipmentId/vendor-payments", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.create"), async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
@@ -11333,7 +11441,7 @@ async function startServer() {
   // Atomic + idempotent (items 5/6): the payment reversal AND the ledger
   // subtraction happen in ONE Firestore transaction, so ledger and payment can
   // never diverge. A repeat on an already-reversed payment replays 200.
-  app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requirePermission("vendorPayments.reverse"), async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
@@ -11425,7 +11533,7 @@ async function startServer() {
     };
   }
 
-  app.get("/api/cost-statements/:shipmentId/invoices", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.view"), async (req, res) => {
     try {
       const invoices = await loadInvoicesForShipment(req.params.shipmentId);
       invoices.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
@@ -11437,7 +11545,7 @@ async function startServer() {
   });
 
   // Create a DRAFT invoice (pricing computed server-side).
-  app.post("/api/cost-statements/:shipmentId/invoices", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.create"), async (req, res) => {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
@@ -11480,7 +11588,7 @@ async function startServer() {
   });
 
   // Edit a DRAFT invoice (recompute pricing; immutable once issued).
-  app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requireCanWriteCostStatements, async (req, res) => {
+  app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requirePermission("invoices.editDraft"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
@@ -11514,7 +11622,7 @@ async function startServer() {
   });
 
   // Issue a draft invoice — snapshots the bank account; becomes immutable.
-  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requirePermission("invoices.issue"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
@@ -11559,7 +11667,7 @@ async function startServer() {
   });
 
   // Cancel an issued invoice (reason required; never deletes).
-  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requirePermission("invoices.cancel"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
@@ -11619,7 +11727,7 @@ async function startServer() {
     (typeof req.body?.company === "string" && req.body.company) || "";
 
   // Outstanding invoices for a customer (for allocation).
-  app.get("/api/customer-accounts/invoices", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/invoices", requirePermission("customerPayments.view"), async (req, res) => {
     try {
       const company = readCompany(req);
       if (!company) return res.status(400).json({ error: "A customer company is required." });
@@ -11632,7 +11740,7 @@ async function startServer() {
   });
 
   // Payments + per-currency account summary for a customer.
-  app.get("/api/customer-accounts/payments", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/payments", requirePermission("customerPayments.view"), async (req, res) => {
     try {
       const company = readCompany(req);
       if (!company) return res.status(400).json({ error: "A customer company is required." });
@@ -11647,7 +11755,7 @@ async function startServer() {
 
   // Record a customer payment. allocationMode: "auto" (oldest-first) or
   // "manual" (body.allocations). Overpayment is retained as advance credit.
-  app.post("/api/customer-accounts/payments", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/customer-accounts/payments", requirePermission("customerPayments.create"), async (req, res) => {
     try {
       const body = req.body || {};
       const company = readCompany(req);
@@ -11768,7 +11876,7 @@ async function startServer() {
   // across instances (item 4): ONE Firestore transaction restores this
   // payment's prior allocations to their invoice ledgers, validates + applies
   // the new allocations, and writes the payment + all touched ledgers together.
-  app.post("/api/customer-accounts/payments/:paymentId/allocate", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/customer-accounts/payments/:paymentId/allocate", requirePermission("customerPayments.allocate"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
       if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
@@ -11841,7 +11949,7 @@ async function startServer() {
   // allocations from the referenced invoice ledgers happen in ONE Firestore
   // transaction, so ledger and payment can never diverge. A repeat on an
   // already-reversed payment replays 200. Original allocations are preserved.
-  app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/customer-accounts/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
@@ -11889,7 +11997,7 @@ async function startServer() {
   // Customer Account Statement — customer-facing ledger (opening balance,
   // invoices as debits, payments as credits, running + closing balance),
   // per currency and date range. Distinct from the internal Cost Statement.
-  app.get("/api/customer-accounts/statement", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/statement", requirePermission("customerStatements.view"), async (req, res) => {
     try {
       const company = readCompany(req);
       if (!company) return res.status(400).json({ error: "A customer company is required." });
@@ -11914,7 +12022,7 @@ async function startServer() {
   // active receipt per payment). Snapshots company branding + bank; lists
   // the MAR invoices covered. Voided (never deleted) when the payment is
   // reversed (handled in the reverse route above). Internal-only routes.
-  app.post("/api/customer-accounts/payments/:paymentId/receipt", requireCanWriteCostStatements, async (req, res) => {
+  app.post("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.create"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
       if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
@@ -11970,7 +12078,7 @@ async function startServer() {
       res.status(500).json({ error: "Failed to issue receipt." });
     }
   });
-  app.get("/api/customer-accounts/payments/:paymentId/receipt", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.view"), async (req, res) => {
     try {
       const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
       const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued")
@@ -12007,13 +12115,13 @@ async function startServer() {
   }
   const isTemplateDocType = (v: string): v is TemplateDocType => (TEMPLATE_DOC_TYPES as readonly string[]).includes(v);
 
-  app.get("/api/admin/accounting/templates/:docType", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/templates/:docType", requirePermission("accountingTemplates.view"), async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
       res.json({ config: await loadTemplateConfig(req.params.docType), defaults: defaultTemplateConfig(req.params.docType) });
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load template." }); }
   });
-  app.put("/api/admin/accounting/templates/:docType", requireSuperAdmin, async (req, res) => {
+  app.put("/api/admin/accounting/templates/:docType", requirePermission("accountingTemplates.publish"), async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
       const docType = req.params.docType;
@@ -12033,14 +12141,14 @@ async function startServer() {
       res.status(outcome.http).json(outcome.body);
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to save template." }); }
   });
-  app.get("/api/admin/accounting/templates/:docType/versions", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/admin/accounting/templates/:docType/versions", requirePermission("accountingTemplates.view"), async (req, res) => {
     try {
       const snap = await getDocs(collection(db, "templateConfigVersions"));
       const versions = snap.docs.map((d) => d.data() as any).filter((v) => v.docType === req.params.docType).sort((a, b) => b.version - a.version);
       res.json({ versions });
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load versions." }); }
   });
-  app.post("/api/admin/accounting/templates/:docType/restore/:version", requireSuperAdmin, async (req, res) => {
+  app.post("/api/admin/accounting/templates/:docType/restore/:version", requirePermission("accountingTemplates.restore"), async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
       const docType = req.params.docType;
@@ -12082,7 +12190,7 @@ async function startServer() {
   };
 
   // Customer Invoice PDF (draft preview or issued — the badge/watermark differ).
-  app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/invoices/:invoiceId/pdf", requirePermission("invoices.print"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
@@ -12101,7 +12209,7 @@ async function startServer() {
   });
 
   // Payment Receipt PDF.
-  app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/payments/:paymentId/receipt/pdf", requirePermission("receipts.print"), async (req, res) => {
     try {
       const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
       const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued") || allReceipts.find((r) => r.paymentId === req.params.paymentId);
@@ -12118,7 +12226,7 @@ async function startServer() {
   });
 
   // Customer Account Statement PDF.
-  app.get("/api/customer-accounts/statement/pdf", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/customer-accounts/statement/pdf", requirePermission("customerStatements.export"), async (req, res) => {
     try {
       const company = readCompany(req);
       if (!company) return res.status(400).json({ error: "A customer company is required." });
@@ -12136,7 +12244,7 @@ async function startServer() {
   });
 
   // Vendor Payment Voucher PDF (INTERNAL only).
-  app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requireCanViewCostStatements, async (req, res) => {
+  app.get("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/voucher", requirePermission("vendorPayments.printVoucher"), async (req, res) => {
     try {
       const snap = await getDoc(doc(db, "vendorPayments", req.params.paymentId));
       if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
@@ -12157,7 +12265,7 @@ async function startServer() {
 
   // Template preview — renders a SAMPLE document with the submitted (draft)
   // config so the user can preview before saving/publishing. Never persists.
-  app.post("/api/admin/accounting/templates/:docType/preview", requireCanViewCostStatements, async (req, res) => {
+  app.post("/api/admin/accounting/templates/:docType/preview", requirePermission("accountingTemplates.view"), async (req, res) => {
     try {
       if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
       const config = validateTemplateConfig(req.params.docType, req.body || {});

@@ -155,25 +155,16 @@ export function canWriteCostStatements(adminType: AdminType | undefined): boolea
 // Accounting writers (super + accounts): create/edit costs, record vendor
 // payments + reversals, set profit + issue/cancel invoices, record customer
 // payments + allocation/reversal, generate receipts, view statements.
-export const canManageAccounting = canWriteCostStatements;
-export const canRecordVendorPayment = canWriteCostStatements;
-export const canReverseVendorPayment = canWriteCostStatements;
-export const canSetInvoiceProfit = canWriteCostStatements;
-export const canIssueInvoice = canWriteCostStatements;
-export const canRecordCustomerPayment = canWriteCostStatements;
-export const canAllocatePayment = canWriteCostStatements;
-export const canReversePaymentAllocation = canWriteCostStatements;
-export const canCreateReceipt = canWriteCostStatements;
-export const canViewCustomerStatement = canViewCostStatements;
-
-// Template / bank / structural settings are Super-Admin only (never
-// ordinary employees) — mirrors requireSuperAdmin on those routes.
-export const canManageBankAccounts = isSuperAdmin;
-export const canManageTemplates = isSuperAdmin;
-export const canPublishTemplate = isSuperAdmin;
-export const canRestoreTemplateVersion = isSuperAdmin;
-export const canManageApprovalWorkflow = isSuperAdmin;
-export const canDecideReopening = isSuperAdmin;
+// NOTE (PR #140 review increment 4, item 12): the former broad accounting
+// aliases (canManageAccounting / canRecordVendorPayment / canIssueInvoice /
+// canAllocatePayment / canCreateReceipt / canManageBankAccounts /
+// canManageTemplates / …) that all mapped to the same adminType role check
+// were REMOVED. Accounting authorization now has ONE source of truth: the
+// granular permission registry + resolver in src/lib/accountingPermissions.ts
+// (hasPermission / resolveEffectivePermissions), enforced on the server via
+// requirePermission(<key>) and mirrored in the UI from the same effective
+// permission set. canViewCostStatements / canWriteCostStatements above remain
+// only as the coarse tab-visibility gates they always were.
 
 /**
  * Admin Data Fetch / AdminType Access Review (PR #58): GET /api/logs (and the

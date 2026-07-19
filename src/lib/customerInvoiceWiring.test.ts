@@ -12,11 +12,11 @@ const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
 
 describe("customer invoice routes — permissions + lifecycle", () => {
   it("reads require accounting view; create/edit/issue/cancel require accounting write", () => {
-    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/invoices", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requireCanWriteCostStatements');
+    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.view")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices", requirePermission("invoices.create")');
+    expect(SERVER).toContain('app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requirePermission("invoices.editDraft")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requirePermission("invoices.issue")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requirePermission("invoices.cancel")');
   });
   it("selling amount + profit are computed server-side via the pure module (never trusted from body)", () => {
     expect(SERVER).toContain("computeInvoiceSelling(");

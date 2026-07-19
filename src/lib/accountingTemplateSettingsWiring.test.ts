@@ -12,16 +12,16 @@ const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
 
 describe("template settings route permissions (Desktop is the source of truth)", () => {
   it("company profile: view = accounting viewers, write = Super Admin", () => {
-    expect(SERVER).toContain('app.get("/api/admin/accounting/company-profile", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.put("/api/admin/accounting/company-profile", requireSuperAdmin');
+    expect(SERVER).toContain('app.get("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.view")');
+    expect(SERVER).toContain('app.put("/api/admin/accounting/company-profile", requirePermission("accountingCompanyProfile.manage")');
   });
   it("bank accounts: read = accounting viewers, create/update = Super Admin", () => {
-    expect(SERVER).toContain('app.get("/api/admin/accounting/bank-accounts", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/admin/accounting/bank-accounts", requireSuperAdmin');
-    expect(SERVER).toContain('app.put("/api/admin/accounting/bank-accounts/:id", requireSuperAdmin');
+    expect(SERVER).toContain('app.get("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.view")');
+    expect(SERVER).toContain('app.post("/api/admin/accounting/bank-accounts", requirePermission("bankAccounts.manage")');
+    expect(SERVER).toContain('app.put("/api/admin/accounting/bank-accounts/:id", requirePermission("bankAccounts.manage")');
   });
   it("default-bank suggestion is readable by accounting viewers (Desktop + Mobile invoice view)", () => {
-    expect(SERVER).toContain('app.get("/api/admin/accounting/default-bank-account", requireCanViewCostStatements');
+    expect(SERVER).toContain('app.get("/api/admin/accounting/default-bank-account", requirePermission("bankAccounts.view")');
   });
 });
 

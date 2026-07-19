@@ -17,8 +17,8 @@ describe("template versioning + issued-document snapshots", () => {
     expect(SERVER).toContain('tx.set("accountingSettings", `template_${docType}`');
   });
   it("version history + restore routes exist (view/super-admin)", () => {
-    expect(SERVER).toContain('app.get("/api/admin/accounting/company-profile/versions", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/admin/accounting/company-profile/restore/:version", requireSuperAdmin');
+    expect(SERVER).toContain('app.get("/api/admin/accounting/company-profile/versions", requirePermission("accountingCompanyProfile.view")');
+    expect(SERVER).toContain('app.post("/api/admin/accounting/company-profile/restore/:version", requirePermission("accountingCompanyProfile.restore")');
   });
   it("issued invoices snapshot the company branding + version at issue time", () => {
     expect(SERVER).toContain("companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined");

@@ -12,9 +12,9 @@ const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
 
 describe("vendor payables routes — permissions + internal-only", () => {
   it("list/summary reads require accounting view; recording + reversal require accounting write", () => {
-    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/vendor-payments", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/vendor-payments", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requireCanWriteCostStatements');
+    expect(SERVER).toContain('app.get("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.view")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/vendor-payments", requirePermission("vendorPayments.create")');
+    expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requirePermission("vendorPayments.reverse")');
   });
   it("vendor payments never leak into customer/driver/public share views", () => {
     const SHARE = readFileSync(join(ROOT, "src", "lib", "publicShareView.ts"), "utf-8");

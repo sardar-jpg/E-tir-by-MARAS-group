@@ -6,8 +6,8 @@ const SERVER = readFileSync(join(__dirname, "..", "..", "server.ts"), "utf-8");
 
 describe("payment receipt routes", () => {
   it("issue requires accounting write; fetch requires accounting view", () => {
-    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/receipt", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.get("/api/customer-accounts/payments/:paymentId/receipt", requireCanViewCostStatements');
+    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.create")');
+    expect(SERVER).toContain('app.get("/api/customer-accounts/payments/:paymentId/receipt", requirePermission("receipts.view")');
   });
   it("issuance is idempotent + guarded via the pure module", () => {
     expect(SERVER).toContain("canIssueReceipt(");

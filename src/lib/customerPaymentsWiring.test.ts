@@ -11,11 +11,11 @@ const SERVER = readFileSync(join(ROOT, "server.ts"), "utf-8");
 
 describe("customer payment routes — permissions + lifecycle", () => {
   it("reads require accounting view; record/allocate/reverse require accounting write", () => {
-    expect(SERVER).toContain('app.get("/api/customer-accounts/invoices", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.get("/api/customer-accounts/payments", requireCanViewCostStatements');
-    expect(SERVER).toContain('app.post("/api/customer-accounts/payments", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/allocate", requireCanWriteCostStatements');
-    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements');
+    expect(SERVER).toContain('app.get("/api/customer-accounts/invoices", requirePermission("customerPayments.view")');
+    expect(SERVER).toContain('app.get("/api/customer-accounts/payments", requirePermission("customerPayments.view")');
+    expect(SERVER).toContain('app.post("/api/customer-accounts/payments", requirePermission("customerPayments.create")');
+    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/allocate", requirePermission("customerPayments.allocate")');
+    expect(SERVER).toContain('app.post("/api/customer-accounts/payments/:paymentId/reverse", requirePermission("customerPayments.reverse")');
   });
   it("allocation is enforced by the transaction-safe invoice ledger (item 2)", () => {
     // Cross-instance safety (increment 3): allocation math reads + writes the
