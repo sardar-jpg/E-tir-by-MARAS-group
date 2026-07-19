@@ -56,6 +56,7 @@ import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
 import VendorPayablesPanel from "./admin/VendorPayablesPanel";
 import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
+import MobileAccountingQuickActions from "./admin/mobile/MobileAccountingQuickActions";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -7229,26 +7230,37 @@ MARAS Group etir Center`;
                   onChanged={(next) => setSelectedCostStatement(next)}
                 />
 
-                {/* Vendor Payables (partial payments, reversal, filters) —
-                    Desktop-only, internal accounting. Lives inside the cost
-                    statement detail; server owns all figures. */}
-                <VendorPayablesPanel
+                {/* Phase 12 — Mobile: lightweight quick actions only (the
+                    full panels below are Desktop-only). Same APIs/permissions;
+                    Desktop stays the source of truth. */}
+                <MobileAccountingQuickActions
                   shipmentId={selectedCostStatement.shipmentId}
-                  items={selectedCostStatement.items || []}
-                  bankAccounts={bankAccounts}
                   canWrite={canViewCostStatements(resolvedAdminType)}
+                  sessionId={ownAdminId}
                   lang={lang}
                 />
 
-                {/* Customer Invoices — pricing/profit workflow, MAR-linked.
-                    Cost/profit stay internal; server owns the selling amount. */}
-                <CustomerInvoicePanel
-                  shipmentId={selectedCostStatement.shipmentId}
-                  currency={(selectedCostStatement.agreedCurrency || selectedCostStatement.currency) as any}
-                  bankAccounts={bankAccounts}
-                  canWrite={canViewCostStatements(resolvedAdminType)}
-                  lang={lang}
-                />
+                {/* Desktop-only full accounting panels (hidden on mobile so the
+                    lightweight quick actions above are the mobile surface). */}
+                <div className="hidden lg:block space-y-4">
+                  {/* Vendor Payables (partial payments, reversal, filters). */}
+                  <VendorPayablesPanel
+                    shipmentId={selectedCostStatement.shipmentId}
+                    items={selectedCostStatement.items || []}
+                    bankAccounts={bankAccounts}
+                    canWrite={canViewCostStatements(resolvedAdminType)}
+                    lang={lang}
+                  />
+
+                  {/* Customer Invoices — pricing/profit workflow, MAR-linked. */}
+                  <CustomerInvoicePanel
+                    shipmentId={selectedCostStatement.shipmentId}
+                    currency={(selectedCostStatement.agreedCurrency || selectedCostStatement.currency) as any}
+                    bankAccounts={bankAccounts}
+                    canWrite={canViewCostStatements(resolvedAdminType)}
+                    lang={lang}
+                  />
+                </div>
 
                 {/* Section header */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
