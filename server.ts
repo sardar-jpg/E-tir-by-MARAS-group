@@ -94,7 +94,7 @@ import {
   isDuplicatePayment, summarizeCustomerAccount,
 } from "./src/lib/customerPayments";
 import { canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
-import { requireClientId, indexClientsByCompany, resolveRecordClientId } from "./src/lib/customerIdentity";
+import { requireClientId } from "./src/lib/customerIdentity";
 import { normalizeIdempotencyKey, scopeIdempotencyKey, fingerprintPayload, resolveIdempotency } from "./src/lib/idempotency";
 import { nextAccountingSequence, receiptSequenceDocId, accountingYearOf, formatReceiptNumber, type AccountingSequenceDoc } from "./src/lib/accountingSequence";
 import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriority } from "./src/lib/expensePriority";
@@ -11364,19 +11364,6 @@ async function startServer() {
     }
   });
 
-  // Ensure the vendor payable ledger exists for a cost item, seeded
-  // deterministically from source (item cost + active payments). This one-time
-  // bootstrap (idempotent — the same base value every time) lets the
-  // transaction below read a ledger by ref; the CONTENDED increment happens
-  // inside runAccountingTransaction, never here.
-  async function ensureVendorLedger(shipmentId: string, item: Pick<CostItem, "id" | "totalAmount" | "currency">, nowIso: string): Promise<void> {
-    const id = vendorLedgerId(shipmentId, item.id);
-    const snap = await getDoc(doc(db, "vendorPayableLedgers", id));
-    if (snap.exists()) return;
-    const payments = await loadVendorPaymentsForShipment(shipmentId);
-    await setDoc(doc(db, "vendorPayableLedgers", id), cleanUndefined(buildVendorLedger({ shipmentId, item, payments, nowIso })));
-  }
-
   // Record a vendor payment (partial payments allowed). Overpayment is
   // prevented by Firestore itself: the per-cost-item ledger is read + written
   // inside runAccountingTransaction, so two instances can never both commit
@@ -11402,11 +11389,13 @@ async function startServer() {
       }
       const now = new Date().toISOString();
       const ledgerKey = vendorLedgerId(req.params.shipmentId, item.id);
-      await ensureVendorLedger(req.params.shipmentId, item, now);
       const paymentId = `vpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const result = await runAccountingTransaction(async (tx) => {
+        // The ledger is created lazily on the first payment for a cost item
+        // (new items start at paidAmount 0). The CONTENDED increment is inside
+        // this transaction; Firestore serializes concurrent first-payments.
         let ledger = await tx.get<VendorPayableLedger>("vendorPayableLedgers", ledgerKey);
-        if (!ledger) ledger = buildVendorLedger({ shipmentId: req.params.shipmentId, item, payments: existing, nowIso: now });
+        if (!ledger) ledger = buildVendorLedger({ shipmentId: req.params.shipmentId, item, payments: [], nowIso: now });
         const decision = decideVendorPayment({ ledger, amount: Number(body.amount), currency: body.currency, allowOverpayment });
         if (!decision.ok) return { http: 400, body: { code: decision.code, error: decision.error } };
         const payment: VendorPaymentTransaction = {
@@ -11482,13 +11471,6 @@ async function startServer() {
     const snap = await getDocs(collection(db, "customerInvoices"));
     return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.shipmentId === shipmentId);
   }
-  // Phase 1 (customer isolation): a companyName → immutable clientId index,
-  // used to require identity on new writes and to resolve legacy records
-  // (never using companyName as a permanent identity).
-  async function loadClientsIndex(): Promise<Map<string, string>> {
-    const snap = await getDocs(collection(db, "clients"));
-    return indexClientsByCompany(snap.docs.map((d) => d.data() as Client));
-  }
   // Build an invoice record from the statement + a validated pricing body.
   function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
     const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
@@ -11553,19 +11535,11 @@ async function startServer() {
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
       if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
-      // Phase 1: a NEW invoice must carry an immutable clientId. Prefer the
-      // one supplied by the client; otherwise resolve it from the customers
-      // list by the shipment's companyName. Never fall back to companyName as
-      // identity — reject if it cannot be established.
-      const invoiceCompany = stmt.companyName || shipment?.companyName || "";
-      let resolvedClientId = "";
+      // A NEW invoice MUST carry an immutable clientId (production structure —
+      // no companyName-based legacy resolution). Rejected if absent.
       const direct = requireClientId((req.body || {}).clientId);
-      if (direct.ok) resolvedClientId = direct.clientId;
-      else {
-        const legacy = resolveRecordClientId({ companyName: invoiceCompany }, await loadClientsIndex());
-        if (!legacy.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required and could not be resolved from the customer list." });
-        resolvedClientId = legacy.clientId;
-      }
+      if (!direct.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required." });
+      const resolvedClientId = direct.clientId;
       const existing = await loadInvoicesForShipment(req.params.shipmentId);
       const now = new Date().toISOString();
       const invoice: CustomerInvoice = {
@@ -11653,10 +11627,10 @@ async function startServer() {
         issuedAt: now, issuedBy: req.session!.id,
       };
       await setDoc(doc(db, "customerInvoices", issued.id), cleanUndefined(issued));
-      // Initialize the invoice allocation ledger (item 2). Rebuild from source
-      // so a re-issue never loses any allocations already recorded.
-      const priorPayments = await loadPaymentsForCompany(issued.companyName);
-      await setDoc(doc(db, "invoiceAccountingLedgers", issued.id), cleanUndefined(buildInvoiceLedger(issued, priorPayments, now)));
+      // Initialize the invoice allocation ledger (item 2) to zero allocations.
+      // A freshly issued invoice has no allocations yet; payments allocate against
+      // it afterwards inside runAccountingTransaction, which advances the ledger.
+      await setDoc(doc(db, "invoiceAccountingLedgers", issued.id), cleanUndefined(initInvoiceLedgerFromInvoice(issued, now)));
       await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
       res.json({ invoice: cleanUndefined(issued) });
     } catch (err) {
@@ -11713,15 +11687,6 @@ async function startServer() {
     const snap = await getDocs(collection(db, "customerPayments"));
     return snap.docs.map((d) => d.data() as CustomerPayment).filter((p) => p.companyName === companyName);
   }
-  // Ensure an invoice's allocation ledger exists, seeded deterministically from
-  // source (invoice + active payments' allocations). One-time bootstrap so the
-  // allocation transaction can read the ledger by ref; the CONTENDED allocation
-  // math happens inside runAccountingTransaction, never here.
-  async function ensureInvoiceLedger(invoice: CustomerInvoice, payments: CustomerPayment[], nowIso: string): Promise<void> {
-    const snap = await getDoc(doc(db, "invoiceAccountingLedgers", invoice.id));
-    if (snap.exists()) return;
-    await setDoc(doc(db, "invoiceAccountingLedgers", invoice.id), cleanUndefined(buildInvoiceLedger(invoice, payments, nowIso)));
-  }
   const readCompany = (req: express.Request): string =>
     (typeof req.query.company === "string" && req.query.company) ||
     (typeof req.body?.company === "string" && req.body.company) || "";
@@ -11767,34 +11732,26 @@ async function startServer() {
       const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
       const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
       const now = new Date().toISOString();
-      // Resolve the immutable payer clientId (Phase 1) — reads outside the tx
-      // (identity is not the contended resource).
-      let payerClientId = "";
+      // A NEW payment MUST carry an immutable clientId (production structure —
+      // no companyName-based legacy resolution). Rejected if absent.
       const directId = requireClientId(body.clientId);
-      if (directId.ok) payerClientId = directId.clientId;
-      else {
-        const legacy = resolveRecordClientId({ companyName: company }, await loadClientsIndex());
-        if (!legacy.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required and could not be resolved from the customer list." });
-        payerClientId = legacy.clientId;
-      }
+      if (!directId.ok) return res.status(400).json({ code: "unresolved_identity", error: "A customer clientId is required." });
+      const payerClientId = directId.clientId;
       const invoicesAll = await loadInvoicesForCompany(company);
       const existing = await loadPaymentsForCompany(company);
       if (isDuplicatePayment(existing, { companyName: company, amount, paymentDate, reference, currency })) {
         return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
       }
       const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
-      // Determine target invoices, then ensure their ledgers exist (bootstrap
-      // from source, deterministic + idempotent) so the transaction can read
-      // them by ref — the CONTENDED allocation math happens inside the tx.
+      // Determine target invoices. Their ledgers are read by ref inside the
+      // transaction; a missing ledger is initialized to zero allocations there
+      // (initInvoiceLedgerFromInvoice), and the CONTENDED allocation math is
+      // done inside runAccountingTransaction — never before it.
       const manual = body.allocationMode === "manual" && Array.isArray(body.allocations);
       const ownIssued = invoicesAll
         .filter((i) => (i.clientId || "") === payerClientId && i.status === "issued")
         .sort((a, b) => (a.issuedAt || a.createdAt || "").localeCompare(b.issuedAt || b.createdAt || "") || a.id.localeCompare(b.id));
       const targetIds: string[] = manual ? body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
-      for (const id of targetIds) {
-        const inv = invoiceById.get(id);
-        if (inv) await ensureInvoiceLedger(inv, existing, now);
-      }
       // Bank snapshot (outside tx — not contended).
       let bankAccountSnapshot: string | undefined;
       if (typeof body.bankAccountId === "string" && body.bankAccountId) {
@@ -11886,7 +11843,6 @@ async function startServer() {
       const company = paymentPre.companyName;
       const payerClientId = paymentPre.clientId || "";
       const invoicesAll = await loadInvoicesForCompany(company);
-      const existing = await loadPaymentsForCompany(company);
       const invoiceById = new Map(invoicesAll.map((i) => [i.id, i]));
       const manual = req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations);
       const ownIssued = invoicesAll
@@ -11895,7 +11851,6 @@ async function startServer() {
       const oldIds = (paymentPre.allocations || []).map((a) => a.invoiceId);
       const newIds = manual ? req.body.allocations.map((a: any) => a.invoiceId) : ownIssued.map((i) => i.id);
       const allIds = [...new Set([...oldIds, ...newIds])];
-      for (const id of allIds) { const inv = invoiceById.get(id); if (inv) await ensureInvoiceLedger(inv, existing, now); }
       const invoiceNumbers = new Map(invoicesAll.map((i) => [i.id, i.invoiceNumber]));
       const result = await runAccountingTransaction(async (tx) => {
         const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
