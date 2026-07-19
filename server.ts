@@ -93,9 +93,11 @@ import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
 } from "./src/lib/customerPayments";
-import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
+import { canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { requireClientId, indexClientsByCompany, resolveRecordClientId } from "./src/lib/customerIdentity";
 import { normalizeIdempotencyKey, scopeIdempotencyKey, fingerprintPayload, resolveIdempotency } from "./src/lib/idempotency";
+import { nextAccountingSequence, receiptSequenceDocId, accountingYearOf, formatReceiptNumber, type AccountingSequenceDoc } from "./src/lib/accountingSequence";
+import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriority } from "./src/lib/expensePriority";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
@@ -1825,6 +1827,59 @@ function getShipmentSequenceCounterMemory(): InMemorySequenceCounter {
     mStore.shipmentSequenceCounter = new InMemorySequenceCounter(mStore.shipments.length);
   }
   return mStore.shipmentSequenceCounter;
+}
+
+// Receipt numbering (PR #140 review, item 6): collision-safe per-YEAR
+// sequence handed out from counters/receipt-<year>, mirroring the shipment
+// sequence allocator above. Firestore mode uses a runTransaction on the
+// counter doc; memory mode uses a per-year single-threaded counter (no await
+// between read and increment) so two concurrent receipt creations can never
+// receive the same number. Returns the 1-based number to format.
+const receiptSequenceCountersMemory = new Map<number, InMemorySequenceCounter>();
+function getReceiptSequenceCounterMemory(year: number): InMemorySequenceCounter {
+  let c = receiptSequenceCountersMemory.get(year);
+  if (!c) {
+    // Bootstraps from receipts already issued for this year so numbering
+    // continues after a restart instead of colliding with existing numbers.
+    const store = (getMemoryStore().paymentReceipts as PaymentReceipt[]) || [];
+    const suffix = `RCPT-${year}-`;
+    const highest = store.reduce((max, r) => {
+      if (typeof r.receiptNumber === "string" && r.receiptNumber.startsWith(suffix)) {
+        const n = parseInt(r.receiptNumber.slice(suffix.length), 10);
+        if (Number.isFinite(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    c = new InMemorySequenceCounter(highest + 1); // next() returns `highest+1` first
+    receiptSequenceCountersMemory.set(year, c);
+  }
+  return c;
+}
+async function allocateNextReceiptSequence(year: number): Promise<number> {
+  if (useMemoryFallback || !db) {
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getReceiptSequenceCounterMemory(year).next();
+  }
+  const counterRef = (db as any).collection("counters").doc(receiptSequenceDocId(year));
+  try {
+    return await withTimeout(
+      (db as any).runTransaction(async (tx: any) => {
+        const snap = await tx.get(counterRef);
+        const data = snap.exists ? (snap.data() as AccountingSequenceDoc) : undefined;
+        const { issued, next } = nextAccountingSequence(data);
+        tx.set(counterRef, next, { merge: true });
+        return issued;
+      }),
+      5000,
+      "Firestore receipt sequence transaction timed out"
+    );
+  } catch (error) {
+    console.warn("Firestore receipt sequence transaction failed or timed out. Switching to Memory Fallback.", error);
+    useMemoryFallback = true;
+    scheduleFirestoreRecovery(30_000);
+    if (STRICT_PERSISTENCE) throw new ServiceUnavailableError();
+    return getReceiptSequenceCounterMemory(year).next();
+  }
 }
 
 async function allocateNextShipmentSequence(): Promise<number> {
@@ -10290,6 +10345,45 @@ async function startServer() {
     return { httpStatus: outcome.httpStatus, body: outcome.body };
   }
 
+  /**
+   * Generic single-document atomic mutation (PR #140 review increment 2).
+   * Reads doc `id` from `collectionName`, runs the pure/synchronous `decide`
+   * against the FRESH value, and conditionally writes — Firestore mode inside
+   * one runTransaction (serialized commits, the loser re-reads the winner's
+   * write), memory mode as a synchronous read→decide→write with no await in
+   * between (single-threaded serialization). `decide` MUST be pure and must
+   * return the full record to persist in `save`. Used for atomic + idempotent
+   * reversals, default-bank exclusivity, etc.
+   */
+  async function mutateDocumentAtomic<T extends Record<string, any>>(
+    collectionName: string,
+    id: string,
+    decide: (current: T | null) => { httpStatus: number; body: any; save?: T }
+  ): Promise<{ httpStatus: number; body: any }> {
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      const ref = doc(db, collectionName, id);
+      return await withTimeout(
+        (db as any).runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const current = snap.exists ? (snap.data() as T) : null;
+          const outcome = decide(current);
+          if (outcome.save) tx.set(ref, cleanUndefined(outcome.save));
+          return { httpStatus: outcome.httpStatus, body: outcome.body };
+        }),
+        8000,
+        "Accounting document transaction timed out"
+      );
+    }
+    const store = (getMemoryStore() as any)[collectionName] as any[];
+    const idx = Array.isArray(store) ? store.findIndex((r) => r.id === id) : -1;
+    const current = idx >= 0 ? (store[idx] as T) : null;
+    const outcome = decide(current);
+    if (outcome.save && Array.isArray(store)) {
+      if (idx >= 0) store[idx] = outcome.save; else store.push(outcome.save);
+    }
+    return { httpStatus: outcome.httpStatus, body: outcome.body };
+  }
+
   /** Super + Accounts admins to notify when a statement is finalized. */
   function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
     const ids = new Set<string>();
@@ -10918,7 +11012,9 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
-      const payments = await loadVendorPaymentsForShipment(req.params.shipmentId);
+      // Normalize legacy paymentMethod:"urgent" records into the priority model
+      // on read (item 12) without ever rewriting the invalid stored value.
+      const payments = (await loadVendorPaymentsForShipment(req.params.shipmentId)).map(normalizeExpensePriority);
       const items = (stmt.items as CostItem[]) || [];
       const summaries = items.map((it) => summarizeVendorPayable(it, payments));
       res.json({ payments, summaries });
@@ -10964,7 +11060,10 @@ async function startServer() {
         amount: v.amount,
         currency: item!.currency,
         paymentDate,
-        paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.slice(0, 60) : "",
+        // Urgency is a priority, never a payment method (item 12): "urgent" is
+        // stripped from the method and recorded as priority instead.
+        paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+        priority: resolveRequestedPriority(body) === "urgent" || String(body.paymentMethod || "").toLowerCase() === "urgent" ? "urgent" : "normal",
         bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
         bankAccountSnapshot,
         reference: reference || undefined,
@@ -10987,20 +11086,29 @@ async function startServer() {
   });
 
   // Reverse a vendor payment (never deletes; requires a reason). Desktop-only.
+  // Atomic + idempotent (item 5): decided against the FRESH record inside a
+  // single-document transaction, so concurrent reversals serialize and a
+  // repeat on an already-reversed payment replays idempotently (200).
   app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
     try {
-      const snap = await getDoc(doc(db, "vendorPayments", req.params.paymentId));
-      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
-      const payment = snap.data() as VendorPaymentTransaction;
-      if (payment.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Payment not found for this statement." });
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
-      const decision = canReverseVendorPayment(payment, reason);
-      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
       const now = new Date().toISOString();
-      const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: req.session!.id, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-      await setDoc(doc(db, "vendorPayments", payment.id), cleanUndefined(reversed));
-      await logActivity("", "Accounting", req.session!.id, `Vendor payment reversed for ${payment.shipmentNumber} (${payment.amount} ${payment.currency})`, "", "");
-      res.json({ payment: cleanUndefined(reversed) });
+      const actor = req.session!.id;
+      let didReverse = false;
+      const result = await mutateDocumentAtomic<VendorPaymentTransaction>("vendorPayments", req.params.paymentId, (payment) => {
+        if (!payment) return { httpStatus: 404, body: { error: "Payment not found." } };
+        if (payment.shipmentId !== req.params.shipmentId) return { httpStatus: 404, body: { error: "Payment not found for this statement." } };
+        if (payment.status === "reversed") return { httpStatus: 200, body: { payment: cleanUndefined(payment), idempotent: true } }; // idempotent replay
+        const decision = canReverseVendorPayment(payment, reason);
+        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        didReverse = true;
+        const reversed: VendorPaymentTransaction = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+        return { httpStatus: 200, body: { payment: cleanUndefined(reversed) }, save: reversed };
+      });
+      if (result.httpStatus === 200 && didReverse) {
+        await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] vendor payment reversal failed:", err);
@@ -11328,7 +11436,7 @@ async function startServer() {
         companyName: company,
         clientId: payerClientId,
         amount, currency, paymentDate,
-        paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.slice(0, 60) : "",
+        paymentMethod: sanitizePaymentMethod(body.paymentMethod),
         bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
         bankAccountSnapshot,
         reference: reference || undefined,
@@ -11380,27 +11488,39 @@ async function startServer() {
     }
   });
 
-  // Reverse a customer payment (reason required; never deletes).
+  // Reverse a customer payment (reason required; never deletes). Atomic +
+  // idempotent (item 3): the reversal is decided against the FRESH record
+  // inside a single-document transaction, so two concurrent reversals
+  // serialize — one flips active→reversed, the other re-reads "reversed" and
+  // replays idempotently (200) instead of writing twice or erroring.
   app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
     try {
-      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
-      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
-      const payment = snap.data() as CustomerPayment;
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
-      const decision = canReversePayment(payment, reason);
-      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
       const now = new Date().toISOString();
-      const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: req.session!.id, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(reversed));
-      // Void any issued receipt for this payment (never delete).
-      const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
-      for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
-        if (r.paymentId === payment.id && r.status === "issued") {
-          await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: req.session!.id, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+      const actor = req.session!.id;
+      let didReverse = false;
+      const result = await mutateDocumentAtomic<CustomerPayment>("customerPayments", req.params.paymentId, (payment) => {
+        if (!payment) return { httpStatus: 404, body: { error: "Payment not found." } };
+        if (payment.status === "reversed") return { httpStatus: 200, body: { payment: cleanUndefined(payment), idempotent: true } }; // idempotent replay
+        const decision = canReversePayment(payment, reason);
+        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        didReverse = true;
+        const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+        return { httpStatus: 200, body: { payment: cleanUndefined(reversed) }, save: reversed };
+      });
+      if (result.httpStatus === 200 && didReverse) {
+        // Void any issued receipt for this payment (never delete). Different
+        // collection than the reversed payment; safe + idempotent (voiding an
+        // already-void receipt is a no-op) so a retry can't corrupt state.
+        const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
+        for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
+          if (r.paymentId === req.params.paymentId && r.status === "issued") {
+            await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+          }
         }
+        await logActivity("", "Accounting", actor, `Customer payment reversed (${req.params.paymentId})`, "", "");
       }
-      await logActivity("", "Accounting", req.session!.id, `Customer payment reversed for ${payment.companyName} (${payment.amount} ${payment.currency})`, "", "");
-      res.json({ payment: cleanUndefined(reversed) });
+      res.status(result.httpStatus).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to reverse customer payment." });
@@ -11457,12 +11577,15 @@ async function startServer() {
       });
       if (rcptIdem.kind === "replay") return res.status(200).json({ receipt: cleanUndefined(rcptIdem.record), idempotent: true });
       if (rcptIdem.kind === "conflict") return res.status(409).json({ code: rcptIdem.code, error: rcptIdem.error });
-      const companyReceiptCount = allReceipts.filter((r) => r.companyName === payment.companyName).length;
       const now = new Date().toISOString();
+      // Collision-safe, transaction-backed per-year receipt number
+      // (RCPT-YYYY-000001) — never a non-atomic count of existing receipts.
+      const receiptYear = accountingYearOf(now);
+      const receiptSeq = await allocateNextReceiptSequence(receiptYear);
       const companySnapshot = await loadCompanyProfile();
       const receipt: PaymentReceipt = {
         id: `rcpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        receiptNumber: buildReceiptNumber(companyReceiptCount + 1),
+        receiptNumber: formatReceiptNumber(receiptYear, receiptSeq),
         paymentId: payment.id,
         companyName: payment.companyName,
         clientId: payment.clientId,

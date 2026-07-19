@@ -12,7 +12,10 @@ describe("payment receipt routes", () => {
   it("issuance is idempotent + guarded via the pure module", () => {
     expect(SERVER).toContain("canIssueReceipt(");
     expect(SERVER).toContain("findActiveReceiptForPayment(");
-    expect(SERVER).toContain("buildReceiptNumber(");
+  });
+  it("receipt numbers come from a collision-safe transaction-backed sequence (item 6)", () => {
+    expect(SERVER).toContain("allocateNextReceiptSequence(");
+    expect(SERVER).toContain("formatReceiptNumber(");
   });
   it("reversing a payment voids its receipt (never deletes)", () => {
     expect(SERVER).toContain('status: "void"');

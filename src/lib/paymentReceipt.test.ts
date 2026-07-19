@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment, buildReceiptView } from "./paymentReceipt";
+import { canIssueReceipt, findActiveReceiptForPayment, buildReceiptView } from "./paymentReceipt";
 import type { CustomerPayment, PaymentReceipt } from "../types";
 
 const payment = (over: Partial<CustomerPayment> = {}): CustomerPayment => ({
@@ -12,11 +12,7 @@ const receipt = (over: Partial<PaymentReceipt> = {}): PaymentReceipt => ({
   status: "issued", issuedBy: "u", issuedAt: "t", ...over,
 });
 
-describe("receipt number + issue guards", () => {
-  it("numbers by per-company sequence, zero-padded", () => {
-    expect(buildReceiptNumber(1)).toBe("RCPT-0001");
-    expect(buildReceiptNumber(42)).toBe("RCPT-0042");
-  });
+describe("receipt issue guards", () => {
   it("only active payments can be receipted", () => {
     expect(canIssueReceipt(payment()).ok).toBe(true);
     expect(canIssueReceipt(payment({ status: "reversed" })).ok).toBe(false);

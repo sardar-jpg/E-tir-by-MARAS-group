@@ -8,10 +8,11 @@
  */
 import type { CustomerPayment, PaymentReceipt } from "../types";
 
-/** Receipt document number derived from a per-company sequence. */
-export function buildReceiptNumber(sequenceForCompany: number): string {
-  return `RCPT-${String(sequenceForCompany).padStart(4, "0")}`;
-}
+// Receipt numbering moved to a collision-safe, transaction-backed per-year
+// sequence (accountingSequence.ts → formatReceiptNumber, "RCPT-YYYY-000001").
+// The former count-based buildReceiptNumber(sequenceForCompany) is removed:
+// deriving a number from a non-atomic read of how many receipts already
+// exist let two concurrent creations hand out the same number.
 
 export type ReceiptDecision = { ok: true } | { ok: false; code: string; error: string };
 

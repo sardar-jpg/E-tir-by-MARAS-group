@@ -90,7 +90,8 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
     const amt = Number(vp.amount);
     if (!vp.costItemId || !(amt > 0)) { setErr("Pick a cost line and amount."); return; }
     const it = items.find((i) => i.id === vp.costItemId);
-    const ok = await post(`/api/cost-statements/${shipmentId}/vendor-payments`, { costItemId: vp.costItemId, amount: amt, currency: it?.currency || stmt.currency, paymentMethod: "urgent", attachmentUrl: vp.proof || undefined });
+    // Urgency is a priority, not a payment method (PR #140 review, item 12).
+    const ok = await post(`/api/cost-statements/${shipmentId}/vendor-payments`, { costItemId: vp.costItemId, amount: amt, currency: it?.currency || stmt.currency, priority: "urgent", attachmentUrl: vp.proof || undefined });
     if (ok) setVp({ costItemId: "", amount: "", proof: "" });
   };
   const reject = async () => { const reason = window.prompt(tr("reject", lang) + ":"); if (reason && reason.trim()) await post(`/api/cost-statements/${shipmentId}/reject`, { reason, revision: stmt.revision || 1 }); };

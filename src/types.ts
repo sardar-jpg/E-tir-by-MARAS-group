@@ -504,6 +504,13 @@ export interface VendorPaymentTransaction {
   currency: Currency;
   paymentDate: string;
   paymentMethod: string;
+  /**
+   * Urgency is a PRIORITY, not a payment method (PR #140 review, item 12).
+   * Legacy records that stored paymentMethod:"urgent" are normalized on read
+   * (normalizeExpensePriority, expensePriority.ts); new writes never persist
+   * "urgent" as a method.
+   */
+  priority?: 'normal' | 'urgent';
   /** Paying bank/cash account (from Template Settings) + snapshot. */
   bankAccountId?: string;
   bankAccountSnapshot?: string;
