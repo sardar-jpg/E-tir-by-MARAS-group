@@ -566,6 +566,12 @@ export interface CostStatement {
   finalPdfGeneratedBy?: string;
   finalPdfStatementRevision?: number;
   finalVersions?: unknown[];
+  // Transient finalization reservation (PR #6 idempotency): set atomically
+  // with accountingStatus="finalizing" so a crash between PDF storage and
+  // closure is recoverable, and a retry resolves to the same identity.
+  finalizationKey?: string;
+  finalizingAt?: string;
+  finalizingBy?: string;
   reopenRequestedBy?: string;
   reopenRequestedAt?: string;
   reopenReason?: string;

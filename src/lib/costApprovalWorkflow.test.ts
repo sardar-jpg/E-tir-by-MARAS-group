@@ -4,7 +4,8 @@ import {
   isFinancialEditingAllowed, isImmutable, canSubmitForApproval, canApproveStage, canRejectStage,
   canRequestReopen, canDecideReopen, pendingStageForStatus, nextStatusAfterApproval, nextStageAfterApproval,
   appendHistory, approvalsForCycle, latestStageApprovals, buildFinalPdfFileName,
-  type CostApprovalWorkflowConfig, type ApprovalHistoryEntry,
+  finalizationKeyFor, hasFinalVersionFor, decideFinalization,
+  type CostApprovalWorkflowConfig, type ApprovalHistoryEntry, type FinalPdfVersion,
 } from "./costApprovalWorkflow";
 
 const ACTIVE = ["ops1", "acc1", "md1", "other"];
@@ -151,5 +152,45 @@ describe("final PDF filename sanitization", () => {
     // Path separators become '-'; dots are allowed in filenames.
     expect(buildFinalPdfFileName("../../etc/passwd", 1)).toBe("Cost-Statement_..-..-etc-passwd_Final_Rev-1.pdf");
     expect(buildFinalPdfFileName("../../etc/passwd", 1)).not.toContain("/");
+  });
+});
+
+describe("idempotent finalization primitives", () => {
+  it("finalizationKeyFor is deterministic on shipment + cycle + revision", () => {
+    expect(finalizationKeyFor("s1", 1, 2)).toBe("s1:1:2");
+    expect(finalizationKeyFor("s1", 1, 2)).toBe(finalizationKeyFor("s1", 1, 2));
+    expect(finalizationKeyFor("s1", 2, 2)).not.toBe(finalizationKeyFor("s1", 1, 2));
+    expect(finalizationKeyFor("s1", 1, 3)).not.toBe(finalizationKeyFor("s1", 1, 2));
+  });
+  it("hasFinalVersionFor matches on cycle AND revision", () => {
+    const versions = [{ cycleNumber: 1, statementRevision: 2 }] as FinalPdfVersion[];
+    expect(hasFinalVersionFor(versions, 1, 2)).toBe(true);
+    expect(hasFinalVersionFor(versions, 1, 3)).toBe(false);
+    expect(hasFinalVersionFor(versions, 2, 2)).toBe(false);
+    expect(hasFinalVersionFor(undefined, 1, 2)).toBe(false);
+  });
+  it("decideFinalization: a valid MD-stage approval begins finalization", () => {
+    const d = decideFinalization({ status: "pending_managing_director_approval", config: CONFIG, actorId: "md1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" });
+    expect(d.action).toBe("begin");
+    if (d.action === "begin") expect(d.key).toBe("s1:1:2");
+  });
+  it("decideFinalization: the wrong approver / wrong stage / stale revision are rejected", () => {
+    expect(decideFinalization({ status: "pending_managing_director_approval", config: CONFIG, actorId: "ops1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" }).action).toBe("reject");
+    expect(decideFinalization({ status: "pending_accounts_approval", config: CONFIG, actorId: "md1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" }).action).toBe("reject");
+    expect(decideFinalization({ status: "pending_managing_director_approval", config: CONFIG, actorId: "md1", actingRevision: 1, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" }).action).toBe("reject");
+  });
+  it("decideFinalization: an already-closed statement is an idempotent no-op", () => {
+    expect(decideFinalization({ status: "final_closed", config: CONFIG, actorId: "md1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: "s1:1:2", shipmentId: "s1" }).action).toBe("already_closed");
+  });
+  it("decideFinalization: only the owning MD may resume a matching in-progress finalization", () => {
+    const key = "s1:1:2";
+    // Same MD + same key → resume (crash recovery).
+    expect(decideFinalization({ status: "finalizing", config: CONFIG, actorId: "md1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" }).action).toBe("resume");
+    // A different actor cannot hijack an in-progress finalization.
+    const other = decideFinalization({ status: "finalizing", config: CONFIG, actorId: "acc1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" });
+    expect(other.action).toBe("reject");
+    if (other.action === "reject") expect(other.code).toBe("finalizing_in_progress");
+    // A mismatched key (someone else's finalization) is also rejected.
+    expect(decideFinalization({ status: "finalizing", config: CONFIG, actorId: "md1", actingRevision: 3, storedRevision: 3, cycle: 1, existingKey: "s1:1:2", shipmentId: "s1" }).action).toBe("reject");
   });
 });

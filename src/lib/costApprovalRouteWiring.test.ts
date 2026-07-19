@@ -34,26 +34,49 @@ describe("route permissions", () => {
 
 describe("actor identity is server-derived, decisions go through the pure module", () => {
   it("submit/approve/reject/reopen use pure guards and the session id, never body identity", () => {
-    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 2200);
+    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 2600);
     expect(SUBMIT).toContain("canSubmitForApproval(status)");
     expect(SUBMIT).toContain("isWorkflowConfigUsable(config");
     expect(SUBMIT).toContain("resolveWorkflowActorName(req.session!)");
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 5000);
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
     expect(APPROVE).toContain("canApproveStage({ status, config, actorId: req.session!.id");
     expect(APPROVE).not.toContain("req.body.actorId");
-    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 1800);
+    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 2400);
     expect(REJECT).toContain("canRejectStage({ status, config, actorId: req.session!.id");
   });
-  it("edit route is locked while pending or closed", () => {
-    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements', 3400);
+  it("every workflow transition re-reads + re-decides INSIDE an atomic mutation (BLOCKER 2)", () => {
+    // All five simple routes and the finalization route funnel their state
+    // change through mutateCostStatementAtomic, which re-reads the doc and
+    // runs the pure decision against that fresh value.
+    for (const route of ["submit", "approve", "reject", "reopen-request", "reopen-decision"]) {
+      const R = region(`app.post("/api/cost-statements/:shipmentId/${route}"`, 5200);
+      expect(R, `${route} must be atomic`).toContain("mutateCostStatementAtomic(req.params.shipmentId, (stmt)");
+    }
+    // The atomic helper re-reads inside a Firestore transaction and mirrors
+    // the same decision synchronously against the live memory array.
+    const HELPER = region("async function mutateCostStatementAtomic", 1400);
+    expect(HELPER).toContain("runTransaction");
+    expect(HELPER).toContain("tx.get(ref)");
+    expect(HELPER).toContain("getMemoryStore().costStatements");
+  });
+  it("edit route is locked while pending/finalizing/closed — enforced inside the atomic section", () => {
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requireCanWriteCostStatements', 4200);
+    expect(EDIT).toContain("assertEditableInAtomicSection");
     expect(EDIT).toContain("isFinancialEditingAllowed(currentStatus)");
-    expect(EDIT).toContain('code: "accounting_locked"');
+    expect(EDIT).toContain('code: lockErr.code');
+    // The guard runs inside BOTH the Firestore transaction (re-check on the
+    // tx-fresh doc) and the memory write (passed to the atomic helper).
+    expect(SERVER).toContain("assertEditableInAtomicSection(stored);");
+    expect(SERVER).toContain("buildFinal,\n          assertEditableInAtomicSection");
   });
 });
 
-describe("final closure integrity", () => {
-  it("the PDF is generated and stored BEFORE the statement is marked closed; failure returns 502 and does not close", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 5000);
+describe("final closure integrity + idempotent, crash-recoverable finalization", () => {
+  it("finalization reserves a 'finalizing' state, then stores the PDF BEFORE closing; failure returns 502 and does not close", () => {
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
+    // A deterministic finalization decision drives begin/resume/close.
+    expect(APPROVE).toContain("decideFinalization({");
+    expect(APPROVE).toContain('accountingStatus: "finalizing"');
     const finalizeAt = APPROVE.indexOf("finalizeCostStatementPdf(");
     const closedAt = APPROVE.indexOf('accountingStatus: "final_closed"');
     expect(finalizeAt).toBeGreaterThan(-1);
@@ -66,9 +89,10 @@ describe("final closure integrity", () => {
     expect(FINALIZE).toContain("renderFinalCostStatementPdf(model)");
     expect(FINALIZE).toContain("buildFinalPdfModel(");
   });
-  it("historical final PDF versions are appended, never overwritten", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 5000);
-    expect(APPROVE).toContain("finalVersions: [...((stmt.finalVersions");
+  it("the closure commit is idempotent — it dedupes on the key and appends versions, never overwrites", () => {
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
+    expect(APPROVE).toContain("hasFinalVersionFor(");
+    expect(APPROVE).toContain("[...((stmt.finalVersions");
   });
 });
 

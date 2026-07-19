@@ -21,6 +21,12 @@ export type AccountingStatus =
   | "pending_accounts_approval"
   | "pending_managing_director_approval"
   | "rejected_for_correction"
+  // Transient, server-owned state between the Managing Director's approval
+  // (committed atomically) and the final PDF being generated + stored +
+  // the closure committed. Locks editing like a pending state; a crash
+  // here leaves the statement recoverable (a retry resumes finalization
+  // idempotently). See finalizationKeyFor / decideFinalization.
+  | "finalizing"
   | "final_closed"
   | "reopen_requested"
   | "reopened";
@@ -89,6 +95,10 @@ export interface CostApprovalState {
   finalPdfGeneratedBy?: string;
   finalPdfStatementRevision?: number;
   finalVersions?: FinalPdfVersion[];
+  /** Transient finalization reservation identity (see decideFinalization). */
+  finalizationKey?: string;
+  finalizingAt?: string;
+  finalizingBy?: string;
   reopenRequestedBy?: string;
   reopenRequestedAt?: string;
   reopenReason?: string;
@@ -326,4 +336,64 @@ export function latestStageApprovals(
 export function buildFinalPdfFileName(shipmentNumber: string, revision: number): string {
   const safe = (shipmentNumber || "unknown").replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
   return `Cost-Statement_${safe}_Final_Rev-${revision}.pdf`;
+}
+
+// ── Idempotent finalization ──────────────────────────────────────────────
+/**
+ * Deterministic finalization identity: one Managing-Director closure is
+ * uniquely identified by shipment + cycle + revision. Retrying the same
+ * finalization (crash recovery, duplicate request) resolves to the SAME
+ * key, so the commit step can dedupe and never append a version twice or
+ * store two official PDFs for one approval.
+ */
+export function finalizationKeyFor(shipmentId: string, cycle: number, revision: number): string {
+  return `${shipmentId}:${cycle}:${revision}`;
+}
+
+/** True when a final version for this cycle+revision already exists (dedupe guard). */
+export function hasFinalVersionFor(versions: FinalPdfVersion[] | undefined, cycle: number, revision: number): boolean {
+  return (versions || []).some((v) => v.cycleNumber === cycle && v.statementRevision === revision);
+}
+
+export type FinalizationBeginDecision =
+  /** MD stage is validly pending — begin finalization (move to `finalizing`). */
+  | { action: "begin"; cycle: number; revision: number; key: string }
+  /** Already `finalizing` with the same key by the same approver — a retry; resume PDF+commit. */
+  | { action: "resume"; cycle: number; revision: number; key: string }
+  /** Already closed for this key — idempotent no-op. */
+  | { action: "already_closed" }
+  | { action: "reject"; code: string; error: string };
+
+/**
+ * Decide, from the CURRENT (transaction-fresh) statement, whether a
+ * Managing-Director approval should begin finalization, resume a crashed
+ * one, or is a no-op/rejection. `stmt` is the doc read inside the
+ * transaction — never a value loaded earlier.
+ */
+export function decideFinalization(params: {
+  status: AccountingStatus;
+  config: CostApprovalWorkflowConfig;
+  actorId: string;
+  actingRevision: number;
+  storedRevision: number;
+  cycle: number;
+  existingKey: string | undefined;
+  shipmentId: string;
+}): FinalizationBeginDecision {
+  const key = finalizationKeyFor(params.shipmentId, params.cycle, params.storedRevision);
+  if (params.status === "final_closed") return { action: "already_closed" };
+  if (params.status === "finalizing") {
+    // Only the assigned MD who owns this exact finalization may resume it.
+    if (params.existingKey === key && assigneeForStage(params.config, "managing_director") === params.actorId) {
+      return { action: "resume", cycle: params.cycle, revision: params.storedRevision, key };
+    }
+    return { action: "reject", code: "finalizing_in_progress", error: "This statement is being finalized. Please retry in a moment." };
+  }
+  // Otherwise it must be a valid, current MD-stage approval.
+  const guard = canApproveStage({ status: params.status, config: params.config, actorId: params.actorId, actingRevision: params.actingRevision, storedRevision: params.storedRevision });
+  if (!guard.ok) return { action: "reject", code: guard.code, error: guard.error };
+  if (pendingStageForStatus(params.status) !== "managing_director") {
+    return { action: "reject", code: "not_final_stage", error: "This statement is not at the Managing Director stage." };
+  }
+  return { action: "begin", cycle: params.cycle, revision: params.storedRevision, key };
 }
