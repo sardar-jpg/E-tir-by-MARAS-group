@@ -85,6 +85,10 @@ import {
 import {
   summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
 } from "./src/lib/vendorPayments";
+import {
+  computeInvoiceSelling, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
+  canCancelInvoice, buildInvoiceNumber,
+} from "./src/lib/customerInvoice";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -442,6 +446,8 @@ let memoryStore: {
   // Vendor Payables: one doc per vendor payment transaction (a cost item
   // may have several). Same PR #44 lesson — needs an entry here.
   vendorPayments: VendorPaymentTransaction[];
+  // Customer Invoices: one doc per invoice (a shipment may have several).
+  customerInvoices: CustomerInvoice[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -480,6 +486,7 @@ function getMemoryStore() {
       accountingSettings: [],
       bankAccounts: [],
       vendorPayments: [],
+      customerInvoices: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2045,8 +2052,10 @@ import {
   DriverActiveJobLock,
   CompanyProfile,
   BankAccount,
+  BankAccountSnapshot,
   VendorPaymentTransaction,
-  CostItem
+  CostItem,
+  CustomerInvoice
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -10915,6 +10924,188 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] vendor payment reversal failed:", err);
       res.status(500).json({ error: "Failed to reverse vendor payment." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Customer Invoices — issue a customer-facing selling document from a
+  // shipment's cost statement. Server owns the selling amount (pricing mode
+  // + inputs) and the PRIVATE cost/profit; issued invoices are immutable
+  // (cancel, never delete). Internal-only routes (super/accounts). Uses
+  // Template Settings bank accounts for the payment details snapshot.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadInvoicesForShipment(shipmentId: string): Promise<CustomerInvoice[]> {
+    const snap = await getDocs(collection(db, "customerInvoices"));
+    return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.shipmentId === shipmentId);
+  }
+  // Build an invoice record from the statement + a validated pricing body.
+  function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
+    const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
+    const costBasis = Number.isFinite(stmt.totalCost) ? stmt.totalCost : 0;
+    const mode = body.pricingMode;
+    const inputs = {
+      costBasis,
+      contractAmount: typeof body.contractAmount === "number" ? body.contractAmount : (shipment?.agreedAmount ?? stmt.agreedAmount),
+      fixedProfit: typeof body.fixedProfit === "number" ? body.fixedProfit : undefined,
+      marginPercent: typeof body.marginPercent === "number" ? body.marginPercent : undefined,
+      unitPrice: typeof body.unitPrice === "number" ? body.unitPrice : undefined,
+      unitQuantity: typeof body.unitQuantity === "number" ? body.unitQuantity : undefined,
+      manualAmount: typeof body.manualAmount === "number" ? body.manualAmount : undefined,
+    };
+    const selling = computeInvoiceSelling(mode, inputs);
+    if (!selling.ok) return { ok: false, code: selling.code, error: selling.error };
+    const grossProfit = computeInvoiceGrossProfit({ sellingAmount: selling.sellingAmount, costBasis, invoiceCurrency, costCurrency: stmt.currency });
+    return {
+      ok: true,
+      value: {
+        shipmentId: stmt.shipmentId,
+        shipmentNumber: stmt.shipmentNumber,
+        clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+        companyName: stmt.companyName || shipment?.companyName || "",
+        currency: invoiceCurrency,
+        pricingMode: mode,
+        costBasis,
+        contractAmount: inputs.contractAmount,
+        fixedProfit: inputs.fixedProfit,
+        marginPercent: inputs.marginPercent,
+        unitPrice: inputs.unitPrice,
+        unitQuantity: inputs.unitQuantity,
+        manualAmount: inputs.manualAmount,
+        sellingAmount: selling.sellingAmount,
+        grossProfit,
+        description: typeof body.description === "string" ? body.description.slice(0, 500) : "",
+        notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : "",
+        internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : "",
+        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+        revision: 1,
+      },
+    };
+  }
+
+  app.get("/api/cost-statements/:shipmentId/invoices", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const invoices = await loadInvoicesForShipment(req.params.shipmentId);
+      invoices.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ invoices });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load invoices." });
+    }
+  });
+
+  // Create a DRAFT invoice (pricing computed server-side).
+  app.post("/api/cost-statements/:shipmentId/invoices", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
+      const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
+      const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      const existing = await loadInvoicesForShipment(req.params.shipmentId);
+      const now = new Date().toISOString();
+      const invoice: CustomerInvoice = {
+        ...built.value,
+        id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        invoiceNumber: buildInvoiceNumber(stmt.shipmentNumber, existing.length + 1),
+        status: "draft",
+        createdAt: now,
+        createdBy: req.session!.id,
+      };
+      await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
+      await logActivity("", "Accounting", req.session!.id, `Draft invoice ${invoice.invoiceNumber} created (${invoice.sellingAmount} ${invoice.currency})`, "", "");
+      res.status(201).json({ invoice: cleanUndefined(invoice) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice create failed:", err);
+      res.status(500).json({ error: "Failed to create invoice." });
+    }
+  });
+
+  // Edit a DRAFT invoice (recompute pricing; immutable once issued).
+  app.put("/api/cost-statements/:shipmentId/invoices/:invoiceId", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const existing = snap.data() as CustomerInvoice;
+      if (existing.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      if (!isInvoiceEditable(existing.status)) return res.status(409).json({ code: "not_draft", error: "Only a draft invoice can be edited." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
+      const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
+      const built = buildInvoiceFromBody(stmt, shipment, { ...existing, ...(req.body || {}) });
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      const invoice: CustomerInvoice = {
+        ...built.value,
+        id: existing.id,
+        invoiceNumber: existing.invoiceNumber,
+        status: "draft",
+        createdAt: existing.createdAt,
+        createdBy: existing.createdBy,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.session!.id,
+        revision: (existing.revision || 1) + 1,
+      };
+      await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
+      res.json({ invoice: cleanUndefined(invoice) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to update invoice." });
+    }
+  });
+
+  // Issue a draft invoice — snapshots the bank account; becomes immutable.
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const decision = canIssueInvoice({ status: invoice.status, pricingMode: invoice.pricingMode, costStatementStatus: resolveAccountingStatus(stmt as any), sellingAmount: invoice.sellingAmount });
+      if (!decision.ok) return res.status(decision.code === "cost_not_approved" ? 409 : 400).json({ code: decision.code, error: decision.error });
+      // Snapshot the chosen bank account (issuer may override via body.bankAccountId).
+      let bankAccountSnapshot: BankAccountSnapshot | undefined;
+      const bankId = typeof req.body?.bankAccountId === "string" && req.body.bankAccountId ? req.body.bankAccountId : invoice.bankAccountId;
+      if (bankId) {
+        const bankSnap = await getDoc(doc(db, "bankAccounts", bankId));
+        if (bankSnap.exists()) {
+          const b = bankSnap.data() as BankAccount;
+          bankAccountSnapshot = { bankName: b.bankName, accountHolderName: b.accountHolderName, accountNumber: b.accountNumber, iban: b.iban, swift: b.swift, currency: b.currency, branch: b.branch };
+        }
+      }
+      const now = new Date().toISOString();
+      const issued: CustomerInvoice = { ...invoice, status: "issued", bankAccountId: bankId || invoice.bankAccountId, bankAccountSnapshot, issuedAt: now, issuedBy: req.session!.id };
+      await setDoc(doc(db, "customerInvoices", issued.id), cleanUndefined(issued));
+      await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
+      res.json({ invoice: cleanUndefined(issued) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice issue failed:", err);
+      res.status(500).json({ error: "Failed to issue invoice." });
+    }
+  });
+
+  // Cancel an issued invoice (reason required; never deletes).
+  app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/cancel", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
+      const invoice = snap.data() as CustomerInvoice;
+      if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const decision = canCancelInvoice(invoice.status, reason);
+      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      const now = new Date().toISOString();
+      const cancelled: CustomerInvoice = { ...invoice, status: "cancelled", cancelledAt: now, cancelledBy: req.session!.id, cancellationReason: reason.slice(0, 1000) };
+      await setDoc(doc(db, "customerInvoices", cancelled.id), cleanUndefined(cancelled));
+      await logActivity("", "Accounting", req.session!.id, `Invoice ${cancelled.invoiceNumber} cancelled`, "", "");
+      res.json({ invoice: cleanUndefined(cancelled) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to cancel invoice." });
     }
   });
 

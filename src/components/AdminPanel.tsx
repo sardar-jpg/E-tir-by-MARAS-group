@@ -53,6 +53,7 @@ import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
 import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
 import VendorPayablesPanel from "./admin/VendorPayablesPanel";
+import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -7214,6 +7215,16 @@ MARAS Group etir Center`;
                 <VendorPayablesPanel
                   shipmentId={selectedCostStatement.shipmentId}
                   items={selectedCostStatement.items || []}
+                  bankAccounts={bankAccounts}
+                  canWrite={canViewCostStatements(resolvedAdminType)}
+                  lang={lang}
+                />
+
+                {/* Customer Invoices — pricing/profit workflow, MAR-linked.
+                    Cost/profit stay internal; server owns the selling amount. */}
+                <CustomerInvoicePanel
+                  shipmentId={selectedCostStatement.shipmentId}
+                  currency={(selectedCostStatement.agreedCurrency || selectedCostStatement.currency) as any}
                   bankAccounts={bankAccounts}
                   canWrite={canViewCostStatements(resolvedAdminType)}
                   lang={lang}

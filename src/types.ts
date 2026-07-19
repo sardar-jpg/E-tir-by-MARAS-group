@@ -524,6 +524,80 @@ export interface VendorPaymentTransaction {
 /** Derived, server-authoritative payable status for a single cost item. */
 export type VendorPayableStatus = 'Unpaid' | 'Partially Paid' | 'Paid' | 'Overpaid';
 
+// ═══════════════════════════════════════════════════════════════════
+// Customer Invoices — customer-facing selling document, linked to a
+// shipment (MAR number) and customer. Internal cost + profit are stored on
+// the invoice but are PRIVATE (never in the customer projection / PDF).
+// Issued invoices are immutable; corrections are cancellations (never
+// deletes). Pricing math lives in src/lib/customerInvoice.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+export type InvoicePricingMode =
+  | 'contract'            // the shipment's agreed contract price
+  | 'fixed_profit'        // cost + a fixed profit amount
+  | 'percentage_margin'   // cost + a markup % on cost
+  | 'per_truck'           // unit price × trucks
+  | 'per_container'       // unit price × containers
+  | 'per_service'         // unit price × services
+  | 'manual';             // a manually approved selling price
+
+export type CustomerInvoiceStatus = 'draft' | 'issued' | 'cancelled';
+
+/** Snapshot of the bank account chosen for an issued document. */
+export interface BankAccountSnapshot {
+  bankName: string;
+  accountHolderName: string;
+  accountNumber: string;
+  iban?: string;
+  swift?: string;
+  currency: Currency;
+  branch?: string;
+}
+
+export interface CustomerInvoice {
+  id: string;
+  /** Derived from the MAR order number — no second numbering system. */
+  invoiceNumber: string;
+  shipmentId: string;
+  shipmentNumber: string;
+  clientId?: string;
+  companyName: string;
+  currency: Currency;
+  pricingMode: InvoicePricingMode;
+  // ── Pricing inputs (only the relevant ones are used per mode) ──
+  /** PRIVATE internal snapshot of the approved total cost. Never shown to customer. */
+  costBasis: number;
+  contractAmount?: number;
+  fixedProfit?: number;
+  marginPercent?: number;
+  unitPrice?: number;
+  unitQuantity?: number;
+  manualAmount?: number;
+  // ── Server-computed ──
+  /** Customer-facing invoice total. */
+  sellingAmount: number;
+  /** PRIVATE derived gross profit (selling − cost), or null if not comparable. */
+  grossProfit?: number | null;
+  description?: string;
+  /** Customer-visible note. */
+  notes?: string;
+  /** PRIVATE internal note. */
+  internalNotes?: string;
+  status: CustomerInvoiceStatus;
+  bankAccountId?: string;
+  bankAccountSnapshot?: BankAccountSnapshot;
+  issuedAt?: string;
+  issuedBy?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancellationReason?: string;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  revision?: number;
+}
+
 export interface CostStatement {
   shipmentId: string;
   shipmentNumber: string;
