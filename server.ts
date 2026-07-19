@@ -98,8 +98,12 @@ import { buildCustomerAccountStatement, customerStatementCurrencies } from "./sr
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
   buildInvoicePdfModel, buildReceiptPdfModel, buildStatementPdfModel, buildVoucherPdfModel, advanceCreditFor,
+  applyTemplateToModel, buildSamplePreviewModel,
 } from "./src/lib/accountingPdfModel";
 import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
+import {
+  validateTemplateConfig, defaultTemplateConfig, TEMPLATE_DOC_TYPES, type TemplateDocType, type TemplateConfig,
+} from "./src/lib/accountingTemplateConfig";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -465,6 +469,8 @@ let memoryStore: {
   paymentReceipts: PaymentReceipt[];
   // Company profile version history (issued-document integrity).
   companyProfileVersions: CompanyProfileVersion[];
+  // Per-document-type template config version history (Phase 11).
+  templateConfigVersions: any[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -507,6 +513,7 @@ function getMemoryStore() {
       customerPayments: [],
       paymentReceipts: [],
       companyProfileVersions: [],
+      templateConfigVersions: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -10305,7 +10312,8 @@ async function startServer() {
     generatedBy: string
   ): Promise<{ url: string; path: string; fileName: string }> {
     const company = await loadCompanyProfile().catch(() => ({} as CompanyProfile));
-    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company });
+    const tpl = await loadTemplateConfig("cost_statement").catch(() => null);
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage });
     const buffer = await renderFinalCostStatementPdf(model);
     const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
     const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
@@ -11436,6 +11444,66 @@ async function startServer() {
   // internal cost/profit (done in the pure model builders). Streamed inline
   // as application/pdf for clean print + download. Internal-only routes.
   // ══════════════════════════════════════════════════════════════════
+  // ── Controlled template customization (Phase 11) ──────────────────
+  // One bounded config per document type (accountingSettings/template_<type>),
+  // versioned like the company profile. The PDF renderers honor it; issued
+  // documents keep their own snapshots so history is unaffected.
+  async function loadTemplateConfig(docType: TemplateDocType): Promise<TemplateConfig> {
+    const snap = await getDoc(doc(db, "accountingSettings", `template_${docType}`));
+    const stored = snap.exists() ? (snap.data() as any) : {};
+    // validateTemplateConfig only normalizes the editable fields; re-attach
+    // the persisted version metadata so versioning/restore work.
+    const cfg = validateTemplateConfig(docType, stored);
+    if (typeof stored.version === "number") cfg.version = stored.version;
+    if (stored.updatedAt) cfg.updatedAt = stored.updatedAt;
+    if (stored.updatedBy) cfg.updatedBy = stored.updatedBy;
+    return cfg;
+  }
+  const isTemplateDocType = (v: string): v is TemplateDocType => (TEMPLATE_DOC_TYPES as readonly string[]).includes(v);
+
+  app.get("/api/admin/accounting/templates/:docType", requireCanViewCostStatements, async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      res.json({ config: await loadTemplateConfig(req.params.docType), defaults: defaultTemplateConfig(req.params.docType) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load template." }); }
+  });
+  app.put("/api/admin/accounting/templates/:docType", requireSuperAdmin, async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const now = new Date().toISOString();
+      const current = await loadTemplateConfig(req.params.docType);
+      const currentVersion = typeof current.version === "number" ? current.version : 0;
+      if (currentVersion > 0) await setDoc(doc(db, "templateConfigVersions", `tpl-${req.params.docType}-${currentVersion}-${Date.now()}`), cleanUndefined({ ...current, id: `tpl-${req.params.docType}-${currentVersion}`, docType: req.params.docType, version: currentVersion, archivedAt: now }));
+      const config: TemplateConfig = { ...validateTemplateConfig(req.params.docType, req.body || {}), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+      await setDoc(doc(db, "accountingSettings", `template_${req.params.docType}`), cleanUndefined(config));
+      await logActivity("", "Accounting", req.session!.id, `Template updated: ${req.params.docType} (v${config.version})`, "", "");
+      res.json({ config });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to save template." }); }
+  });
+  app.get("/api/admin/accounting/templates/:docType/versions", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const snap = await getDocs(collection(db, "templateConfigVersions"));
+      const versions = snap.docs.map((d) => d.data() as any).filter((v) => v.docType === req.params.docType).sort((a, b) => b.version - a.version);
+      res.json({ versions });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load versions." }); }
+  });
+  app.post("/api/admin/accounting/templates/:docType/restore/:version", requireSuperAdmin, async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const snap = await getDocs(collection(db, "templateConfigVersions"));
+      const prior = snap.docs.map((d) => d.data() as any).find((v) => v.docType === req.params.docType && v.version === Number(req.params.version));
+      if (!prior) return res.status(404).json({ error: "Version not found." });
+      const now = new Date().toISOString();
+      const current = await loadTemplateConfig(req.params.docType);
+      const currentVersion = typeof current.version === "number" ? current.version : 0;
+      if (currentVersion > 0) await setDoc(doc(db, "templateConfigVersions", `tpl-${req.params.docType}-${currentVersion}-${Date.now()}`), cleanUndefined({ ...current, id: `tpl-${req.params.docType}-${currentVersion}`, docType: req.params.docType, version: currentVersion, archivedAt: now }));
+      const restored: TemplateConfig = { ...validateTemplateConfig(req.params.docType, prior), version: currentVersion + 1, updatedAt: now, updatedBy: req.session!.id };
+      await setDoc(doc(db, "accountingSettings", `template_${req.params.docType}`), cleanUndefined(restored));
+      await logActivity("", "Accounting", req.session!.id, `Template restored: ${req.params.docType} from v${req.params.version}`, "", "");
+      res.json({ config: restored });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to restore template." }); }
+  });
+
   const pdfLang = (req: express.Request): Language => {
     const l = typeof req.query.lang === "string" ? req.query.lang : "en";
     return (l === "ar" || l === "tr" ? l : "en") as Language;
@@ -11456,7 +11524,7 @@ async function startServer() {
       const company = invoice.companySnapshot || (await loadCompanyProfile());
       let bank: BankAccount | null = null;
       if (!invoice.bankAccountSnapshot) bank = resolveDefaultBankAccountForCurrency(await loadBankAccounts(), invoice.currency);
-      const model = buildInvoicePdfModel({ invoice, company, bank, language: pdfLang(req), nowIso: new Date().toISOString() });
+      const model = applyTemplateToModel(buildInvoicePdfModel({ invoice, company, bank, language: pdfLang(req), nowIso: new Date().toISOString() }), await loadTemplateConfig("invoice"));
       sendPdf(res, await renderAccountingPdf(model), `Invoice_${invoice.invoiceNumber}.pdf`);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11473,7 +11541,7 @@ async function startServer() {
       if (!receipt) return res.status(404).json({ error: "No receipt for this payment." });
       const company = receipt.companySnapshot || (await loadCompanyProfile());
       const [invoices, payments] = [await loadInvoicesForCompany(receipt.companyName), await loadPaymentsForCompany(receipt.companyName)];
-      const model = buildReceiptPdfModel({ receipt, company, language: pdfLang(req), nowIso: new Date().toISOString(), advanceCredit: advanceCreditFor(invoices, payments, receipt.currency) });
+      const model = applyTemplateToModel(buildReceiptPdfModel({ receipt, company, language: pdfLang(req), nowIso: new Date().toISOString(), advanceCredit: advanceCreditFor(invoices, payments, receipt.currency) }), await loadTemplateConfig("receipt"));
       sendPdf(res, await renderAccountingPdf(model), `Receipt_${receipt.receiptNumber}.pdf`);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11491,7 +11559,7 @@ async function startServer() {
       const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : customerStatementCurrencies(invoices, payments)[0]) as Currency;
       if (!currency) return res.status(404).json({ error: "No account activity for this customer." });
       const statement = buildCustomerAccountStatement({ companyName: company, currency, invoices, payments, from: typeof req.query.from === "string" ? req.query.from : "", to: typeof req.query.to === "string" ? req.query.to : "" });
-      const model = buildStatementPdfModel({ statement, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString() });
+      const model = applyTemplateToModel(buildStatementPdfModel({ statement, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString() }), await loadTemplateConfig("statement"));
       sendPdf(res, await renderAccountingPdf(model), `Statement_${company}_${currency}.pdf`);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11511,12 +11579,27 @@ async function startServer() {
       if (!stmt) return;
       const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === payment.costItemId);
       const remaining = item ? summarizeVendorPayable(item, await loadVendorPaymentsForShipment(req.params.shipmentId)).remaining : undefined;
-      const model = buildVoucherPdfModel({ payment, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString(), remainingPayable: remaining, costItemDescription: item ? (item.supplierName || item.description || item.costType) : undefined });
+      const model = applyTemplateToModel(buildVoucherPdfModel({ payment, company: await loadCompanyProfile(), language: pdfLang(req), nowIso: new Date().toISOString(), remainingPayable: remaining, costItemDescription: item ? (item.supplierName || item.description || item.costType) : undefined }), await loadTemplateConfig("voucher"));
       sendPdf(res, await renderAccountingPdf(model), `Voucher_${payment.shipmentNumber}_${payment.id}.pdf`);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] voucher pdf failed:", err);
       res.status(500).json({ error: "Failed to render voucher PDF." });
+    }
+  });
+
+  // Template preview — renders a SAMPLE document with the submitted (draft)
+  // config so the user can preview before saving/publishing. Never persists.
+  app.post("/api/admin/accounting/templates/:docType/preview", requireCanViewCostStatements, async (req, res) => {
+    try {
+      if (!isTemplateDocType(req.params.docType)) return res.status(400).json({ error: "Unknown document type." });
+      const config = validateTemplateConfig(req.params.docType, req.body || {});
+      const model = applyTemplateToModel(buildSamplePreviewModel(req.params.docType, await loadCompanyProfile(), pdfLang(req)), config);
+      sendPdf(res, await renderAccountingPdf(model), `Preview_${req.params.docType}.pdf`);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] template preview failed:", err);
+      res.status(500).json({ error: "Failed to render preview." });
     }
   });
 

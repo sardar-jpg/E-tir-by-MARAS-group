@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import type { CustomerAccountStatement } from "./customerAccountStatement";
 import { summarizeCustomerAccount } from "./customerPayments";
+import { resolveTemplateRender, type TemplateConfig, type TemplateRenderOptions } from "./accountingTemplateConfig";
 
 export type PdfDirection = "ltr" | "rtl";
 export interface PdfCompany {
@@ -50,6 +51,30 @@ export interface AccountingPdfModel {
   bank?: PdfBank | null;
   flags: AccountingPdfFlags;
   footerText?: string;
+  /** Controlled template render options (font/sizes/accent/logo) — Phase 11. */
+  render?: TemplateRenderOptions;
+}
+
+/**
+ * Apply a controlled TemplateConfig to a built model: overrides the
+ * visibility flags, header/footer/notes/terms text, and attaches the render
+ * options (font/sizes/accent/logo). Bounded — see accountingTemplateConfig.
+ */
+export function applyTemplateToModel(model: AccountingPdfModel, config: TemplateConfig | null | undefined): AccountingPdfModel {
+  if (!config) return model;
+  return {
+    ...model,
+    flags: {
+      showBank: config.showBank && model.flags.showBank,      // never force a bank block onto docs that never carry one
+      showSignature: config.showSignature,
+      showStamp: config.showStamp,
+      showPageNumbers: config.showPageNumbers,
+    },
+    notes: config.showNotes ? (model.notes || config.standardNotes) : undefined,
+    paymentTerms: config.paymentTerms || model.paymentTerms,
+    footerText: config.footerText || model.footerText,
+    render: resolveTemplateRender(config),
+  };
 }
 
 const directionFor = (lang: Language): PdfDirection => (lang === "ar" ? "rtl" : "ltr");
@@ -284,4 +309,41 @@ export function buildVoucherPdfModel(params: {
 export function advanceCreditFor(invoices: CustomerInvoice[], payments: CustomerPayment[], currency: Currency): number {
   const s = summarizeCustomerAccount(invoices, payments).find((x) => x.currency === currency);
   return s ? s.unallocatedCredit : 0;
+}
+
+/**
+ * A representative SAMPLE model for a document type, for the "preview before
+ * saving" Template Settings feature (never persisted). Uses the configured
+ * company + placeholder amounts so the user sees layout + branding + toggles.
+ */
+export function buildSamplePreviewModel(docType: AccountingPdfModel["docType"], company: CompanyProfile | null, language: Language): AccountingPdfModel {
+  const c = companyFrom(company);
+  const base = { language, direction: directionFor(language), company: c, flags: { ...DEFAULT_FLAGS }, footerText: c.footerText } as const;
+  const sampleParty = [{ label: pick(docType === "voucher" ? LBL.vendor : LBL.customer, language), value: docType === "voucher" ? "Sample Vendor Co" : "Sample Customer Co" }];
+  if (docType === "receipt") {
+    return { ...base, docType, title: pick(LBL.receipt, language), badge: { text: pick(LBL.paid, language), kind: "issued" }, parties: sampleParty,
+      meta: [{ label: pick(LBL.receiptNo, language), value: "RCPT-0001" }, { label: pick(LBL.paymentDate, language), value: "2026-07-19" }, { label: pick(LBL.method, language), value: "wire" }],
+      columns: [{ key: "inv", label: pick(LBL.invoiceNo, language), align: "left" }, { key: "amount", label: pick(LBL.amount, language), align: "right" }],
+      rows: [{ inv: "MAR-2026-1001", amount: "1,500.00" }], totals: [{ label: `${pick(LBL.amount, language)} (USD)`, value: "1,500.00 USD", strong: true }], bank: null };
+  }
+  if (docType === "statement") {
+    return { ...base, docType, title: pick(LBL.statement, language), parties: sampleParty,
+      meta: [{ label: pick(LBL.currency, language), value: "USD" }, { label: pick(LBL.dateRange, language), value: "2026-07-01 → 2026-07-31" }],
+      columns: [{ key: "date", label: pick(LBL.date, language), align: "left" }, { key: "ref", label: pick(LBL.reference, language), align: "left" }, { key: "debit", label: pick(LBL.debit, language), align: "right" }, { key: "credit", label: pick(LBL.credit, language), align: "right" }, { key: "balance", label: pick(LBL.balance, language), align: "right" }],
+      rows: [{ date: "2026-07-05", ref: "MAR-2026-1001", debit: "1,500.00", credit: "", balance: "1,500.00" }, { date: "2026-07-10", ref: "PAY-1", debit: "", credit: "500.00", balance: "1,000.00" }],
+      totals: [{ label: `${pick(LBL.closing, language)} (USD)`, value: "1,000.00 USD", strong: true }], bank: null };
+  }
+  if (docType === "voucher" || docType === "cost_statement") {
+    return { ...base, docType, title: pick(docType === "voucher" ? LBL.voucher : LBL.invoice, language), internalNotice: pick(LBL.internal, language), parties: sampleParty,
+      meta: [{ label: pick(LBL.order, language), value: "MAR-2026-1001" }, { label: pick(LBL.paymentDate, language), value: "2026-07-19" }, { label: pick(LBL.method, language), value: "wire" }],
+      columns: [{ key: "desc", label: pick(LBL.description, language), align: "left" }, { key: "amount", label: pick(LBL.amount, language), align: "right" }],
+      rows: [{ desc: "Sample cost line", amount: "4,000.00" }], totals: [{ label: `${pick(LBL.amount, language)} (USD)`, value: "4,000.00 USD", strong: true }], bank: null };
+  }
+  // invoice (default)
+  return { ...base, docType: "invoice", title: pick(LBL.invoice, language), badge: { text: pick(LBL.issued, language), kind: "issued" }, parties: sampleParty,
+    meta: [{ label: pick(LBL.invoiceNo, language), value: "MAR-2026-1001" }, { label: pick(LBL.order, language), value: "MAR-2026-1001" }, { label: pick(LBL.issueDate, language), value: "2026-07-19" }, { label: pick(LBL.currency, language), value: "USD" }],
+    columns: [{ key: "desc", label: pick(LBL.description, language), align: "left" }, { key: "qty", label: pick(LBL.qty, language), align: "right" }, { key: "unit", label: pick(LBL.unit, language), align: "right" }, { key: "amount", label: pick(LBL.amount, language), align: "right" }],
+    rows: [{ desc: "Freight service (sample)", qty: "1", unit: "1,500.00", amount: "1,500.00" }],
+    totals: [{ label: `${pick(LBL.total, language)} (USD)`, value: "1,500.00 USD", strong: true }],
+    bank: { bankName: "Sample Bank", accountHolderName: c.name, accountNumber: "0000-0000", currency: "USD" } };
 }

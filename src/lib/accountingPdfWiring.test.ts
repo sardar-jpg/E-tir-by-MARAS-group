@@ -24,7 +24,7 @@ describe("accounting PDF routes", () => {
     expect(SERVER).toContain('Content-Disposition');
   });
   it("the final cost statement PDF now carries company branding", () => {
-    expect(SERVER).toContain("buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company })");
+    expect(SERVER).toContain("buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company");
     const MODEL = readFileSync(join(__dirname, "costStatementFinalPdfModel.ts"), "utf-8");
     expect(MODEL).toContain("brandName");
     expect(MODEL).toContain("brandFooterText");

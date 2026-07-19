@@ -5,6 +5,7 @@ import { apiFetch } from '../../../lib/api';
 import CostApprovalSettingsCard from '../CostApprovalSettingsCard';
 import CompanyProfileSettingsCard from '../CompanyProfileSettingsCard';
 import BankAccountsSettingsCard from '../BankAccountsSettingsCard';
+import TemplateCustomizationCard from '../TemplateCustomizationCard';
 import {
   NOTIFICATION_PREFERENCE_CATEGORIES,
   DEFAULT_ADMIN_NOTIFICATION_PREFERENCES,
@@ -374,6 +375,8 @@ export default function AdminSettingsSection({
               the same accounting API. */}
           <CompanyProfileSettingsCard lang={lang} />
           <BankAccountsSettingsCard lang={lang} />
+          {/* Controlled document template customization (Phase 11). */}
+          <TemplateCustomizationCard lang={lang} />
         </div>
       )}
 
