@@ -640,6 +640,36 @@ export interface CustomerPayment {
   reversalReason?: string;
 }
 
+/**
+ * A customer-facing acknowledgment of a received payment, generated from a
+ * CustomerPayment (one active receipt per payment). Snapshots company/bank
+ * at issue time and lists the MAR invoices the payment covered. Voided (not
+ * deleted) if the underlying payment is reversed.
+ */
+export interface PaymentReceipt {
+  id: string;
+  receiptNumber: string;
+  paymentId: string;
+  companyName: string;
+  clientId?: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  reference?: string;
+  bankAccountSnapshot?: string;
+  /** Invoices (by MAR-derived number) this payment was allocated to. */
+  allocations: PaymentAllocation[];
+  /** Snapshot of the issuing company branding at receipt time. */
+  companySnapshot?: CompanyProfile;
+  status: 'issued' | 'void';
+  issuedBy: string;
+  issuedAt: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  voidReason?: string;
+}
+
 export interface CostStatement {
   shipmentId: string;
   shipmentNumber: string;

@@ -93,6 +93,7 @@ import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
 } from "./src/lib/customerPayments";
+import { buildReceiptNumber, canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -454,6 +455,8 @@ let memoryStore: {
   customerInvoices: CustomerInvoice[];
   // Customer Payments: account-based (per company), allocated to invoices.
   customerPayments: CustomerPayment[];
+  // Payment Receipts: one active receipt per customer payment.
+  paymentReceipts: PaymentReceipt[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -494,6 +497,7 @@ function getMemoryStore() {
       vendorPayments: [],
       customerInvoices: [],
       customerPayments: [],
+      paymentReceipts: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2064,7 +2068,8 @@ import {
   CostItem,
   CustomerInvoice,
   CustomerPayment,
-  PaymentAllocation
+  PaymentAllocation,
+  PaymentReceipt
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -11263,11 +11268,76 @@ async function startServer() {
       const now = new Date().toISOString();
       const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: req.session!.id, reversedAt: now, reversalReason: reason.slice(0, 1000) };
       await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(reversed));
+      // Void any issued receipt for this payment (never delete).
+      const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
+      for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
+        if (r.paymentId === payment.id && r.status === "issued") {
+          await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: req.session!.id, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+        }
+      }
       await logActivity("", "Accounting", req.session!.id, `Customer payment reversed for ${payment.companyName} (${payment.amount} ${payment.currency})`, "", "");
       res.json({ payment: cleanUndefined(reversed) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to reverse customer payment." });
+    }
+  });
+
+  // ── Payment Receipts ──────────────────────────────────────────────
+  // Generate a customer receipt from an active payment (idempotent: one
+  // active receipt per payment). Snapshots company branding + bank; lists
+  // the MAR invoices covered. Voided (never deleted) when the payment is
+  // reversed (handled in the reverse route above). Internal-only routes.
+  app.post("/api/customer-accounts/payments/:paymentId/receipt", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as CustomerPayment;
+      const decision = canIssueReceipt(payment);
+      if (!decision.ok) return res.status(decision.code === "not_found" ? 404 : 409).json({ code: decision.code, error: decision.error });
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const existingActive = findActiveReceiptForPayment(allReceipts, payment.id);
+      if (existingActive) return res.status(200).json({ receipt: cleanUndefined(existingActive), idempotent: true });
+      const companyReceiptCount = allReceipts.filter((r) => r.companyName === payment.companyName).length;
+      const now = new Date().toISOString();
+      const companySnapshot = await loadCompanyProfile();
+      const receipt: PaymentReceipt = {
+        id: `rcpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        receiptNumber: buildReceiptNumber(companyReceiptCount + 1),
+        paymentId: payment.id,
+        companyName: payment.companyName,
+        clientId: payment.clientId,
+        amount: payment.amount,
+        currency: payment.currency,
+        paymentDate: payment.paymentDate,
+        paymentMethod: payment.paymentMethod,
+        reference: payment.reference,
+        bankAccountSnapshot: payment.bankAccountSnapshot,
+        allocations: payment.allocations || [],
+        companySnapshot: Object.keys(companySnapshot).length ? companySnapshot : undefined,
+        status: "issued",
+        issuedBy: req.session!.id,
+        issuedAt: now,
+      };
+      await setDoc(doc(db, "paymentReceipts", receipt.id), cleanUndefined(receipt));
+      await logActivity("", "Accounting", req.session!.id, `Receipt ${receipt.receiptNumber} issued for ${payment.companyName} (${payment.amount} ${payment.currency})`, "", "");
+      res.status(201).json({ receipt: cleanUndefined(receipt) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] receipt issue failed:", err);
+      res.status(500).json({ error: "Failed to issue receipt." });
+    }
+  });
+  app.get("/api/customer-accounts/payments/:paymentId/receipt", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const allReceipts = (await getDocs(collection(db, "paymentReceipts"))).docs.map((d) => d.data() as PaymentReceipt);
+      const receipt = allReceipts.find((r) => r.paymentId === req.params.paymentId && r.status === "issued")
+        || allReceipts.find((r) => r.paymentId === req.params.paymentId);
+      if (!receipt) return res.status(404).json({ error: "No receipt for this payment." });
+      res.json({ receipt });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load receipt." });
     }
   });
 
