@@ -101,6 +101,8 @@ import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriori
 import { decideSetDefaultBank } from "./src/lib/bankDefault";
 import { planCostStatementRepair } from "./src/lib/shipmentCostStatement";
 import { KeyedMutex } from "./src/lib/asyncMutex";
+import { buildCostItemFromInput, decideItemAppend } from "./src/lib/costStatementItem";
+import { resolveStatementRevision } from "./src/lib/costStatementMath";
 import {
   vendorLedgerId, buildVendorLedger, decideVendorPayment, applyVendorLedgerDelta, type VendorPayableLedger,
 } from "./src/lib/vendorPayableLedger";
@@ -11157,6 +11159,50 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] ledger repair failed:", err);
       res.status(500).json({ error: "Failed to reconcile ledgers." });
+    }
+  });
+
+  // Item-level cost-statement add (PR #140 increment 3, items 9–11). Adds ONE
+  // cost item — the mobile quick-expense flow must NEVER PUT the whole
+  // costItems array (that clobbers concurrent additions). The append happens
+  // inside mutateCostStatementAtomic (single-document transaction): the
+  // statement is re-read, the lock + optimistic revision are re-checked, and
+  // idempotency is honored — all against the transaction-fresh value, so two
+  // concurrent additions both land and a stale expectedRevision is rejected.
+  app.post("/api/cost-statements/:shipmentId/items", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const built = buildCostItemFromInput(body.item || {}, `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      if (!built.ok) return res.status(400).json({ code: built.code, error: built.error });
+      const idemKey = normalizeIdempotencyKey(body.idempotencyKey);
+      const scopedKey = idemKey ? scopeIdempotencyKey("cost-item", idemKey) : undefined;
+      const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
+      const now = new Date().toISOString();
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const status = resolveAccountingStatus(stmt as any);
+        if (!isFinancialEditingAllowed(status)) {
+          return { httpStatus: 409, body: { code: "accounting_locked", error: "This statement is in the approval workflow or finalized and cannot be edited." } };
+        }
+        const items = ((stmt.items as CostItem[]) || []);
+        const storedRevision = resolveStatementRevision(stmt);
+        const decision = decideItemAppend({ items, storedRevision, expectedRevision, scopedIdempotencyKey: scopedKey });
+        if (decision.kind === "replay") return { httpStatus: 200, body: { item: cleanUndefined(decision.item), revision: storedRevision, idempotent: true } };
+        if (decision.kind === "conflict") return { httpStatus: 409, body: { code: decision.code, error: decision.error } };
+        const item: CostItem = { ...built.item, idempotencyKey: scopedKey };
+        const nextItems = [...items, item];
+        const newTotalCost = Math.round((nextItems.reduce((s, it) => s + (Number.isFinite(it.totalAmount) ? it.totalAmount : 0), 0) + Number.EPSILON) * 100) / 100;
+        const summary = deriveExpenseSummary(newTotalCost, Number.isFinite(stmt.paidAmount) ? stmt.paidAmount : 0);
+        const nextRevision = storedRevision + 1;
+        const saved: CostStatement = { ...stmt, items: nextItems, totalCost: summary.totalCost, remainingBalance: summary.remainingBalance, paymentStatus: summary.paymentStatus, revision: nextRevision, updatedAt: now };
+        return { httpStatus: 201, body: { item: cleanUndefined(item), revision: nextRevision }, save: saved };
+      });
+      if (result.httpStatus === 201) await logActivity("", "Accounting", req.session!.id, `Cost item added to ${req.params.shipmentId}`, "", "");
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost item add failed:", err);
+      res.status(500).json({ error: "Failed to add cost item." });
     }
   });
 

@@ -15,6 +15,14 @@ describe("mobile accounting quick actions — lightweight, reuses backend", () =
     expect(MOBILE).toContain("/reject");
     expect(MOBILE).toContain("/vendor-payments");
   });
+  it("quick expense uses the item-level endpoint with idempotency + revision, never the full array (item 12)", () => {
+    expect(MOBILE).toContain("/items");
+    expect(MOBILE).toContain("idempotencyKey");
+    expect(MOBILE).toContain("expectedRevision");
+    expect(MOBILE).toContain("revision_conflict");
+    // The old full-array PUT/POST of costItems is gone.
+    expect(MOBILE).not.toContain("items: items2");
+  });
   it("does NOT duplicate heavy/desktop-only capabilities", () => {
     // No bank-account management, template editing, allocation, or reversals on mobile.
     expect(MOBILE).not.toContain("bank-accounts");

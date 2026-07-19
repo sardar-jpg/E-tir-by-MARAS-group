@@ -80,11 +80,21 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
   const addExpense = async () => {
     const amt = Number(exp.amount);
     if (!(amt > 0)) { setErr("Enter a valid amount."); return; }
-    // Reuse the cost-statement write route: append one line to the current items.
-    const newItem = { costType: "expense", description: exp.description || "Expense", quantity: 1, unitPrice: amt, currency: stmt.currency, supplierName: exp.supplierName || "" };
-    const items2 = [...items.map((i) => ({ ...i })), newItem];
-    const ok = await post(`/api/cost-statements/${shipmentId}`, { currency: stmt.currency, paidAmount: stmt.paidAmount || 0, customerReceivedAmount: stmt.customerReceivedAmount || 0, notes: stmt.notes || "", revision: stmt.revision || 1, items: items2 });
-    if (ok) setExp({ description: "", supplierName: "", amount: "" });
+    // Item-level add (PR #140 increment 3): send ONE item with an
+    // idempotencyKey + the revision we loaded — never the whole costItems
+    // array. A stale revision returns 409; we reload and ask the user to retry.
+    setBusy(true); setErr(null);
+    try {
+      const idempotencyKey = `mobile-exp-${sessionId}-${shipmentId}-${Date.now()}`;
+      const res = await apiFetch(`/api/cost-statements/${shipmentId}/items`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item: { costType: "expense", description: exp.description || "Expense", amount: amt, currency: stmt.currency, supplierName: exp.supplierName || "" }, idempotencyKey, expectedRevision: stmt.revision || 1 }),
+      });
+      if (res.ok) { setSheet(null); setExp({ description: "", supplierName: "", amount: "" }); await load(); return; }
+      const b = await res.json().catch(() => ({}));
+      if (b.code === "revision_conflict") { setErr("This statement changed since you opened it — reloaded. Please review and retry."); await load(); }
+      else setErr(b.error || "Could not add the expense.");
+    } catch { setErr("Could not add the expense."); } finally { setBusy(false); }
   };
   const addVendorPayment = async () => {
     const amt = Number(vp.amount);

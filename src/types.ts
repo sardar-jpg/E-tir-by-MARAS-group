@@ -480,6 +480,10 @@ export interface CostItem {
   vendorId?: string;
   dueDate?: string;
   paymentTerms?: string;
+  /** Priority of this expense line (PR #140 increment 3) — never a payment method. */
+  priority?: 'normal' | 'urgent';
+  /** Stable client key for the item-level add API (idempotent append). */
+  idempotencyKey?: string;
 }
 
 /**
