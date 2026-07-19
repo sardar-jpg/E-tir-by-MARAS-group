@@ -146,6 +146,7 @@ describe("validateChatSendPayload", () => {
   it("accepts a valid attachment-only message with a real Storage URL", () => {
     const result = validateChatSendPayload({
       type: "file",
+      fileName: "file.pdf", // PR #138: file messages now require a real name
       fileUrl: "https://storage.googleapis.com/bucket/file.pdf",
     });
     expect(result.ok).toBe(true);
@@ -154,6 +155,7 @@ describe("validateChatSendPayload", () => {
   it("accepts a valid attachment-only message with a real Firebase Storage download URL", () => {
     const result = validateChatSendPayload({
       type: "file",
+      fileName: "file.pdf", // PR #138: file messages now require a real name
       fileUrl: "https://firebasestorage.googleapis.com/v0/b/proj.appspot.com/o/file.pdf?alt=media&token=abc123",
     });
     expect(result.ok).toBe(true);
@@ -162,6 +164,7 @@ describe("validateChatSendPayload", () => {
   it("accepts a file message with a real Storage URL plus caption text", () => {
     const result = validateChatSendPayload({
       type: "file",
+      fileName: "file.pdf", // PR #138: file messages now require a real name
       fileUrl: "https://storage.googleapis.com/bucket/file.pdf",
       text: "Here is the CMR",
     });
@@ -204,9 +207,32 @@ describe("validateChatSendPayload", () => {
   it("rejects over-limit caption text on an otherwise-valid file message", () => {
     const result = validateChatSendPayload({
       type: "file",
+      fileName: "file.pdf", // PR #138: file messages now require a real name
       fileUrl: "https://storage.googleapis.com/bucket/file.pdf",
       text: "a".repeat(MAX_CHAT_TEXT_LENGTH + 1),
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("file messages require a REAL file name (PR #138 review, M-1) — text behavior unchanged", () => {
+  const URL = "https://firebasestorage.googleapis.com/v0/b/x/o/f.png?alt=media&token=t";
+
+  it("a file message without a fileName is rejected — the chat→document mirror can never fabricate a name", () => {
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL }).ok).toBe(false);
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL, fileName: "   " }).ok).toBe(false);
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL, fileName: "unnamed_document.bin" }).ok).toBe(false);
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL, fileName: "#" }).ok).toBe(false);
+  });
+
+  it("a file message with a real fileName passes (with or without caption text)", () => {
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL, fileName: "pod.png" }).ok).toBe(true);
+    expect(validateChatSendPayload({ type: "file", fileUrl: URL, fileName: "pod.png", text: "delivered" }).ok).toBe(true);
+  });
+
+  it("text messages are unaffected: no fileName required, same emptiness rule as before", () => {
+    expect(validateChatSendPayload({ type: "text", text: "merhaba" }).ok).toBe(true);
+    expect(validateChatSendPayload({ type: "text", text: "  " }).ok).toBe(false);
+    expect(validateChatSendPayload({ type: "text", text: "hi", fileName: undefined }).ok).toBe(true);
   });
 });

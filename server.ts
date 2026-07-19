@@ -70,7 +70,7 @@ import {
 import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError } from "./src/lib/costStatementMath";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
-import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
+import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory, validateDocumentReference, INVALID_DOCUMENT_INPUT_CODE } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
 import { isDriverChatAvailable } from "./src/lib/driverJobFlow";
 import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
@@ -6157,7 +6157,7 @@ async function startServer() {
       // attachment is present" rule. See src/lib/chatMessageValidation.ts
       // for the full rationale — this is the one place that rule is
       // actually enforced; every client-side check is advisory on top of it.
-      const sendValidation = validateChatSendPayload({ type, text, fileUrl });
+      const sendValidation = validateChatSendPayload({ type, text, fileUrl, fileName });
       if (!sendValidation.ok) {
         return res.status(400).json({ error: sendValidation.error });
       }
@@ -6283,7 +6283,10 @@ async function startServer() {
         const newDoc = {
           id: docId,
           shipmentId,
-          name: fileName || "unnamed_document.bin",
+          // PR #138 review (M-1): guaranteed real by validateChatSendPayload
+          // above — a file message without a genuine fileName is rejected
+          // before any write, so the mirror never fabricates a name.
+          name: String(fileName).trim(),
           url: fileUrl,
           // Unified documents model: a recognizable category id (any
           // case/spacing) is stored canonically; anything else files
@@ -6460,6 +6463,17 @@ async function startServer() {
         return res.status(403).json({ error: "This document category is published by MARAS Admin and cannot be uploaded by drivers." });
       }
 
+      // PR #138 review (audit finding M-1, final blocker): a document
+      // record is created only from a REAL name and a REAL uploaded
+      // reference — the old fallbacks fabricated a placeholder document
+      // from an empty request. Validation happens BEFORE any write: on
+      // failure nothing is stored, no activity entry is written, and no
+      // notification is sent.
+      const documentInput = validateDocumentReference({ name, url });
+      if (!documentInput.ok) {
+        return res.status(400).json({ error: documentInput.error, code: INVALID_DOCUMENT_INPUT_CODE });
+      }
+
       const sDocRef = doc(db, "shipments", shipmentId);
       const sDoc = await getDoc(sDocRef);
       if (!sDoc.exists()) {
@@ -6471,8 +6485,8 @@ async function startServer() {
       const newDoc = {
         id: docId,
         shipmentId,
-        name: name || "document.bin",
-        url: url || "#",
+        name: documentInput.name,
+        url: documentInput.url,
         // Unified documents model: a recognizable category id (any
         // case/spacing) is stored canonically; anything else files under
         // 'other' — never an unclassifiable string (the old unvalidated

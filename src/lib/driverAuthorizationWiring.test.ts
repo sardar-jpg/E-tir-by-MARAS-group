@@ -80,11 +80,33 @@ describe("M-2 — driver identity comes from the verified session only", () => {
   it("chat and document attribution are server-derived — client-sent identity strings are ignored", () => {
     const CHAT = region('app.post("/api/shipments/:id/chat", requireShipmentAccess', 3400);
     expect(CHAT).toContain("await resolveChatSenderIdentity(req)");
-    const DOCS = region('app.post("/api/shipments/:id/documents", requireShipmentAccess', 2600);
+    const DOCS = region('app.post("/api/shipments/:id/documents", requireShipmentAccess', 3400);
     expect(DOCS).toContain("(await resolveChatSenderIdentity(req)).senderName");
     expect(DOCS).not.toContain('uploadedBy || "Admin"');
     // Driver upload/category policy retained.
     expect(DOCS).toContain("canDriverUploadDocumentCategory(category)");
+  });
+
+  it("M-1 final blocker: document records are validated BEFORE any write — placeholder defaults are gone", () => {
+    const DOCS = region('app.post("/api/shipments/:id/documents", requireShipmentAccess', 3800);
+    expect(DOCS).toContain("validateDocumentReference({ name, url })");
+    expect(DOCS).toContain("INVALID_DOCUMENT_INPUT_CODE");
+    // Ordering: validation happens before the shipment write, activity
+    // log, and notification — a 400 has zero side effects.
+    const validateAt = DOCS.indexOf("validateDocumentReference");
+    expect(validateAt).toBeGreaterThan(-1);
+    for (const write of ["newDoc", "logActivity", "pushNotification"]) {
+      const writeAt = DOCS.indexOf(write);
+      if (writeAt >= 0) expect(validateAt).toBeLessThan(writeAt);
+    }
+    // The fabrication fallbacks no longer exist anywhere in the server.
+    expect(SERVER).not.toContain('name || "document.bin"');
+    expect(SERVER).not.toContain('url || "#"');
+    expect(SERVER).not.toContain('fileName || "unnamed_document.bin"');
+    // Chat file messages carry the name requirement through the shared
+    // validator (behavioral tests in chatMessageValidation.test.ts).
+    const CHAT = region('app.post("/api/shipments/:id/chat", requireShipmentAccess', 3400);
+    expect(CHAT).toContain("validateChatSendPayload({ type, text, fileUrl, fileName })");
   });
 
   it("push tokens register under the session identity and delete only with ownership", () => {

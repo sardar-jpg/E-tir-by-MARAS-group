@@ -139,6 +139,43 @@ export function buildPublicShareDocumentPath(shareToken: string, docId: string):
  * explicitly turns one on — so the default here is `false`; only an
  * explicit `true` opts a new document into public visibility.
  */
+/**
+ * PR #138 review (audit finding M-1, final blocker): production document
+ * records must never be fabricated from missing input. The old route
+ * defaults (`name || "document.bin"`, `url || "#"`) turned an empty
+ * request into a fake document. This validator is the single behavioral
+ * gate for direct document uploads: a record is created only from a real
+ * name and a real uploaded reference matching the existing upload
+ * contract (/api/upload returns an absolute https:// Storage URL; legacy
+ * records used same-origin /api/ paths). Placeholder junk is rejected.
+ */
+export const INVALID_DOCUMENT_INPUT_CODE = "invalid_document_input";
+
+const PLACEHOLDER_DOCUMENT_VALUES = new Set([
+  "#", "document.bin", "unnamed_document.bin", "untitled", "null", "undefined", "n/a", "none", "file", "document",
+]);
+
+export function isPlaceholderDocumentValue(value: string): boolean {
+  return PLACEHOLDER_DOCUMENT_VALUES.has(value.trim().toLowerCase());
+}
+
+export function validateDocumentReference(input: { name?: unknown; url?: unknown }):
+  | { ok: true; name: string; url: string }
+  | { ok: false; error: string } {
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const url = typeof input.url === "string" ? input.url.trim() : "";
+  if (!name || isPlaceholderDocumentValue(name)) {
+    return { ok: false, error: "A real document name is required." };
+  }
+  if (!url || isPlaceholderDocumentValue(url)) {
+    return { ok: false, error: "A real uploaded document reference is required." };
+  }
+  if (!(url.startsWith("https://") || url.startsWith("/api/"))) {
+    return { ok: false, error: "A real uploaded document reference is required." };
+  }
+  return { ok: true, name, url };
+}
+
 export function resolveNewDocumentSharedExternally(explicit?: boolean): boolean {
   return explicit === true;
 }
