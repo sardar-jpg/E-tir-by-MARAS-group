@@ -29,7 +29,12 @@ describe("template settings data integrity", () => {
   it("validates via the pure module and enforces one-default-per-currency", () => {
     expect(SERVER).toContain("validateCompanyProfile(");
     expect(SERVER).toContain("validateBankAccount(");
-    expect(SERVER).toContain("applyDefaultBankExclusivity(");
+    // One-default-per-currency is now enforced atomically (item 7): the target
+    // becomes the sole default and every other same-currency account is demoted
+    // in one write; an inactive account can never be the default.
+    expect(SERVER).toContain("decideSetDefaultBank(");
+    expect(SERVER).toContain("enforceDefaultBankExclusivity(");
+    expect(SERVER).toContain("inactive_default");
     expect(SERVER).toContain("resolveDefaultBankAccountForCurrency(");
   });
   it("bank accounts are retired via active:false, never hard-deleted (no DELETE route)", () => {

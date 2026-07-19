@@ -79,7 +79,7 @@ import {
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
 import { buildDraftCostStatement } from "./src/lib/costStatementDraft";
 import {
-  validateCompanyProfile, validateBankAccount, applyDefaultBankExclusivity,
+  validateCompanyProfile, validateBankAccount,
   resolveDefaultBankAccountForCurrency,
 } from "./src/lib/accountingTemplateSettings";
 import {
@@ -98,6 +98,8 @@ import { requireClientId, indexClientsByCompany, resolveRecordClientId } from ".
 import { normalizeIdempotencyKey, scopeIdempotencyKey, fingerprintPayload, resolveIdempotency } from "./src/lib/idempotency";
 import { nextAccountingSequence, receiptSequenceDocId, accountingYearOf, formatReceiptNumber, type AccountingSequenceDoc } from "./src/lib/accountingSequence";
 import { sanitizePaymentMethod, resolveRequestedPriority, normalizeExpensePriority } from "./src/lib/expensePriority";
+import { decideSetDefaultBank } from "./src/lib/bankDefault";
+import { planCostStatementRepair } from "./src/lib/shipmentCostStatement";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
 import { buildArOverview } from "./src/lib/accountsReceivableOverview";
 import {
@@ -4905,30 +4907,31 @@ async function startServer() {
       );
     }
 
-    await setDoc(doc(db, "shipments", id), newShipment);
-
-    // Core Business Rule: every shipment gets a linked, MAR-numbered
-    // internal cost record from the moment it is created — so accounting
-    // never has to hunt for a shipment to attach a cost statement to, and
-    // the Costs registry reflects the shipment immediately. The draft is
-    // empty (accountants fill in the cost lines later) and always
-    // `accountingStatus: "draft"` — never final. It reuses the SAME shape
-    // the edit route produces for a brand-new statement (buildDraftCost
-    // Statement), and its document id IS the shipment id, so there is
-    // exactly one statement per shipment (no duplicates). This never fails
-    // shipment creation: a draft-write hiccup is logged and the lazy
-    // upsert on POST /api/cost-statements/:shipmentId remains the fallback.
-    try {
-      const existingStmt = await getDoc(doc(db, "costStatements", id));
-      if (!existingStmt.exists()) {
-        const draft = buildDraftCostStatement(newShipment, newShipment.createdAt);
+    // Core Business Rule (item 10): every shipment gets a linked,
+    // MAR-numbered internal cost record whose document id IS the shipment id,
+    // so there is EXACTLY ONE statement per shipment. The shipment and its
+    // draft cost statement are now created ALL-OR-NOTHING: a Firestore write
+    // batch (atomic commit) in Firestore mode, or a memory write that rolls
+    // the shipment back if the statement write fails. A shipment is never
+    // left active without its cost statement.
+    const draft = buildDraftCostStatement(newShipment, newShipment.createdAt);
+    if (!useMemoryFallback && db && typeof (db as any).batch === "function") {
+      const batch = (db as any).batch();
+      batch.set((db as any).collection("shipments").doc(id), newShipment);
+      batch.set((db as any).collection("costStatements").doc(id), draft);
+      await withTimeout(batch.commit(), 8000, "Shipment + cost statement batch commit timed out");
+    } else {
+      // Memory (or a db without batch): write both, roll back the shipment if
+      // the cost-statement write throws — never a shipment without a statement.
+      await setDoc(doc(db, "shipments", id), newShipment);
+      try {
         await setDoc(doc(db, "costStatements", id), draft);
+      } catch (stmtErr) {
+        const store = getMemoryStore();
+        const si = store.shipments.findIndex((s) => s.id === id);
+        if (si >= 0) store.shipments.splice(si, 1);
+        throw stmtErr;
       }
-    } catch (draftErr) {
-      console.warn(
-        `[accounting] draft cost statement for ${shipmentNumber} was not created at shipment creation (recoverable — it will be created on first save):`,
-        draftErr instanceof Error ? draftErr.message : draftErr
-      );
     }
 
     await logActivity(
@@ -10921,22 +10924,36 @@ async function startServer() {
       res.status(500).json({ error: "Failed to load bank accounts." });
     }
   });
+  // Enforce one-active-default-per-currency (item 7): computes the exclusive
+  // set with the target as sole default and demotes every OTHER same-currency
+  // account. Rejects an inactive default. Each call writes the FULL currency's
+  // flags, so two concurrent default changes still leave exactly one default
+  // (last commit wins entirely). The target account is written by the caller.
+  async function enforceDefaultBankExclusivity(account: BankAccount): Promise<{ ok: true } | { ok: false; code: string; error: string }> {
+    const all = await loadBankAccounts();
+    const withTarget = all.some((a) => a.id === account.id) ? all.map((a) => (a.id === account.id ? account : a)) : [...all, account];
+    const d = decideSetDefaultBank({ target: account, allAccounts: withTarget });
+    if (!d.ok) return d;
+    for (const w of d.writes) {
+      if (w.id !== account.id) await setDoc(doc(db, "bankAccounts", w.id), cleanUndefined(w));
+    }
+    return { ok: true };
+  }
+
   app.post("/api/admin/accounting/bank-accounts", requireSuperAdmin, async (req, res) => {
     try {
       const result = validateBankAccount(req.body || {});
       if (!result.ok) return res.status(400).json({ error: result.error });
       const now = new Date().toISOString();
       const account: BankAccount = { ...result.value, id: `bank-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: now, createdBy: req.session!.id };
-      // Persist the new account first, then enforce one-default-per-currency
-      // across the full set (demoting any previous default of this currency).
+      // Reject an inactive account being made default before persisting anything.
+      if (account.isDefaultForCurrency && !account.active) {
+        return res.status(400).json({ code: "inactive_default", error: "An inactive bank account cannot be set as the default." });
+      }
       await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
       if (account.isDefaultForCurrency) {
-        const all = await loadBankAccounts();
-        for (const demoted of applyDefaultBankExclusivity(all, account.id, account.currency)) {
-          if (demoted.id !== account.id && all.find((a) => a.id === demoted.id)?.isDefaultForCurrency && !demoted.isDefaultForCurrency) {
-            await setDoc(doc(db, "bankAccounts", demoted.id), cleanUndefined(demoted));
-          }
-        }
+        const ex = await enforceDefaultBankExclusivity(account);
+        if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
       }
       await logActivity("", "Accounting", req.session!.id, `Bank account added (${account.bankName}, ${account.currency})`, "", "");
       res.status(201).json({ account: cleanUndefined(account) });
@@ -10956,14 +10973,16 @@ async function startServer() {
       const result = validateBankAccount({ ...existing, ...(req.body || {}) });
       if (!result.ok) return res.status(400).json({ error: result.error });
       const account: BankAccount = { ...result.value, id: existing.id, createdAt: existing.createdAt, createdBy: existing.createdBy, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      // Reject an inactive account being made default (item 7). Deactivating a
+      // current default is allowed and simply leaves no default for that
+      // currency (surfaced via GET default-bank-account returning null).
+      if (account.isDefaultForCurrency && !account.active) {
+        return res.status(400).json({ code: "inactive_default", error: "An inactive bank account cannot be set as the default." });
+      }
       await setDoc(doc(db, "bankAccounts", account.id), cleanUndefined(account));
       if (account.isDefaultForCurrency && account.active) {
-        const all = await loadBankAccounts();
-        for (const demoted of applyDefaultBankExclusivity(all, account.id, account.currency)) {
-          if (demoted.id !== account.id && all.find((a) => a.id === demoted.id)?.isDefaultForCurrency && !demoted.isDefaultForCurrency) {
-            await setDoc(doc(db, "bankAccounts", demoted.id), cleanUndefined(demoted));
-          }
-        }
+        const ex = await enforceDefaultBankExclusivity(account);
+        if (!ex.ok) return res.status(400).json({ code: ex.code, error: ex.error });
       }
       await logActivity("", "Accounting", req.session!.id, `Bank account updated (${account.bankName}, ${account.currency})`, "", "");
       res.json({ account: cleanUndefined(account) });
@@ -10984,6 +11003,34 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to resolve default bank account." });
+    }
+  });
+
+  // Idempotent repair (item 10): create the missing draft cost statement for
+  // any legacy shipment that has none (id === shipmentId). Never overwrites an
+  // existing statement; safe to rerun (a second run reports 0 created).
+  app.post("/api/admin/accounting/repair-cost-statements", requireSuperAdmin, async (req, res) => {
+    try {
+      const [shipmentsSnap, statementsSnap] = [await getDocs(collection(db, "shipments")), await getDocs(collection(db, "costStatements"))];
+      const shipments = shipmentsSnap.docs.map((d) => d.data() as Shipment);
+      const existingIds = statementsSnap.docs.map((d) => (d.data() as CostStatement).shipmentId || (d as any).id).filter(Boolean);
+      const missing = planCostStatementRepair(shipments, existingIds);
+      const created: string[] = [];
+      for (const shipmentId of missing) {
+        const shipment = shipments.find((s) => s.id === shipmentId);
+        if (!shipment) continue;
+        // Guard against a race: re-check existence right before writing.
+        const existing = await getDoc(doc(db, "costStatements", shipmentId));
+        if (existing.exists()) continue;
+        await setDoc(doc(db, "costStatements", shipmentId), buildDraftCostStatement(shipment, shipment.createdAt || new Date().toISOString()));
+        created.push(shipmentId);
+      }
+      if (created.length) await logActivity("", "Accounting", req.session!.id, `Repaired ${created.length} missing cost statement(s)`, "", "");
+      res.json({ scanned: shipments.length, missing: missing.length, created: created.length, createdIds: created });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] cost-statement repair failed:", err);
+      res.status(500).json({ error: "Failed to repair cost statements." });
     }
   });
 
