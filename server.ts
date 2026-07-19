@@ -3998,14 +3998,17 @@ async function startServer() {
    * working immediately, not at token expiry (24h). The env-configured
    * owner has no Firestore record and is validated without a lookup.
    *
-   * Failure handling: a DEFINITIVE rejection (account missing/blocked/
-   * type-changed) drops the session — the request proceeds
-   * unauthenticated and gets the ordinary 401. An infrastructure ERROR
-   * during the lookup keeps the session (fail-open) so a transient
-   * Firestore blip cannot turn into a total outage for already-valid
-   * sessions; the exception is logged. Rejections are console-logged at
-   * most once per account per 10 minutes per instance to avoid log spam
-   * from a retrying client; ids/roles only — never tokens.
+   * Failure handling (FAIL-CLOSED — PR #137 review): a DEFINITIVE
+   * rejection (account missing/blocked/type-changed) drops the session —
+   * the request proceeds unauthenticated and gets the ordinary 401. An
+   * infrastructure ERROR during the lookup attaches NO session either:
+   * it sets req.sessionVerificationUnavailable, and every auth gate
+   * answers 503 SESSION_VERIFICATION_UNAVAILABLE — the caller is neither
+   * authorized nor falsely told they're unauthenticated, and clients can
+   * retry instead of logging out. Owner sessions are independent of the
+   * Firestore lookup and unaffected by outages. All logging is throttled
+   * (once per account / once per outage window per 10 min); ids/roles
+   * only — never tokens.
    */
   const staleSessionLogAt = new Map<string, number>();
   const STALE_SESSION_LOG_THROTTLE_MS = 10 * 60 * 1000;

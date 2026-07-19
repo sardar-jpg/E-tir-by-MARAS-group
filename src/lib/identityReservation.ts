@@ -39,6 +39,8 @@ import {
   type IdentityCandidate,
 } from "./accountIdentity";
 
+export type { IdentityCandidate, IdentityField } from "./accountIdentity";
+
 export const IDENTITY_KEYS_COLLECTION = "accountIdentityKeys";
 export const OWNER_RESERVATION_SOURCE = "owner";
 
@@ -148,6 +150,43 @@ export function canReleaseReservation(
 export function computeOwnerClaims(ownerEmail: string): IdentityKeyClaim[] {
   const ownerRecord = buildOwnerIdentityRecord(ownerEmail);
   return computeIdentityClaims({ username: ownerRecord.username, email: ownerRecord.email });
+}
+
+/**
+ * Backfill write decision (PR #137 final review): the migration script's
+ * initial collection snapshot is a PLAN, never authorization to write.
+ * At write time each reservation is decided inside a transaction from
+ * CURRENT state: the re-read reservation document and the re-read backing
+ * account (whose claims are recomputed fresh).
+ */
+export type BackfillWriteDecision =
+  /** Key absent and still claimed by the current account — safe to create. */
+  | { action: "create" }
+  /** Reservation already belongs to this exact account — idempotent no-op. */
+  | { action: "already_owned" }
+  /** Someone else reserved it (possibly concurrently, after the scan) — NEVER overwrite. */
+  | { action: "foreign_conflict"; currentOwner: { source: string; accountId: string } }
+  /** The backing account is gone or no longer claims this identity — do not write. */
+  | { action: "stale"; reason: "account_missing" | "identity_changed" };
+
+export function decideBackfillWrite(opts: {
+  plannedKeyId: string;
+  planned: { source: string; accountId: string };
+  /** The reservation document re-read INSIDE the write transaction (null = absent). */
+  currentReservation: { source: string; accountId: string } | null;
+  /** Whether the backing account document still exists at write time (owner: always true). */
+  currentAccountExists: boolean;
+  /** Key ids recomputed from the account's CURRENT identity at write time. */
+  currentAccountClaimKeyIds: string[];
+}): BackfillWriteDecision {
+  if (opts.currentReservation) {
+    return opts.currentReservation.source === opts.planned.source && opts.currentReservation.accountId === opts.planned.accountId
+      ? { action: "already_owned" }
+      : { action: "foreign_conflict", currentOwner: opts.currentReservation };
+  }
+  if (!opts.currentAccountExists) return { action: "stale", reason: "account_missing" };
+  if (!opts.currentAccountClaimKeyIds.includes(opts.plannedKeyId)) return { action: "stale", reason: "identity_changed" };
+  return { action: "create" };
 }
 
 export interface MemoryReservationStores {

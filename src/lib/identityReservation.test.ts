@@ -8,6 +8,7 @@ import {
   canReleaseReservation,
   buildReservationRecord,
   applyIdentityReservationMemory,
+  decideBackfillWrite,
   IdentityConflictError,
   OWNER_RESERVATION_SOURCE,
   type IdentityReservationRecord,
@@ -155,5 +156,41 @@ describe("atomic reservation semantics (memory-mode = synchronous, equivalent wi
     const existing = new Map(stores.keys.map((k) => [k.id, k]));
     expect(findClaimConflict(computeIdentityClaims({ email: "mine@x.com" }), existing, owner("clients", "c1"))).toBeNull();
     expect(findClaimConflict(computeIdentityClaims({ email: "mine@x.com" }), existing, owner("clients", "c2"))).toBe("email");
+  });
+});
+
+describe("backfill write decisions — the snapshot is a plan, never authorization (PR #137 final review)", () => {
+  const KEY = buildIdentityKeyId("email", "legacy@x.com")!;
+  const planned = { source: "drivers", accountId: "d1" };
+  const base = { plannedKeyId: KEY, planned, currentAccountExists: true, currentAccountClaimKeyIds: [KEY] };
+
+  it("a reservation created concurrently after the initial scan is never overwritten", () => {
+    const d = decideBackfillWrite({ ...base, currentReservation: { source: "clients", accountId: "c9" } });
+    expect(d).toEqual({ action: "foreign_conflict", currentOwner: { source: "clients", accountId: "c9" } });
+  });
+
+  it("a foreign reservation is never replaced even when the account still claims the key", () => {
+    const d = decideBackfillWrite({ ...base, currentReservation: { source: "drivers", accountId: "OTHER" } });
+    expect(d.action).toBe("foreign_conflict");
+  });
+
+  it("same-account existing reservation is idempotent (already_owned, no write)", () => {
+    const d = decideBackfillWrite({ ...base, currentReservation: { source: "drivers", accountId: "d1" } });
+    expect(d).toEqual({ action: "already_owned" });
+  });
+
+  it("an account whose identity changed during the backfill produces STALE and no reservation", () => {
+    const changedKey = buildIdentityKeyId("email", "renamed@x.com")!;
+    const d = decideBackfillWrite({ ...base, currentReservation: null, currentAccountClaimKeyIds: [changedKey] });
+    expect(d).toEqual({ action: "stale", reason: "identity_changed" });
+  });
+
+  it("a deleted account produces STALE and no reservation", () => {
+    const d = decideBackfillWrite({ ...base, currentReservation: null, currentAccountExists: false, currentAccountClaimKeyIds: [] });
+    expect(d).toEqual({ action: "stale", reason: "account_missing" });
+  });
+
+  it("only a still-valid, currently-absent key is created", () => {
+    expect(decideBackfillWrite({ ...base, currentReservation: null })).toEqual({ action: "create" });
   });
 });

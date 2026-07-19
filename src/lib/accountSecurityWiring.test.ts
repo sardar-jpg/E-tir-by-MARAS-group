@@ -99,12 +99,32 @@ describe("PR #137 review: transactional identity reservations are the authoritat
     expect(OWNER).toContain("computeOwnerClaims(ownerEmail)");
   });
 
-  it("the backfill script exists, is dry-run by default, and never auto-resolves legacy collisions", () => {
+  it("the backfill script is dry-run by default, never auto-resolves collisions, and EVERY execute-mode write is transactional", () => {
     const SCRIPT = readFileSync(join(ROOT, "scripts", "backfill-identity-keys.ts"), "utf-8");
     expect(SCRIPT).toContain('process.argv.includes("--execute")');
     expect(SCRIPT).toContain("DRY RUN (nothing written)");
     expect(SCRIPT).toContain("never auto-resolved");
     expect(SCRIPT).toContain("COLLISION");
+    // PR #137 final review: the initial snapshot is a plan, not
+    // authorization — each write re-reads the reservation AND the backing
+    // account inside a transaction and goes through the pure decision.
+    expect(SCRIPT).toContain("db.runTransaction(async (tx)");
+    expect(SCRIPT).toContain("decideBackfillWrite({");
+    expect(SCRIPT).toContain("await tx.get(keyRef)");
+    expect(SCRIPT).toContain("STALE ${keyId");
+    // No unconditional set remains — the only reservation write is tx.set
+    // inside the "create" branch.
+    expect(SCRIPT).not.toContain(".doc(keyId).set(");
+    expect(SCRIPT).toContain('if (d.action === "create")');
+  });
+
+  it("the stale fail-open wording is gone from the middleware documentation", () => {
+    expect(SERVER).not.toContain("fail-open");
+    expect(SERVER).not.toContain("keeps the session");
+    const DOC = region("Failure handling (FAIL-CLOSED", 700);
+    expect(DOC).toContain("attaches NO session");
+    expect(DOC).toContain("503 SESSION_VERIFICATION_UNAVAILABLE");
+    expect(DOC).toContain("Owner sessions are independent of the");
   });
 });
 
