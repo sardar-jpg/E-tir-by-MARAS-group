@@ -15,7 +15,6 @@ import {
   canWriteAuditLogs,
   canViewLogisticsAnalytics,
   resolveFullAdminStatus,
-  sanitizeCreatedAdminType,
   isProtectedOwnerAccount,
   canDeleteAdminAccount,
   canManageShipmentStatus,
@@ -215,23 +214,6 @@ describe("canManageShipmentStatus (PR #111 review — dedicated shipment-status 
   });
 });
 
-describe("sanitizeCreatedAdminType", () => {
-  it("never lets a caller mint a 'super' admin through POST /api/admins", () => {
-    expect(sanitizeCreatedAdminType("super")).toBe("operation");
-  });
-
-  it("passes through 'accounts' as requested", () => {
-    expect(sanitizeCreatedAdminType("accounts")).toBe("accounts");
-  });
-
-  it("defaults anything else (including missing/garbage input) to 'operation'", () => {
-    expect(sanitizeCreatedAdminType("operation")).toBe("operation");
-    expect(sanitizeCreatedAdminType(undefined)).toBe("operation");
-    expect(sanitizeCreatedAdminType(null)).toBe("operation");
-    expect(sanitizeCreatedAdminType("root")).toBe("operation");
-    expect(sanitizeCreatedAdminType(123)).toBe("operation");
-  });
-});
 
 describe("isProtectedOwnerAccount", () => {
   const OWNER_EMAIL = "sardar@maras.iq";

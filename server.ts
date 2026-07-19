@@ -40,6 +40,9 @@ import {
 } from "./src/lib/auth";
 import { assessProductionConfig } from "./src/lib/productionConfig";
 import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, shouldRecordSchedulerTimeout, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
+import { findGlobalIdentityCollision, identityConflictMessage, buildOwnerIdentityRecord, validateCreatedAdminType, type IdentityRecord } from "./src/lib/accountIdentity";
+import { evaluateSessionBacking, backingCollectionForRole, isOwnerSession, SESSION_VERIFICATION_UNAVAILABLE_CODE, SESSION_VERIFICATION_UNAVAILABLE_MESSAGE } from "./src/lib/sessionBacking";
+import { IDENTITY_KEYS_COLLECTION, OWNER_RESERVATION_SOURCE, IdentityConflictError, computeIdentityClaims, computeOwnerClaims, diffIdentityClaims, findClaimConflict, canReleaseReservation, buildReservationRecord, applyIdentityReservationMemory, type IdentityKeyClaim, type IdentityReservationRecord } from "./src/lib/identityReservation";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
   resolveOutgoingChatChannel,
@@ -55,7 +58,7 @@ import { stripPassword } from "./src/lib/sanitize";
 import { sanitizeDriver, scopeDriverListForSession, deriveAdditionalDriverIds, buildDriverOwnedShipmentQueryScopes } from "./src/lib/driverVisibility";
 import { resolveShipmentListQueryScopes } from "./src/lib/shipmentListAccess";
 import { SHIPMENT_STATUS_GROUPS, zeroedShipmentStatusGroupCounts } from "./src/lib/shipmentStatusGroups";
-import { findDuplicateDriverField, resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
+import { resolveDriverLoginBlock, isDriverAssignmentSafe, canDeleteDriverAccount } from "./src/lib/driverAccess";
 import { hasVerifiedFirebaseUid, isFirebaseUserNotFoundError, planServerFirebaseIdentityDeletion } from "./src/lib/driverAccountDeletion";
 import {
   isSelfDeletableRole,
@@ -65,12 +68,12 @@ import {
   type SelfDeletableRole,
 } from "./src/lib/accountDeletion";
 import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError } from "./src/lib/costStatementMath";
-import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, sanitizeCreatedAdminType, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
+import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
 import { isDocumentVisibleForShare, resolveNewDocumentSharedExternally, canDriverUploadDocumentCategory } from "./src/lib/documentAccess";
 import { coerceDocumentCategoryForStorage } from "./src/lib/shipmentDocuments";
 import { isDriverChatAvailable } from "./src/lib/driverJobFlow";
-import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, hasDuplicateClientUsername, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
+import { resolveClientAccountDeleteAuthorization, buildClientUsernameField, buildClientPasswordUpdateField, normalizeClientUsername, matchesClientLoginIdentifier, isShipmentVisibleToClientCompany, isClientAccountActive, resolveClientCreationCompany, validateStaffCredentials, resolveClientPushRecipientIds, buildClientOwnedShipmentQueryScopes } from "./src/lib/clientAccess";
 import { addReaderToNotification, canMarkNotificationRead, buildDriverClientNotificationQueryScopes } from "./src/lib/notificationAccess";
 import {
   DEFAULT_PAGE_SIZE,
@@ -406,6 +409,10 @@ let memoryStore: {
   auditRuns: AuditRunRecord[];
   auditState: any[];
   adminDashboardLayouts: any[];
+  // PR #137 review: transactional identity reservations. Same PR #44
+  // lesson: every collection this server reads/writes needs an entry
+  // here, or memory-fallback access silently no-ops.
+  accountIdentityKeys: IdentityReservationRecord[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -440,6 +447,7 @@ function getMemoryStore() {
       auditRuns: [],
       auditState: [],
       adminDashboardLayouts: [],
+      accountIdentityKeys: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2037,6 +2045,14 @@ declare global {
     interface Request {
       session?: AuthSessionPayload;
       shipment?: Shipment;
+      /**
+       * PR #137 review: set (with session left unattached) when a
+       * cryptographically valid token could not have its backing account
+       * verified because the lookup itself failed. Auth gates turn this
+       * into a 503 SESSION_VERIFICATION_UNAVAILABLE instead of a
+       * misleading 401 — and never into an authorized request.
+       */
+      sessionVerificationUnavailable?: boolean;
     }
   }
 }
@@ -3969,19 +3985,97 @@ async function startServer() {
     return null;
   }
 
-  /** Attaches req.session if a valid token is present; does NOT reject the request on its own. */
-  function attachSession(req: express.Request, _res: express.Response, next: express.NextFunction) {
+  /**
+   * Attaches req.session if a valid token is present; does NOT reject the
+   * request on its own (that stays requireAuth/requireRole's job).
+   *
+   * Stage 2 PR 4 (stale-session invalidation): a cryptographically valid
+   * token is no longer enough. The BACKING ACCOUNT is loaded on every
+   * authenticated request and the session only attaches when that account
+   * still exists, is still allowed to log in (driver approval, client
+   * active flag), and — for admins — still has the adminType the token
+   * claims. A deleted/disabled/rejected/demoted account therefore stops
+   * working immediately, not at token expiry (24h). The env-configured
+   * owner has no Firestore record and is validated without a lookup.
+   *
+   * Failure handling (FAIL-CLOSED — PR #137 review): a DEFINITIVE
+   * rejection (account missing/blocked/type-changed) drops the session —
+   * the request proceeds unauthenticated and gets the ordinary 401. An
+   * infrastructure ERROR during the lookup attaches NO session either:
+   * it sets req.sessionVerificationUnavailable, and every auth gate
+   * answers 503 SESSION_VERIFICATION_UNAVAILABLE — the caller is neither
+   * authorized nor falsely told they're unauthenticated, and clients can
+   * retry instead of logging out. Owner sessions are independent of the
+   * Firestore lookup and unaffected by outages. All logging is throttled
+   * (once per account / once per outage window per 10 min); ids/roles
+   * only — never tokens.
+   */
+  const staleSessionLogAt = new Map<string, number>();
+  const STALE_SESSION_LOG_THROTTLE_MS = 10 * 60 * 1000;
+  app.use(async (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     const token = getTokenFromRequest(req);
-    if (token) {
-      const payload = verifySessionToken(token);
-      if (payload) req.session = payload;
+    if (!token) return next();
+    const payload = verifySessionToken(token);
+    if (!payload) return next();
+
+    const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+    if (isOwnerSession(payload, ownerEmail)) {
+      req.session = payload;
+      return next();
+    }
+    const collectionName = backingCollectionForRole(payload.role);
+    if (!collectionName) return next(); // unknown role: never attach
+
+    try {
+      const snap = await getDoc(doc(db, collectionName, payload.id));
+      const check = evaluateSessionBacking(payload, { exists: snap.exists(), record: snap.exists() ? (snap.data() as Record<string, unknown>) : undefined });
+      if (check.ok) {
+        req.session = payload;
+      } else {
+        const key = `${payload.role}:${payload.id}`;
+        const last = staleSessionLogAt.get(key) || 0;
+        if (Date.now() - last > STALE_SESSION_LOG_THROTTLE_MS) {
+          staleSessionLogAt.set(key, Date.now());
+          console.warn(`[session] stale session rejected (${check.reason}) for ${payload.role} ${payload.id} — backing account no longer authorizes it.`);
+        }
+      }
+    } catch (err) {
+      // PR #137 review: FAIL CLOSED. An infrastructure failure is not a
+      // verdict about the user — but it is also not authorization. The
+      // session is NOT attached; the flag below makes protected routes
+      // answer 503 SESSION_VERIFICATION_UNAVAILABLE instead of a
+      // misleading 401. Public routes never consult the session and are
+      // unaffected. Logged (throttled, no token material) so an outage
+      // is visible without log spam.
+      req.sessionVerificationUnavailable = true;
+      const infraKey = "verification-infra";
+      const last = staleSessionLogAt.get(infraKey) || 0;
+      if (Date.now() - last > STALE_SESSION_LOG_THROTTLE_MS) {
+        staleSessionLogAt.set(infraKey, Date.now());
+        console.warn("[session] backing-account verification unavailable — authenticated requests answer 503 until persistence recovers:", err instanceof Error ? err.message : err);
+      }
     }
     next();
+  });
+
+  /**
+   * PR #137 review: shared 503 path for every auth gate. A valid token
+   * whose backing account could not be VERIFIED (infrastructure failure)
+   * is neither authorized (no req.session) nor "unauthorized" — gates
+   * answer 503 with a stable code so clients can retry rather than
+   * logging the user out on a false 401.
+   */
+  function respondIfSessionVerificationUnavailable(req: express.Request, res: express.Response): boolean {
+    if (req.sessionVerificationUnavailable && !req.session) {
+      res.status(503).json({ error: SESSION_VERIFICATION_UNAVAILABLE_MESSAGE, code: SESSION_VERIFICATION_UNAVAILABLE_CODE });
+      return true;
+    }
+    return false;
   }
-  app.use(attachSession);
 
   /** Rejects the request unless a valid session of any role is present. */
   function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -3991,6 +4085,7 @@ async function startServer() {
   /** Rejects the request unless the session role is in the allowed list. */
   function requireRole(...roles: SessionRole[]) {
     return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (respondIfSessionVerificationUnavailable(req, res)) return;
       if (!req.session) {
         return res.status(401).json({ error: "Authentication required." });
       }
@@ -4011,6 +4106,7 @@ async function startServer() {
    * (unit-tested) decision logic.
    */
   function requireFullAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     const status = resolveFullAdminStatus(req.session);
     if (status === 401) {
       return res.status(401).json({ error: "Authentication required." });
@@ -4031,6 +4127,7 @@ async function startServer() {
    * UI could otherwise still call the route directly.
    */
   function requireSuperAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4050,6 +4147,7 @@ async function startServer() {
    * admins remain read-only.
    */
   function requireCanViewClients(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4059,6 +4157,7 @@ async function startServer() {
     next();
   }
   function requireCanViewVendors(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4076,6 +4175,7 @@ async function startServer() {
    * canViewCostStatements (adminAccess.ts) for the super/accounts-only rule.
    */
   function requireCanViewCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4097,6 +4197,7 @@ async function startServer() {
    * /api/admins.
    */
   function requireCanWriteCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4116,6 +4217,7 @@ async function startServer() {
    * (PR #82, see canWriteAuditLogs for why).
    */
   function requireCanViewAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4137,6 +4239,7 @@ async function startServer() {
    * is unaffected and stays super-only.
    */
   function requireCanWriteAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session || req.session.role !== "admin") {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -4254,6 +4357,7 @@ async function startServer() {
    * shipment to req so handlers don't need to re-fetch it.
    */
   function requireShipmentAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
     if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
     }
@@ -7100,11 +7204,149 @@ async function startServer() {
     }
   });
 
+  /**
+   * Stage 2 PR 4: one snapshot of every identity in the system, for the
+   * canonical cross-role collision check (src/lib/accountIdentity.ts).
+   * Admins carry email; drivers and clients (Owners + Staff) carry
+   * username/email/phone; the env-configured owner joins as a virtual
+   * record so no account of any role can claim the owner's email or its
+   * username form. Placeholder display values on existing records are
+   * harmless here: the CANDIDATE side ignores blanks, and real submitted
+   * values never equal cosmetic placeholders like "No phone".
+   */
+  /**
+   * PR #137 review item 2: the AUTHORITATIVE uniqueness mechanism.
+   * Claims/releases identity-key reservations and applies the account
+   * write/delete ATOMICALLY — Firestore mode in one runTransaction (a
+   * losing concurrent claimant aborts with IdentityConflictError and
+   * writes NOTHING: no orphan reservations, no account); memory mode via
+   * the fully synchronous applyIdentityReservationMemory (equivalent
+   * atomicity within one process). The collection scan that runs before
+   * this in each route remains only as the legacy-account guard —
+   * accounts predating reservations are static data, so the scan blocks
+   * those collisions deterministically while this transaction closes the
+   * new-vs-new race.
+   */
+  async function applyIdentityReservation(op: {
+    owner: { source: string; accountId: string };
+    claims: IdentityKeyClaim[];
+    releaseKeyIds?: string[];
+    accountWrite?: { collection: string; id: string; data: Record<string, unknown> } | null;
+    accountDelete?: { collection: string; id: string } | null;
+  }): Promise<void> {
+    const releaseKeyIds = op.releaseKeyIds || [];
+    if (!useMemoryFallback && db && typeof (db as any).runTransaction === "function") {
+      await withTimeout(
+        (db as any).runTransaction(async (tx: any) => {
+          const claimRefs = op.claims.map((c) => doc(db, IDENTITY_KEYS_COLLECTION, c.keyId));
+          const claimSnaps: any[] = [];
+          for (const ref of claimRefs) claimSnaps.push(await tx.get(ref));
+          const existing = new Map<string, { source: string; accountId: string }>();
+          claimSnaps.forEach((s, i) => {
+            if (s.exists) existing.set(op.claims[i].keyId, s.data() as { source: string; accountId: string });
+          });
+          const conflict = findClaimConflict(op.claims, existing, op.owner);
+          if (conflict) throw new IdentityConflictError(conflict);
+          const releaseRefs = releaseKeyIds.map((k) => doc(db, IDENTITY_KEYS_COLLECTION, k));
+          const releaseSnaps: any[] = [];
+          for (const ref of releaseRefs) releaseSnaps.push(await tx.get(ref));
+          const nowIso = new Date().toISOString();
+          op.claims.forEach((c, i) => tx.set(claimRefs[i], buildReservationRecord(c, op.owner, nowIso)));
+          releaseSnaps.forEach((s, i) => {
+            if (s.exists && canReleaseReservation(s.data() as IdentityReservationRecord, op.owner)) tx.delete(releaseRefs[i]);
+          });
+          if (op.accountWrite) tx.set(doc(db, op.accountWrite.collection, op.accountWrite.id), op.accountWrite.data);
+          if (op.accountDelete) tx.delete(doc(db, op.accountDelete.collection, op.accountDelete.id));
+        }),
+        8000,
+        "Identity reservation transaction timed out"
+      );
+      return;
+    }
+    // Memory fallback: synchronous check+mutate — atomic within the process.
+    const mem = getMemoryStore();
+    const target = op.accountWrite?.collection || op.accountDelete?.collection || null;
+    const accountArray =
+      target === "admins" ? mem.admins : target === "drivers" ? mem.drivers : target === "clients" ? mem.clients : null;
+    applyIdentityReservationMemory(
+      { keys: mem.accountIdentityKeys, accounts: accountArray },
+      {
+        owner: op.owner,
+        claims: op.claims,
+        releaseKeyIds,
+        ...(op.accountWrite ? { accountWrite: { ...op.accountWrite.data, id: op.accountWrite.id } } : {}),
+        ...(op.accountDelete ? { accountDeleteId: op.accountDelete.id } : {}),
+      }
+    );
+  }
+
+  /** Driver identity for reservations: the cosmetic "No phone" placeholder is never a reservable identity. */
+  function driverReservationIdentity(d: { username?: string; email?: string; phone?: string }): { username?: string; email?: string; phone?: string } {
+    return { username: d.username, email: d.email, phone: d.phone === "No phone" ? "" : d.phone };
+  }
+
+  // Permanently reserve the protected owner's identity keys (idempotent;
+  // owner-source reservations can never be claimed or released by any
+  // account). Delayed so persistence has settled; failure is non-fatal
+  // and retried at the next boot.
+  const ownerReservationTimer = setTimeout(() => {
+    (async () => {
+      try {
+        const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+        await applyIdentityReservation({
+          owner: { source: OWNER_RESERVATION_SOURCE, accountId: "owner" },
+          claims: computeOwnerClaims(ownerEmail),
+        });
+        console.log("[identity] protected-owner identity reservations ensured.");
+      } catch (err) {
+        console.warn("[identity] owner reservation could not be ensured (will retry at next boot):", err instanceof Error ? err.message : err);
+      }
+    })();
+  }, 10_000);
+  ownerReservationTimer.unref?.();
+
+  async function loadAllIdentityRecords(): Promise<IdentityRecord[]> {
+    const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
+    const [adminsSnap, driversSnap, clientsSnap] = await Promise.all([
+      getDocs(collection(db, "admins")),
+      getDocs(collection(db, "drivers")),
+      getDocs(collection(db, "clients")),
+    ]);
+    const records: IdentityRecord[] = [buildOwnerIdentityRecord(ownerEmail)];
+    for (const d of adminsSnap.docs) {
+      const a = d.data() as { id?: string; email?: string };
+      records.push({ source: "admins", id: a.id || d.id, email: a.email });
+    }
+    for (const d of driversSnap.docs) {
+      const dr = d.data() as Driver;
+      records.push({ source: "drivers", id: dr.id || d.id, username: dr.username, email: dr.email, phone: dr.phone });
+    }
+    for (const d of clientsSnap.docs) {
+      const c = d.data() as Client;
+      records.push({ source: "clients", id: c.id || d.id, username: c.username, email: c.email, phone: c.phone });
+    }
+    return records;
+  }
+
   app.post("/api/admins", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
       if (!data.password || data.password.length < 8) {
         return res.status(400).json({ error: "A password of at least 8 characters is required." });
+      }
+      // Stage 2 PR 4: strict adminType validation — missing/unknown values
+      // are 400s, "super" is an explicit rejection (the owner is
+      // env-configured; no second Super Admin can be created through the
+      // API), and the old silent downgrade-to-operation fallback is gone.
+      const typeCheck = validateCreatedAdminType(data.adminType);
+      if (!typeCheck.ok) {
+        return res.status(400).json({ error: typeCheck.error });
+      }
+      // Global identity uniqueness: the new admin's email may not collide
+      // with ANY account of ANY role (or the protected owner identity).
+      const identityCollision = findGlobalIdentityCollision({ email: data.email }, await loadAllIdentityRecords());
+      if (identityCollision) {
+        return res.status(409).json({ error: identityConflictMessage(identityCollision) });
       }
       const newAdminId = data.id || `admin-${Date.now()}`;
       // This route must only ever create a brand-new admin record. Without
@@ -7122,10 +7364,31 @@ async function startServer() {
         name: data.name || "MARAS Team Member",
         email: data.email || "",
         password: hashPassword(data.password),
-        adminType: sanitizeCreatedAdminType(data.adminType),
+        adminType: typeCheck.adminType,
         createdAt: data.createdAt || new Date().toISOString()
       };
-      await setDoc(doc(db, "admins", newAdmin.id), newAdmin);
+      // Atomic reserve + create: the reservation transaction is the
+      // authoritative uniqueness mechanism (the scan above only guards
+      // legacy accounts). A concurrent duplicate claim aborts here with
+      // no partial writes.
+      try {
+        await applyIdentityReservation({
+          owner: { source: "admins", accountId: newAdmin.id },
+          claims: computeIdentityClaims({ email: newAdmin.email }),
+          accountWrite: { collection: "admins", id: newAdmin.id, data: newAdmin },
+        });
+      } catch (reserveErr) {
+        if (reserveErr instanceof IdentityConflictError) {
+          return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+        }
+        throw reserveErr;
+      }
+      // Activity trail: who created which admin at what type. Name/email/
+      // type only — never password material.
+      await logActivity("", "", req.session!.id,
+        `Admin account created: ${newAdmin.name} (${newAdmin.adminType})`,
+        `Yönetici hesabı oluşturuldu: ${newAdmin.name} (${newAdmin.adminType})`,
+        `تم إنشاء حساب مسؤول: ${newAdmin.name} (${newAdmin.adminType})`);
       const { password, ...safeAdmin } = newAdmin;
       res.status(201).json(safeAdmin);
     } catch (err) {
@@ -7157,10 +7420,43 @@ async function startServer() {
       const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || "sardar@maras.iq").toLowerCase();
       const existing = await getDoc(docRef);
       if (existing.exists() && isProtectedOwnerAccount(existing.data() as any, ownerEmail)) {
+        // Rejected protected-owner mutation attempts are audit-trailed
+        // (actor + action only — no credentials of any kind).
+        await logActivity("", "", req.session!.id,
+          "BLOCKED: attempt to delete the protected owner account",
+          "ENGELLENDİ: korumalı sahip hesabını silme girişimi",
+          "محظور: محاولة حذف حساب المالك المحمي").catch(() => {});
         return res.status(403).json({ error: "The owner account cannot be deleted." });
       }
 
-      await deleteDoc(docRef);
+      const deletedAdmin = existing.exists() ? (existing.data() as { name?: string; adminType?: string; email?: string }) : null;
+      // Atomic release + delete: only reservations owned by THIS admins/{id}
+      // are released (owner-source reservations are untouchable).
+      await applyIdentityReservation({
+        owner: { source: "admins", accountId: id },
+        claims: [],
+        releaseKeyIds: computeIdentityClaims({ email: deletedAdmin?.email }).map((c) => c.keyId),
+        accountDelete: { collection: "admins", id },
+      });
+      // Stage 2 PR 4: a deleted admin's push tokens must not keep
+      // delivering notifications, and their stale session dies on the
+      // next request via the attachSession backing check. Only the
+      // TARGET admin's tokens are touched.
+      try {
+        // Canonical cleanup shape (same as driver deletion / DELETE
+        // /api/account): SNAPSHOT DOC IDS via the tested ownership helper —
+        // never the token value, which is not guaranteed to be the doc id.
+        const tokensSnap = await getDocs(collection(db, "pushTokens"));
+        const tokenRecords = tokensSnap.docs.map(t => ({ id: t.id, ...(t.data() as { userId?: string; role?: string }) }));
+        const tokenIdsToDelete = selectPushTokensForAccountDeletion(tokenRecords, { id, role: "admin" });
+        await Promise.all(tokenIdsToDelete.map(tokenDocId => deleteDoc(doc(db, "pushTokens", tokenDocId))));
+      } catch (tokenErr) {
+        console.warn("[admins] push-token cleanup after deletion failed (non-fatal):", tokenErr instanceof Error ? tokenErr.message : tokenErr);
+      }
+      await logActivity("", "", req.session!.id,
+        `Admin account deleted: ${deletedAdmin?.name || id}${deletedAdmin?.adminType ? ` (${deletedAdmin.adminType})` : ""}`,
+        `Yönetici hesabı silindi: ${deletedAdmin?.name || id}`,
+        `تم حذف حساب المسؤول: ${deletedAdmin?.name || id}`).catch(() => {});
       res.json({ success: true, message: "Admin deleted successfully" });
     } catch (err) {
       console.error(err);
@@ -7241,7 +7537,16 @@ async function startServer() {
         console.warn("[DELETE /api/drivers/:id] Could not read driver record before deletion:", lookupErr);
       }
 
-      await deleteDoc(docRef);
+      // Atomic release + delete: only this driver's own identity
+      // reservations are released, in the same transaction as the delete.
+      await applyIdentityReservation({
+        owner: { source: "drivers", accountId: req.params.id },
+        claims: [],
+        releaseKeyIds: driverBeforeDelete
+          ? computeIdentityClaims(driverReservationIdentity(driverBeforeDelete)).map((c) => c.keyId)
+          : [],
+        accountDelete: { collection: "drivers", id: req.params.id },
+      });
 
       // Best-effort cleanup of every push-token registration this driver
       // ever made — same ownership rule as DELETE /api/push-tokens/:token
@@ -7430,7 +7735,20 @@ async function startServer() {
       // exactly one Client Firestore document, never a cascade to
       // shipments, documents, or any other Client record.
       const targetId = req.session!.role === "client" ? req.session!.id : requestedId;
-      await deleteDoc(doc(db, "clients", targetId));
+      // Atomic release + delete of the client account and ONLY its own
+      // identity reservations.
+      {
+        const clientSnap = await getDoc(doc(db, "clients", targetId)).catch(() => null);
+        const clientIdentity = clientSnap?.exists() ? (clientSnap.data() as Client) : null;
+        await applyIdentityReservation({
+          owner: { source: "clients", accountId: targetId },
+          claims: [],
+          releaseKeyIds: clientIdentity
+            ? computeIdentityClaims({ username: clientIdentity.username, email: clientIdentity.email, phone: clientIdentity.phone }).map((c) => c.keyId)
+            : [],
+          accountDelete: { collection: "clients", id: targetId },
+        });
+      }
       res.json({ success: true, message: "Client deleted successfully" });
     } catch (err) {
       console.error(err);
@@ -7681,7 +7999,20 @@ async function startServer() {
       }
       clearAccountDeletionRateLimit(session.id);
 
-      await deleteDoc(docRef);
+      // Atomic release + delete: the account document and ONLY its own
+      // identity reservations go together (driver placeholders excluded).
+      await applyIdentityReservation({
+        owner: { source: collectionName, accountId: session.id },
+        claims: [],
+        releaseKeyIds: existingRecord
+          ? computeIdentityClaims(
+              role === "driver"
+                ? driverReservationIdentity(existingRecord)
+                : { username: existingRecord.username, email: existingRecord.email, phone: existingRecord.phone }
+            ).map((c) => c.keyId)
+          : [],
+        accountDelete: { collection: collectionName, id: session.id },
+      });
       await cleanupPushTokens();
       await cleanupAdminNotificationPreferences();
 
@@ -7820,6 +8151,16 @@ async function startServer() {
   app.post("/api/drivers", requireFullAdmin, async (req, res) => {
     try {
       const data = req.body;
+      // Stage 2 PR 4: global cross-role identity uniqueness. Checked on
+      // the RAW submitted fields only (generated username fallbacks and
+      // display placeholders below are cosmetic and never collide).
+      const identityCollision = findGlobalIdentityCollision(
+        { username: data.username, email: data.email, phone: data.phone },
+        await loadAllIdentityRecords()
+      );
+      if (identityCollision) {
+        return res.status(409).json({ error: identityConflictMessage(identityCollision) });
+      }
       const newDriver: Driver = {
         id: data.id || `driver-${Date.now()}`,
         name: data.name || "Unnamed Driver",
@@ -7835,7 +8176,20 @@ async function startServer() {
         completedShipmentsCount: 0,
         truckType: data.truckType || "reefer"
       };
-      await setDoc(doc(db, "drivers", newDriver.id), newDriver);
+      // Atomic reserve + create (raw submitted identity only — generated
+      // fallbacks/placeholders are cosmetic and never reserved).
+      try {
+        await applyIdentityReservation({
+          owner: { source: "drivers", accountId: newDriver.id },
+          claims: computeIdentityClaims({ username: data.username, email: data.email, phone: data.phone }),
+          accountWrite: { collection: "drivers", id: newDriver.id, data: newDriver as unknown as Record<string, unknown> },
+        });
+      } catch (reserveErr) {
+        if (reserveErr instanceof IdentityConflictError) {
+          return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+        }
+        throw reserveErr;
+      }
       res.status(201).json({
         ...sanitizeDriver(newDriver),
         // Only returned here, once, at creation time, so the admin can
@@ -7910,19 +8264,34 @@ async function startServer() {
       // etc.) — those are cosmetic-only and would otherwise collide with
       // each other across unrelated drivers, producing false-positive
       // duplicate rejections for anyone who omitted the same field.
-      const driversSnapshot = await getDocs(collection(db, "drivers"));
-      const existingDrivers = driversSnapshot.docs.map(d => d.data() as Driver);
-      const duplicateField = findDuplicateDriverField(existingDrivers, {
-        username: data.username,
-        email: data.email,
-        phone: data.phone,
-      });
+      // Stage 2 PR 4: upgraded from the driver-only findDuplicateDriverField
+      // check to the GLOBAL cross-role identity check — a self-registering
+      // driver can no longer claim an admin's email, a client's username/
+      // phone, or the protected owner's identity. Same raw-fields-only
+      // rule as before; the conflict message names only the field type.
+      const duplicateField = findGlobalIdentityCollision(
+        { username: data.username, email: data.email, phone: data.phone },
+        await loadAllIdentityRecords()
+      );
       if (duplicateField) {
-        const fieldLabel = duplicateField === "username" ? "Username" : duplicateField === "email" ? "Email address" : "Phone number";
-        return res.status(409).json({ error: `${fieldLabel} is already registered to another driver.` });
+        return res.status(409).json({ error: identityConflictMessage(duplicateField) });
       }
 
-      await setDoc(doc(db, "drivers", newDriver.id), newDriver);
+      // Atomic reserve + create — closes the race two concurrent
+      // self-registrations with the same identity would otherwise win
+      // together (both scans above pass; only one reservation commits).
+      try {
+        await applyIdentityReservation({
+          owner: { source: "drivers", accountId: newDriver.id },
+          claims: computeIdentityClaims({ username: data.username, email: data.email, phone: data.phone }),
+          accountWrite: { collection: "drivers", id: newDriver.id, data: newDriver as unknown as Record<string, unknown> },
+        });
+      } catch (reserveErr) {
+        if (reserveErr instanceof IdentityConflictError) {
+          return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+        }
+        throw reserveErr;
+      }
 
       await logActivity(
         "",
@@ -7979,6 +8348,22 @@ async function startServer() {
       const driverData = driverDoc.data() as Driver;
       const statusChanged = driverData.status !== status;
       await setDoc(docRef, { ...driverData, status });
+
+      // Stage 2 PR 4: a rejected driver's push tokens are revoked (their
+      // stale session dies on the next request via the attachSession
+      // backing check). Only the TARGET driver's tokens are touched.
+      if (statusChanged && status === "rejected") {
+        try {
+          // Canonical cleanup shape: snapshot doc ids via the tested
+          // ownership helper — never the token value.
+          const tokensSnap = await getDocs(collection(db, "pushTokens"));
+          const tokenRecords = tokensSnap.docs.map(t => ({ id: t.id, ...(t.data() as { userId?: string; role?: string }) }));
+          const tokenIdsToDelete = selectPushTokensForAccountDeletion(tokenRecords, { id: req.params.id, role: "driver" });
+          await Promise.all(tokenIdsToDelete.map(tokenDocId => deleteDoc(doc(db, "pushTokens", tokenDocId))));
+        } catch (tokenErr) {
+          console.warn("[drivers] push-token cleanup after rejection failed (non-fatal):", tokenErr instanceof Error ? tokenErr.message : tokenErr);
+        }
+      }
 
       // Only notify/log on an actual transition — a repeated approve/reject
       // request (double-click, retried request) is still a safe no-op, but
@@ -8086,13 +8471,16 @@ async function startServer() {
         }
       }
 
-      // Duplicate check across ALL Client accounts (Owner and Staff alike —
-      // POST /api/login's client-matching branch has no per-company
-      // scoping, so a duplicate username anywhere would make one of the
-      // two colliding accounts unreachable/ambiguous at login. Same
-      // reasoning as findDuplicateDriverField for drivers.
-      if (data.username && hasDuplicateClientUsername(existingClients, data.username)) {
-        return res.status(409).json({ error: "Username is already registered to another client account." });
+      // Stage 2 PR 4: upgraded from the client-only username check to the
+      // GLOBAL cross-role identity check (username/email/phone vs admins,
+      // drivers, all client accounts, and the protected owner). The
+      // conflict message names only the field type, never the account.
+      const identityCollision = findGlobalIdentityCollision(
+        { username: data.username, email: data.email, phone: data.phone },
+        await loadAllIdentityRecords()
+      );
+      if (identityCollision) {
+        return res.status(409).json({ error: identityConflictMessage(identityCollision) });
       }
       const newClient: Client = {
         id: data.id || `client-${Date.now()}`,
@@ -8108,7 +8496,19 @@ async function startServer() {
         ...buildClientUsernameField(data.username),
         ...(data.password ? { password: hashPassword(data.password) } : {}),
       };
-      await setDoc(doc(db, "clients", newClient.id), newClient);
+      // Atomic reserve + create (raw submitted identity fields only).
+      try {
+        await applyIdentityReservation({
+          owner: { source: "clients", accountId: newClient.id },
+          claims: computeIdentityClaims({ username: data.username, email: data.email, phone: data.phone }),
+          accountWrite: { collection: "clients", id: newClient.id, data: newClient as unknown as Record<string, unknown> },
+        });
+      } catch (reserveErr) {
+        if (reserveErr instanceof IdentityConflictError) {
+          return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+        }
+        throw reserveErr;
+      }
       res.status(201).json(stripPassword(newClient));
     } catch (err) {
       console.error(err);
@@ -8138,21 +8538,70 @@ async function startServer() {
       // any other account, matching the existing per-id-only update
       // behavior of this route.
       if (data.active !== undefined) updates.active = Boolean(data.active);
-      if (data.username !== undefined) {
-        const normalizedUsername = normalizeClientUsername(data.username);
-        if (normalizedUsername) {
-          const clientsSnapshot = await getDocs(collection(db, "clients"));
-          const existingClients = clientsSnapshot.docs.map(d => d.data() as Client);
-          if (hasDuplicateClientUsername(existingClients, normalizedUsername, req.params.id)) {
-            return res.status(409).json({ error: "Username is already registered to another client account." });
-          }
+      // Stage 2 PR 4: identity-field edits (username/email/phone) run the
+      // GLOBAL cross-role collision check, excluding this client's own
+      // record — an unchanged own identity always passes.
+      if (data.username !== undefined || data.email !== undefined || data.phone !== undefined) {
+        const identityCollision = findGlobalIdentityCollision(
+          { username: data.username, email: data.email, phone: data.phone },
+          await loadAllIdentityRecords(),
+          { source: "clients", id: req.params.id }
+        );
+        if (identityCollision) {
+          return res.status(409).json({ error: identityConflictMessage(identityCollision) });
         }
-        updates.username = normalizedUsername;
+      }
+      if (data.username !== undefined) {
+        updates.username = normalizeClientUsername(data.username);
       }
       const passwordField = buildClientPasswordUpdateField(data.password);
       if ("password" in passwordField) updates.password = hashPassword(passwordField.password);
 
-      await updateDoc(clientRef, updates as Record<string, unknown>);
+      // Atomic identity-key move + account write (full merged document in
+      // the same transaction; unchanged reservations stay put).
+      const previousClient = clientDoc.data() as Client;
+      const mergedClient = { ...previousClient, ...updates } as Client;
+      {
+        const { toReserve, toReleaseKeyIds } = diffIdentityClaims(
+          { username: previousClient.username, email: previousClient.email, phone: previousClient.phone },
+          { username: mergedClient.username, email: mergedClient.email, phone: mergedClient.phone }
+        );
+        try {
+          await applyIdentityReservation({
+            owner: { source: "clients", accountId: req.params.id },
+            claims: toReserve,
+            releaseKeyIds: toReleaseKeyIds,
+            accountWrite: { collection: "clients", id: req.params.id, data: mergedClient as unknown as Record<string, unknown> },
+          });
+        } catch (reserveErr) {
+          if (reserveErr instanceof IdentityConflictError) {
+            return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+          }
+          throw reserveErr;
+        }
+      }
+
+      // Stage 2 PR 4: disabling a client login account revokes its push
+      // tokens (its stale session dies on the next request via the
+      // attachSession backing check) and leaves an audit-trail entry.
+      // Only the TARGET account's tokens are touched.
+      const wasActive = (clientDoc.data() as Client).active !== false;
+      if (data.active === false && wasActive) {
+        try {
+          // Canonical cleanup shape: snapshot doc ids via the tested
+          // ownership helper — never the token value.
+          const tokensSnap = await getDocs(collection(db, "pushTokens"));
+          const tokenRecords = tokensSnap.docs.map(t => ({ id: t.id, ...(t.data() as { userId?: string; role?: string }) }));
+          const tokenIdsToDelete = selectPushTokensForAccountDeletion(tokenRecords, { id: req.params.id, role: "client" });
+          await Promise.all(tokenIdsToDelete.map(tokenDocId => deleteDoc(doc(db, "pushTokens", tokenDocId))));
+        } catch (tokenErr) {
+          console.warn("[clients] push-token cleanup after disable failed (non-fatal):", tokenErr instanceof Error ? tokenErr.message : tokenErr);
+        }
+        await logActivity("", "", req.session!.id,
+          `Client account disabled: ${(clientDoc.data() as Client).contactName || req.params.id}`,
+          `Müşteri hesabı devre dışı bırakıldı: ${(clientDoc.data() as Client).contactName || req.params.id}`,
+          `تم تعطيل حساب العميل: ${(clientDoc.data() as Client).contactName || req.params.id}`).catch(() => {});
+      }
 
       const updated = { ...clientDoc.data(), ...updates } as Client;
       res.json(stripPassword(updated));
@@ -8224,6 +8673,20 @@ async function startServer() {
       if (availableForOffers !== undefined && typeof availableForOffers !== "boolean") {
         return res.status(400).json({ error: "availableForOffers must be true or false." });
       }
+      // Stage 2 PR 4: identity-field edits go through the global
+      // cross-role collision check, excluding this driver's own record —
+      // an unchanged own identity always passes; claiming any OTHER
+      // account's username/email/phone (any role, or the owner) is a 409.
+      if (username !== undefined || email !== undefined || phone !== undefined) {
+        const identityCollision = findGlobalIdentityCollision(
+          { username, email, phone },
+          await loadAllIdentityRecords(),
+          { source: "drivers", id: req.params.id }
+        );
+        if (identityCollision) {
+          return res.status(409).json({ error: identityConflictMessage(identityCollision) });
+        }
+      }
       let sanitizedRoutes: DriverRoute[] | undefined;
       if (workingRoutes !== undefined) {
         const routeResult = sanitizeWorkingRoutes(workingRoutes);
@@ -8273,7 +8736,29 @@ async function startServer() {
       if (allianceInactive !== undefined) updatedDriver.allianceInactive = allianceInactive === true;
       if (availableForOffers !== undefined) updatedDriver.availableForOffers = availableForOffers;
 
-      await setDoc(dRef, updatedDriver);
+      // Atomic identity-key move + account write: unchanged values keep
+      // their reservation; new values are reserved and old ones released
+      // in the SAME transaction as the profile write. Placeholder phone
+      // values are never reservable (driverReservationIdentity).
+      {
+        const { toReserve, toReleaseKeyIds } = diffIdentityClaims(
+          driverReservationIdentity(original),
+          driverReservationIdentity(updatedDriver)
+        );
+        try {
+          await applyIdentityReservation({
+            owner: { source: "drivers", accountId: req.params.id },
+            claims: toReserve,
+            releaseKeyIds: toReleaseKeyIds,
+            accountWrite: { collection: "drivers", id: req.params.id, data: updatedDriver as Record<string, unknown> },
+          });
+        } catch (reserveErr) {
+          if (reserveErr instanceof IdentityConflictError) {
+            return res.status(409).json({ error: identityConflictMessage(reserveErr.field) });
+          }
+          throw reserveErr;
+        }
+      }
 
       // If name or truck updated, automatically update assigned shipments references
       if ((name && name !== original.name) || (truckNumber && truckNumber !== original.truckNumber)) {

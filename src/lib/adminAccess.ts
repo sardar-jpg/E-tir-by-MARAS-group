@@ -191,19 +191,13 @@ export function canManageVendors(adminType: AdminType | undefined): boolean {
   return canManageClients(adminType);
 }
 
-/**
- * POST /api/admins lets any full admin (super or operation) create a new
- * sub-admin, taking `adminType` straight from the request body. Without
- * this, an operation-type admin could hand themselves (or an accomplice)
- * a brand-new "super" admin record — indistinguishable from the real
- * owner for every adminType-based check in this file — via a single API
- * call. Only "operation" and "accounts" may ever be created through this
- * route; "super" is reserved for the owner account, which is never
- * created here (see SUPER_ADMIN_EMAIL / the local-dev demo seed).
- */
-export function sanitizeCreatedAdminType(requested: unknown): "operation" | "accounts" {
-  return requested === "accounts" ? "accounts" : "operation";
-}
+/* sanitizeCreatedAdminType was removed in Stage 2 PR 4: its silent
+ * downgrade-to-operation fallback violated strict adminType validation.
+ * POST /api/admins now uses validateCreatedAdminType
+ * (src/lib/accountIdentity.ts), which keeps the same product rule —
+ * only "operation"/"accounts" can ever be created; "super" is reserved
+ * for the env-configured owner — but rejects missing/unknown/"super"
+ * values with an explicit 400 instead of silently mutating them. */
 
 /**
  * Owner-account protection: the account matching the well-known owner

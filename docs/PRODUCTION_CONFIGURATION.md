@@ -117,3 +117,32 @@ OPENAI_API_KEY, AUDIT_SCHEDULER_TOKEN` (+ any manually preserved extras).
 and every contract issue for the current environment assessed as
 production; exits non-zero on fatal issues. Use `-- --dev` to assess the
 environment as-is instead.
+
+## 7. One-time migration — identity reservations (PR #137)
+
+PR #137 makes the `accountIdentityKeys` collection the authoritative
+uniqueness mechanism for account identities (username/email/phone across
+admins, drivers, clients, and the protected owner). Existing accounts
+predate it, so a one-time backfill is required. **Until the backfill runs,
+the system is still safe**: every create/update route keeps a
+collection-wide scan that deterministically blocks collisions with legacy
+accounts (static data), while the reservation transaction closes the
+concurrent new-vs-new race — the backfill just moves legacy accounts onto
+the authoritative mechanism too.
+
+**Migration order (run in exactly this order, after PR #137 is deployed):**
+
+1. `npx tsx scripts/backfill-identity-keys.ts` — **dry run** (default;
+   writes nothing). Review the output.
+2. If it reports `COLLISION` lines, two legacy accounts share an identity —
+   fix the data in the app first (edit one of the accounts), then re-run
+   the dry run until clean. The script never auto-resolves collisions.
+3. `npx tsx scripts/backfill-identity-keys.ts --execute` — writes the
+   uncontested reservations. Idempotent; safe to re-run.
+4. Verify: the script's summary shows `Legacy collisions: 0` and the
+   expected reservation count; spot-check the `accountIdentityKeys`
+   collection in the Firebase console (documents contain hashes and
+   account references only — never raw values or credentials).
+
+The protected owner's reservations are also self-ensured at every server
+boot, so step 3 and the running server converge on the same state.
