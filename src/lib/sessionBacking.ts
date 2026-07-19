@@ -18,6 +18,17 @@ import { isClientAccountActive } from "./clientAccess";
 
 export type SessionBackingRejection = "missing" | "blocked" | "role_changed" | "unknown_role";
 
+/**
+ * PR #137 review: when the backing-account lookup itself FAILS (Firestore
+ * outage), the request is neither authorized nor proven unauthorized —
+ * protected routes answer 503 with this code instead of attaching the
+ * session (fail-closed) or lying with a 401. Public/unauthenticated
+ * routes are unaffected (they never consult the session).
+ */
+export const SESSION_VERIFICATION_UNAVAILABLE_CODE = "SESSION_VERIFICATION_UNAVAILABLE";
+export const SESSION_VERIFICATION_UNAVAILABLE_MESSAGE =
+  "Session verification is temporarily unavailable. Please try again in a moment.";
+
 export interface SessionBackingResult {
   ok: boolean;
   reason?: SessionBackingRejection;

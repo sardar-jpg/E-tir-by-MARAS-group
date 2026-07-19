@@ -16,8 +16,8 @@ const region = (needle: string, length: number): string => {
   return SERVER.slice(at, at + length);
 };
 
-describe("stale-session invalidation is wired into the session middleware", () => {
-  const MW = region("const staleSessionLogAt = new Map", 3200);
+describe("stale-session invalidation is wired into the session middleware (fail-closed)", () => {
+  const MW = region("const staleSessionLogAt = new Map", 4200);
 
   it("every authenticated request verifies the backing account through the tested pure module", () => {
     expect(MW).toContain("isOwnerSession(payload, ownerEmail)");
@@ -29,12 +29,82 @@ describe("stale-session invalidation is wired into the session middleware", () =
     expect(MW).not.toContain("updateDoc(");
   });
 
-  it("rejection logging is throttled and secret-free; infra errors fail open, never into a fake verdict", () => {
+  it("PR #137 review: infrastructure failure NEVER attaches the session — it flags 503, not authorization", () => {
+    // The catch block sets the verification-unavailable flag…
+    expect(MW).toContain("req.sessionVerificationUnavailable = true");
+    // …and contains NO session attachment (the only `req.session =` in the
+    // middleware appear on the owner path and the verified-ok path).
+    const catchAt = MW.indexOf("} catch (err) {");
+    const catchBlock = MW.slice(catchAt, MW.indexOf("next();", catchAt));
+    expect(catchBlock).not.toContain("req.session = payload");
+    expect(catchBlock).toContain("verification unavailable");
+    // The old fail-open wording is gone from the server entirely.
+    expect(SERVER).not.toContain("keeping session for this request");
+  });
+
+  it("protected routes answer 503 SESSION_VERIFICATION_UNAVAILABLE on verification outage — via every auth gate", () => {
+    const HELPER = region("function respondIfSessionVerificationUnavailable", 900);
+    expect(HELPER).toContain("503");
+    expect(HELPER).toContain("SESSION_VERIFICATION_UNAVAILABLE_CODE");
+    // All 11 gates consult the helper: requireAuth, requireRole (factory),
+    // requireFullAdmin, requireSuperAdmin, requireShipmentAccess, and the
+    // six canView/canWrite gates.
+    const gateCalls = SERVER.split("if (respondIfSessionVerificationUnavailable(req, res)) return;").length - 1;
+    expect(gateCalls).toBeGreaterThanOrEqual(11);
+    // Public/unauthenticated surfaces stay unaffected: the share routes
+    // use no auth gate at all.
+    const SHARE = region('app.get("/api/share/:token"', 300);
+    expect(SHARE).not.toContain("requireAuth");
+  });
+
+  it("rejection + infra logging is throttled and secret-free", () => {
     expect(MW).toContain("STALE_SESSION_LOG_THROTTLE_MS");
     expect(MW).toContain("stale session rejected");
-    // Log lines carry role + id only — never the token.
+    // No token VALUE ever reaches a log line (no template interpolation of
+    // the token variable anywhere in the middleware).
     expect(MW).not.toContain("${token");
-    expect(MW).toContain("keeping session for this request");
+    expect(MW).not.toContain(", token)");
+  });
+});
+
+describe("PR #137 review: transactional identity reservations are the authoritative uniqueness mechanism", () => {
+  it("the atomic executor runs claims+releases+account write in ONE transaction (memory mode synchronous)", () => {
+    const EXEC = region("async function applyIdentityReservation", 3400);
+    expect(EXEC).toContain("(db as any).runTransaction(async (tx: any) =>");
+    expect(EXEC).toContain("findClaimConflict(op.claims, existing, op.owner)");
+    expect(EXEC).toContain("throw new IdentityConflictError(conflict)");
+    expect(EXEC).toContain("canReleaseReservation(");
+    expect(EXEC).toContain("applyIdentityReservationMemory(");
+    // Memory-fallback collection entry exists (PR #44 lesson).
+    expect(SERVER).toContain("accountIdentityKeys: IdentityReservationRecord[];");
+    expect(SERVER).toContain("accountIdentityKeys: [],");
+  });
+
+  it("all six create/update account paths and all four delete paths go through the executor", () => {
+    const count = SERVER.split("await applyIdentityReservation({").length - 1;
+    expect(count).toBeGreaterThanOrEqual(10); // 3 creates + self-register + 2 updates + 4 deletes/releases (+ owner startup)
+    // Creates/updates write the account INSIDE the reservation transaction…
+    expect(SERVER.split("accountWrite: { collection:").length - 1).toBeGreaterThanOrEqual(5);
+    // …and deletes remove the account + release only its own keys together.
+    expect(SERVER.split("accountDelete: { collection:").length - 1).toBeGreaterThanOrEqual(4);
+    // The raw account setDoc/deleteDoc calls those paths used are gone.
+    expect(SERVER).not.toContain('await setDoc(doc(db, "admins", newAdmin.id), newAdmin)');
+    expect(SERVER).not.toContain('await setDoc(doc(db, "drivers", newDriver.id), newDriver)');
+    expect(SERVER).not.toContain('await setDoc(doc(db, "clients", newClient.id), newClient)');
+  });
+
+  it("owner identity keys are reserved at startup under the untouchable owner source", () => {
+    const OWNER = region("const ownerReservationTimer", 900);
+    expect(OWNER).toContain("OWNER_RESERVATION_SOURCE");
+    expect(OWNER).toContain("computeOwnerClaims(ownerEmail)");
+  });
+
+  it("the backfill script exists, is dry-run by default, and never auto-resolves legacy collisions", () => {
+    const SCRIPT = readFileSync(join(ROOT, "scripts", "backfill-identity-keys.ts"), "utf-8");
+    expect(SCRIPT).toContain('process.argv.includes("--execute")');
+    expect(SCRIPT).toContain("DRY RUN (nothing written)");
+    expect(SCRIPT).toContain("never auto-resolved");
+    expect(SCRIPT).toContain("COLLISION");
   });
 });
 
@@ -105,14 +175,37 @@ describe("owner protection", () => {
 });
 
 describe("push tokens and audit trail on delete/disable", () => {
-  it("admin deletion, client disable, and driver rejection all revoke ONLY the target account's push tokens", () => {
-    const DEL = region('app.delete("/api/admins/:id"', 3400);
-    expect(DEL).toContain("t.userId === id");
-    const CLI = region('app.put("/api/clients/:id"', 4600);
-    expect(CLI).toContain("t.userId === req.params.id");
-    const STATUS = region('app.patch("/api/drivers/:id/status"', 2200);
+  it("admin deletion, client disable, and driver rejection all use the canonical helper with SNAPSHOT DOC IDS", () => {
+    // PR #137 review item 3: never assume the token value equals the doc
+    // id — every cleanup maps `{ id: t.id, ...t.data() }` and deletes by
+    // the ids selectPushTokensForAccountDeletion returns.
+    for (const [needle, role, len] of [
+      ['app.delete("/api/admins/:id"', '{ id, role: "admin" }', 4200],
+      ['app.put("/api/clients/:id"', '{ id: req.params.id, role: "client" }', 6400],
+      ['app.patch("/api/drivers/:id/status"', '{ id: req.params.id, role: "driver" }', 2600],
+    ] as const) {
+      const R = region(needle, len);
+      expect(R).toContain("id: t.id, ...(t.data()");
+      expect(R).toContain(`selectPushTokensForAccountDeletion(tokenRecords, ${role})`);
+    }
+    const STATUS = region('app.patch("/api/drivers/:id/status"', 2600);
     expect(STATUS).toContain('status === "rejected"');
-    expect(STATUS).toContain("t.userId === req.params.id");
+    // No CLEANUP path deletes by the token VALUE field: every pushTokens
+    // deleteDoc in the server uses ids produced by the canonical helper
+    // or the ownership-checked single-token route — never `t.token`.
+    for (const badPattern of ['deleteDoc(doc(db, "pushTokens", t.token', 'deleteDoc(doc(db, "pushTokens", tokenValue']) {
+      expect(SERVER).not.toContain(badPattern);
+    }
+  });
+
+  it("the ownership helper itself selects by document id even when it differs from the token value", async () => {
+    const { selectPushTokensForAccountDeletion } = await import("./pushTokenAccess");
+    const docs = [
+      { id: "doc-abc", userId: "admin-1", role: "admin" }, // doc id ≠ token value
+      { id: "doc-def", userId: "admin-2", role: "admin" },
+      { id: "doc-ghi", userId: "admin-1", role: "driver" }, // same user id, different role — untouched
+    ];
+    expect(selectPushTokensForAccountDeletion(docs, { id: "admin-1", role: "admin" })).toEqual(["doc-abc"]);
   });
 
   it("activity log entries exist for admin creation/deletion and client disabling — with no credential material", () => {
