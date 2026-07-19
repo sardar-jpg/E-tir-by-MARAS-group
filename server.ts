@@ -89,6 +89,10 @@ import {
   computeInvoiceSelling, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
   canCancelInvoice, buildInvoiceNumber,
 } from "./src/lib/customerInvoice";
+import {
+  buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
+  isDuplicatePayment, summarizeCustomerAccount,
+} from "./src/lib/customerPayments";
 import { renderFinalCostStatementPdf } from "./src/lib/costStatementFinalPdf";
 import { canViewShipmentRegistry, canViewDriverRoster, canViewAdminRoster, canViewClients, canViewVendors, canViewCostStatements, canWriteCostStatements, canViewAuditLogs, canWriteAuditLogs, canViewGpsTracking, resolveFullAdminStatus, isProtectedOwnerAccount, canDeleteAdminAccount, canManageShipmentStatus, type AdminType } from "./src/lib/adminAccess";
 import { resolveCorsOrigin, parseAllowedOriginsFromEnv } from "./src/lib/cors";
@@ -448,6 +452,8 @@ let memoryStore: {
   vendorPayments: VendorPaymentTransaction[];
   // Customer Invoices: one doc per invoice (a shipment may have several).
   customerInvoices: CustomerInvoice[];
+  // Customer Payments: account-based (per company), allocated to invoices.
+  customerPayments: CustomerPayment[];
   test: any[];
   // BUG-15: allocates shipment sequence numbers when running on the
   // memory fallback. Lazily created (see getShipmentSequenceCounter)
@@ -487,6 +493,7 @@ function getMemoryStore() {
       bankAccounts: [],
       vendorPayments: [],
       customerInvoices: [],
+      customerPayments: [],
       test: [{ id: "connection", status: "ok" }],
       shipmentSequenceCounter: null
     };
@@ -2055,7 +2062,9 @@ import {
   BankAccountSnapshot,
   VendorPaymentTransaction,
   CostItem,
-  CustomerInvoice
+  CustomerInvoice,
+  CustomerPayment,
+  PaymentAllocation
 } from "./src/types";
 import {
   sanitizeWorkingRoutes,
@@ -11106,6 +11115,159 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to cancel invoice." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Customer Payments + allocation — account-based (per customer company).
+  // A payment is allocated across invoices (auto oldest-first, or manual);
+  // any unallocated amount is advance credit. Per-invoice paid/outstanding
+  // and per-currency account totals are derived server-side. Payments are
+  // never edited/deleted — corrections are reversals. Internal-only.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadInvoicesForCompany(companyName: string): Promise<CustomerInvoice[]> {
+    const snap = await getDocs(collection(db, "customerInvoices"));
+    return snap.docs.map((d) => d.data() as CustomerInvoice).filter((i) => i.companyName === companyName);
+  }
+  async function loadPaymentsForCompany(companyName: string): Promise<CustomerPayment[]> {
+    const snap = await getDocs(collection(db, "customerPayments"));
+    return snap.docs.map((d) => d.data() as CustomerPayment).filter((p) => p.companyName === companyName);
+  }
+  const readCompany = (req: express.Request): string =>
+    (typeof req.query.company === "string" && req.query.company) ||
+    (typeof req.body?.company === "string" && req.body.company) || "";
+
+  // Outstanding invoices for a customer (for allocation).
+  app.get("/api/customer-accounts/invoices", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      res.json({ invoices, outstanding: buildOutstandingList(invoices, payments) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load customer invoices." });
+    }
+  });
+
+  // Payments + per-currency account summary for a customer.
+  app.get("/api/customer-accounts/payments", requireCanViewCostStatements, async (req, res) => {
+    try {
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const [invoices, payments] = [await loadInvoicesForCompany(company), await loadPaymentsForCompany(company)];
+      payments.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      res.json({ payments, summary: summarizeCustomerAccount(invoices, payments) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load customer payments." });
+    }
+  });
+
+  // Record a customer payment. allocationMode: "auto" (oldest-first) or
+  // "manual" (body.allocations). Overpayment is retained as advance credit.
+  app.post("/api/customer-accounts/payments", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const company = readCompany(req);
+      if (!company) return res.status(400).json({ error: "A customer company is required." });
+      const amount = typeof body.amount === "number" && Number.isFinite(body.amount) ? body.amount : NaN;
+      if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ code: "invalid_amount", error: "Payment amount must be a positive number." });
+      const currency = body.currency as Currency;
+      if (!["USD", "IQD", "TRY", "EUR"].includes(currency)) return res.status(400).json({ code: "invalid_currency", error: "Currency must be one of USD, IQD, TRY, EUR." });
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      const invoices = await loadInvoicesForCompany(company);
+      const existing = await loadPaymentsForCompany(company);
+      if (isDuplicatePayment(existing, { companyName: company, amount, paymentDate, reference, currency })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      let allocations: PaymentAllocation[];
+      if (body.allocationMode === "manual" && Array.isArray(body.allocations)) {
+        const v = validateAllocations({ paymentId: null, paymentAmount: amount, paymentCurrency: currency, allocations: body.allocations, invoices, payments: existing });
+        if (!v.ok) return res.status(400).json({ code: v.code, error: v.error });
+        allocations = v.allocations;
+      } else {
+        allocations = autoAllocate(amount, currency, buildOutstandingList(invoices, existing)).allocations;
+      }
+      let bankAccountSnapshot: string | undefined;
+      if (typeof body.bankAccountId === "string" && body.bankAccountId) {
+        const bankSnap = await getDoc(doc(db, "bankAccounts", body.bankAccountId));
+        if (bankSnap.exists()) { const b = bankSnap.data() as BankAccount; bankAccountSnapshot = `${b.bankName} (${b.currency})`; }
+      }
+      const now = new Date().toISOString();
+      const payment: CustomerPayment = {
+        id: `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        companyName: company,
+        clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+        amount, currency, paymentDate,
+        paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.slice(0, 60) : "",
+        bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+        bankAccountSnapshot,
+        reference: reference || undefined,
+        attachmentUrl: typeof body.attachmentUrl === "string" ? body.attachmentUrl : undefined,
+        attachmentName: typeof body.attachmentName === "string" ? body.attachmentName : undefined,
+        notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
+        allocations,
+        status: "active",
+        createdBy: req.session!.id,
+        createdAt: now,
+      };
+      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(payment));
+      await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
+      res.status(201).json({ payment: cleanUndefined(payment) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] customer payment failed:", err);
+      res.status(500).json({ error: "Failed to record customer payment." });
+    }
+  });
+
+  // Re-allocate an active payment (manual set or auto re-run).
+  app.post("/api/customer-accounts/payments/:paymentId/allocate", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as CustomerPayment;
+      if (payment.status !== "active") return res.status(409).json({ code: "not_active", error: "Only an active payment can be re-allocated." });
+      const invoices = await loadInvoicesForCompany(payment.companyName);
+      const allPayments = await loadPaymentsForCompany(payment.companyName);
+      let allocations: PaymentAllocation[];
+      if (req.body?.allocationMode === "manual" && Array.isArray(req.body.allocations)) {
+        const v = validateAllocations({ paymentId: payment.id, paymentAmount: payment.amount, paymentCurrency: payment.currency, allocations: req.body.allocations, invoices, payments: allPayments });
+        if (!v.ok) return res.status(400).json({ code: v.code, error: v.error });
+        allocations = v.allocations;
+      } else {
+        const others = allPayments.filter((p) => p.id !== payment.id);
+        allocations = autoAllocate(payment.amount, payment.currency, buildOutstandingList(invoices, others)).allocations;
+      }
+      const next: CustomerPayment = { ...payment, allocations, updatedAt: new Date().toISOString(), updatedBy: req.session!.id };
+      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(next));
+      await logActivity("", "Accounting", req.session!.id, `Customer payment re-allocated for ${payment.companyName}`, "", "");
+      res.json({ payment: cleanUndefined(next) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to re-allocate payment." });
+    }
+  });
+
+  // Reverse a customer payment (reason required; never deletes).
+  app.post("/api/customer-accounts/payments/:paymentId/reverse", requireCanWriteCostStatements, async (req, res) => {
+    try {
+      const snap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!snap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = snap.data() as CustomerPayment;
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const decision = canReversePayment(payment, reason);
+      if (!decision.ok) return res.status(decision.code === "reason_required" ? 400 : 409).json({ code: decision.code, error: decision.error });
+      const now = new Date().toISOString();
+      const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: req.session!.id, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+      await setDoc(doc(db, "customerPayments", payment.id), cleanUndefined(reversed));
+      await logActivity("", "Accounting", req.session!.id, `Customer payment reversed for ${payment.companyName} (${payment.amount} ${payment.currency})`, "", "");
+      res.json({ payment: cleanUndefined(reversed) });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to reverse customer payment." });
     }
   });
 

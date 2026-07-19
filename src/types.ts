@@ -598,6 +598,48 @@ export interface CustomerInvoice {
   revision?: number;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Customer Payments — account-based (per customer, by company name), not
+// per-invoice. A payment is allocated across one or more invoices (auto,
+// oldest-first, or manual); any unallocated balance is advance credit.
+// Completed payments are never edited/deleted — corrections are reversals.
+// Allocation/summary math lives in src/lib/customerPayments.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+/** One allocation of a payment to a specific invoice. */
+export interface PaymentAllocation {
+  invoiceId: string;
+  invoiceNumber: string;
+  amount: number;
+}
+
+export interface CustomerPayment {
+  id: string;
+  /** Customer identity — the shipment/invoice company name (consistent everywhere). */
+  companyName: string;
+  clientId?: string;
+  amount: number;
+  currency: Currency;
+  paymentDate: string;
+  paymentMethod: string;
+  bankAccountId?: string;
+  bankAccountSnapshot?: string;
+  reference?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
+  notes?: string;
+  /** Current allocations to invoices (replaceable while active). */
+  allocations: PaymentAllocation[];
+  status: 'active' | 'reversed';
+  createdBy: string;
+  createdAt: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  reversedBy?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+}
+
 export interface CostStatement {
   shipmentId: string;
   shipmentNumber: string;
