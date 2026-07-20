@@ -33,6 +33,7 @@ const T = {
   title: { en: "Shipment Cost Statement", ar: "كشف تكاليف الشحنة", tr: "Sevkiyat Maliyet Tablosu" },
   subtitle: { en: "Create and manage shipment expenses, vendor payments and customer invoicing", ar: "إنشاء وإدارة مصاريف الشحنة ومدفوعات الموردين وفوترة العملاء", tr: "Sevkiyat masraflarını, tedarikçi ödemelerini ve müşteri faturalarını yönetin" },
   back: { en: "Back to Cost Statements", ar: "العودة إلى كشوف التكاليف", tr: "Maliyet Tablolarına Dön" },
+  backShort: { en: "Back", ar: "رجوع", tr: "Geri" },
   preview: { en: "Preview Documents", ar: "معاينة المستندات", tr: "Belgeleri Önizle" },
   more: { en: "Actions", ar: "إجراءات", tr: "İşlemler" },
   saveDraft: { en: "Save Draft", ar: "حفظ المسودة", tr: "Taslağı Kaydet" },
@@ -274,15 +275,19 @@ export default function CostStatementWorkspace({
   const btnGhost = "px-4 py-2.5 bg-white border border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50 text-[13px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all shadow-sm";
 
   return (
-    <div className="w-full min-h-full bg-slate-100/70 pb-24">
+    // Mobile: no page-level horizontal overflow (overflow-x-hidden is a guard AFTER
+    // the width fixes below), and bottom padding clears BOTH the sticky action bar
+    // and the mobile bottom navigation (+ iOS safe area). Desktop keeps pb-24.
+    <div className="w-full min-h-full bg-slate-100/70 overflow-x-hidden pb-[calc(8.5rem+env(safe-area-inset-bottom))] lg:pb-24">
       {/* ─── Header ─────────────────────────────────────────────────────── */}
-      <div className="bg-white border-b border-slate-200 px-4 md:px-8 pt-6 pb-7 space-y-6">
+      <div className="bg-white border-b border-slate-200 px-4 md:px-8 pt-4 pb-5 sm:pt-6 sm:pb-7 space-y-4 sm:space-y-6">
         <div className="flex items-center justify-between gap-3">
-          <button onClick={onBack} className="text-[12px] font-bold text-slate-500 hover:text-slate-900 flex items-center gap-1.5 bg-transparent border-0 cursor-pointer p-0 transition-colors">
-            <ArrowLeft className="w-4 h-4" />{pick(T.back, lang)}
+          <button onClick={onBack} className="text-[12px] font-bold text-slate-500 hover:text-slate-900 flex items-center gap-1.5 bg-transparent border-0 cursor-pointer p-0 transition-colors min-w-0">
+            <ArrowLeft className="w-4 h-4 shrink-0" /><span className="truncate"><span className="sm:hidden">{pick(T.backShort, lang)}</span><span className="hidden sm:inline">{pick(T.back, lang)}</span></span>
           </button>
-          <div className="flex items-center gap-2">
-            <button onClick={() => scrollTo("documents")} className={btnGhost}><Eye className="w-4 h-4" />{pick(T.preview, lang)}</button>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Preview Documents is folded into the More Actions menu on mobile (shown once). */}
+            <button onClick={() => scrollTo("documents")} className={`${btnGhost} hidden sm:flex`}><Eye className="w-4 h-4" />{pick(T.preview, lang)}</button>
             <div className="relative">
               <button onClick={() => setShowMore((v) => !v)} className={btnGhost}><MoreHorizontal className="w-4 h-4" />{pick(T.more, lang)}<ChevronDown className="w-3.5 h-3.5 opacity-60" /></button>
               {showMore && (
@@ -303,12 +308,12 @@ export default function CostStatementWorkspace({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-[28px] leading-none font-black text-slate-900 tracking-tight">{pick(T.title, lang)}</h1>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <h1 className="text-[22px] sm:text-[28px] leading-tight sm:leading-none font-black text-slate-900 tracking-tight">{pick(T.title, lang)}</h1>
           {/* Title badge = Statement Status ONLY (item 13). */}
           <StatusPill label={pick(statementStatus.label, lang)} tone={statementStatus.tone} large />
         </div>
-        <p className="text-[13.5px] text-slate-500 -mt-3.5">{pick(T.subtitle, lang)}</p>
+        <p className="text-[12.5px] sm:text-[13.5px] text-slate-500 -mt-2 sm:-mt-3.5">{pick(T.subtitle, lang)}</p>
 
         {/* Premium shipment info cards — 2 (tablet) / 4 (desktop) / 6 (wide) (item 2). */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6 gap-3.5">
@@ -357,7 +362,7 @@ export default function CostStatementWorkspace({
            breakpoint (desktop / tablet / mobile). No two-column layout. (item 4) ── */}
       <div className="px-4 md:px-8 py-6 max-w-[1400px] mx-auto space-y-6">
           {/* 1. Order Accounting Summary — server-authoritative KPIs (read only) */}
-          <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 scroll-mt-24">
+          <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 scroll-mt-24">
             <SectionHead num={1} title={pick(T.summary, lang)} desc={pick(T.summaryDesc, lang)} />
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
               <BigKpi label={pick(T.agreedPrice, lang)} value={money(agreedAmount)} unit={agreedCurrency} tone="blue" />
@@ -531,23 +536,28 @@ export default function CostStatementWorkspace({
           </section>
       </div>
 
-      {/* ─── Sticky footer ──────────────────────────────────────────────── */}
-      <div className="fixed bottom-0 inset-x-0 lg:left-auto lg:right-0 lg:w-[calc(100%-var(--admin-sidebar,0px))] bg-white border-t border-slate-200 px-4 md:px-8 py-3.5 flex items-center justify-between gap-3 z-30 print:hidden">
-        <div className="text-[12px] text-slate-500 flex items-center gap-1.5 min-w-0">
+      {/* ─── Sticky action bar ──────────────────────────────────────────────
+          Mobile: sits ABOVE the fixed bottom navigation (offset by the nav's
+          height + iOS safe area), so the primary actions are never hidden. The
+          two primary buttons stretch to fill the width and always fit the
+          viewport. Desktop: unchanged — pinned to bottom-0 beside the sidebar,
+          with the Linked Cargo + Last saved context. */}
+      <div className="fixed inset-x-0 z-30 bottom-[calc(4rem+env(safe-area-inset-bottom))] lg:bottom-0 lg:left-auto lg:right-0 lg:w-[calc(100%-var(--admin-sidebar,0px))] bg-white border-t border-slate-200 px-4 md:px-8 py-3 sm:py-3.5 flex items-center justify-between gap-3 print:hidden">
+        <div className="hidden lg:flex text-[12px] text-slate-500 items-center gap-1.5 min-w-0">
           <Package className="w-4 h-4 text-slate-400 shrink-0" />
           <span className="font-bold text-slate-600 shrink-0">{pick(T.linkedCargo, lang)}:</span>
           <span className="truncate">{statement.companyName}</span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 w-full lg:w-auto">
           {lastSavedLabel && <span className="hidden sm:flex items-center gap-1 text-[12px] text-slate-400"><CheckCircle2 className="w-4 h-4 text-emerald-500" />{pick(T.lastSaved, lang)}: {lastSavedLabel}</span>}
           {canWrite && onSaveDraft && (
-            <button onClick={() => onSaveDraft()} disabled={isSaving} className="px-4 py-2.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 text-[13px] font-bold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-all">
+            <button onClick={() => onSaveDraft()} disabled={isSaving} className="flex-1 lg:flex-none justify-center px-4 py-2.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 text-[13px] font-bold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-all">
               {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}{pick(T.saveDraft, lang)}
             </button>
           )}
           {/* Submit for Approval — the SECOND and last location. */}
           {canWrite && (
-            <button onClick={() => (onSubmitForApproval ? onSubmitForApproval() : scrollTo("review"))} disabled={!canSubmit} title={!canSubmit ? pick(T.submitBlocked, lang) : undefined} className={btnPrimary}>
+            <button onClick={() => (onSubmitForApproval ? onSubmitForApproval() : scrollTo("review"))} disabled={!canSubmit} title={!canSubmit ? pick(T.submitBlocked, lang) : undefined} className={`${btnPrimary} flex-1 lg:flex-none justify-center`}>
               <Send className="w-4 h-4" />{pick(T.submit, lang)}
             </button>
           )}
@@ -556,7 +566,7 @@ export default function CostStatementWorkspace({
 
       {/* Success toast (subtle) */}
       {toast && (
-        <div className="fixed bottom-24 right-6 z-40 bg-slate-900 text-white text-[13px] font-bold px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300 print:hidden">
+        <div className="fixed right-4 sm:right-6 bottom-[calc(9.5rem+env(safe-area-inset-bottom))] lg:bottom-24 z-50 bg-slate-900 text-white text-[13px] font-bold px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300 print:hidden">
           <CheckCircle2 className="w-5 h-5 text-emerald-400" />{toast}
         </div>
       )}
@@ -643,7 +653,7 @@ function SectionHead({ num, title, desc, action, badge }: { num?: number; title:
 }
 function SectionCard({ id, num, title, desc, action, badge, children }: { id: string; num?: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section id={id} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5 scroll-mt-24">
+    <section id={id} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 space-y-5 scroll-mt-24">
       <SectionHead num={num} title={title} desc={desc} action={action} badge={badge} />
       {children}
     </section>
