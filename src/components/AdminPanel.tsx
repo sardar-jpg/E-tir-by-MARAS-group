@@ -61,6 +61,8 @@ import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import AccountingDashboard from "./admin/accounting/AccountingDashboard";
 import CustomerStatementsPage from "./admin/accounting/CustomerStatementsPage";
 import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
+import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
+import PaymentsPage from "./admin/accounting/PaymentsPage";
 import AccountingComingSoon from "./admin/accounting/AccountingComingSoon";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel, isLiveAccountingTab } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
@@ -6732,6 +6734,12 @@ MARAS Group etir Center`;
       )}
       {activeTab === 'acct_vendor_statements' && canViewCostStatements(resolvedAdminType) && (
         <VendorStatementsPage lang={lang} vendors={vendors} />
+      )}
+      {activeTab === 'acct_invoices' && canViewCostStatements(resolvedAdminType) && (
+        <CustomerInvoicesPage lang={lang} clients={clients} />
+      )}
+      {activeTab === 'acct_payments' && canViewCostStatements(resolvedAdminType) && (
+        <PaymentsPage lang={lang} clients={clients} costStatements={costStatements} />
       )}
       {ACCOUNTING_TAB_IDS.includes(activeTab) && !isLiveAccountingTab(activeTab) && canViewCostStatements(resolvedAdminType) && (
         <AccountingComingSoon lang={lang} tabId={activeTab} />
