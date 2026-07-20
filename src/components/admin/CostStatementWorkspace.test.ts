@@ -372,3 +372,46 @@ describe("17. accounting simplification pass (order number, reference, unit, lay
     expect(drawerSrc).toContain("shipmentId");
   });
 });
+
+describe("18. mobile responsive layout (Shipment Cost Statement)", () => {
+  it("guards against page-level horizontal overflow after fixing widths", () => {
+    // overflow-x-hidden is a belt-and-suspenders guard; the width fixes below are the real fix.
+    expect(workspaceSrc).toContain("overflow-x-hidden");
+  });
+  it("bottom padding clears BOTH the action bar and the mobile bottom nav (+ iOS safe area)", () => {
+    expect(workspaceSrc).toContain("pb-[calc(8.5rem+env(safe-area-inset-bottom))] lg:pb-24");
+  });
+  it("the sticky action bar sits ABOVE the mobile bottom navigation on mobile, bottom-0 on desktop", () => {
+    expect(workspaceSrc).toContain("bottom-[calc(4rem+env(safe-area-inset-bottom))] lg:bottom-0");
+  });
+  it("the two primary actions stretch to fit the mobile viewport (flex-1) and are natural width on desktop", () => {
+    // Both Save Draft and Submit for Approval get flex-1 on mobile, flex-none on lg.
+    expect((workspaceSrc.match(/flex-1 lg:flex-none justify-center/g) || []).length).toBe(2);
+  });
+  it("keeps Save Draft + Submit for Approval in ONE place (no duplicate mobile/desktop controls)", () => {
+    expect((workspaceSrc.match(/T\.submit, lang\)/g) || []).length).toBe(1);
+    expect((workspaceSrc.match(/T\.saveDraft, lang\)/g) || []).length).toBe(1);
+  });
+  it("Preview Documents is DESKTOP-only; on mobile it lives only in the More Actions menu", () => {
+    // The standalone Preview button shows from lg up; on mobile + tablet Preview is only in the menu.
+    expect(workspaceSrc).toContain('${btnGhost} hidden lg:flex');
+    expect(workspaceSrc).not.toContain('${btnGhost} hidden sm:flex');
+  });
+  it("the page title and header spacing are reduced on mobile (no clipped heading)", () => {
+    expect(workspaceSrc).toContain("text-[19px] sm:text-[28px]");
+    expect(workspaceSrc).toContain("pt-3 pb-4 sm:pt-6 sm:pb-7");
+  });
+  it("the Approval Workflow card is collapsible on mobile (expanded by default), always open on desktop", () => {
+    expect(workspaceSrc).toContain("const [approvalOpen, setApprovalOpen] = useState(true)");
+    // Mobile-only toggle + the card is hidden when collapsed on mobile but always shown at lg.
+    expect(workspaceSrc).toContain("setApprovalOpen((v) => !v)");
+    expect(workspaceSrc).toContain('${approvalOpen ? "block" : "hidden"} lg:block');
+  });
+  it("summary/route/etc cards stay one-per-row full-width on mobile (no desktop grid on small screens)", () => {
+    // grid starts at a single column on mobile and only widens at sm/lg breakpoints.
+    expect(workspaceSrc).toContain("grid-cols-1 sm:grid-cols-2 lg:grid-cols-4");
+  });
+  it("respects the iOS safe-area inset at the bottom", () => {
+    expect(workspaceSrc).toContain("env(safe-area-inset-bottom)");
+  });
+});
