@@ -90,11 +90,11 @@ describe("4. five ordered workflow steps", () => {
       expect(positions[i]).toBeGreaterThan(positions[i - 1]);
     }
   });
-  it("step states include blocked/active/completed/pending with a status label", () => {
+  it("step states include blocked/active/completed/pending with a status sub-label", () => {
     expect(workspaceSrc).toContain("StepState");
     expect(workspaceSrc).toContain('"blocked"');
     expect(workspaceSrc).toContain('"completed"');
-    expect(workspaceSrc).toContain("statusLabel");
+    expect(workspaceSrc).toContain("StepStatusLabel");
   });
 });
 
@@ -108,7 +108,7 @@ describe("5. NO editable aggregate accounting fields", () => {
     expect(hasReceivedInput).toBe(false);
   });
   it("summary totals are rendered via read-only KPI components, not inputs", () => {
-    expect(workspaceSrc).toContain("<MiniKpi");
+    expect(workspaceSrc).toContain("<BigKpi");
     expect(workspaceSrc).toContain("<KpiCell");
     // No text input / editable field anywhere in the workspace itself.
     expect(workspaceSrc).not.toContain("<input");
@@ -226,9 +226,10 @@ describe("12. privacy — internal cost/markup never presented as customer figur
 });
 
 describe("13. responsive two-column desktop layout (not mobile-first)", () => {
-  it("the body is a desktop two-column grid that collapses to one column", () => {
-    expect(workspaceSrc).toContain("grid-cols-1 lg:grid-cols-3");
-    expect(workspaceSrc).toContain("lg:col-span-2");
+  it("the body is a desktop two-column grid (≈65/35) that collapses to one column", () => {
+    expect(workspaceSrc).toContain("grid-cols-1 lg:grid-cols-12");
+    expect(workspaceSrc).toContain("lg:col-span-8"); // main ≈65%
+    expect(workspaceSrc).toContain("lg:col-span-4"); // right ≈35%
   });
 });
 
@@ -273,5 +274,65 @@ describe("15. Receive Payment reuses the existing AR flow (no duplicated logic)"
     expect((accountPanelSrc.match(/onChanged\?\.\(\)/g) || []).length).toBeGreaterThanOrEqual(3);
     expect(accountPanelSrc).toContain("/reverse");
     expect(accountPanelSrc).toContain("/receipt");
+  });
+  it("Receive Payment is disabled and explained until an invoice exists (item 10)", () => {
+    expect(workspaceSrc).toContain("disabled={!hasIssuedInvoice}");
+    expect(workspaceSrc).toContain("invoiceFirst");
+  });
+});
+
+describe("16. UI refinement — scale, drawer, statuses, approval, docs", () => {
+  const drawerSrc = readFileSync(join(ROOT, "src/components/admin/ExpenseDrawer.tsx"), "utf8");
+  const approvalSrc = readFileSync(join(ROOT, "src/components/admin/CostApprovalWorkflowCard.tsx"), "utf8");
+  const invoicePanel2 = readFileSync(join(ROOT, "src/components/admin/CustomerInvoicePanel.tsx"), "utf8");
+
+  it("the add-expense drawer is CLOSED by default and closes + resets on save (item 3)", () => {
+    expect(workspaceSrc).toContain("const [showAddExpense, setShowAddExpense] = useState(false)");
+    expect(workspaceSrc).toContain("<ExpenseDrawer");
+    // It only opens on an explicit click, never by default.
+    expect(workspaceSrc).toContain("onClick={() => setShowAddExpense(true)}");
+    // Drawer resets fields and closes on a successful save.
+    expect(drawerSrc).toContain("reset();");
+    expect(drawerSrc).toContain("onClose();");
+  });
+  it("the drawer reuses the existing item endpoint (no duplicated accounting logic, item 14)", () => {
+    expect(drawerSrc).toContain("/api/cost-statements/${shipmentId}/items");
+    expect(drawerSrc).toContain("expectedRevision");
+    expect(drawerSrc).toContain("idempotencyKey");
+  });
+  it("Submit for Approval appears only in the two action bars, never in Quick Actions or the timeline (item 4)", () => {
+    // Exactly two Submit buttons in the workspace (top bar + sticky bar).
+    expect((workspaceSrc.match(/T\.submit, lang\)/g) || []).length).toBe(2);
+    // The approval timeline card no longer renders its own Submit button.
+    expect(approvalSrc).not.toContain(">Submit for Approval<");
+    // The dense mobile quick-actions block is not embedded on desktop.
+    expect(workspaceSrc).not.toContain("MobileAccountingQuickActions");
+  });
+  it("statuses are separated: statement status drives the title badge, not UNPAID (item 13)", () => {
+    expect(workspaceSrc).toContain("resolveAccountingStatus");
+    expect(workspaceSrc).toContain("deriveStatementStatus");
+    expect(workspaceSrc).toContain("statementStatus");
+    // Distinct vendor + customer payment status vocabularies.
+    expect(workspaceSrc).toContain("vendorStatus");
+    expect(workspaceSrc).toContain("custStatus");
+    // The title badge is the statement status, not the payment status.
+    expect(workspaceSrc).toContain("label={pick(statementStatus.label, lang)}");
+    expect(workspaceSrc).not.toContain("statement.paymentStatus");
+  });
+  it("blocked workflow steps explain the reason, never just 'Blocked' (item 8)", () => {
+    expect(workspaceSrc).toContain("needExpense");
+    expect(workspaceSrc).toContain("needCustomer");
+    expect(workspaceSrc).toContain("needInvoice");
+  });
+  it("the approval workflow is a timeline with role, timestamp and comment (item 12)", () => {
+    expect(approvalSrc).toContain("actorRole");
+    expect(approvalSrc).toContain("appr.comment");
+    expect(approvalSrc).toContain("toLocaleString()");
+  });
+  it("the customer invoice card shows number, dates, amount, status and actions (item 9)", () => {
+    expect(invoicePanel2).toContain("invoiceDate");
+    expect(invoicePanel2).toContain("dueDate");
+    expect(invoicePanel2).toContain("viewInvoice");
+    expect(invoicePanel2).toContain("downloadPdf");
   });
 });

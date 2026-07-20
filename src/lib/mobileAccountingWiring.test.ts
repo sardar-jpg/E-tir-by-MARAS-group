@@ -5,10 +5,11 @@ import { join } from "node:path";
 const ROOT = join(__dirname, "..", "..");
 const MOBILE = readFileSync(join(ROOT, "src", "components", "admin", "mobile", "MobileAccountingQuickActions.tsx"), "utf-8");
 const PANEL_HOST = readFileSync(join(ROOT, "src", "components", "AdminPanel.tsx"), "utf-8");
-// The quick-actions panel now also embeds inside the full-screen cost-statement
-// workspace (with `embedded` to show it at every breakpoint); the mobile-only
-// hosting still exists via the same component's default lg:hidden behaviour.
+// The desktop cost-statement workspace uses a dedicated ExpenseDrawer for
+// on-demand expense entry (reusing the SAME item-level endpoint); the mobile
+// quick-actions panel stays mobile-only (lg:hidden).
 const WORKSPACE = readFileSync(join(ROOT, "src", "components", "admin", "CostStatementWorkspace.tsx"), "utf-8");
+const EXPENSE_DRAWER = readFileSync(join(ROOT, "src", "components", "admin", "ExpenseDrawer.tsx"), "utf-8");
 
 describe("mobile accounting quick actions — lightweight, reuses backend", () => {
   it("is mobile-only (lg:hidden) and reuses the SAME accounting APIs", () => {
@@ -38,12 +39,17 @@ describe("mobile accounting quick actions — lightweight, reuses backend", () =
   it("the full desktop accounting list stays desktop-only (hidden lg:block)", () => {
     expect(PANEL_HOST).toContain("hidden lg:block");
   });
-  it("the quick-actions panel is mounted by the full-screen cost-statement workspace", () => {
-    expect(WORKSPACE).toContain("<MobileAccountingQuickActions");
-    // Inside the workspace it renders at every breakpoint (embedded), so
-    // desktop users get an Add Expense affordance too.
-    expect(WORKSPACE).toContain("embedded");
-    // The default (non-embedded) mount remains mobile-only.
+  it("the desktop workspace enters expenses via ExpenseDrawer, reusing the same item endpoint", () => {
+    // The dense mobile quick-actions block is NOT embedded on desktop anymore;
+    // a focused ExpenseDrawer handles on-demand expense entry.
+    expect(WORKSPACE).toContain("<ExpenseDrawer");
+    expect(WORKSPACE).not.toContain("<MobileAccountingQuickActions");
+    // The drawer reuses the SAME item-level endpoint + idempotency/revision
+    // contract — no duplicated accounting logic, no new server behaviour.
+    expect(EXPENSE_DRAWER).toContain("/api/cost-statements/${shipmentId}/items");
+    expect(EXPENSE_DRAWER).toContain("idempotencyKey");
+    expect(EXPENSE_DRAWER).toContain("expectedRevision");
+    // The mobile quick-actions panel still exists and stays mobile-only.
     expect(MOBILE).toContain("lg:hidden");
   });
 });
