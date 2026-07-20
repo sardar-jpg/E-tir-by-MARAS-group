@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 import { Ship, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import type { Language } from '../../types';
+import { ACCOUNTING_TAB_IDS } from '../../lib/accountingNav';
 
 export interface AdminSidebarTab {
   id: string;
@@ -22,14 +23,21 @@ interface AdminSidebarProps {
   onCloseMobile: () => void;
 }
 
-type GroupKey = 'operations' | 'business' | 'system';
+type GroupKey = 'operations' | 'accounting' | 'business' | 'system';
 
 // Fixed grouping/order for the sidebar — independent of the order tabs are
 // filtered in, so role-based filtering (done by the caller) keeps working
 // unchanged and only decides which of these ids are present.
+//
+// The `accounting` group is the dedicated Accounting module section; its ids
+// come straight from the accountingNav registry (single source of truth) so
+// the sidebar can never drift from the module's page list. `costs` (Cost
+// Statements) lives here now — it is part of the Accounting module — and is
+// intentionally NOT repeated in `business`.
 const GROUPS: { key: GroupKey; ids: string[] }[] = [
   { key: 'operations', ids: ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center'] },
-  { key: 'business', ids: ['clients', 'vendors', 'costs', 'reports'] },
+  { key: 'accounting', ids: ACCOUNTING_TAB_IDS },
+  { key: 'business', ids: ['clients', 'vendors', 'reports'] },
   { key: 'system', ids: ['settings', 'gmail', 'audit', 'team', 'my_account'] },
 ];
 
@@ -49,6 +57,7 @@ export function findUngroupedTabIds(tabIds: string[]): string[] {
 
 const GROUP_LABELS: Record<GroupKey, Record<Language, string>> = {
   operations: { en: 'Operations', tr: 'Operasyonlar', ar: 'العمليات' },
+  accounting: { en: 'Accounting', tr: 'Muhasebe', ar: 'المحاسبة' },
   business: { en: 'Business', tr: 'İşletme', ar: 'الأعمال' },
   system: { en: 'System', tr: 'Sistem', ar: 'النظام' },
 };
