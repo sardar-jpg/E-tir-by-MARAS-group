@@ -479,8 +479,11 @@ export default function CostStatementWorkspace({
                 clientId={resolvedClientId || undefined}
                 companyName={statement.companyName}
                 agreedAmount={agreedAmount}
+                customerHasPayments={customer.customerReceivedAmount > 0}
                 onInvoicesChange={setInvoices}
                 onLinkCustomer={onOpenCustomer ? () => onOpenCustomer(resolvedClientId) : undefined}
+                onReceivePayment={() => { setShowReceivePayment(true); document.getElementById("csw-payments")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                onViewPayments={() => { document.getElementById("csw-payments")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
               />
             </div>
           </section>
@@ -704,14 +707,14 @@ function BigKpi({ label, value, unit, tone }: { label: string; value: string; un
 function DocCard({ icon, tone, name, ready, onPreview, lang, pendingReason }: { icon: React.ReactNode; tone: keyof typeof TONE; name: string; ready: boolean; onPreview?: () => void; lang: Language; pendingReason?: string }) {
   const t = TONE[tone] || TONE.slate;
   return (
-    <div className={`rounded-2xl border p-4 flex items-center gap-3.5 transition-all ${ready ? "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm" : "border-slate-100 bg-slate-50/50"}`}>
+    <div className={`rounded-2xl border p-4 flex items-center gap-3.5 transition-all ${ready ? "border-emerald-200 bg-emerald-50/30 hover:border-emerald-300 hover:shadow-sm" : "border-slate-100 bg-slate-50/50"}`}>
       <span className={`w-14 h-14 rounded-2xl ${ready ? `${t.bg} ${t.fg}` : "bg-slate-100 text-slate-300"} flex items-center justify-center shrink-0`}>{icon}</span>
       <div className="min-w-0 flex-1">
         <div className={`text-[13px] font-black leading-tight ${ready ? "text-slate-800" : "text-slate-400"}`}>{name}</div>
         {/* Helpful status: a concrete reason when not generated, not a bare label. */}
         {!ready && pendingReason
           ? <span className="inline-flex items-center gap-1 mt-1 text-[9.5px] font-bold text-amber-600"><Clock className="w-3 h-3" />{pendingReason}</span>
-          : <span className={`inline-block mt-1 text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded ${ready ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-400"}`}>{ready ? pick(T.generated, lang) : pick(T.notGenerated, lang)}</span>}
+          : <span className={`inline-flex items-center gap-1 mt-1 text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded ${ready ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-400"}`}>{ready && <CheckCircle2 className="w-2.5 h-2.5" />}{ready ? pick(T.generated, lang) : pick(T.notGenerated, lang)}</span>}
         {ready && onPreview && (
           <div className="flex items-center gap-1.5 mt-2">
             <button onClick={onPreview} title={pick(T.preview, lang)} className="w-9 h-9 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center cursor-pointer border-0 transition-colors"><Eye className="w-4 h-4" /></button>
