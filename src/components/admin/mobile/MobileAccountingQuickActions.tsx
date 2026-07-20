@@ -36,12 +36,16 @@ const T = {
 const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
 const money = (v: number) => (Number.isFinite(v) ? v : 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
-export default function MobileAccountingQuickActions({ shipmentId, canWrite, sessionId, lang, embedded = false }: {
+export default function MobileAccountingQuickActions({ shipmentId, canWrite, sessionId, lang, embedded = false, onChanged }: {
   shipmentId: string; canWrite: boolean; sessionId: string; lang: Language;
   // When `embedded` (e.g. inside the full-screen CostStatementWorkspace) the
   // panel is shown at every breakpoint; otherwise it stays mobile-only
   // (lg:hidden) as the compact companion to the desktop accounting panels.
   embedded?: boolean;
+  // Fired after a successful write (expense/vendor payment/submit) so a host
+  // can refresh derived views and surface a success cue. Presentation only —
+  // the accounting write itself is unchanged.
+  onChanged?: (kind: "expense" | "vendor" | "submit") => void;
 }) {
   const visibility = embedded ? "" : "lg:hidden";
   const [stmt, setStmt] = useState<CostStatement | null>(null);
@@ -95,7 +99,7 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ item: { costType: "expense", description: exp.description || "Expense", amount: amt, currency: stmt.currency, supplierName: exp.supplierName || "" }, idempotencyKey, expectedRevision: stmt.revision || 1 }),
       });
-      if (res.ok) { setSheet(null); setExp({ description: "", supplierName: "", amount: "" }); await load(); return; }
+      if (res.ok) { setSheet(null); setExp({ description: "", supplierName: "", amount: "" }); await load(); onChanged?.("expense"); return; }
       const b = await res.json().catch(() => ({}));
       if (b.code === "revision_conflict") { setErr("This statement changed since you opened it — reloaded. Please review and retry."); await load(); }
       else setErr(b.error || "Could not add the expense.");
@@ -107,7 +111,7 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
     const it = items.find((i) => i.id === vp.costItemId);
     // Urgency is a priority, not a payment method (PR #140 review, item 12).
     const ok = await post(`/api/cost-statements/${shipmentId}/vendor-payments`, { costItemId: vp.costItemId, amount: amt, currency: it?.currency || stmt.currency, priority: "urgent", attachmentUrl: vp.proof || undefined });
-    if (ok) setVp({ costItemId: "", amount: "", proof: "" });
+    if (ok) { setVp({ costItemId: "", amount: "", proof: "" }); onChanged?.("vendor"); }
   };
   const reject = async () => { const reason = window.prompt(tr("reject", lang) + ":"); if (reason && reason.trim()) await post(`/api/cost-statements/${shipmentId}/reject`, { reason, revision: stmt.revision || 1 }); };
 

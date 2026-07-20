@@ -90,10 +90,11 @@ describe("4. five ordered workflow steps", () => {
       expect(positions[i]).toBeGreaterThan(positions[i - 1]);
     }
   });
-  it("step states include blocked/ready/active/completed with explanatory hints", () => {
+  it("step states include blocked/active/completed/pending with a status label", () => {
     expect(workspaceSrc).toContain("StepState");
-    expect(workspaceSrc).toContain("blocked");
-    expect(workspaceSrc).toContain("hint");
+    expect(workspaceSrc).toContain('"blocked"');
+    expect(workspaceSrc).toContain('"completed"');
+    expect(workspaceSrc).toContain("statusLabel");
   });
 });
 
@@ -106,9 +107,11 @@ describe("5. NO editable aggregate accounting fields", () => {
     const hasReceivedInput = /Customer Received[\s\S]{0,120}<input/i.test(workspaceSrc);
     expect(hasReceivedInput).toBe(false);
   });
-  it("summary totals are rendered via read-only SumRow/Stat, not inputs", () => {
-    expect(workspaceSrc).toContain("<SumRow");
-    expect(workspaceSrc).toContain("<Stat ");
+  it("summary totals are rendered via read-only KPI components, not inputs", () => {
+    expect(workspaceSrc).toContain("<MiniKpi");
+    expect(workspaceSrc).toContain("<KpiCell");
+    // No text input / editable field anywhere in the workspace itself.
+    expect(workspaceSrc).not.toContain("<input");
   });
 });
 
@@ -154,7 +157,10 @@ describe("8. vendor payments cannot precede an expense (payable must exist)", ()
     expect(workspaceSrc).toContain("noVendorYet");
   });
   it("the vendor step is 'blocked' until an expense exists", () => {
-    expect(workspaceSrc).toContain('state: !hasExpenses ? "blocked"');
+    // The step-state machine marks a step blocked when its hard prerequisite is
+    // missing; the vendor step (index 1) requires at least one expense.
+    expect(workspaceSrc).toContain("blockedPrereq");
+    expect(workspaceSrc).toContain("i === 1 && !hasExpenses");
   });
 });
 
