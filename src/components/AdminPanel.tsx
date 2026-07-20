@@ -6669,6 +6669,7 @@ MARAS Group etir Center`;
             shipments={shipments}
             clients={clients}
             bankAccounts={bankAccounts}
+            vendors={vendors}
             lang={lang}
             canWrite={canViewCostStatements(resolvedAdminType)}
             actor={{ sessionId: ownAdminId, isSuperAdmin: resolvedAdminType === 'super', canWriteCostStatements: canViewCostStatements(resolvedAdminType) }}
