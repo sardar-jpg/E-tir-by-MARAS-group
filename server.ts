@@ -89,6 +89,7 @@ import {
   computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
   canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
 } from "./src/lib/customerInvoice";
+import { sanitizeInvoiceLines, computeInvoiceTotals, priceDifference } from "./src/lib/customerInvoiceLines";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
@@ -11640,6 +11641,67 @@ async function startServer() {
   function buildInvoiceFromBody(stmt: CostStatement, shipment: Shipment | null, body: any): { ok: true; value: Omit<CustomerInvoice, "id" | "invoiceNumber" | "status" | "createdAt" | "createdBy"> } | { ok: false; code: string; error: string } {
     const invoiceCurrency = (body.currency as Currency) || stmt.agreedCurrency || stmt.currency;
     const costBasis = Number.isFinite(stmt.totalCost) ? stmt.totalCost : 0;
+
+    // ── Line-based customer invoice (new workflow) ───────────────────────────
+    // When invoiceLines[] is present the customer total is DERIVED from the
+    // service lines — the employee never picks a pricing method. The server
+    // recomputes every line amount + all totals (browser values are ignored)
+    // and maps the result onto the existing model as a `manual` invoice whose
+    // sellingAmount = grandTotal, so the ledger / payments / receipts are
+    // unchanged. Internal cost/profit are computed for internal reporting only
+    // and are stripped from every customer projection (view + PDF).
+    if (Array.isArray(body.invoiceLines)) {
+      const linesResult = sanitizeInvoiceLines(body.invoiceLines);
+      if (!linesResult.ok) return { ok: false, code: linesResult.code, error: linesResult.error };
+      const totals = computeInvoiceTotals(linesResult.lines, {
+        discountAmount: typeof body.discountAmount === "number" ? body.discountAmount : 0,
+        taxAmount: typeof body.taxAmount === "number" ? body.taxAmount : 0,
+        additionalCharges: typeof body.additionalCharges === "number" ? body.additionalCharges : 0,
+      });
+      const agreedAmount = Number.isFinite(shipment?.agreedAmount) ? Number(shipment!.agreedAmount)
+        : Number.isFinite((stmt as any).agreedAmount) ? Number((stmt as any).agreedAmount) : 0;
+      const agreedPriceDifference = priceDifference(totals.grandTotal, agreedAmount);
+      const reason = typeof body.priceDifferenceReason === "string" ? body.priceDifferenceReason.trim() : "";
+      // A non-zero difference vs the agreed selling price must carry a reason
+      // (stored for the audit trail). Creation is never auto-blocked otherwise.
+      if (Math.abs(agreedPriceDifference) > 0.001 && !reason) {
+        return { ok: false, code: "price_difference_reason_required", error: "The invoice total differs from the agreed shipment selling price. A price-difference reason is required." };
+      }
+      const grossProfit = computeInvoiceGrossProfit({ sellingAmount: totals.grandTotal, costBasis, invoiceCurrency, costCurrency: stmt.currency });
+      return {
+        ok: true,
+        value: {
+          shipmentId: stmt.shipmentId,
+          shipmentNumber: stmt.shipmentNumber,
+          clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+          companyName: stmt.companyName || shipment?.companyName || "",
+          currency: invoiceCurrency,
+          pricingMode: "manual",
+          costBasis,
+          manualAmount: totals.grandTotal,
+          sellingAmount: totals.grandTotal,
+          grossProfit,
+          invoiceLines: linesResult.lines,
+          subtotal: totals.subtotal,
+          discountAmount: totals.discountAmount,
+          taxAmount: totals.taxAmount,
+          additionalCharges: totals.additionalCharges,
+          grandTotal: totals.grandTotal,
+          agreedPriceDifference,
+          priceDifferenceReason: reason || undefined,
+          invoiceDate: typeof body.invoiceDate === "string" ? body.invoiceDate.slice(0, 10) : new Date().toISOString().slice(0, 10),
+          dueDate: typeof body.dueDate === "string" ? body.dueDate.slice(0, 10) : undefined,
+          paymentTerms: typeof body.paymentTerms === "string" ? body.paymentTerms.slice(0, 120) : undefined,
+          description: typeof body.description === "string" ? body.description.slice(0, 500) : "",
+          notes: typeof body.notes === "string" ? body.notes.slice(0, 1000) : "",
+          customerNotes: typeof body.customerNotes === "string" ? body.customerNotes.slice(0, 1000) : "",
+          internalNotes: typeof body.internalNotes === "string" ? body.internalNotes.slice(0, 1000) : "",
+          bankAccountId: typeof body.bankAccountId === "string" ? body.bankAccountId : undefined,
+          revision: 1,
+        },
+      };
+    }
+
     const mode = body.pricingMode;
     // Reject the removed pricing model outright (no dual-read, no aliasing).
     if (!isInvoicePricingMode(mode)) {
@@ -11724,6 +11786,20 @@ async function startServer() {
       };
       await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
       await logActivity("", "Accounting", req.session!.id, `Draft invoice ${invoice.invoiceNumber} created (${invoice.sellingAmount} ${invoice.currency})`, "", "");
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.invoiceDraftCreated, entityType: "customer_invoice", entityId: invoice.id, result: "success",
+        invoiceId: invoice.id, clientId: invoice.clientId, orderId: invoice.shipmentNumber, currency: invoice.currency,
+        afterSnapshot: { number: invoice.invoiceNumber, grandTotal: invoice.grandTotal ?? invoice.sellingAmount, lineCount: (invoice.invoiceLines || []).length },
+      });
+      // Record the price-difference reason in the audit trail (customer total ≠
+      // agreed selling price). Never carries internal cost/profit.
+      if (typeof invoice.agreedPriceDifference === "number" && Math.abs(invoice.agreedPriceDifference) > 0.001) {
+        await recordAudit(req, {
+          action: AUDIT_ACTIONS.invoicePriceDifferenceRecorded, entityType: "customer_invoice", entityId: invoice.id, result: "success",
+          invoiceId: invoice.id, orderId: invoice.shipmentNumber, currency: invoice.currency, reason: invoice.priceDifferenceReason,
+          afterSnapshot: { agreedPriceDifference: invoice.agreedPriceDifference, grandTotal: invoice.grandTotal },
+        });
+      }
       res.status(201).json({ invoice: cleanUndefined(invoice) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11759,6 +11835,18 @@ async function startServer() {
         revision: (existing.revision || 1) + 1,
       };
       await setDoc(doc(db, "customerInvoices", invoice.id), cleanUndefined(invoice));
+      await recordAudit(req, {
+        action: AUDIT_ACTIONS.invoiceDraftUpdated, entityType: "customer_invoice", entityId: invoice.id, result: "success",
+        invoiceId: invoice.id, clientId: invoice.clientId, orderId: invoice.shipmentNumber, currency: invoice.currency,
+        afterSnapshot: { grandTotal: invoice.grandTotal ?? invoice.sellingAmount, lineCount: (invoice.invoiceLines || []).length, revision: invoice.revision },
+      });
+      if (typeof invoice.agreedPriceDifference === "number" && Math.abs(invoice.agreedPriceDifference) > 0.001) {
+        await recordAudit(req, {
+          action: AUDIT_ACTIONS.invoicePriceDifferenceRecorded, entityType: "customer_invoice", entityId: invoice.id, result: "success",
+          invoiceId: invoice.id, orderId: invoice.shipmentNumber, currency: invoice.currency, reason: invoice.priceDifferenceReason,
+          afterSnapshot: { agreedPriceDifference: invoice.agreedPriceDifference, grandTotal: invoice.grandTotal },
+        });
+      }
       res.json({ invoice: cleanUndefined(invoice) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;

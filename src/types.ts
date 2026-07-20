@@ -640,6 +640,47 @@ export interface CustomerInvoice {
   updatedAt?: string;
   updatedBy?: string;
   revision?: number;
+  // ── Line-based invoicing (customer-facing service lines) ──
+  // Optional + legacy-safe: invoices created before this feature have no
+  // invoiceLines and keep rendering/paying from their sellingAmount. For
+  // line-based invoices the server recomputes each line amount + all totals
+  // and sets sellingAmount = grandTotal (so the ledger/payments are unchanged).
+  /** Customer-facing invoice date (defaults to today; distinct from issuedAt). */
+  invoiceDate?: string;
+  /** Server-recomputed customer service lines. Never contains internal cost/profit. */
+  invoiceLines?: CustomerInvoiceLine[];
+  /** Sum of line amounts (server-computed). */
+  subtotal?: number;
+  discountAmount?: number;
+  taxAmount?: number;
+  additionalCharges?: number;
+  /** Server-computed: subtotal − discount + tax + additionalCharges. Equals sellingAmount. */
+  grandTotal?: number;
+  /** Customer-facing notes (separate from the internal `internalNotes`). */
+  customerNotes?: string;
+  /** grandTotal − agreed shipment selling price (signed; for the audit trail). */
+  agreedPriceDifference?: number;
+  /** Reason recorded when grandTotal differs from the agreed selling price. */
+  priceDifferenceReason?: string;
+}
+
+/**
+ * A single customer-facing invoice service line. `amount` is ALWAYS recomputed
+ * server-side (quantity × unitPrice) — a browser-supplied amount is never
+ * trusted. `serviceType`/`unit` come from the controlled catalog; a custom
+ * value is only allowed via the "Other" sentinel (customServiceType/customUnit).
+ * Nothing here exposes vendor cost or internal profit.
+ */
+export interface CustomerInvoiceLine {
+  id: string;
+  serviceType: string;
+  customServiceType?: string;
+  description?: string;
+  quantity: number;
+  unit: string;
+  customUnit?: string;
+  unitPrice: number;
+  amount: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════
