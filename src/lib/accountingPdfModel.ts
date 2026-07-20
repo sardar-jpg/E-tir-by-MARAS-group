@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import type { CustomerAccountStatement } from "./customerAccountStatement";
 import { summarizeCustomerAccount } from "./customerPayments";
+import { hasInvoiceLines, lineServiceLabel, lineUnitLabel } from "./customerInvoiceLines";
 import { resolveTemplateRender, type TemplateConfig, type TemplateRenderOptions } from "./accountingTemplateConfig";
 
 export type PdfDirection = "ltr" | "rtl";
@@ -138,6 +139,12 @@ const LBL = {
   amount: { en: "Amount", ar: "المبلغ", tr: "Tutar" },
   total: { en: "Total", ar: "الإجمالي", tr: "Toplam" },
   subtotal: { en: "Subtotal", ar: "المجموع الفرعي", tr: "Ara Toplam" },
+  service: { en: "Service", ar: "الخدمة", tr: "Hizmet" },
+  unitPrice: { en: "Unit Price", ar: "سعر الوحدة", tr: "Birim Fiyat" },
+  discount: { en: "Discount", ar: "الخصم", tr: "İndirim" },
+  tax: { en: "Tax", ar: "الضريبة", tr: "Vergi" },
+  additionalCharges: { en: "Additional Charges", ar: "رسوم إضافية", tr: "Ek Ücretler" },
+  grandTotal: { en: "Grand Total", ar: "الإجمالي الكلي", tr: "Genel Toplam" },
   paymentTerms: { en: "Payment Terms", ar: "شروط الدفع", tr: "Ödeme Koşulları" },
   notes: { en: "Notes", ar: "ملاحظات", tr: "Notlar" },
   bankDetails: { en: "Bank Details", ar: "التفاصيل المصرفية", tr: "Banka Bilgileri" },
@@ -175,6 +182,44 @@ export function buildInvoicePdfModel(params: {
     : inv.status === "paid"
     ? { text: pick(LBL.paid, lang), kind: "issued" as const }
     : { text: pick(LBL.issued, lang), kind: "issued" as const };
+  // Line-based invoices render one row per customer service line + a full
+  // totals block; legacy invoices keep the single selling-total row. Neither
+  // path ever emits vendor cost, internal cost base, markup, or gross profit.
+  const lineBased = hasInvoiceLines(inv);
+  const columns = lineBased
+    ? [
+        { key: "service", label: pick(LBL.service, lang), align: "left" as const },
+        { key: "desc", label: pick(LBL.description, lang), align: "left" as const },
+        { key: "qty", label: pick(LBL.qty, lang), align: "right" as const },
+        { key: "unit", label: pick(LBL.unit, lang), align: "right" as const },
+        { key: "unitPrice", label: pick(LBL.unitPrice, lang), align: "right" as const },
+        { key: "amount", label: pick(LBL.amount, lang), align: "right" as const },
+      ]
+    : [
+        { key: "desc", label: pick(LBL.description, lang), align: "left" as const },
+        { key: "qty", label: pick(LBL.qty, lang), align: "right" as const },
+        { key: "unit", label: pick(LBL.unit, lang), align: "right" as const },
+        { key: "amount", label: pick(LBL.amount, lang), align: "right" as const },
+      ];
+  const rows = lineBased
+    ? (inv.invoiceLines || []).map((l) => ({
+        service: lineServiceLabel(l),
+        desc: l.description || "",
+        qty: String(l.quantity),
+        unit: lineUnitLabel(l),
+        unitPrice: money(l.unitPrice),
+        amount: money(l.amount),
+      }))
+    : [invoiceLineRow(inv, lang)];
+  const totals = lineBased
+    ? [
+        { label: `${pick(LBL.subtotal, lang)} (${inv.currency})`, value: money(inv.subtotal ?? inv.sellingAmount, inv.currency) },
+        ...(inv.discountAmount ? [{ label: pick(LBL.discount, lang), value: `- ${money(inv.discountAmount, inv.currency)}` }] : []),
+        ...(inv.taxAmount ? [{ label: pick(LBL.tax, lang), value: money(inv.taxAmount, inv.currency) }] : []),
+        ...(inv.additionalCharges ? [{ label: pick(LBL.additionalCharges, lang), value: money(inv.additionalCharges, inv.currency) }] : []),
+        { label: `${pick(LBL.grandTotal, lang)} (${inv.currency})`, value: money(inv.grandTotal ?? inv.sellingAmount, inv.currency), strong: true },
+      ]
+    : [{ label: `${pick(LBL.total, lang)} (${inv.currency})`, value: money(inv.sellingAmount, inv.currency), strong: true }];
   return {
     docType: "invoice",
     title: pick(LBL.invoice, lang),
@@ -185,19 +230,17 @@ export function buildInvoicePdfModel(params: {
     meta: [
       { label: pick(LBL.invoiceNo, lang), value: inv.invoiceNumber },
       { label: pick(LBL.order, lang), value: inv.shipmentNumber },
-      { label: pick(LBL.issueDate, lang), value: (inv.issuedAt || inv.createdAt || params.nowIso).slice(0, 10) },
+      { label: pick(LBL.issueDate, lang), value: (inv.issuedAt || inv.invoiceDate || inv.createdAt || params.nowIso).slice(0, 10) },
+      ...(inv.dueDate ? [{ label: pick(LBL.dueDate, lang), value: inv.dueDate.slice(0, 10) }] : []),
+      ...(inv.paymentTerms ? [{ label: pick(LBL.paymentTerms, lang), value: inv.paymentTerms }] : []),
       { label: pick(LBL.currency, lang), value: inv.currency },
     ],
-    columns: [
-      { key: "desc", label: pick(LBL.description, lang), align: "left" },
-      { key: "qty", label: pick(LBL.qty, lang), align: "right" },
-      { key: "unit", label: pick(LBL.unit, lang), align: "right" },
-      { key: "amount", label: pick(LBL.amount, lang), align: "right" },
-    ],
-    rows: [invoiceLineRow(inv, lang)],
-    totals: [{ label: `${pick(LBL.total, lang)} (${inv.currency})`, value: money(inv.sellingAmount, inv.currency), strong: true }],
-    notes: inv.notes,
-    paymentTerms: inv.description && inv.pricingMode !== "manual" ? undefined : undefined,
+    columns,
+    rows,
+    totals,
+    // Customer-facing notes only (never internalNotes).
+    notes: inv.customerNotes || inv.notes,
+    paymentTerms: undefined,
     bank: bankFrom(inv.bankAccountSnapshot || params.bank),
     flags: { ...DEFAULT_FLAGS, ...params.flags },
     footerText: (inv.companySnapshot || params.company || {}).footerText,

@@ -25,6 +25,8 @@ export const AUDIT_ACTIONS = {
   invoiceIssueRejected: "invoice.issue_rejected",
   invoiceEditRejected: "invoice.edit_rejected",
   invoiceStatusRecalculated: "invoice.status_recalculated",
+  /** A line-based invoice's grand total differs from the agreed selling price. */
+  invoicePriceDifferenceRecorded: "invoice.price_difference_recorded",
 
   customerPaymentCreated: "customer_payment.created",
   customerPaymentAllocated: "customer_payment.allocated",

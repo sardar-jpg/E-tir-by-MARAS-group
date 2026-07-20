@@ -72,6 +72,9 @@ const T = {
   addExpense: { en: "Add Expense", ar: "إضافة مصروف", tr: "Masraf Ekle" },
   notGenerated: { en: "Not Generated", ar: "غير مُنشأ", tr: "Oluşturulmadı" },
   generated: { en: "Generated", ar: "مُنشأ", tr: "Oluşturuldu" },
+  docWaitInvoice: { en: "Waiting for invoice to be issued", ar: "بانتظار إصدار الفاتورة", tr: "Faturanın düzenlenmesi bekleniyor" },
+  docWaitVendor: { en: "Waiting for vendor payment", ar: "بانتظار دفع المورد", tr: "Tedarikçi ödemesi bekleniyor" },
+  docWaitReceipt: { en: "Waiting for customer payment", ar: "بانتظار دفع العميل", tr: "Müşteri ödemesi bekleniyor" },
   lastSaved: { en: "Last saved", ar: "آخر حفظ", tr: "Son kayıt" },
   progress: { en: "Accounting Progress", ar: "التقدم المحاسبي", tr: "Muhasebe İlerlemesi" },
   linkedCargo: { en: "Linked Cargo", ar: "الشحنة المرتبطة", tr: "Bağlı Kargo" },
@@ -474,6 +477,8 @@ export default function CostStatementWorkspace({
                 canWrite={canWrite}
                 lang={lang}
                 clientId={resolvedClientId || undefined}
+                companyName={statement.companyName}
+                agreedAmount={agreedAmount}
                 onInvoicesChange={setInvoices}
                 onLinkCustomer={onOpenCustomer ? () => onOpenCustomer(resolvedClientId) : undefined}
               />
@@ -516,10 +521,10 @@ export default function CostStatementWorkspace({
           <SectionCard id="csw-documents" num={5} title={pick(T.documents, lang)} desc={pick(T.documentsDesc, lang)}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <DocCard icon={<ScrollText className="w-7 h-7" />} tone="slate" name="Cost Statement" ready onPreview={() => previewDoc(`/api/cost-statements/${statement.shipmentId}/pdf?lang=${lang}`)} lang={lang} />
-              <DocCard icon={<FileText className="w-7 h-7" />} tone="blue" name="Customer Invoice" ready={hasIssuedInvoice} onPreview={hasIssuedInvoice ? () => previewDoc(`/api/cost-statements/${statement.shipmentId}/invoices/${issuedInvoice!.id}/pdf?lang=${lang}`) : undefined} lang={lang} />
+              <DocCard icon={<FileText className="w-7 h-7" />} tone="blue" name="Customer Invoice" ready={hasIssuedInvoice} pendingReason={pick(T.docWaitInvoice, lang)} onPreview={hasIssuedInvoice ? () => previewDoc(`/api/cost-statements/${statement.shipmentId}/invoices/${issuedInvoice!.id}/pdf?lang=${lang}`) : undefined} lang={lang} />
               <DocCard icon={<FileText className="w-7 h-7" />} tone="emerald" name="Client Statement" ready onPreview={() => previewDoc(`/api/customer-accounts/statement/pdf?company=${encodeURIComponent(statement.companyName)}&currency=${agreedCurrency}&lang=${lang}`)} lang={lang} />
-              <DocCard icon={<Building2 className="w-7 h-7" />} tone="red" name="Vendor Voucher" ready={false} lang={lang} />
-              <DocCard icon={<Receipt className="w-7 h-7" />} tone="teal" name="Payment Receipt" ready={false} lang={lang} />
+              <DocCard icon={<Building2 className="w-7 h-7" />} tone="red" name="Vendor Voucher" ready={false} pendingReason={pick(T.docWaitVendor, lang)} lang={lang} />
+              <DocCard icon={<Receipt className="w-7 h-7" />} tone="teal" name="Payment Receipt" ready={false} pendingReason={pick(T.docWaitReceipt, lang)} lang={lang} />
             </div>
           </SectionCard>
 
@@ -696,14 +701,17 @@ function BigKpi({ label, value, unit, tone }: { label: string; value: string; un
   );
 }
 
-function DocCard({ icon, tone, name, ready, onPreview, lang }: { icon: React.ReactNode; tone: keyof typeof TONE; name: string; ready: boolean; onPreview?: () => void; lang: Language }) {
+function DocCard({ icon, tone, name, ready, onPreview, lang, pendingReason }: { icon: React.ReactNode; tone: keyof typeof TONE; name: string; ready: boolean; onPreview?: () => void; lang: Language; pendingReason?: string }) {
   const t = TONE[tone] || TONE.slate;
   return (
     <div className={`rounded-2xl border p-4 flex items-center gap-3.5 transition-all ${ready ? "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm" : "border-slate-100 bg-slate-50/50"}`}>
       <span className={`w-14 h-14 rounded-2xl ${ready ? `${t.bg} ${t.fg}` : "bg-slate-100 text-slate-300"} flex items-center justify-center shrink-0`}>{icon}</span>
       <div className="min-w-0 flex-1">
         <div className={`text-[13px] font-black leading-tight ${ready ? "text-slate-800" : "text-slate-400"}`}>{name}</div>
-        <span className={`inline-block mt-1 text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded ${ready ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-400"}`}>{ready ? pick(T.generated, lang) : pick(T.notGenerated, lang)}</span>
+        {/* Helpful status: a concrete reason when not generated, not a bare label. */}
+        {!ready && pendingReason
+          ? <span className="inline-flex items-center gap-1 mt-1 text-[9.5px] font-bold text-amber-600"><Clock className="w-3 h-3" />{pendingReason}</span>
+          : <span className={`inline-block mt-1 text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded ${ready ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-400"}`}>{ready ? pick(T.generated, lang) : pick(T.notGenerated, lang)}</span>}
         {ready && onPreview && (
           <div className="flex items-center gap-1.5 mt-2">
             <button onClick={onPreview} title={pick(T.preview, lang)} className="w-9 h-9 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center cursor-pointer border-0 transition-colors"><Eye className="w-4 h-4" /></button>

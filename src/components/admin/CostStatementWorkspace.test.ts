@@ -179,7 +179,8 @@ describe("9. customer invoice — human-readable clientId UX (no raw error)", ()
   });
   it("invoice creation forwards clientId so identity resolves server-side", () => {
     expect(invoicePanelSrc).toContain("clientId");
-    expect(invoicePanelSrc).toMatch(/identity[\s\S]{0,60}clientId/);
+    // The line-based create payload carries the immutable clientId.
+    expect(invoicePanelSrc).toMatch(/buildPayload[\s\S]{0,120}clientId/);
   });
 });
 

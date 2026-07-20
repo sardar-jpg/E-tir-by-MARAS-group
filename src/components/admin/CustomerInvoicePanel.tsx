@@ -1,28 +1,23 @@
-import { useState, useEffect, useCallback } from "react";
-import { FileText, Plus, Send, Ban, Loader2, Eye, Download } from "lucide-react";
-import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, InvoicePricingMode, InvoiceMarkupType, Currency } from "../../types";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
+import { FileText, Plus, Send, Ban, Loader2, Eye, Download, Printer, X, ChevronDown, Check, Search, AlertTriangle, Trash2 } from "lucide-react";
+import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, Currency } from "../../types";
 import { apiFetch } from "../../lib/api";
-import { INVOICE_PRICING_MODES } from "../../lib/customerInvoice";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
+import {
+  INVOICE_SERVICE_TYPES, INVOICE_UNITS, PAYMENT_TERMS, PRICE_DIFFERENCE_REASONS,
+  isOtherServiceType, isOtherUnit, isCustomPaymentTerm, paymentTermDays, type CatalogOption, type L3,
+} from "../../lib/invoiceLineCatalog";
+import { computeLineAmount, computeInvoiceTotals } from "../../lib/customerInvoiceLines";
 
 /**
- * Customer Invoice panel — inside the Cost Statement detail (Desktop/Admin
- * Web, internal accounting). Create/edit a DRAFT invoice (manual price or
- * cost-plus markup), issue it (immutable, snapshots the bank), or cancel an
- * issued one. The selling amount + markup + gross profit are always recomputed
- * server-side; this panel only submits inputs. partially_paid / paid are
- * server-derived and shown read-only. Cost/profit shown here are INTERNAL
- * (admin view — the customer PDF/projection strips them).
+ * Customer Invoice panel — build a real customer-facing logistics invoice with
+ * multiple service LINES. The employee never picks a pricing method: the total
+ * is derived from the lines. Every line amount + all totals are recomputed
+ * SERVER-side on save (the browser preview is never trusted). Internal cost and
+ * profit never appear on the customer invoice or its PDF.
  */
-const MODE_LABEL: Record<InvoicePricingMode, { en: string; tr: string; ar: string }> = {
-  manual: { en: "Manual price", tr: "Manuel fiyat", ar: "سعر يدوي" },
-  cost_plus: { en: "Cost + markup", tr: "Maliyet + kâr payı", ar: "التكلفة + هامش" },
-};
-const MARKUP_LABEL: Record<InvoiceMarkupType, { en: string; tr: string; ar: string }> = {
-  percentage: { en: "Percentage %", tr: "Yüzde %", ar: "نسبة مئوية %" },
-  fixed: { en: "Fixed amount", tr: "Sabit tutar", ar: "مبلغ ثابت" },
-};
-const STATUS_LABEL: Record<CustomerInvoiceStatus, { en: string; tr: string; ar: string }> = {
+const STATUS_LABEL: Record<CustomerInvoiceStatus, L3> = {
   draft: { en: "Draft", tr: "Taslak", ar: "مسودة" },
   issued: { en: "Issued", tr: "Düzenlendi", ar: "صادرة" },
   partially_paid: { en: "Partially paid", tr: "Kısmen ödendi", ar: "مدفوعة جزئياً" },
@@ -31,52 +26,79 @@ const STATUS_LABEL: Record<CustomerInvoiceStatus, { en: string; tr: string; ar: 
 };
 const T = {
   title: { en: "Customer Invoices", tr: "Müşteri Faturaları", ar: "فواتير العملاء" },
-  intro: { en: "Selling price + profit are computed server-side; cost and profit stay internal (never on the customer document).", tr: "Satış fiyatı + kâr sunucuda hesaplanır; maliyet ve kâr dahilidir (müşteri belgesinde asla yer almaz).", ar: "يُحتسب سعر البيع والربح على الخادم؛ تبقى التكلفة والربح داخلية (لا تظهر في مستند العميل)." },
+  intro: { en: "Build a customer invoice from service lines. The total comes from the lines; internal cost and profit never appear on the customer document.", tr: "Hizmet satırlarından müşteri faturası oluşturun. Toplam satırlardan gelir; iç maliyet ve kâr müşteri belgesinde görünmez.", ar: "أنشئ فاتورة العميل من بنود الخدمة. يأتي الإجمالي من البنود؛ لا تظهر التكلفة والربح الداخليان على مستند العميل." },
   create: { en: "New invoice", tr: "Yeni fatura", ar: "فاتورة جديدة" },
   none: { en: "No invoices yet.", tr: "Henüz fatura yok.", ar: "لا توجد فواتير بعد." },
-  mode: { en: "Pricing", tr: "Fiyatlandırma", ar: "التسعير" },
-  selling: { en: "Selling", tr: "Satış", ar: "البيع" },
-  profit: { en: "Profit (internal)", tr: "Kâr (dahili)", ar: "الربح (داخلي)" },
-  save: { en: "Save draft", tr: "Taslağı kaydet", ar: "حفظ المسودة" },
-  cancel: { en: "Cancel", tr: "İptal", ar: "إلغاء" },
-  issue: { en: "Issue", tr: "Düzenle", ar: "إصدار" },
-  cancelInv: { en: "Cancel invoice", tr: "Faturayı iptal et", ar: "إلغاء الفاتورة" },
-  bank: { en: "Bank account", tr: "Banka hesabı", ar: "الحساب المصرفي" },
-  desc: { en: "Description (customer)", tr: "Açıklama (müşteri)", ar: "الوصف (العميل)" },
-  noCustomer: {
-    en: "This shipment is not linked to a valid customer account. Link or create the customer before creating an invoice.",
-    tr: "Bu sevkiyat geçerli bir müşteri hesabına bağlı değil. Fatura oluşturmadan önce müşteriyi bağlayın veya oluşturun.",
-    ar: "هذه الشحنة غير مرتبطة بحساب عميل صالح. اربط العميل أو أنشئه قبل إنشاء الفاتورة.",
-  },
+  noCustomer: { en: "This shipment is not linked to a valid customer account. Link or create the customer before creating an invoice.", tr: "Bu sevkiyat geçerli bir müşteri hesabına bağlı değil. Fatura oluşturmadan önce müşteriyi bağlayın veya oluşturun.", ar: "هذه الشحنة غير مرتبطة بحساب عميل صالح. اربط العميل أو أنشئه قبل إنشاء الفاتورة." },
   linkCustomer: { en: "Link Customer", tr: "Müşteriyi Bağla", ar: "ربط العميل" },
+  customer: { en: "Customer", tr: "Müşteri", ar: "العميل" },
+  invoiceNo: { en: "Invoice Number", tr: "Fatura No", ar: "رقم الفاتورة" },
+  invoiceNoAuto: { en: "Generated on save", tr: "Kaydetmede oluşturulur", ar: "يُنشأ عند الحفظ" },
   invoiceDate: { en: "Invoice Date", tr: "Fatura Tarihi", ar: "تاريخ الفاتورة" },
   dueDate: { en: "Due Date", tr: "Vade Tarihi", ar: "تاريخ الاستحقاق" },
-  invoiceAmount: { en: "Invoice Amount", tr: "Fatura Tutarı", ar: "قيمة الفاتورة" },
-  payStatus: { en: "Payment Status", tr: "Ödeme Durumu", ar: "حالة الدفع" },
+  paymentTerms: { en: "Payment Terms", tr: "Ödeme Koşulları", ar: "شروط الدفع" },
+  customTerm: { en: "Custom term label", tr: "Özel koşul etiketi", ar: "وصف الشرط المخصص" },
+  currency: { en: "Currency", tr: "Para Birimi", ar: "العملة" },
+  bank: { en: "Bank Account", tr: "Banka Hesabı", ar: "الحساب المصرفي" },
+  bankPick: { en: "Select a bank account…", tr: "Banka hesabı seçin…", ar: "اختر حسابًا مصرفيًا…" },
+  customerNotes: { en: "Customer Description / Notes", tr: "Müşteri Açıklaması / Notlar", ar: "وصف / ملاحظات العميل" },
+  customerNotesPlaceholder: { en: "Optional — shown to the customer", tr: "İsteğe bağlı — müşteriye gösterilir", ar: "اختياري — يظهر للعميل" },
+  lines: { en: "Invoice Lines", tr: "Fatura Satırları", ar: "بنود الفاتورة" },
+  addLine: { en: "Add Invoice Line", tr: "Fatura Satırı Ekle", ar: "إضافة بند" },
+  serviceType: { en: "Service Type", tr: "Hizmet Türü", ar: "نوع الخدمة" },
+  specifyService: { en: "Specify Service Type", tr: "Hizmet Türünü Belirtin", ar: "حدّد نوع الخدمة" },
+  description: { en: "Description", tr: "Açıklama", ar: "الوصف" },
+  quantity: { en: "Qty", tr: "Miktar", ar: "الكمية" },
+  unit: { en: "Unit", tr: "Birim", ar: "الوحدة" },
+  specifyUnit: { en: "Specify Unit", tr: "Birimi Belirtin", ar: "حدّد الوحدة" },
+  unitPrice: { en: "Unit Price", tr: "Birim Fiyat", ar: "سعر الوحدة" },
+  amount: { en: "Amount", tr: "Tutar", ar: "المبلغ" },
+  noLines: { en: "No lines yet — add the first service line.", tr: "Henüz satır yok — ilk hizmet satırını ekleyin.", ar: "لا توجد بنود بعد — أضف أول بند خدمة." },
+  subtotal: { en: "Subtotal", tr: "Ara Toplam", ar: "المجموع الفرعي" },
+  discount: { en: "Discount", tr: "İndirim", ar: "الخصم" },
+  tax: { en: "Tax", tr: "Vergi", ar: "الضريبة" },
+  additional: { en: "Additional Charges", tr: "Ek Ücretler", ar: "رسوم إضافية" },
+  grandTotal: { en: "Grand Total", tr: "Genel Toplam", ar: "الإجمالي الكلي" },
+  agreedPrice: { en: "Agreed Shipment Selling Price", tr: "Anlaşılan Satış Fiyatı", ar: "سعر البيع المتفق" },
+  readOnly: { en: "Read only", tr: "Salt okunur", ar: "للقراءة فقط" },
+  diffWarn: { en: "Invoice total differs from the agreed shipment selling price by", tr: "Fatura toplamı, anlaşılan satış fiyatından şu kadar farklı:", ar: "يختلف إجمالي الفاتورة عن سعر البيع المتفق بمقدار" },
+  diffReason: { en: "Price Difference Reason", tr: "Fiyat Farkı Nedeni", ar: "سبب فرق السعر" },
+  diffReasonPick: { en: "Select a reason…", tr: "Bir neden seçin…", ar: "اختر سببًا…" },
+  saveDraft: { en: "Save Invoice Draft", tr: "Fatura Taslağını Kaydet", ar: "حفظ مسودة الفاتورة" },
+  issue: { en: "Issue Invoice", tr: "Faturayı Düzenle", ar: "إصدار الفاتورة" },
+  cancel: { en: "Cancel", tr: "İptal", ar: "إلغاء" },
+  cancelInv: { en: "Cancel Invoice", tr: "Faturayı iptal et", ar: "إلغاء الفاتورة" },
   viewInvoice: { en: "View Invoice", tr: "Faturayı Görüntüle", ar: "عرض الفاتورة" },
   downloadPdf: { en: "Download PDF", tr: "PDF İndir", ar: "تنزيل PDF" },
+  print: { en: "Print", tr: "Yazdır", ar: "طباعة" },
+  invoiceAmount: { en: "Invoice Amount", tr: "Fatura Tutarı", ar: "قيمة الفاتورة" },
+  payStatus: { en: "Payment Status", tr: "Ödeme Durumu", ar: "حالة الدفع" },
+  needFields: { en: "Complete invoice date, due date, bank account and at least one valid line.", tr: "Fatura tarihi, vade, banka hesabı ve en az bir geçerli satırı tamamlayın.", ar: "أكمل تاريخ الفاتورة والاستحقاق والحساب المصرفي وبندًا واحدًا صحيحًا على الأقل." },
+  needReason: { en: "A price-difference reason is required.", tr: "Fiyat farkı nedeni gereklidir.", ar: "سبب فرق السعر مطلوب." },
 };
-const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
-const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+const tr = (k: keyof typeof T, lang: Language) => (T[k] as L3)[lang] || (T[k] as L3).en;
+const money = (v: number) => (Number.isFinite(v) ? v : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const STATUS_STYLE: Record<CustomerInvoiceStatus, string> = {
-  draft: "bg-slate-100 text-slate-600",
-  issued: "bg-emerald-100 text-emerald-700",
-  partially_paid: "bg-amber-100 text-amber-700",
-  paid: "bg-blue-100 text-blue-700",
-  cancelled: "bg-red-100 text-red-700",
+  draft: "bg-slate-100 text-slate-600", issued: "bg-emerald-100 text-emerald-700",
+  partially_paid: "bg-amber-100 text-amber-700", paid: "bg-blue-100 text-blue-700", cancelled: "bg-red-100 text-red-700",
 };
 
-export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, onInvoicesChange, onLinkCustomer }: {
+interface LineForm { id: string; serviceType: string; customServiceType: string; description: string; quantity: string; unit: string; customUnit: string; unitPrice: string; }
+const emptyLine = (): LineForm => ({ id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, serviceType: "", customServiceType: "", description: "", quantity: "1", unit: "", customUnit: "", unitPrice: "" });
+const num = (s: string): number => { const n = Number(s); return Number.isFinite(n) ? n : 0; };
+
+export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, companyName, agreedAmount, onInvoicesChange, onLinkCustomer }: {
   shipmentId: string;
   currency: Currency;
   bankAccounts: BankAccount[];
   canWrite: boolean;
   lang: Language;
-  /** Immutable customer identity — required to create/issue an invoice. */
   clientId?: string;
-  /** Notifies the parent when the invoice list changes (for step/summary derivation). */
+  /** Read-only customer name from the shipment/order. */
+  companyName?: string;
+  /** Read-only agreed shipment selling price, for the price-difference comparison. */
+  agreedAmount?: number;
   onInvoicesChange?: (invoices: CustomerInvoice[]) => void;
-  /** Opens the customer-link flow when the shipment has no valid clientId. */
   onLinkCustomer?: () => void;
 }) {
   const [invoices, setInvoices] = useState<CustomerInvoice[]>([]);
@@ -84,9 +106,9 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [form, setForm] = useState<{ pricingMode: InvoicePricingMode; markupType: InvoiceMarkupType; markupValue: string; manualAmount: string; description: string; bankAccountId: string }>({
-    pricingMode: "manual", markupType: "percentage", markupValue: "", manualAmount: "", description: "", bankAccountId: "",
-  });
+  const today = new Date().toISOString().slice(0, 10);
+  const [hdr, setHdr] = useState({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" });
+  const [lines, setLines] = useState<LineForm[]>([emptyLine()]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,49 +117,104 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   }, [shipmentId, onInvoicesChange]);
   useEffect(() => { void load(); }, [load]);
 
-  const numOrU = (s: string) => (s.trim() === "" ? undefined : Number(s));
-  const createDraft = async () => {
+  const resetForm = () => { setHdr({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" }); setLines([emptyLine()]); };
+
+  // Auto-fill due date from a controlled payment term (Custom leaves it manual).
+  const chooseTerm = (term: string) => {
+    setHdr((h) => {
+      const next = { ...h, paymentTerms: term };
+      const days = paymentTermDays(term);
+      if (days !== null && h.invoiceDate) { const d = new Date(h.invoiceDate); d.setDate(d.getDate() + days); next.dueDate = d.toISOString().slice(0, 10); }
+      if (!isCustomPaymentTerm(term)) next.customTerm = "";
+      return next;
+    });
+  };
+
+  // Client-side preview (SERVER RECOMPUTES on save — never trusted here).
+  const previewLines = useMemo(() => lines.map((l) => ({ ...l, amount: computeLineAmount(num(l.quantity), num(l.unitPrice)) })), [lines]);
+  const totals = useMemo(() => computeInvoiceTotals(previewLines.map((l) => ({ id: l.id, serviceType: l.serviceType, quantity: num(l.quantity), unit: l.unit, unitPrice: num(l.unitPrice), amount: l.amount })), { discountAmount: num(hdr.discountAmount), taxAmount: num(hdr.taxAmount), additionalCharges: num(hdr.additionalCharges) }), [previewLines, hdr.discountAmount, hdr.taxAmount, hdr.additionalCharges]);
+  const agreed = Number.isFinite(agreedAmount) ? Number(agreedAmount) : 0;
+  const priceDiff = Math.round((totals.grandTotal - agreed + Number.EPSILON) * 100) / 100;
+  const hasDiff = agreed > 0 && Math.abs(priceDiff) > 0.001;
+
+  const lineValid = (l: LineForm) => !!l.serviceType && (!isOtherServiceType(l.serviceType) || l.customServiceType.trim().length > 0) && !!l.unit && (!isOtherUnit(l.unit) || l.customUnit.trim().length > 0) && num(l.quantity) > 0 && num(l.unitPrice) >= 0;
+  const allLinesValid = lines.length > 0 && lines.every(lineValid);
+  const headerValid = !!hdr.invoiceDate && !!hdr.dueDate && !!hdr.bankAccountId;
+  const reasonOk = !hasDiff || hdr.priceDifferenceReason.trim().length > 0;
+  const canSave = canWrite && !!clientId && allLinesValid && headerValid && reasonOk;
+
+  const buildPayload = () => ({
+    clientId,
+    currency,
+    invoiceDate: hdr.invoiceDate,
+    dueDate: hdr.dueDate,
+    paymentTerms: isCustomPaymentTerm(hdr.paymentTerms) ? (hdr.customTerm.trim() || "Custom") : hdr.paymentTerms || undefined,
+    bankAccountId: hdr.bankAccountId || undefined,
+    customerNotes: hdr.customerNotes.trim() || undefined,
+    discountAmount: num(hdr.discountAmount),
+    taxAmount: num(hdr.taxAmount),
+    additionalCharges: num(hdr.additionalCharges),
+    priceDifferenceReason: hasDiff ? hdr.priceDifferenceReason.trim() : undefined,
+    invoiceLines: lines.map((l) => ({
+      serviceType: l.serviceType,
+      customServiceType: isOtherServiceType(l.serviceType) ? l.customServiceType.trim() : undefined,
+      description: l.description.trim() || undefined,
+      quantity: num(l.quantity),
+      unit: l.unit,
+      customUnit: isOtherUnit(l.unit) ? l.customUnit.trim() : undefined,
+      unitPrice: num(l.unitPrice),
+    })),
+  });
+
+  const createDraft = async (): Promise<CustomerInvoice | null> => {
+    const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildPayload()) });
+    if (res.ok) return (await res.json()).invoice as CustomerInvoice;
+    const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); return null;
+  };
+  const onSaveDraft = async () => {
+    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
+    setErr(null); setBusy(true);
+    try { const inv = await createDraft(); if (inv) { setCreating(false); resetForm(); await load(); } }
+    catch { setErr("Save failed."); } finally { setBusy(false); }
+  };
+  const onIssue = async () => {
+    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
     setErr(null); setBusy(true);
     try {
-      // Immutable clientId is required by the server; include it so a draft can
-      // actually be created (a missing/invalid customer link is surfaced below).
-      const identity = clientId ? { clientId } : {};
-      const payload = form.pricingMode === "cost_plus"
-        ? { ...identity, pricingMode: "cost_plus", markupType: form.markupType, markupValue: numOrU(form.markupValue), description: form.description, bankAccountId: form.bankAccountId || undefined }
-        : { ...identity, pricingMode: "manual", manualAmount: numOrU(form.manualAmount), description: form.description, bankAccountId: form.bankAccountId || undefined };
-      const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) { setCreating(false); await load(); }
-      else { const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); }
-    } catch { setErr("Save failed."); } finally { setBusy(false); }
+      const inv = await createDraft();
+      if (!inv) return;
+      const bankId = inv.bankAccountId || hdr.bankAccountId || undefined;
+      const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/issue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bankAccountId: bankId, idempotencyKey: `issue-${inv.id}` }) });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); setErr(b.error || "Issue failed."); await load(); return; }
+      setCreating(false); resetForm(); await load();
+    } catch { setErr("Issue failed."); } finally { setBusy(false); }
   };
-  const issue = async (inv: CustomerInvoice) => {
+  const issueExisting = async (inv: CustomerInvoice) => {
     const bankId = inv.bankAccountId || (bankAccounts.find((b) => b.active && b.currency === inv.currency && b.isDefaultForCurrency)?.id) || "";
     try { const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/issue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bankAccountId: bankId || undefined }) });
       if (res.ok) await load(); else { const b = await res.json().catch(() => ({})); window.alert(b.error || "Issue failed."); } }
-    catch { /* panel-isolated */ }
+    catch { /* isolated */ }
   };
   const cancelInvoice = async (inv: CustomerInvoice) => {
     const reason = window.prompt(tr("cancelInv", lang) + ":");
     if (!reason || !reason.trim()) return;
     try { const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }); if (res.ok) await load(); }
-    catch { /* panel-isolated */ }
+    catch { /* isolated */ }
   };
 
-  const mode = form.pricingMode;
+  const setLine = (id: string, patch: Partial<LineForm>) => setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const banks = bankAccounts.filter((b) => b.active && b.currency === currency);
+
   return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3 mt-4">
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5"><FileText className="w-4 h-4 text-orange-600" /><span>{tr("title", lang)}</span></h3>
-          <p className="text-[11px] text-slate-500 mt-0.5">{tr("intro", lang)}</p>
+          <h3 className="text-[14px] font-black text-slate-900 flex items-center gap-2"><FileText className="w-4 h-4 text-orange-600" /><span>{tr("title", lang)}</span></h3>
+          <p className="text-[11px] text-slate-500 mt-1 max-w-xl">{tr("intro", lang)}</p>
         </div>
-        {canWrite && !creating && clientId && <button onClick={() => { setCreating(true); setErr(null); }} className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1"><Plus className="w-3.5 h-3.5" />{tr("create", lang)}</button>}
+        {canWrite && !creating && clientId && <button onClick={() => { setCreating(true); setErr(null); }} className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5"><Plus className="w-4 h-4" />{tr("create", lang)}</button>}
       </div>
 
-      {/* Human-readable missing-customer state — never a raw "clientId required". */}
       {canWrite && !clientId && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
           <p className="text-[11px] font-semibold text-amber-800">{tr("noCustomer", lang)}</p>
@@ -146,7 +223,6 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
       )}
 
       {loading && <div className="flex items-center gap-2 text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin" />…</div>}
-      {/* Clear empty state (item 9): explain + offer Create when a customer is linked. */}
       {!loading && invoices.length === 0 && !creating && (
         <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-5 py-6 text-center space-y-2">
           <FileText className="w-8 h-8 text-slate-300 mx-auto" />
@@ -155,68 +231,144 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
         </div>
       )}
 
+      {/* Existing invoices */}
       <div className="space-y-2.5">
-        {invoices.map((inv) => {
-          const invoiceDate = inv.issuedAt || inv.createdAt;
-          return (
-            <div key={inv.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="font-black text-slate-900 font-mono text-[14px]">{inv.invoiceNumber}</span>
-                <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wide ${STATUS_STYLE[inv.status]}`}>{STATUS_LABEL[inv.status]?.[lang] || inv.status}</span>
-              </div>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-3">
-                <InvField label={tr("invoiceDate", lang)} value={invoiceDate ? new Date(invoiceDate).toLocaleDateString() : "—"} />
-                <InvField label={tr("dueDate", lang)} value={inv.dueDate ? new Date(inv.dueDate).toLocaleDateString() : "—"} />
-                <InvField label={tr("invoiceAmount", lang)} value={`${money(inv.sellingAmount)} ${inv.currency}`} strong />
-                <InvField label={tr("payStatus", lang)} value={STATUS_LABEL[inv.status]?.[lang] || inv.status} />
-                {typeof inv.grossProfit === "number" && <InvField label={tr("profit", lang)} value={`${money(inv.grossProfit)} ${inv.currency}`} muted />}
-              </div>
-              <div className="flex items-center gap-2 flex-wrap mt-3.5 pt-3 border-t border-slate-100">
-                <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Eye className="w-3.5 h-3.5" />{tr("viewInvoice", lang)}</button>
-                <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Download className="w-3.5 h-3.5" />{tr("downloadPdf", lang)}</button>
-                {canWrite && inv.status === "draft" && <button onClick={() => issue(inv)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5"><Send className="w-3.5 h-3.5" />{tr("issue", lang)}</button>}
-                {canWrite && (inv.status === "issued" || inv.status === "partially_paid" || inv.status === "paid") && <button onClick={() => cancelInvoice(inv)} className="px-3 py-1.5 bg-white border border-red-200 hover:bg-red-50 text-red-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Ban className="w-3.5 h-3.5" />{tr("cancelInv", lang)}</button>}
-              </div>
+        {invoices.map((inv) => (
+          <div key={inv.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="font-black text-slate-900 font-mono text-[14px]">{inv.invoiceNumber}</span>
+              <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wide ${STATUS_STYLE[inv.status]}`}>{STATUS_LABEL[inv.status]?.[lang] || inv.status}</span>
             </div>
-          );
-        })}
-      </div>
-
-      {creating && (
-        <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 space-y-2">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{tr("mode", lang)}</label>
-              <select value={form.pricingMode} onChange={(e) => setForm({ ...form, pricingMode: e.target.value as InvoicePricingMode })} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
-                {INVOICE_PRICING_MODES.map((m) => <option key={m} value={m}>{MODE_LABEL[m][lang] || MODE_LABEL[m].en}</option>)}
-              </select>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-3">
+              <InvField label={tr("invoiceDate", lang)} value={(inv.issuedAt || inv.invoiceDate || inv.createdAt) ? new Date(inv.issuedAt || inv.invoiceDate || inv.createdAt).toLocaleDateString() : "—"} />
+              <InvField label={tr("dueDate", lang)} value={inv.dueDate ? new Date(inv.dueDate).toLocaleDateString() : "—"} />
+              <InvField label={tr("invoiceAmount", lang)} value={`${money(inv.grandTotal ?? inv.sellingAmount)} ${inv.currency}`} strong />
+              <InvField label={tr("payStatus", lang)} value={STATUS_LABEL[inv.status]?.[lang] || inv.status} />
             </div>
-            {mode === "cost_plus" && <>
-              <div>
-                <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{MARKUP_LABEL[form.markupType][lang] || MARKUP_LABEL[form.markupType].en}</label>
-                <select value={form.markupType} onChange={(e) => setForm({ ...form, markupType: e.target.value as InvoiceMarkupType })} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
-                  {(["percentage", "fixed"] as InvoiceMarkupType[]).map((t) => <option key={t} value={t}>{MARKUP_LABEL[t][lang] || MARKUP_LABEL[t].en}</option>)}
-                </select>
-              </div>
-              <NumInput label={form.markupType === "percentage" ? "%" : currency} v={form.markupValue} onChange={(v) => setForm({ ...form, markupValue: v })} />
-            </>}
-            {mode === "manual" && <NumInput label={`Selling price (${currency})`} v={form.manualAmount} onChange={(v) => setForm({ ...form, manualAmount: v })} />}
-            <div className="md:col-span-2">
-              <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{tr("desc", lang)}</label>
-              <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{tr("bank", lang)}</label>
-              <select value={form.bankAccountId} onChange={(e) => setForm({ ...form, bankAccountId: e.target.value })} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
-                <option value="">—</option>
-                {bankAccounts.filter((b) => b.active && b.currency === currency).map((b) => <option key={b.id} value={b.id}>{b.bankName} ({b.currency})</option>)}
-              </select>
+            {Array.isArray(inv.invoiceLines) && inv.invoiceLines.length > 0 && (
+              <div className="mt-2 text-[11px] text-slate-500">{inv.invoiceLines.length} {tr("lines", lang).toLowerCase()}</div>
+            )}
+            <div className="flex items-center gap-2 flex-wrap mt-3.5 pt-3 border-t border-slate-100">
+              <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Eye className="w-3.5 h-3.5" />{tr("viewInvoice", lang)}</button>
+              <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/invoices/${inv.id}/pdf?lang=${lang}`)} className="px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Download className="w-3.5 h-3.5" />{tr("downloadPdf", lang)}</button>
+              {(inv.status === "issued" || inv.status === "partially_paid" || inv.status === "paid") && <button onClick={() => window.print()} className="px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Printer className="w-3.5 h-3.5" />{tr("print", lang)}</button>}
+              {canWrite && inv.status === "draft" && <button onClick={() => issueExisting(inv)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5"><Send className="w-3.5 h-3.5" />{tr("issue", lang)}</button>}
+              {canWrite && (inv.status === "issued" || inv.status === "partially_paid" || inv.status === "paid") && <button onClick={() => cancelInvoice(inv)} className="px-3 py-1.5 bg-white border border-red-200 hover:bg-red-50 text-red-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Ban className="w-3.5 h-3.5" />{tr("cancelInv", lang)}</button>}
             </div>
           </div>
-          {err && <p className="text-[11px] font-bold text-red-600">{err}</p>}
-          <div className="flex items-center gap-2">
-            <button onClick={createDraft} disabled={busy} className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">{tr("save", lang)}</button>
-            <button onClick={() => { setCreating(false); setErr(null); }} className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[11px] font-bold rounded-lg cursor-pointer">{tr("cancel", lang)}</button>
+        ))}
+      </div>
+
+      {/* New invoice form */}
+      {creating && (
+        <div className="rounded-2xl border border-blue-200 bg-blue-50/40 p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center justify-between">
+            <h4 className="text-[13px] font-black text-slate-900 flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" />{tr("create", lang)}</h4>
+            <button onClick={() => { setCreating(false); resetForm(); setErr(null); }} className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-slate-500 hover:border-slate-300 flex items-center justify-center cursor-pointer"><X className="w-4 h-4" /></button>
+          </div>
+
+          {/* Header */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <RoField label={tr("customer", lang)} value={companyName || "—"} />
+            <RoField label={tr("invoiceNo", lang)} value={tr("invoiceNoAuto", lang)} muted />
+            <RoField label={tr("currency", lang)} value={currency} />
+            <Field label={tr("invoiceDate", lang)} required><input type="date" value={hdr.invoiceDate} onChange={(e) => setHdr({ ...hdr, invoiceDate: e.target.value })} className={inp} /></Field>
+            <Field label={tr("dueDate", lang)} required><input type="date" value={hdr.dueDate} onChange={(e) => setHdr({ ...hdr, dueDate: e.target.value })} className={`${inp} ${!hdr.dueDate ? "border-red-300" : ""}`} /></Field>
+            <Field label={tr("paymentTerms", lang)}>
+              <CatalogSelect options={PAYMENT_TERMS} value={hdr.paymentTerms} lang={lang} placeholder={tr("paymentTerms", lang)} onChange={chooseTerm} />
+            </Field>
+            {isCustomPaymentTerm(hdr.paymentTerms) && <Field label={tr("customTerm", lang)}><input value={hdr.customTerm} onChange={(e) => setHdr({ ...hdr, customTerm: e.target.value })} className={inp} /></Field>}
+            <Field label={tr("bank", lang)} required>
+              <select value={hdr.bankAccountId} onChange={(e) => setHdr({ ...hdr, bankAccountId: e.target.value })} className={`${inp} cursor-pointer ${!hdr.bankAccountId ? "border-red-300" : ""}`}>
+                <option value="">{tr("bankPick", lang)}</option>
+                {banks.map((b) => <option key={b.id} value={b.id}>{b.bankName} ({b.currency})</option>)}
+              </select>
+            </Field>
+            <Field label={tr("customerNotes", lang)} full><input value={hdr.customerNotes} onChange={(e) => setHdr({ ...hdr, customerNotes: e.target.value })} placeholder={tr("customerNotesPlaceholder", lang)} className={inp} /></Field>
+          </div>
+
+          {/* Lines table */}
+          <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+              <span className="text-[12px] font-black text-slate-800 uppercase tracking-wide">{tr("lines", lang)}</span>
+              <button onClick={() => setLines((ls) => [...ls, emptyLine()])} className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1"><Plus className="w-3.5 h-3.5" />{tr("addLine", lang)}</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="text-left text-slate-400 border-b border-slate-100">
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase w-52">{tr("serviceType", lang)}</th>
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase">{tr("description", lang)}</th>
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase w-16">{tr("quantity", lang)}</th>
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase w-32">{tr("unit", lang)}</th>
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase w-24 text-right">{tr("unitPrice", lang)}</th>
+                    <th className="py-2 px-2 text-[9.5px] font-black uppercase w-28 text-right">{tr("amount", lang)}</th>
+                    <th className="py-2 px-2 w-8"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((l) => (
+                    <tr key={l.id} className="border-b border-slate-50 align-top">
+                      <td className="py-2 px-2">
+                        <CatalogSelect options={INVOICE_SERVICE_TYPES} value={l.serviceType} lang={lang} searchable placeholder={tr("serviceType", lang)} onChange={(v) => setLine(l.id, { serviceType: v, ...(isOtherServiceType(v) ? {} : { customServiceType: "" }) })} invalid={!l.serviceType} />
+                        {isOtherServiceType(l.serviceType) && <input value={l.customServiceType} onChange={(e) => setLine(l.id, { customServiceType: e.target.value })} placeholder={tr("specifyService", lang)} className={`${inp} mt-1 ${l.customServiceType.trim() ? "" : "border-red-300"}`} />}
+                      </td>
+                      <td className="py-2 px-2"><input value={l.description} onChange={(e) => setLine(l.id, { description: e.target.value })} className={inp} /></td>
+                      <td className="py-2 px-2"><input type="number" min="0" step="0.01" value={l.quantity} onChange={(e) => setLine(l.id, { quantity: e.target.value })} className={`${inp} text-right ${num(l.quantity) > 0 ? "" : "border-red-300"}`} /></td>
+                      <td className="py-2 px-2">
+                        <CatalogSelect options={INVOICE_UNITS} value={l.unit} lang={lang} placeholder={tr("unit", lang)} onChange={(v) => setLine(l.id, { unit: v, ...(isOtherUnit(v) ? {} : { customUnit: "" }) })} invalid={!l.unit} />
+                        {isOtherUnit(l.unit) && <input value={l.customUnit} onChange={(e) => setLine(l.id, { customUnit: e.target.value })} placeholder={tr("specifyUnit", lang)} className={`${inp} mt-1 ${l.customUnit.trim() ? "" : "border-red-300"}`} />}
+                      </td>
+                      <td className="py-2 px-2"><input type="number" min="0" step="0.01" value={l.unitPrice} onChange={(e) => setLine(l.id, { unitPrice: e.target.value })} className={`${inp} text-right`} /></td>
+                      {/* Amount is auto — never typed. */}
+                      <td className="py-2 px-2 text-right font-mono font-black text-slate-900">{money(computeLineAmount(num(l.quantity), num(l.unitPrice)))}</td>
+                      <td className="py-2 px-2 text-center">{lines.length > 1 && <button onClick={() => setLines((ls) => ls.filter((x) => x.id !== l.id))} className="text-slate-300 hover:text-red-500 cursor-pointer bg-transparent border-0 p-1"><Trash2 className="w-4 h-4" /></button>}</td>
+                    </tr>
+                  ))}
+                  {lines.length === 0 && <tr><td colSpan={7} className="py-4 text-center text-[12px] text-slate-400">{tr("noLines", lang)}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Totals + agreed price */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3">
+                <div className="text-[10px] font-black uppercase tracking-wide text-emerald-700">{tr("agreedPrice", lang)}</div>
+                <div className="flex items-baseline gap-2 mt-1">
+                  <span className="text-xl font-black font-mono text-emerald-700">{money(agreed)}</span>
+                  <span className="text-[11px] font-bold text-emerald-500">{currency}</span>
+                  <span className="text-[9px] font-bold uppercase text-emerald-400 ml-auto">{tr("readOnly", lang)}</span>
+                </div>
+              </div>
+              {hasDiff && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 space-y-2">
+                  <p className="text-[11.5px] font-semibold text-amber-800 flex items-start gap-1.5"><AlertTriangle className="w-4 h-4 shrink-0 mt-px" />{tr("diffWarn", lang)} <strong>{money(Math.abs(priceDiff))} {currency}</strong>.</p>
+                  <div>
+                    <label className="block text-[10px] font-black uppercase tracking-wide text-amber-700 mb-1">{tr("diffReason", lang)} *</label>
+                    <CatalogSelect options={PRICE_DIFFERENCE_REASONS} value={hdr.priceDifferenceReason} lang={lang} placeholder={tr("diffReasonPick", lang)} onChange={(v) => setHdr({ ...hdr, priceDifferenceReason: v })} invalid={!hdr.priceDifferenceReason} />
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
+              <TotRow label={tr("subtotal", lang)} value={`${money(totals.subtotal)} ${currency}`} />
+              <TotAdj label={tr("discount", lang)} v={hdr.discountAmount} onChange={(v) => setHdr({ ...hdr, discountAmount: v })} />
+              <TotAdj label={tr("tax", lang)} v={hdr.taxAmount} onChange={(v) => setHdr({ ...hdr, taxAmount: v })} />
+              <TotAdj label={tr("additional", lang)} v={hdr.additionalCharges} onChange={(v) => setHdr({ ...hdr, additionalCharges: v })} />
+              <div className="border-t border-slate-200 pt-2 flex items-center justify-between">
+                <span className="text-[12px] font-black uppercase tracking-wide text-slate-700">{tr("grandTotal", lang)}</span>
+                <span className="text-xl font-black font-mono text-slate-900">{money(totals.grandTotal)} <span className="text-[11px] text-slate-400">{currency}</span></span>
+              </div>
+            </div>
+          </div>
+
+          {err && <p className="text-[12px] font-bold text-red-600">{err}</p>}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={onSaveDraft} disabled={busy || !canSave} className="px-4 py-2.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed text-[13px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}{tr("saveDraft", lang)}</button>
+            <button onClick={onIssue} disabled={busy || !canSave} className="px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-[13px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Send className="w-4 h-4" />{tr("issue", lang)}</button>
+            <button onClick={() => { setCreating(false); resetForm(); setErr(null); }} className="px-4 py-2.5 bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 text-[13px] font-bold rounded-lg cursor-pointer">{tr("cancel", lang)}</button>
           </div>
         </div>
       )}
@@ -224,20 +376,65 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   );
 }
 
-function InvField({ label, value, strong, muted }: { label: string; value: string; strong?: boolean; muted?: boolean }) {
-  return (
-    <div>
-      <div className="text-[9.5px] font-black uppercase tracking-wide text-slate-400">{label}</div>
-      <div className={`text-[13px] mt-0.5 ${strong ? "font-black text-slate-900 font-mono" : muted ? "font-semibold text-slate-400" : "font-bold text-slate-700"}`}>{value}</div>
-    </div>
-  );
+const inp = "w-full text-[12px] border border-slate-300 rounded-lg px-2.5 py-2 bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition";
+
+function Field({ label, required, full, children }: { label: string; required?: boolean; full?: boolean; children: React.ReactNode }) {
+  return <div className={full ? "md:col-span-3" : ""}><label className="block text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">{label}{required && <span className="text-red-500"> *</span>}</label>{children}</div>;
+}
+function RoField({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
+  return <div><label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-1">{label}</label><div className={`text-[13px] font-bold rounded-lg px-2.5 py-2 bg-slate-50 border border-slate-200 ${muted ? "text-slate-400 italic font-semibold" : "text-slate-700"}`}>{value}</div></div>;
+}
+function InvField({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return <div><div className="text-[9.5px] font-black uppercase tracking-wide text-slate-400">{label}</div><div className={`text-[13px] mt-0.5 ${strong ? "font-black text-slate-900 font-mono" : "font-bold text-slate-700"}`}>{value}</div></div>;
+}
+function TotRow({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-center justify-between text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><span className="font-mono font-bold text-slate-700">{value}</span></div>;
+}
+function TotAdj({ label, v, onChange }: { label: string; v: string; onChange: (v: string) => void }) {
+  return <div className="flex items-center justify-between gap-2 text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><input type="number" min="0" step="0.01" value={v} onChange={(e) => onChange(e.target.value)} placeholder="0.00" className="w-24 text-[12px] text-right border border-slate-200 rounded-md px-2 py-1 bg-white outline-none focus:border-blue-300" /></div>;
 }
 
-function NumInput({ label, v, onChange }: { label: string; v: string; onChange: (v: string) => void }) {
+/**
+ * Controlled dropdown from a catalog; `searchable` adds a filter box; i18n
+ * labels. The menu renders in a PORTAL with fixed positioning so it is never
+ * clipped by the (scrollable/narrow) invoice-lines table container.
+ */
+function CatalogSelect({ options, value, lang, placeholder, onChange, searchable, invalid }: { options: CatalogOption[]; value: string; lang: Language; placeholder: string; onChange: (v: string) => void; searchable?: boolean; invalid?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const place = () => { const r = btnRef.current?.getBoundingClientRect(); if (r) setRect({ left: r.left, top: r.bottom + 4, width: r.width }); };
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onDoc = (e: MouseEvent) => { if (!btnRef.current?.contains(e.target as Node) && !menuRef.current?.contains(e.target as Node)) setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", onScroll); };
+  }, [open]);
+  const label = options.find((o) => o.value === value)?.label;
+  const filtered = q.trim() ? options.filter((o) => (o.label[lang] || o.label.en).toLowerCase().includes(q.trim().toLowerCase()) || o.value.toLowerCase().includes(q.trim().toLowerCase())) : options;
   return (
-    <div>
-      <label className="block text-[10px] font-black uppercase tracking-wide text-slate-400 mb-0.5">{label}</label>
-      <input type="number" step="0.01" value={v} onChange={(e) => onChange(e.target.value)} className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
-    </div>
+    <>
+      <button ref={btnRef} type="button" onClick={() => setOpen((o) => !o)} className={`${inp} flex items-center justify-between text-left cursor-pointer ${invalid ? "border-red-300" : ""}`}>
+        <span className={value ? "font-semibold text-slate-800 truncate" : "text-slate-400 truncate"}>{value ? (label?.[lang] || label?.en || value) : placeholder}</span>
+        <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+      </button>
+      {open && rect && createPortal(
+        <div ref={menuRef} style={{ position: "fixed", left: rect.left, top: rect.top, width: Math.max(rect.width, 190), zIndex: 60 }} className="bg-white border border-slate-200 rounded-xl shadow-2xl overflow-hidden">
+          {searchable && <div className="flex items-center gap-2 px-2.5 py-2 border-b border-slate-100"><Search className="w-3.5 h-3.5 text-slate-400 shrink-0" /><input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="…" className="w-full text-[12px] outline-none bg-transparent" /></div>}
+          <div className="max-h-56 overflow-y-auto py-1">
+            {filtered.map((o) => (
+              <button key={o.value} type="button" onClick={() => { onChange(o.value); setOpen(false); setQ(""); }} className="w-full text-left px-3 py-2 hover:bg-slate-50 cursor-pointer border-0 bg-transparent flex items-center justify-between gap-2 text-[12.5px] font-semibold text-slate-700">
+                {o.label[lang] || o.label.en}{o.value === value && <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />}
+              </button>
+            ))}
+          </div>
+        </div>, document.body)}
+    </>
   );
 }
