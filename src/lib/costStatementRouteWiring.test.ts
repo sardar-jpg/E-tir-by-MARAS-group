@@ -86,7 +86,12 @@ describe("no second numbering system", () => {
     expect(PANEL).not.toContain("`Statement Ref: CLI-");
     expect(PANEL).not.toContain("`Statement Ref: VND-");
     expect(PANEL).not.toMatch(/Reference: MARAS-\$\{/);
-    // The one business reference remains the shipment's own MAR number.
-    expect(PANEL).toContain("— ${selectedStatement.shipmentNumber}`");
+    // The one business reference remains the shipment's own MAR number. The
+    // dedicated full-screen workspace (which replaced the old inline modal
+    // renderer) displays statement.shipmentNumber plainly, with no prefix.
+    const WORKSPACE = readFileSync(join(__dirname, "..", "components", "admin", "CostStatementWorkspace.tsx"), "utf-8");
+    expect(WORKSPACE).not.toContain("INV-MARAS-");
+    expect(WORKSPACE).not.toContain("MARAS-${");
+    expect(WORKSPACE).toContain("value={statement.shipmentNumber}");
   });
 });

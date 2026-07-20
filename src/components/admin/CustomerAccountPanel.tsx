@@ -37,11 +37,14 @@ const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
 const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
 const CURRENCIES: Currency[] = ["USD", "IQD", "TRY", "EUR"];
 
-export default function CustomerAccountPanel({ companyName, bankAccounts, canWrite, lang }: {
+export default function CustomerAccountPanel({ companyName, bankAccounts, canWrite, lang, onChanged }: {
   companyName: string;
   bankAccounts: BankAccount[];
   canWrite: boolean;
   lang: Language;
+  // Fired after a successful payment / reversal / receipt so a host can refresh
+  // its derived views. Presentation only — the AR write itself is unchanged.
+  onChanged?: () => void;
 }) {
   const [summary, setSummary] = useState<CurrencyAccountSummary[]>([]);
   const [outstanding, setOutstanding] = useState<InvoiceOutstanding[]>([]);
@@ -81,19 +84,19 @@ export default function CustomerAccountPanel({ companyName, bankAccounts, canWri
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ company: companyName, amount: Number(draft.amount), currency: draft.currency, paymentMethod: draft.paymentMethod, reference: draft.reference || undefined, bankAccountId: draft.bankAccountId || undefined, allocationMode: "auto" }),
       });
-      if (res.ok) { setRecording(false); setDraft({ amount: "", currency: "USD", paymentMethod: "wire", reference: "", bankAccountId: "" }); await load(); if (stmtCurrency) await loadStatement(stmtCurrency); }
+      if (res.ok) { setRecording(false); setDraft({ amount: "", currency: "USD", paymentMethod: "wire", reference: "", bankAccountId: "" }); await load(); if (stmtCurrency) await loadStatement(stmtCurrency); onChanged?.(); }
       else { const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); }
     } catch { setErr("Save failed."); }
   };
   const reverse = async (p: CustomerPayment) => {
     const reason = window.prompt(tr("reverse", lang) + ":");
     if (!reason || !reason.trim()) return;
-    try { const res = await apiFetch(`/api/customer-accounts/payments/${p.id}/reverse`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }); if (res.ok) { await load(); if (stmtCurrency) await loadStatement(stmtCurrency); } }
+    try { const res = await apiFetch(`/api/customer-accounts/payments/${p.id}/reverse`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }); if (res.ok) { await load(); if (stmtCurrency) await loadStatement(stmtCurrency); onChanged?.(); } }
     catch { /* panel-isolated */ }
   };
   const genReceipt = async (p: CustomerPayment) => {
     try { const res = await apiFetch(`/api/customer-accounts/payments/${p.id}/receipt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      if (res.ok) { const b = await res.json(); window.alert(`${tr("receipt", lang)}: ${b.receipt.receiptNumber}`); } }
+      if (res.ok) { const b = await res.json(); window.alert(`${tr("receipt", lang)}: ${b.receipt.receiptNumber}`); onChanged?.(); } }
     catch { /* panel-isolated */ }
   };
 

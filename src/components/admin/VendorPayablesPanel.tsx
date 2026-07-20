@@ -18,7 +18,7 @@ const T = {
   cost: { en: "Cost", tr: "Maliyet", ar: "التكلفة" },
   paid: { en: "Paid", tr: "Ödenen", ar: "المدفوع" },
   remaining: { en: "Remaining", tr: "Kalan", ar: "المتبقي" },
-  addPayment: { en: "Add payment", tr: "Ödeme ekle", ar: "إضافة دفعة" },
+  addPayment: { en: "Pay Vendor", tr: "Tedarikçiye Öde", ar: "دفع للمورد" },
   amount: { en: "Amount", tr: "Tutar", ar: "المبلغ" },
   date: { en: "Date", tr: "Tarih", ar: "التاريخ" },
   method: { en: "Method", tr: "Yöntem", ar: "الطريقة" },
