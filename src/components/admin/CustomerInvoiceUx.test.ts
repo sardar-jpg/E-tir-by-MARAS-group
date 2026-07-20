@@ -17,12 +17,15 @@ const workspace = readFileSync(join(ROOT, "src/components/admin/CostStatementWor
 const editor = readFileSync(join(ROOT, "src/lib/invoiceLineEditor.ts"), "utf8");
 
 describe("1. ERP invoice-lines table", () => {
-  it("renders a real table with #, Service Type, Description, Qty, Unit, Unit Price, Amount, Actions columns", () => {
-    for (const key of ["rowNo", "serviceType", "description", "quantity", "unit", "unitPrice", "amount", "actions"]) {
+  it("renders a real table with #, Service Type, Description, Qty, Unit Price, Amount, Actions columns (Unit removed)", () => {
+    for (const key of ["rowNo", "serviceType", "description", "quantity", "unitPrice", "amount", "actions"]) {
       expect(panel).toContain(`tr("${key}", lang)`);
     }
     // Visible 1-based row number per line.
     expect(panel).toContain("{idx + 1}");
+    // The Unit column + its dropdown are gone from the invoice-line table.
+    expect(panel).not.toContain("INVOICE_UNITS");
+    expect(panel).not.toContain('placeholder={tr("unit", lang)}');
   });
   it("stays usable with many rows — horizontal scroll + min width, not a cramped single row", () => {
     expect(panel).toContain("overflow-x-auto");

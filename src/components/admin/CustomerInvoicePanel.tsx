@@ -5,8 +5,8 @@ import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, Cur
 import { apiFetch } from "../../lib/api";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 import {
-  INVOICE_SERVICE_TYPES, INVOICE_UNITS, PAYMENT_TERMS, PRICE_DIFFERENCE_REASONS,
-  isOtherServiceType, isOtherUnit, isCustomPaymentTerm, paymentTermDays, type CatalogOption, type L3,
+  INVOICE_SERVICE_TYPES, PAYMENT_TERMS, PRICE_DIFFERENCE_REASONS,
+  isOtherServiceType, isCustomPaymentTerm, paymentTermDays, type CatalogOption, type L3,
 } from "../../lib/invoiceLineCatalog";
 import { computeLineAmount, computeInvoiceTotals } from "../../lib/customerInvoiceLines";
 import {
@@ -181,7 +181,8 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const hasAgreed = agreed > 0;
   const hasDiff = hasAgreed && Math.abs(priceDiff) > 0.001;
 
-  const lineValid = (l: LineDraft) => !!l.serviceType && (!isOtherServiceType(l.serviceType) || l.customServiceType.trim().length > 0) && !!l.unit && (!isOtherUnit(l.unit) || l.customUnit.trim().length > 0) && num(l.quantity) > 0 && num(l.unitPrice) >= 0;
+  // Unit is no longer part of the line UI (item 3); it is not required to save a line.
+  const lineValid = (l: LineDraft) => !!l.serviceType && (!isOtherServiceType(l.serviceType) || l.customServiceType.trim().length > 0) && num(l.quantity) > 0 && num(l.unitPrice) >= 0;
   const allLinesValid = lines.length > 0 && lines.every(lineValid);
   const headerValid = !!hdr.invoiceDate && !!hdr.dueDate && !!hdr.bankAccountId;
   const reasonOk = !hasDiff || hdr.priceDifferenceReason.trim().length > 0;
@@ -204,8 +205,8 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
       customServiceType: isOtherServiceType(l.serviceType) ? l.customServiceType.trim() : undefined,
       description: l.description.trim() || undefined,
       quantity: num(l.quantity),
-      unit: l.unit,
-      customUnit: isOtherUnit(l.unit) ? l.customUnit.trim() : undefined,
+      // Unit is optional now (removed from the UI); only sent if a legacy value is present.
+      unit: l.unit || undefined,
       unitPrice: num(l.unitPrice),
     })),
   });
@@ -380,8 +381,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
                       <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-56">{tr("serviceType", lang)}</th>
                       <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide min-w-[180px]">{tr("description", lang)}</th>
                       <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-24 text-right">{tr("quantity", lang)}</th>
-                      <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-36">{tr("unit", lang)}</th>
-                      <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-28 text-right">{tr("unitPrice", lang)}</th>
+                      <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-32 text-right">{tr("unitPrice", lang)}</th>
                       <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-32 text-right">{tr("amount", lang)}</th>
                       <th className="py-3 px-3 text-[10px] font-black uppercase tracking-wide w-24 text-center">{tr("actions", lang)}</th>
                     </tr>
@@ -399,10 +399,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
                         </td>
                         <td className="py-3 px-3"><input value={l.description} onChange={(e) => setLine(l.id, { description: e.target.value })} placeholder={tr("descriptionPlaceholder", lang)} className={inp} /></td>
                         <td className="py-3 px-3"><input type="number" min="0" step="0.01" value={l.quantity} onChange={(e) => setLine(l.id, { quantity: e.target.value })} className={`${inp} text-right tabular-nums ${num(l.quantity) > 0 ? "" : "border-red-300"}`} /></td>
-                        <td className="py-3 px-3">
-                          <CatalogSelect options={INVOICE_UNITS} value={l.unit} lang={lang} placeholder={tr("unit", lang)} onChange={(v) => setLine(l.id, { unit: v, ...(isOtherUnit(v) ? {} : { customUnit: "" }) })} invalid={!l.unit} />
-                          {isOtherUnit(l.unit) && <input value={l.customUnit} onChange={(e) => setLine(l.id, { customUnit: e.target.value })} placeholder={tr("specifyUnit", lang)} className={`${inp} mt-1.5 ${l.customUnit.trim() ? "" : "border-red-300"}`} />}
-                        </td>
+                        {/* Unit removed from the invoice line UI (item 3); legacy lines keep any stored unit. */}
                         <td className="py-3 px-3"><input type="number" min="0" step="0.01" value={l.unitPrice} onChange={(e) => setLine(l.id, { unitPrice: e.target.value })} onKeyDown={onLastFieldEnter(l, isLast)} className={`${inp} text-right tabular-nums`} /></td>
                         {/* Amount is auto — never typed. Visually stronger than inputs. */}
                         <td className="py-3 px-3 text-right align-middle"><span className="font-mono font-black text-[13.5px] text-slate-900 tabular-nums">{money(computeLineAmount(num(l.quantity), num(l.unitPrice)))}</span></td>

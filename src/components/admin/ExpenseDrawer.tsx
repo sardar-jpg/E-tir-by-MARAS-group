@@ -68,7 +68,6 @@ export default function ExpenseDrawer({ shipmentId, currency, sessionId, vendors
   const [vendorQuery, setVendorQuery] = useState("");
   const [vendorOpen, setVendorOpen] = useState(false);
   const [description, setDescription] = useState("");
-  const [reference, setReference] = useState("");
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -117,7 +116,7 @@ export default function ExpenseDrawer({ shipmentId, currency, sessionId, vendors
 
   const reset = () => {
     setExpenseType(""); setCustomType(""); setVendorId(""); setVendorQuery("");
-    setDescription(""); setReference(""); setAmount(""); setTouched(false);
+    setDescription(""); setAmount(""); setTouched(false);
   };
 
   const save = async () => {
@@ -135,7 +134,6 @@ export default function ExpenseDrawer({ shipmentId, currency, sessionId, vendors
             description: description.trim() || resolvedType,
             // Canonical vendor NAME from the master list — never free text.
             supplierName: selectedVendor.companyName,
-            reference: reference.trim() || undefined,
             amount: amountNum, currency,
           },
           idempotencyKey, expectedRevision,
@@ -245,11 +243,8 @@ export default function ExpenseDrawer({ shipmentId, currency, sessionId, vendors
           <input className={field} value={description} onChange={(e) => setDescription(e.target.value)} placeholder={tr("descPlaceholder", lang)} />
         </div>
 
-        {/* Invoice / Reference — free text, optional (item 5) */}
-        <div>
-          <label className={lbl}>{tr("reference", lang)} <span className="text-slate-300 font-semibold normal-case">· {tr("optional", lang)}</span></label>
-          <input className={field} value={reference} onChange={(e) => setReference(e.target.value)} />
-        </div>
+        {/* Invoice / Reference removed — each cost is linked automatically to the
+            parent order via the unique MAR- order number; no manual reference. */}
 
         {/* Amount */}
         <div>

@@ -677,7 +677,8 @@ export interface CustomerInvoiceLine {
   customServiceType?: string;
   description?: string;
   quantity: number;
-  unit: string;
+  /** Optional — the invoice-line UI no longer collects a unit; legacy lines may still carry one. */
+  unit?: string;
   customUnit?: string;
   unitPrice: number;
   amount: number;

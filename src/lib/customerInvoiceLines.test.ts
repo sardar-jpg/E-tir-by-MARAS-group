@@ -27,10 +27,21 @@ describe("sanitizeInvoiceLine — validation + server-authoritative amount", () 
     const ok = sanitizeInvoiceLine({ ...base, serviceType: "Other", customServiceType: "Special handling" }, "l1");
     expect(ok.ok).toBe(true); if (ok.ok) expect(ok.line.customServiceType).toBe("Special handling");
   });
-  it("requires custom text when unit is Other", () => {
+  it("requires custom text when unit is Other (only when a unit is given)", () => {
     expect(sanitizeInvoiceLine({ ...base, unit: "Other" }, "l1")).toMatchObject({ ok: false, code: "missing_custom_unit" });
     const ok = sanitizeInvoiceLine({ ...base, unit: "Other", customUnit: "Box" }, "l1");
     expect(ok.ok).toBe(true); if (ok.ok) expect(ok.line.customUnit).toBe("Box");
+  });
+  it("unit is OPTIONAL — a line with no unit is accepted and amount is still qty x price (item 3)", () => {
+    const { unit, ...noUnit } = base; // drop the unit field entirely
+    const r = sanitizeInvoiceLine(noUnit, "l1");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.line.unit).toBeUndefined();
+      expect(r.line.amount).toBe(2500); // 1 × 2500
+    }
+    // Empty-string unit is also accepted (treated as no unit).
+    expect(sanitizeInvoiceLine({ ...base, unit: "" }, "l2").ok).toBe(true);
   });
   it("rejects a non-positive quantity and a negative unit price", () => {
     expect(sanitizeInvoiceLine({ ...base, quantity: 0 }, "l1")).toMatchObject({ ok: false, code: "invalid_quantity" });

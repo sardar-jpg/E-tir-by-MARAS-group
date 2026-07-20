@@ -226,11 +226,19 @@ describe("12. privacy — internal cost/markup never presented as customer figur
   });
 });
 
-describe("13. responsive two-column desktop layout (not mobile-first)", () => {
-  it("the body is a desktop two-column grid (≈65/35) that collapses to one column", () => {
-    expect(workspaceSrc).toContain("grid-cols-1 lg:grid-cols-12");
-    expect(workspaceSrc).toContain("lg:col-span-8"); // main ≈65%
-    expect(workspaceSrc).toContain("lg:col-span-4"); // right ≈35%
+describe("13. full-width VERTICAL sections (no two-column layout) (item 4)", () => {
+  it("the body is a single full-width vertical stack on every breakpoint", () => {
+    // The two-column grid was retired — sections stack top-to-bottom at full width.
+    expect(workspaceSrc).not.toContain("lg:grid-cols-12");
+    expect(workspaceSrc).not.toContain("lg:col-span-8");
+    expect(workspaceSrc).not.toContain("lg:col-span-4");
+    expect(workspaceSrc).toContain("max-w-[1400px] mx-auto space-y-6");
+  });
+  it("the six major sections are ordered Summary → Expenses → Vendor → Invoice → Payments → Approval", () => {
+    const order = ["csw-summary", "csw-expenses", "csw-vendor", "csw-invoice", "csw-payments", "csw-review"];
+    const positions = order.map((id) => workspaceSrc.indexOf(`id="${id}"`));
+    for (const p of positions) expect(p).toBeGreaterThan(-1);
+    for (let i = 1; i < positions.length; i++) expect(positions[i]).toBeGreaterThan(positions[i - 1]);
   });
 });
 
@@ -301,9 +309,11 @@ describe("16. UI refinement — scale, drawer, statuses, approval, docs", () => 
     expect(drawerSrc).toContain("expectedRevision");
     expect(drawerSrc).toContain("idempotencyKey");
   });
-  it("Submit for Approval appears only in the two action bars, never in Quick Actions or the timeline (item 4)", () => {
-    // Exactly two Submit buttons in the workspace (top bar + sticky bar).
-    expect((workspaceSrc.match(/T\.submit, lang\)/g) || []).length).toBe(2);
+  it("Submit for Approval + Save Draft have ONE primary location — the sticky action bar (no duplicates) (item 5)", () => {
+    // Exactly one Submit button (sticky bar); the duplicate top-bar action was removed.
+    expect((workspaceSrc.match(/T\.submit, lang\)/g) || []).length).toBe(1);
+    // Save Draft is likewise only in the sticky bar.
+    expect((workspaceSrc.match(/T\.saveDraft, lang\)/g) || []).length).toBe(1);
     // The approval timeline card no longer renders its own Submit button.
     expect(approvalSrc).not.toContain(">Submit for Approval<");
     // The dense mobile quick-actions block is not embedded on desktop.
@@ -335,5 +345,30 @@ describe("16. UI refinement — scale, drawer, statuses, approval, docs", () => 
     expect(invoicePanel2).toContain("dueDate");
     expect(invoicePanel2).toContain("viewInvoice");
     expect(invoicePanel2).toContain("downloadPdf");
+  });
+});
+
+describe("17. accounting simplification pass (order number, reference, unit, layout)", () => {
+  const drawerSrc = readFileSync(join(ROOT, "src/components/admin/ExpenseDrawer.tsx"), "utf8");
+
+  it("uses the MAR- order number as the single primary reference, shown read-only (item 1)", () => {
+    // The order number is the shipment/order number, displayed automatically (not an input).
+    expect(workspaceSrc).toContain("value={statement.shipmentNumber}");
+    expect(workspaceSrc).toContain('hShipment: { en: "Order Number"');
+    // No legacy eTIR- order format anywhere in the accounting workspace UI.
+    expect(workspaceSrc).not.toMatch(/eTIR-\d/i);
+  });
+  it("Invoice / Reference Number is removed from Cost Entry (item 2)", () => {
+    // The drawer no longer collects a reference; it is not sent in the item payload.
+    expect(drawerSrc).not.toContain("setReference");
+    expect(drawerSrc).not.toContain("reference: reference.trim()");
+    // The Expenses table no longer shows an Invoice / Reference column.
+    expect(workspaceSrc).not.toContain('"Invoice / Reference"');
+  });
+  it("the order number is never a manual input inside accounting forms (item 1)", () => {
+    // The drawer takes the parent shipmentId as a prop and renders no order/shipment
+    // number input — the order number is displayed automatically in the workspace header.
+    expect(drawerSrc).not.toContain("shipmentNumber");
+    expect(drawerSrc).toContain("shipmentId");
   });
 });
