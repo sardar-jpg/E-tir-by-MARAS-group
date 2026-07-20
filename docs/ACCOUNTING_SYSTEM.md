@@ -146,3 +146,34 @@ customer projection/PDF strips every private field.
 - Redeploy the prior server build; Firestore documents remain readable by the
   older code (older code simply ignores the newer optional fields).
 - No schema deletions were performed, so a forward/backward redeploy is safe.
+
+## 14. Accounting module UI (admin web/desktop)
+
+Delivered on `feature/accounting-module-foundation` in three reviewed phases. A
+dedicated **Accounting** sidebar group (sourced from the single registry
+`src/lib/accountingNav.ts`) exposes nine pages, all view-gated by
+`canViewCostStatements` (Super Admin + Accounting) exactly like the legacy
+`costs` tab. Web/desktop is the primary surface; mobile stays lightweight
+(read-only, reachable from the "More" menu). No accounting figure is computed in
+the browser — pages render server-authoritative values and, where a page spans
+many entities, aggregate the existing per-company / per-shipment endpoints
+client-side (no backend contract was added). Currencies are never combined; the
+MAR order number (`MAR-YYYY-###`, i.e. `shipmentNumber`) is the only reference.
+
+Pages, each with its own purpose-built identity on one shared design system
+(`src/components/admin/accounting/AccountingUI.tsx`):
+
+1. **Accounting Dashboard** — executive KPIs (`GET /api/admin/dashboard/financial`), revenue-vs-profit + expense-by-category charts, alerts.
+2. **Cost Statements** — the per-shipment financial workspace (`CostStatementWorkspace`): shipment summary, accounting/profit summary, cost breakdown, vendor payments, customer invoice, customer payments, approval workflow.
+3. **Customer Statements** / 4. **Vendor Statements** — running-balance ledgers (`AccountStatementView`) with summary header, search, pagination, CSV/Print/PDF.
+5. **Customer Invoices** — document-centric list + real invoice preview.
+6. **Payments** — directional cash register (receipts vs vendor payments) with reconciliation cues.
+7. **Receivables & Payables** — two-tab aging overview (`src/lib/receivablesPayables.ts`): summary cards, aging buckets, filters, open-statement links.
+8. **Monthly Financial Report** — month/year/currency summary with previous-month comparison, top-5 lists, and Excel/Print/branded-PDF export (`src/lib/monthlyReport.ts`).
+9. **AI Financial Assistant** — deterministic, explainable rule-based insight cards (NOT a chatbot or prediction) with priority, currency-aware impact, and action links (`src/lib/accountingInsights.ts`).
+
+Pure calculation logic lives in tested `src/lib/*` modules
+(`accountingRegisters`, `receivablesPayables`, `monthlyReport`,
+`accountingInsights`, `accountingDashboard`, `vendorAccountStatement`,
+`statementExport`, `accountingNav`). Accounting data is internal only and never
+rendered on customer or driver surfaces.

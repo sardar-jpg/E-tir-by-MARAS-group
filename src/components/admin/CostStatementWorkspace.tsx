@@ -64,6 +64,15 @@ const T = {
   receivedCustomer: { en: "Received from Customer", ar: "المستلم من العميل", tr: "Müşteriden Alınan" },
   remainingCustomer: { en: "Customer Balance", ar: "رصيد العميل", tr: "Müşteri Bakiyesi" },
   grossProfit: { en: "Gross Shipment Profit", ar: "إجمالي ربح الشحنة", tr: "Brüt Sevkiyat Kârı" },
+  shipmentSummary: { en: "Shipment Summary", ar: "ملخص الشحنة", tr: "Sevkiyat Özeti" },
+  shipmentSummaryDesc: { en: "Operational details for this shipment (read-only).", ar: "تفاصيل تشغيلية لهذه الشحنة (للعرض فقط).", tr: "Bu sevkiyata ait operasyonel bilgiler (salt okunur)." },
+  ssRoute: { en: "Route", ar: "المسار", tr: "Güzergah" },
+  ssOrigin: { en: "Origin", ar: "المنشأ", tr: "Çıkış" },
+  ssDestination: { en: "Destination", ar: "الوجهة", tr: "Varış" },
+  ssCargo: { en: "Cargo", ar: "الحمولة", tr: "Kargo" },
+  ssWeight: { en: "Weight", ar: "الوزن", tr: "Ağırlık" },
+  ssTruck: { en: "Truck / Plate", ar: "الشاحنة / اللوحة", tr: "Araç / Plaka" },
+  ssType: { en: "Freight Type", ar: "نوع الشحن", tr: "Taşıma Türü" },
   internal: { en: "Internal only", ar: "داخلي فقط", tr: "Yalnızca dahili" },
   overpaidWarn: { en: "Vendor overpayment credit exists — review the vendor payments before approval.", ar: "يوجد رصيد دفع زائد للمورد — راجع مدفوعات الموردين قبل الاعتماد.", tr: "Tedarikçi fazla ödeme kredisi var — onaydan önce inceleyin." },
   noExpenses: { en: "No shipment expenses have been added yet. Click Add Expense to record the first cost.", ar: "لم تتم إضافة أي مصاريف بعد. اضغط إضافة مصروف لتسجيل أول تكلفة.", tr: "Henüz masraf eklenmedi. İlk maliyeti kaydetmek için Masraf Ekle'ye tıklayın." },
@@ -366,6 +375,20 @@ export default function CostStatementWorkspace({
       {/* ─── Body — full-width VERTICAL sections, stacked top-to-bottom on every
            breakpoint (desktop / tablet / mobile). No two-column layout. (item 4) ── */}
       <div className="px-4 md:px-8 py-6 max-w-[1400px] mx-auto space-y-6">
+          {/* 0. Shipment Summary — operational context for the financials (read only) */}
+          <section id="csw-shipment" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 scroll-mt-24">
+            <SectionHead title={pick(T.shipmentSummary, lang)} desc={pick(T.shipmentSummaryDesc, lang)} />
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-5 gap-y-4 mt-4">
+              <ShipmentFact label={pick(T.ssOrigin, lang)} value={shipment ? [shipment.loadingCity, shipment.loadingCountry].filter(Boolean).join(", ") || "—" : "—"} />
+              <ShipmentFact label={pick(T.ssDestination, lang)} value={shipment ? [shipment.deliveryCity, shipment.deliveryCountry].filter(Boolean).join(", ") || "—" : "—"} />
+              <ShipmentFact label={pick(T.ssType, lang)} value={`${(statement.shipmentType || "").toString().toUpperCase() || "—"}`} />
+              <ShipmentFact label={pick(T.ssTruck, lang)} value={(shipment?.truckNumber || statement.truckNumber || "—") as string} mono />
+              <ShipmentFact label={pick(T.ssCargo, lang)} value={shipment?.cargoDescription || "—"} className="sm:col-span-2" />
+              <ShipmentFact label={pick(T.ssWeight, lang)} value={shipment?.cargoWeight ? `${money(Number(shipment.cargoWeight))} kg` : "—"} />
+              <ShipmentFact label={pick(T.hStatementDate, lang)} value={statement.date || "—"} mono />
+            </div>
+          </section>
+
           {/* 1. Order Accounting Summary — server-authoritative KPIs (read only) */}
           <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 scroll-mt-24">
             <SectionHead num={1} title={pick(T.summary, lang)} desc={pick(T.summaryDesc, lang)} />
@@ -648,6 +671,14 @@ function StepStatusLabel({ state, label }: { state: StepState; label: string }) 
   return <span className={`flex items-center gap-1 text-[11px] font-bold mt-1 leading-tight ${cls}`}><Icon className="w-3 h-3 shrink-0 mt-px" />{label}</span>;
 }
 
+function ShipmentFact({ label, value, mono, className = "" }: { label: string; value: string; mono?: boolean; className?: string }) {
+  return (
+    <div className={`min-w-0 ${className}`}>
+      <p className="text-[10.5px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+      <p className={`mt-1 text-[13px] font-semibold text-slate-800 ${mono ? "font-mono" : ""} break-words`}>{value}</p>
+    </div>
+  );
+}
 function SectionHead({ num, title, desc, action, badge }: { num?: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-3">

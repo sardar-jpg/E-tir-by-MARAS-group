@@ -26,7 +26,8 @@ import {
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
   ArrowUpRight, ClipboardList, CheckCircle2, FileText,
   Paperclip, Image as ImageIcon, Send, X, ExternalLink, RefreshCw, UserPlus, Phone, Mail, Check, AlertCircle, Printer,
-  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, Users, ShieldAlert, User, Lock, Save, Settings, BarChart3
+  Map as MapIcon, Bell, BellRing, Anchor, Plane, Download, Star, Award, Clock, Users, ShieldAlert, User, Lock, Save, Settings, BarChart3,
+  LayoutDashboard, CreditCard, Scale, PieChart, Sparkles, FileBarChart
 } from 'lucide-react';
 import AdminSidebar, { findUngroupedTabIds } from "./admin/AdminSidebar";
 import type { ChatCenterFocus } from "./admin/ChatCenter";
@@ -52,11 +53,17 @@ import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
 import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
-import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
-import VendorPayablesPanel from "./admin/VendorPayablesPanel";
-import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
 import CostStatementWorkspace from "./admin/CostStatementWorkspace";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
+import AccountingDashboard from "./admin/accounting/AccountingDashboard";
+import CustomerStatementsPage from "./admin/accounting/CustomerStatementsPage";
+import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
+import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
+import PaymentsPage from "./admin/accounting/PaymentsPage";
+import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage";
+import MonthlyReportPage from "./admin/accounting/MonthlyReportPage";
+import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
+import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -550,9 +557,14 @@ export default function AdminPanel({
       setIsMarasAiSending(false);
     }
   };
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings'>(
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
+  // Accounting cross-page navigation: Receivables/Payables + AI Assistant link
+  // to a specific customer/vendor statement; this carries the entity name so
+  // the target statement page can pre-select it. Presentation only.
+  const [acctFocusRef, setAcctFocusRef] = useState<string>("");
+  const openAccounting = (tab: string, ref?: string) => { setAcctFocusRef(ref || ""); setActiveTab(tab as typeof activeTab); };
   // PR #132: Logistics Analysis merged into the unified Dashboard. The
   // 'reports' tab id stays valid for backward compatibility (old quick
   // links, saved navigation state) but always redirects to Dashboard
@@ -3956,6 +3968,12 @@ MARAS Group etir Center`;
   const canWriteClients = canManageClients(resolvedAdminType);
   const canWriteVendors = canManageVendors(resolvedAdminType);
 
+  // Resolves the accountingNav registry's lucide icon NAMES to components for
+  // the admin nav (the registry itself stays pure/React-free).
+  const ACCT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+    LayoutDashboard, FileBarChart, Users, Building2, FileText, CreditCard, Scale, PieChart, Sparkles,
+  };
+
   // Admin navigation tabs, filtered by admin role/type — shared by the
   // desktop sidebar and the mobile/tablet horizontal tab bar below.
   const allRoleFilteredAdminTabs = (() => {
@@ -3971,7 +3989,12 @@ MARAS Group etir Center`;
       { id: 'chat_center', label: lang === 'tr' ? 'Mesaj Merkezi' : (lang === 'ar' ? 'مركز المحادثات' : 'Chat Center'), icon: MessageSquare },
       { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
       { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
-      { id: 'costs', label: lang === 'tr' ? 'Muhasebe ve Maliyetler' : (lang === 'ar' ? 'الحسابات وبيانات التكلفة' : 'Accounts & Cost Statements'), icon: DollarSign },
+      // Accounting module pages (dedicated "Accounting" sidebar group). The
+      // `costs` page keeps its own richer label; the rest come from the
+      // accountingNav registry (single source of truth for order + labels).
+      // Role gating for every acct_* id + costs happens in roleFiltered below.
+      { id: 'costs', label: accountingLabel('costs', lang), icon: FileBarChart },
+      ...ACCOUNTING_PAGES.filter((p) => p.id !== 'costs').map((p) => ({ id: p.id, label: accountingLabel(p.id, lang), icon: ACCT_ICONS[p.icon] || FileText })),
       { id: 'gmail', label: lang === 'tr' ? 'Google Workspace' : (lang === 'ar' ? 'جوجل وورك سبيس' : 'Google Workspace'), icon: Mail },
       { id: 'audit', label: t('auditLogsTitle'), icon: ShieldCheck },
       ...(isSuper ? [{ id: 'team', label: lang === 'tr' ? 'Operasyon Ekibi' : (lang === 'ar' ? 'فريق العمليات' : 'Operation Team'), icon: UserPlus }] : []),
@@ -4002,7 +4025,11 @@ MARAS Group etir Center`;
         return ['dashboard', 'shipments', 'tracking_map', 'drivers', 'chat_center', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
       }
       if (isAccounts) {
-        return ['costs', 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
+        // Accounting staff see the whole Accounting module (all acct_* pages +
+        // costs) plus the shared client/vendor/self tabs. Identical view rights
+        // to `costs` today — canViewCostStatements(super|accounts) — just spread
+        // across the module's pages.
+        return [...ACCOUNTING_TAB_IDS, 'clients', 'vendors', 'my_account', 'settings'].includes(tab.id);
       }
       return false;
     });
@@ -6697,6 +6724,35 @@ MARAS Group etir Center`;
             />
           </React.Suspense>
         )
+      )}
+
+      {/* Accounting module pages — all view-gated exactly like `costs`
+          (canViewCostStatements = super + accounts). Live pages render their
+          real UI; roadmap pages render the professional "coming soon"
+          placeholder that keeps the full information architecture visible. */}
+      {activeTab === 'acct_dashboard' && canViewCostStatements(resolvedAdminType) && (
+        <AccountingDashboard lang={lang} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
+      )}
+      {activeTab === 'acct_customer_statements' && canViewCostStatements(resolvedAdminType) && (
+        <CustomerStatementsPage lang={lang} clients={clients} initialEntity={acctFocusRef} />
+      )}
+      {activeTab === 'acct_vendor_statements' && canViewCostStatements(resolvedAdminType) && (
+        <VendorStatementsPage lang={lang} vendors={vendors} initialEntity={acctFocusRef} />
+      )}
+      {activeTab === 'acct_invoices' && canViewCostStatements(resolvedAdminType) && (
+        <CustomerInvoicesPage lang={lang} clients={clients} />
+      )}
+      {activeTab === 'acct_payments' && canViewCostStatements(resolvedAdminType) && (
+        <PaymentsPage lang={lang} clients={clients} costStatements={costStatements} />
+      )}
+      {activeTab === 'acct_receivables' && canViewCostStatements(resolvedAdminType) && (
+        <ReceivablesPayablesPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
+      )}
+      {activeTab === 'acct_reports' && canViewCostStatements(resolvedAdminType) && (
+        <MonthlyReportPage lang={lang} clients={clients} costStatements={costStatements} />
+      )}
+      {activeTab === 'acct_ai' && canViewCostStatements(resolvedAdminType) && (
+        <AIFinancialAssistantPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
       )}
 
 
