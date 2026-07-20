@@ -7,7 +7,7 @@ const T = {
 };
 
 /** Customer (AR) account statements page — one statement per customer company. */
-export default function CustomerStatementsPage({ lang, clients }: { lang: Language; clients: Client[] }) {
+export default function CustomerStatementsPage({ lang, clients, initialEntity }: { lang: Language; clients: Client[]; initialEntity?: string }) {
   return (
     <AccountStatementView
       mode="customer"
@@ -17,6 +17,7 @@ export default function CustomerStatementsPage({ lang, clients }: { lang: Langua
       entities={clients.map((c) => ({ id: c.id, name: c.companyName }))}
       endpoint="/api/customer-accounts/statement"
       queryKey="company"
+      initialEntity={initialEntity}
       pdfPath={(name, currency, l) => `/api/customer-accounts/statement/pdf?company=${encodeURIComponent(name)}&currency=${currency}&lang=${l}`}
     />
   );

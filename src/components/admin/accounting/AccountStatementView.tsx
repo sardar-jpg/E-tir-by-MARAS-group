@@ -85,7 +85,7 @@ function downloadCsv(filename: string, csv: string) {
  * shapes, filters (client-side, never mutating data) and exports it.
  */
 export default function AccountStatementView({
-  mode, lang, title, subtitle, entities, endpoint, queryKey, pdfPath,
+  mode, lang, title, subtitle, entities, endpoint, queryKey, pdfPath, initialEntity,
 }: {
   mode: "customer" | "vendor";
   lang: Language;
@@ -95,6 +95,8 @@ export default function AccountStatementView({
   endpoint: string;
   queryKey: "company" | "vendor";
   pdfPath?: (name: string, currency: string, lang: Language) => string;
+  /** Pre-select this entity when arriving from another accounting page (link). */
+  initialEntity?: string;
 }) {
   const sorted = useMemo(() => [...entities].sort((a, b) => a.name.localeCompare(b.name)), [entities]);
   const [selected, setSelected] = useState<string>("");
@@ -110,6 +112,13 @@ export default function AccountStatementView({
 
   const selectedEntity = useMemo(() => sorted.find((e) => e.name === selected), [sorted, selected]);
   const EntityIcon = mode === "customer" ? Users : Building2;
+
+  // Pre-select an entity when navigated here from another accounting page.
+  useEffect(() => {
+    if (initialEntity && sorted.some((e) => e.name === initialEntity) && initialEntity !== selected) {
+      setSelected(initialEntity); setCurrency(""); setStatement(null); setCurrencies([]); setRowQuery("");
+    }
+  }, [initialEntity, sorted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async (name: string, cur: string, f: string, tt: string) => {
     if (!name) { setStatement(null); setCurrencies([]); return; }

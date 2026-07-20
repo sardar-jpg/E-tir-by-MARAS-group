@@ -11,12 +11,14 @@ describe("accountingNav registry", () => {
       "acct_invoices", "acct_payments", "acct_receivables", "acct_reports", "acct_ai",
     ]);
   });
-  it("marks the delivered pages live and the rest as roadmap", () => {
-    expect(ACCOUNTING_LIVE_TAB_IDS).toEqual(["acct_dashboard", "costs", "acct_customer_statements", "acct_vendor_statements", "acct_invoices", "acct_payments"]);
-    expect(isLiveAccountingTab("acct_dashboard")).toBe(true);
-    expect(isLiveAccountingTab("acct_invoices")).toBe(true);
-    expect(isLiveAccountingTab("acct_payments")).toBe(true);
-    expect(isLiveAccountingTab("acct_reports")).toBe(false);
+  it("marks every accounting page live once the module is complete", () => {
+    expect(ACCOUNTING_LIVE_TAB_IDS).toEqual([
+      "acct_dashboard", "costs", "acct_customer_statements", "acct_vendor_statements",
+      "acct_invoices", "acct_payments", "acct_receivables", "acct_reports", "acct_ai",
+    ]);
+    expect(isLiveAccountingTab("acct_receivables")).toBe(true);
+    expect(isLiveAccountingTab("acct_reports")).toBe(true);
+    expect(isLiveAccountingTab("acct_ai")).toBe(true);
   });
   it("every page carries en/tr/ar labels + an icon", () => {
     for (const p of ACCOUNTING_PAGES) {

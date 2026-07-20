@@ -32,9 +32,9 @@ export const ACCOUNTING_PAGES: AccountingPage[] = [
   { id: "acct_vendor_statements", icon: "Building2", live: true, label: { en: "Vendor Statements", tr: "Tedarikçi Ekstreleri", ar: "كشوف الموردين" } },
   { id: "acct_invoices", icon: "FileText", live: true, label: { en: "Customer Invoices", tr: "Müşteri Faturaları", ar: "فواتير العملاء" } },
   { id: "acct_payments", icon: "CreditCard", live: true, label: { en: "Payments", tr: "Ödemeler", ar: "المدفوعات" } },
-  { id: "acct_receivables", icon: "Scale", live: false, label: { en: "Receivables & Payables", tr: "Alacaklar ve Borçlar", ar: "الذمم المدينة والدائنة" } },
-  { id: "acct_reports", icon: "PieChart", live: false, label: { en: "Financial Reports", tr: "Mali Raporlar", ar: "التقارير المالية" } },
-  { id: "acct_ai", icon: "Sparkles", live: false, label: { en: "AI Financial Assistant", tr: "Yapay Zekâ Mali Asistanı", ar: "المساعد المالي الذكي" } },
+  { id: "acct_receivables", icon: "Scale", live: true, label: { en: "Receivables & Payables", tr: "Alacaklar ve Borçlar", ar: "الذمم المدينة والدائنة" } },
+  { id: "acct_reports", icon: "PieChart", live: true, label: { en: "Financial Reports", tr: "Mali Raporlar", ar: "التقارير المالية" } },
+  { id: "acct_ai", icon: "Sparkles", live: true, label: { en: "AI Financial Assistant", tr: "Yapay Zekâ Mali Asistanı", ar: "المساعد المالي الذكي" } },
 ];
 
 /** All accounting tab ids (used to build the sidebar group + role filter). */

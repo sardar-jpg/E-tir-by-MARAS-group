@@ -7,7 +7,7 @@ const T = {
 };
 
 /** Vendor (AP) account statements page — one statement per vendor. */
-export default function VendorStatementsPage({ lang, vendors }: { lang: Language; vendors: Vendor[] }) {
+export default function VendorStatementsPage({ lang, vendors, initialEntity }: { lang: Language; vendors: Vendor[]; initialEntity?: string }) {
   return (
     <AccountStatementView
       mode="vendor"
@@ -17,6 +17,7 @@ export default function VendorStatementsPage({ lang, vendors }: { lang: Language
       entities={vendors.map((v) => ({ id: v.id, name: v.companyName }))}
       endpoint="/api/vendor-accounts/statement"
       queryKey="vendor"
+      initialEntity={initialEntity}
     />
   );
 }

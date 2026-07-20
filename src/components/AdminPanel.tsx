@@ -63,6 +63,9 @@ import CustomerStatementsPage from "./admin/accounting/CustomerStatementsPage";
 import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
 import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
 import PaymentsPage from "./admin/accounting/PaymentsPage";
+import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage";
+import MonthlyReportPage from "./admin/accounting/MonthlyReportPage";
+import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
 import AccountingComingSoon from "./admin/accounting/AccountingComingSoon";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel, isLiveAccountingTab } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
@@ -561,6 +564,11 @@ export default function AdminPanel({
   const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
+  // Accounting cross-page navigation: Receivables/Payables + AI Assistant link
+  // to a specific customer/vendor statement; this carries the entity name so
+  // the target statement page can pre-select it. Presentation only.
+  const [acctFocusRef, setAcctFocusRef] = useState<string>("");
+  const openAccounting = (tab: string, ref?: string) => { setAcctFocusRef(ref || ""); setActiveTab(tab as typeof activeTab); };
   // PR #132: Logistics Analysis merged into the unified Dashboard. The
   // 'reports' tab id stays valid for backward compatibility (old quick
   // links, saved navigation state) but always redirects to Dashboard
@@ -6730,16 +6738,25 @@ MARAS Group etir Center`;
         <AccountingDashboard lang={lang} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
       )}
       {activeTab === 'acct_customer_statements' && canViewCostStatements(resolvedAdminType) && (
-        <CustomerStatementsPage lang={lang} clients={clients} />
+        <CustomerStatementsPage lang={lang} clients={clients} initialEntity={acctFocusRef} />
       )}
       {activeTab === 'acct_vendor_statements' && canViewCostStatements(resolvedAdminType) && (
-        <VendorStatementsPage lang={lang} vendors={vendors} />
+        <VendorStatementsPage lang={lang} vendors={vendors} initialEntity={acctFocusRef} />
       )}
       {activeTab === 'acct_invoices' && canViewCostStatements(resolvedAdminType) && (
         <CustomerInvoicesPage lang={lang} clients={clients} />
       )}
       {activeTab === 'acct_payments' && canViewCostStatements(resolvedAdminType) && (
         <PaymentsPage lang={lang} clients={clients} costStatements={costStatements} />
+      )}
+      {activeTab === 'acct_receivables' && canViewCostStatements(resolvedAdminType) && (
+        <ReceivablesPayablesPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
+      )}
+      {activeTab === 'acct_reports' && canViewCostStatements(resolvedAdminType) && (
+        <MonthlyReportPage lang={lang} clients={clients} costStatements={costStatements} />
+      )}
+      {activeTab === 'acct_ai' && canViewCostStatements(resolvedAdminType) && (
+        <AIFinancialAssistantPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
       )}
       {ACCOUNTING_TAB_IDS.includes(activeTab) && !isLiveAccountingTab(activeTab) && canViewCostStatements(resolvedAdminType) && (
         <AccountingComingSoon lang={lang} tabId={activeTab} />
