@@ -112,6 +112,7 @@ import {
   applyAllocationDeltas, autoAllocateFromLedgers, deriveInvoiceStatus, type InvoiceAccountingLedger,
 } from "./src/lib/invoiceLedger";
 import { buildCustomerAccountStatement, customerStatementCurrencies } from "./src/lib/customerAccountStatement";
+import { buildVendorAccountStatement, vendorStatementCurrencies, type VendorBill } from "./src/lib/vendorAccountStatement";
 import { buildBankAccountSnapshot, resolveInvoiceBank } from "./src/lib/bankSnapshot";
 import {
   validateAttachmentUpload, buildAttachmentMetadata, applyAttachmentRemoval,
@@ -12309,6 +12310,55 @@ async function startServer() {
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to build account statement." });
+    }
+  });
+
+  // Vendor account statement — the vendor mirror of the customer statement.
+  // Read-only aggregation over EXISTING data: vendor bills are the cost lines
+  // (supplierName === vendor) across all cost statements, credits are the
+  // existing vendorPayments. No accounting rule or write path is added.
+  const readVendor = (req: express.Request): string =>
+    (typeof req.query.vendor === "string" && req.query.vendor) ||
+    (typeof req.body?.vendor === "string" && req.body.vendor) || "";
+  async function loadVendorBills(vendorName: string): Promise<VendorBill[]> {
+    const snap = await getDocs(collection(db, "costStatements"));
+    const bills: VendorBill[] = [];
+    for (const d of snap.docs) {
+      const st = d.data() as CostStatement;
+      for (const item of ((st.items as CostItem[]) || [])) {
+        if ((item.supplierName || "") !== vendorName) continue;
+        bills.push({
+          shipmentNumber: st.shipmentNumber,
+          date: ((item as any).dueDate || st.date || st.createdAt || "").slice(0, 10),
+          description: item.description || item.costType || "Vendor bill",
+          amount: Number(item.totalAmount || 0),
+          currency: item.currency,
+        });
+      }
+    }
+    return bills;
+  }
+  async function loadVendorPaymentsForVendor(vendorName: string): Promise<VendorPaymentTransaction[]> {
+    const snap = await getDocs(collection(db, "vendorPayments"));
+    return snap.docs.map((d) => d.data() as VendorPaymentTransaction).filter((p) => p.vendorName === vendorName);
+  }
+  app.get("/api/vendor-accounts/statement", requirePermission("costs.view"), async (req, res) => {
+    try {
+      const vendor = readVendor(req);
+      if (!vendor) return res.status(400).json({ error: "A vendor is required." });
+      const [bills, payments] = [await loadVendorBills(vendor), await loadVendorPaymentsForVendor(vendor)];
+      const currencies = vendorStatementCurrencies(bills, payments);
+      const currency = (typeof req.query.currency === "string" && req.query.currency ? req.query.currency : currencies[0]) as Currency;
+      if (!currency) return res.json({ currencies: [], statement: null });
+      const statement = buildVendorAccountStatement({
+        vendorName: vendor, currency, bills, payments,
+        from: typeof req.query.from === "string" ? req.query.from : "",
+        to: typeof req.query.to === "string" ? req.query.to : "",
+      });
+      res.json({ currencies, statement });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to build vendor statement." });
     }
   });
 
