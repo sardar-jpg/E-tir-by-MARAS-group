@@ -48,10 +48,11 @@ export function sanitizeInvoiceLine(raw: any, id: string): LineResult {
   const customServiceType = typeof raw?.customServiceType === "string" ? raw.customServiceType.trim() : "";
   if (isOtherServiceType(serviceType) && !customServiceType) return { ok: false, code: "missing_custom_service", error: "Specify the custom service type." };
 
+  // Unit is OPTIONAL (removed from the invoice-line UI). Legacy lines may still
+  // carry a unit; when present, an "Other" unit still needs its custom text.
   const unit = typeof raw?.unit === "string" ? raw.unit.trim() : "";
-  if (!unit) return { ok: false, code: "missing_unit", error: "A unit is required for every line." };
   const customUnit = typeof raw?.customUnit === "string" ? raw.customUnit.trim() : "";
-  if (isOtherUnit(unit) && !customUnit) return { ok: false, code: "missing_custom_unit", error: "Specify the custom unit." };
+  if (unit && isOtherUnit(unit) && !customUnit) return { ok: false, code: "missing_custom_unit", error: "Specify the custom unit." };
 
   const quantity = finite(raw?.quantity);
   if (quantity === null || !(quantity > 0)) return { ok: false, code: "invalid_quantity", error: "Quantity must be greater than zero." };
@@ -62,13 +63,13 @@ export function sanitizeInvoiceLine(raw: any, id: string): LineResult {
     id,
     serviceType: serviceType.slice(0, 80),
     quantity: round2(quantity),
-    unit: unit.slice(0, 40),
     unitPrice: round2(unitPrice),
     // SERVER-AUTHORITATIVE: recomputed, never taken from the client.
     amount: computeLineAmount(quantity, unitPrice),
   };
   if (isOtherServiceType(serviceType)) line.customServiceType = customServiceType.slice(0, 80);
-  if (isOtherUnit(unit)) line.customUnit = customUnit.slice(0, 40);
+  if (unit) line.unit = unit.slice(0, 40);
+  if (unit && isOtherUnit(unit)) line.customUnit = customUnit.slice(0, 40);
   const description = typeof raw?.description === "string" ? raw.description.trim() : "";
   if (description) line.description = description.slice(0, 300);
   return { ok: true, line };
@@ -117,7 +118,12 @@ export function lineServiceLabel(line: CustomerInvoiceLine): string {
   return isOtherServiceType(line.serviceType) ? (line.customServiceType || line.serviceType) : line.serviceType;
 }
 export function lineUnitLabel(line: CustomerInvoiceLine): string {
+  if (!line.unit) return "";
   return isOtherUnit(line.unit) ? (line.customUnit || line.unit) : line.unit;
+}
+/** True when any line carries a unit (drives whether the PDF shows a Unit column). */
+export function invoiceHasAnyUnit(lines: CustomerInvoiceLine[] | undefined): boolean {
+  return Array.isArray(lines) && lines.some((l) => !!l.unit);
 }
 
 /** Signed difference of grand total vs the agreed shipment selling price. */

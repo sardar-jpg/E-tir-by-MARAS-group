@@ -80,14 +80,16 @@ describe("3. Other behaviour", () => {
   });
 });
 
-describe("4 & 5. Description and Invoice/Reference are optional free text, trimmed", () => {
+describe("4 & 5. Description is optional free text; Invoice/Reference removed (item 2)", () => {
   it("description uses the friendly placeholder and is trimmed on submit", () => {
     expect(drawer).toContain("Add expense details or notes");
     expect(drawer).toContain("description.trim()");
   });
-  it("reference is labelled clearly and trimmed", () => {
-    expect(drawer).toContain("Invoice / Reference Number");
-    expect(drawer).toContain("reference.trim()");
+  it("the Invoice / Reference Number field was removed from Cost Entry", () => {
+    // Each cost is linked automatically to the parent order via the MAR- number,
+    // so there is no manual reference input or payload field any more.
+    expect(drawer).not.toContain("setReference");
+    expect(drawer).not.toContain("reference.trim()");
   });
 });
 

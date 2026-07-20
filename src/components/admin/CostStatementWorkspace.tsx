@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   ArrowLeft, Eye, MoreHorizontal, Save, Send, Plus, FileText, ScrollText,
   Receipt, Building2, CheckCircle2, Circle, AlertTriangle, Loader2, Lock, Download,
-  Package, MapPin, Boxes, Coins, Tag, Calendar, Flag, Printer, TrendingUp,
+  Package, MapPin, Boxes, Coins, Tag, Calendar, Flag, Printer,
   Clock, ChevronDown, CreditCard,
 } from "lucide-react";
 import type { Language, CostStatement, Shipment, Client, BankAccount, CustomerInvoice, CostItem, Vendor } from "../../types";
@@ -80,7 +80,7 @@ const T = {
   linkedCargo: { en: "Linked Cargo", ar: "الشحنة المرتبطة", tr: "Bağlı Kargo" },
   expenseAdded: { en: "Expense added successfully", ar: "تمت إضافة المصروف بنجاح", tr: "Masraf başarıyla eklendi" },
   paymentSaved: { en: "Payment recorded successfully", ar: "تم تسجيل الدفعة بنجاح", tr: "Ödeme başarıyla kaydedildi" },
-  hShipment: { en: "Shipment", ar: "الشحنة", tr: "Sevkiyat" },
+  hShipment: { en: "Order Number", ar: "رقم الطلب", tr: "Sipariş Numarası" },
   hCustomer: { en: "Customer", ar: "العميل", tr: "Müşteri" },
   hRoute: { en: "Route", ar: "المسار", tr: "Güzergah" },
   hCargo: { en: "Cargo Type", ar: "نوع البضاعة", tr: "Kargo Türü" },
@@ -298,17 +298,8 @@ export default function CostStatementWorkspace({
                 </>
               )}
             </div>
-            {canWrite && onSaveDraft && (
-              <button onClick={() => { onSaveDraft(); }} disabled={isSaving} className="px-4 py-2.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 text-[13px] font-bold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-all shadow-sm">
-                {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}{pick(T.saveDraft, lang)}
-              </button>
-            )}
-            {/* Submit for Approval — one of ONLY two locations (top bar + sticky bar). */}
-            {canWrite && (
-              <button onClick={() => (onSubmitForApproval ? onSubmitForApproval() : scrollTo("review"))} disabled={!canSubmit} title={!canSubmit ? pick(T.submitBlocked, lang) : undefined} className={btnPrimary}>
-                <Send className="w-4 h-4" />{pick(T.submit, lang)}
-              </button>
-            )}
+            {/* Save Draft + Submit for Approval live in ONE place only — the sticky
+                action bar at the bottom — so the primary actions are never duplicated. */}
           </div>
         </div>
 
@@ -362,12 +353,36 @@ export default function CostStatementWorkspace({
         </div>
       </div>
 
-      {/* ─── Body — ~65% / 35% on desktop, single column below lg (item 6) ── */}
-      <div className="px-4 md:px-8 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Main column (≈65%) */}
-        <div className="lg:col-span-8 space-y-6">
-          {/* 1. Expenses */}
-          <SectionCard id="csw-expenses" num={1} title={pick(T.expenses, lang)} desc={pick(T.expensesDesc, lang)}
+      {/* ─── Body — full-width VERTICAL sections, stacked top-to-bottom on every
+           breakpoint (desktop / tablet / mobile). No two-column layout. (item 4) ── */}
+      <div className="px-4 md:px-8 py-6 max-w-[1400px] mx-auto space-y-6">
+          {/* 1. Order Accounting Summary — server-authoritative KPIs (read only) */}
+          <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 scroll-mt-24">
+            <SectionHead num={1} title={pick(T.summary, lang)} desc={pick(T.summaryDesc, lang)} />
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
+              <BigKpi label={pick(T.agreedPrice, lang)} value={money(agreedAmount)} unit={agreedCurrency} tone="blue" />
+              <BigKpi label={pick(T.totalExpenses, lang)} value={money(totalCost)} unit={statement.currency} tone="navy" />
+              <BigKpi label={pick(T.paidVendors, lang)} value={money(paidAmount)} unit={statement.currency} tone="green" />
+              <BigKpi label={pick(T.remainingVendors, lang)} value={money(expense.expenseRemaining)} unit={statement.currency} tone="orange" />
+              <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={agreedCurrency} tone="green" />
+              <BigKpi label={pick(T.remainingCustomer, lang)} value={money(customer.customerReceivable)} unit={agreedCurrency} tone="orange" />
+            </div>
+            {/* Gross profit — internal only; never shown to the customer. */}
+            <div className="mt-3 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white px-4 py-3.5 flex items-center justify-between">
+              <div>
+                <div className="text-[12px] font-black uppercase tracking-wide text-emerald-700">{pick(T.grossProfit, lang)}</div>
+                <div className="text-[9px] font-bold uppercase tracking-wide text-emerald-400 flex items-center gap-1 mt-0.5"><Lock className="w-2.5 h-2.5" />{pick(T.internal, lang)}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-2xl font-black font-mono text-emerald-700 leading-none">{grossProfit === null ? "—" : money(grossProfit)}</div>
+                <div className="text-[10px] font-bold text-emerald-500 mt-1">{grossProfit === null ? "" : agreedCurrency}</div>
+              </div>
+            </div>
+            {grossProfit === null && <p className="text-[11px] text-slate-400 mt-2">{pick(T.notAggregated, lang)}</p>}
+          </section>
+
+          {/* 2. Costs / Expenses */}
+          <SectionCard id="csw-expenses" num={2} title={pick(T.expenses, lang)} desc={pick(T.expensesDesc, lang)}
             action={canWrite ? (
               <button onClick={() => setShowAddExpense(true)} className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-[13px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-2 transition-all shadow-sm shadow-blue-600/20">
                 <Plus className="w-4 h-4" />{pick(T.addExpense, lang)}
@@ -386,7 +401,7 @@ export default function CostStatementWorkspace({
                 <table className="w-full text-[13px] border-separate border-spacing-0">
                   <thead>
                     <tr className="text-left text-slate-400">
-                      {["#", "Expense Type", "Description", "Vendor", "Invoice / Reference", "Due Date", "Amount", "Currency", "Attachment"].map((h, k) => (
+                      {["#", "Expense Type", "Description", "Vendor", "Due Date", "Amount", "Currency", "Attachment"].map((h, k) => (
                         <th key={k} className={`py-3 px-3 text-[11px] font-black uppercase tracking-wide border-b border-slate-100 ${h === "Amount" ? "text-right" : ""}`}>{h}</th>
                       ))}
                     </tr>
@@ -398,7 +413,6 @@ export default function CostStatementWorkspace({
                         <td className="py-4 px-3 font-bold text-slate-800 border-b border-slate-50">{it.costType || "—"}</td>
                         <td className="py-4 px-3 text-slate-600 border-b border-slate-50">{it.description || "—"}</td>
                         <td className="py-4 px-3 text-slate-600 border-b border-slate-50">{it.supplierName || "—"}</td>
-                        <td className="py-4 px-3 font-mono text-slate-500 border-b border-slate-50">{(it as any).invoiceReference || (it as any).reference || "—"}</td>
                         <td className="py-4 px-3 font-mono text-slate-500 border-b border-slate-50">{(it as any).dueDate || "—"}</td>
                         <td className="py-4 px-3 text-right font-mono font-black text-slate-900 border-b border-slate-50">{money(Number(it.totalAmount || 0))}</td>
                         <td className="py-4 px-3 font-mono text-slate-500 border-b border-slate-50">{it.currency}</td>
@@ -421,8 +435,8 @@ export default function CostStatementWorkspace({
             )}
           </SectionCard>
 
-          {/* 2. Vendor Payments */}
-          <SectionCard id="csw-vendor" num={2} title={pick(T.vendorPayments, lang)} desc={pick(T.vendorPaymentsDesc, lang)}
+          {/* 3. Vendor Payments */}
+          <SectionCard id="csw-vendor" num={3} title={pick(T.vendorPayments, lang)} desc={pick(T.vendorPaymentsDesc, lang)}
             badge={hasExpenses ? <StatusPill label={pick(vendorStatus.label, lang)} tone={vendorStatus.tone} /> : undefined}>
             {!hasExpenses ? (
               <EmptyHint>{pick(T.noVendorYet, lang)}</EmptyHint>
@@ -430,44 +444,10 @@ export default function CostStatementWorkspace({
               <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} />
             )}
           </SectionCard>
-        </div>
 
-        {/* Right column (≈35%) */}
-        <div className="lg:col-span-4 space-y-6">
-          {/* Accounting summary — premium KPI dashboard (server-authoritative). */}
-          <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center"><TrendingUp className="w-5 h-5" /></div>
-              <div>
-                <h2 className="text-[15px] font-black text-slate-900 leading-none">{pick(T.summary, lang)}</h2>
-                <p className="text-[11px] text-slate-400 mt-1">{pick(T.summaryDesc, lang)}</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <BigKpi label={pick(T.agreedPrice, lang)} value={money(agreedAmount)} unit={agreedCurrency} tone="blue" />
-              <BigKpi label={pick(T.totalExpenses, lang)} value={money(totalCost)} unit={statement.currency} tone="navy" />
-              <BigKpi label={pick(T.paidVendors, lang)} value={money(paidAmount)} unit={statement.currency} tone="green" />
-              <BigKpi label={pick(T.remainingVendors, lang)} value={money(expense.expenseRemaining)} unit={statement.currency} tone="orange" />
-              <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={agreedCurrency} tone="green" />
-              <BigKpi label={pick(T.remainingCustomer, lang)} value={money(customer.customerReceivable)} unit={agreedCurrency} tone="orange" />
-            </div>
-            {/* Gross profit — internal only; never shown to the customer. */}
-            <div className="mt-3 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white px-4 py-3.5 flex items-center justify-between">
-              <div>
-                <div className="text-[12px] font-black uppercase tracking-wide text-emerald-700">{pick(T.grossProfit, lang)}</div>
-                <div className="text-[9px] font-bold uppercase tracking-wide text-emerald-400 flex items-center gap-1 mt-0.5"><Lock className="w-2.5 h-2.5" />{pick(T.internal, lang)}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-2xl font-black font-mono text-emerald-700 leading-none">{grossProfit === null ? "—" : money(grossProfit)}</div>
-                <div className="text-[10px] font-bold text-emerald-500 mt-1">{grossProfit === null ? "" : agreedCurrency}</div>
-              </div>
-            </div>
-            {grossProfit === null && <p className="text-[11px] text-slate-400 mt-2">{pick(T.notAggregated, lang)}</p>}
-          </section>
-
-          {/* 3. Customer Invoice */}
-          <section id="csw-invoice">
-            <SectionHead num={3} title={pick(T.invoice, lang)} />
+          {/* 4. Customer Invoice */}
+          <section id="csw-invoice" className="scroll-mt-24">
+            <SectionHead num={4} title={pick(T.invoice, lang)} />
             <div className="mt-3">
               <CustomerInvoicePanel
                 key={`inv-${arRefreshToken}`}
@@ -488,10 +468,10 @@ export default function CostStatementWorkspace({
             </div>
           </section>
 
-          {/* 4. Customer Payments (status derived; no manual received field).
+          {/* 5. Customer Payments (status derived; no manual received field).
               Receive Payment reuses the existing AR flow (CustomerAccountPanel
               → the same /api/customer-accounts/payments endpoints). */}
-          <SectionCard id="csw-payments" num={4} title={pick(T.customerPayments, lang)} desc={pick(T.customerPaymentsDesc, lang)}
+          <SectionCard id="csw-payments" num={5} title={pick(T.customerPayments, lang)} desc={pick(T.customerPaymentsDesc, lang)}
             badge={hasIssuedInvoice ? <StatusPill label={pick(custStatus.label, lang)} tone={custStatus.tone} /> : undefined}
             action={canWrite ? (
               <button onClick={() => setShowReceivePayment((v) => !v)} disabled={!hasIssuedInvoice}
@@ -503,7 +483,7 @@ export default function CostStatementWorkspace({
             {!hasIssuedInvoice ? (
               <EmptyHint>{pick(T.invoiceFirst, lang)}</EmptyHint>
             ) : (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <BigKpi label={pick(T.invoiceAmount, lang)} value={money(issuedInvoice!.sellingAmount)} unit={issuedInvoice!.currency} tone="navy" />
                 <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={agreedCurrency} tone="green" />
                 <BigKpi label={pick(T.remaining, lang)} value={money(customer.customerReceivable)} unit={agreedCurrency} tone="orange" />
@@ -520,9 +500,9 @@ export default function CostStatementWorkspace({
             )}
           </SectionCard>
 
-          {/* 5. Documents — larger cards, opened ON DEMAND (no permanent PDF pane) */}
-          <SectionCard id="csw-documents" num={5} title={pick(T.documents, lang)} desc={pick(T.documentsDesc, lang)}>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Documents — supporting section (opened ON DEMAND; no permanent PDF pane) */}
+          <SectionCard id="csw-documents" title={pick(T.documents, lang)} desc={pick(T.documentsDesc, lang)}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <DocCard icon={<ScrollText className="w-7 h-7" />} tone="slate" name="Cost Statement" ready onPreview={() => previewDoc(`/api/cost-statements/${statement.shipmentId}/pdf?lang=${lang}`)} lang={lang} />
               <DocCard icon={<FileText className="w-7 h-7" />} tone="blue" name="Customer Invoice" ready={hasIssuedInvoice} pendingReason={pick(T.docWaitInvoice, lang)} onPreview={hasIssuedInvoice ? () => previewDoc(`/api/cost-statements/${statement.shipmentId}/invoices/${issuedInvoice!.id}/pdf?lang=${lang}`) : undefined} lang={lang} />
               <DocCard icon={<FileText className="w-7 h-7" />} tone="emerald" name="Client Statement" ready onPreview={() => previewDoc(`/api/customer-accounts/statement/pdf?company=${encodeURIComponent(statement.companyName)}&currency=${agreedCurrency}&lang=${lang}`)} lang={lang} />
@@ -549,7 +529,6 @@ export default function CostStatementWorkspace({
               <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
             </div>
           </section>
-        </div>
       </div>
 
       {/* ─── Sticky footer ──────────────────────────────────────────────── */}
@@ -645,11 +624,11 @@ function StepStatusLabel({ state, label }: { state: StepState; label: string }) 
   return <span className={`flex items-center gap-1 text-[11px] font-bold mt-1 leading-tight ${cls}`}><Icon className="w-3 h-3 shrink-0 mt-px" />{label}</span>;
 }
 
-function SectionHead({ num, title, desc, action, badge }: { num: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode }) {
+function SectionHead({ num, title, desc, action, badge }: { num?: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-3">
       <div className="flex items-start gap-3">
-        <span className="w-7 h-7 rounded-lg bg-slate-900 text-white text-[13px] font-black flex items-center justify-center shrink-0 mt-0.5">{num}</span>
+        {num != null && <span className="w-7 h-7 rounded-lg bg-slate-900 text-white text-[13px] font-black flex items-center justify-center shrink-0 mt-0.5">{num}</span>}
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-[15px] font-black text-slate-900 uppercase tracking-wide leading-none">{title}</h2>
@@ -662,7 +641,7 @@ function SectionHead({ num, title, desc, action, badge }: { num: number; title: 
     </div>
   );
 }
-function SectionCard({ id, num, title, desc, action, badge, children }: { id: string; num: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode; children: React.ReactNode }) {
+function SectionCard({ id, num, title, desc, action, badge, children }: { id: string; num?: number; title: string; desc?: string; action?: React.ReactNode; badge?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section id={id} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5 scroll-mt-24">
       <SectionHead num={num} title={title} desc={desc} action={action} badge={badge} />

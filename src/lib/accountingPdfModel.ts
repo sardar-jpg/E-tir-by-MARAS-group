@@ -16,7 +16,7 @@ import type {
 } from "../types";
 import type { CustomerAccountStatement } from "./customerAccountStatement";
 import { summarizeCustomerAccount } from "./customerPayments";
-import { hasInvoiceLines, lineServiceLabel, lineUnitLabel } from "./customerInvoiceLines";
+import { hasInvoiceLines, lineServiceLabel, lineUnitLabel, invoiceHasAnyUnit } from "./customerInvoiceLines";
 import { resolveTemplateRender, type TemplateConfig, type TemplateRenderOptions } from "./accountingTemplateConfig";
 
 export type PdfDirection = "ltr" | "rtl";
@@ -186,12 +186,15 @@ export function buildInvoicePdfModel(params: {
   // totals block; legacy invoices keep the single selling-total row. Neither
   // path ever emits vendor cost, internal cost base, markup, or gross profit.
   const lineBased = hasInvoiceLines(inv);
+  // Unit column only when at least one line carries a unit (backward compatible:
+  // legacy invoices keep the column; new unit-less invoices omit it).
+  const showUnit = invoiceHasAnyUnit(inv.invoiceLines);
   const columns = lineBased
     ? [
         { key: "service", label: pick(LBL.service, lang), align: "left" as const },
         { key: "desc", label: pick(LBL.description, lang), align: "left" as const },
         { key: "qty", label: pick(LBL.qty, lang), align: "right" as const },
-        { key: "unit", label: pick(LBL.unit, lang), align: "right" as const },
+        ...(showUnit ? [{ key: "unit", label: pick(LBL.unit, lang), align: "right" as const }] : []),
         { key: "unitPrice", label: pick(LBL.unitPrice, lang), align: "right" as const },
         { key: "amount", label: pick(LBL.amount, lang), align: "right" as const },
       ]
