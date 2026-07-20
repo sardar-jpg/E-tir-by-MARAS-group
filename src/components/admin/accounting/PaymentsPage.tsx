@@ -5,7 +5,7 @@ import {
 import type { Language, Client, CostStatement, CustomerPayment, VendorPaymentTransaction } from "../../../types";
 import { apiFetch } from "../../../lib/api";
 import { buildCashRegister, summarizeCash, type CashEntry } from "../../../lib/accountingRegisters";
-import { PageHeader, Panel, KpiCard, StatusPill, EmptyState, Pagination, money, CARD } from "./AccountingUI";
+import { PageHeader, Panel, KpiCard, StatusPill, EmptyState, Pagination, money } from "./AccountingUI";
 
 /**
  * Payments — Cash Management & Reconciliation. Aggregates customer receipts

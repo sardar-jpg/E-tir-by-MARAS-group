@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   DollarSign, TrendingUp, ArrowDownCircle, ArrowUpCircle, FileBarChart, AlertTriangle,
-  Sparkles, ArrowRight, Wallet, Building2,
+  Sparkles, ArrowRight, Wallet,
 } from "lucide-react";
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell,
@@ -10,7 +10,7 @@ import type { Language, CostStatement } from "../../../types";
 import type { CurrencyFinanceOverview, ExecutiveFinanceOverview } from "../../../lib/executiveFinance";
 import { apiFetch } from "../../../lib/api";
 import { monthlyRevenueProfit, expenseByCategory, recentStatements, totalExpenses } from "../../../lib/accountingDashboard";
-import { PageHeader, KpiCard, Panel, StatusPill, money, pick, EmptyState, btnGhost } from "./AccountingUI";
+import { PageHeader, KpiCard, Panel, StatusPill, money, EmptyState, btnGhost } from "./AccountingUI";
 
 const T = {
   title: { en: "Accounting Dashboard", tr: "Muhasebe Panosu", ar: "لوحة المحاسبة" },

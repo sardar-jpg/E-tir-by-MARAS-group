@@ -7,7 +7,7 @@ import { useAccountingDataset } from "./useAccountingDataset";
 import { buildReceivableRows, buildPayableRows } from "../../../lib/receivablesPayables";
 import { computeMonthlyFigures, prevMonthKey, monthKeyOf, reportCurrencies, type MonthlyInput } from "../../../lib/monthlyReport";
 import { buildInsights, countByPriority, type Insight, type InsightPriority, type InsightKind } from "../../../lib/accountingInsights";
-import { PageHeader, Panel, EmptyState, money, btnGhost, CARD } from "./AccountingUI";
+import { PageHeader, EmptyState, money, btnGhost, CARD } from "./AccountingUI";
 
 const T = {
   title: { en: "AI Financial Assistant", tr: "Yapay Zekâ Mali Asistanı", ar: "المساعد المالي الذكي" },

@@ -53,9 +53,6 @@ import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
 import MarasAiBriefCard from "./admin/MarasAiBriefCard";
 import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
 import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
-import CostApprovalWorkflowCard from "./admin/CostApprovalWorkflowCard";
-import VendorPayablesPanel from "./admin/VendorPayablesPanel";
-import CustomerInvoicePanel from "./admin/CustomerInvoicePanel";
 import CostStatementWorkspace from "./admin/CostStatementWorkspace";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import AccountingDashboard from "./admin/accounting/AccountingDashboard";
@@ -66,8 +63,7 @@ import PaymentsPage from "./admin/accounting/PaymentsPage";
 import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage";
 import MonthlyReportPage from "./admin/accounting/MonthlyReportPage";
 import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
-import AccountingComingSoon from "./admin/accounting/AccountingComingSoon";
-import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel, isLiveAccountingTab } from "../lib/accountingNav";
+import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
@@ -6757,9 +6753,6 @@ MARAS Group etir Center`;
       )}
       {activeTab === 'acct_ai' && canViewCostStatements(resolvedAdminType) && (
         <AIFinancialAssistantPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
-      )}
-      {ACCOUNTING_TAB_IDS.includes(activeTab) && !isLiveAccountingTab(activeTab) && canViewCostStatements(resolvedAdminType) && (
-        <AccountingComingSoon lang={lang} tabId={activeTab} />
       )}
 
 
