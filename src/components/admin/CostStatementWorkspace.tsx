@@ -5,7 +5,7 @@ import {
   Package, MapPin, Boxes, Coins, Tag, Calendar, Flag, Printer, TrendingUp,
   Clock, ChevronDown, CreditCard,
 } from "lucide-react";
-import type { Language, CostStatement, Shipment, Client, BankAccount, CustomerInvoice, CostItem } from "../../types";
+import type { Language, CostStatement, Shipment, Client, BankAccount, CustomerInvoice, CostItem, Vendor } from "../../types";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 import { deriveExpenseSummary, deriveCustomerSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../../lib/costStatementMath";
 import { resolveAccountingStatus, type AccountingStatus } from "../../lib/costApprovalWorkflow";
@@ -143,6 +143,8 @@ interface Props {
   shipments: Shipment[];
   clients: Client[];
   bankAccounts: BankAccount[];
+  /** Existing master-data vendor list (from /api/vendors) for the expense selector. */
+  vendors: Vendor[];
   lang: Language;
   canWrite: boolean;
   actor: { sessionId: string; isSuperAdmin: boolean; canWriteCostStatements: boolean };
@@ -157,7 +159,7 @@ interface Props {
 }
 
 export default function CostStatementWorkspace({
-  statement, shipments, clients, bankAccounts, lang, canWrite, actor,
+  statement, shipments, clients, bankAccounts, vendors, lang, canWrite, actor,
   onBack, onRefresh, onExportCsv, onSaveDraft, onSubmitForApproval, onOpenCustomer, isSaving, lastSavedLabel,
 }: Props) {
   const [invoices, setInvoices] = useState<CustomerInvoice[]>([]);
@@ -371,7 +373,7 @@ export default function CostStatementWorkspace({
             {/* Add-expense drawer — CLOSED by default; reuses the existing item API. */}
             {canWrite && showAddExpense && (
               <ExpenseDrawer shipmentId={statement.shipmentId} currency={statement.currency} sessionId={actor.sessionId}
-                expectedRevision={(statement as any).revision || 1} lang={lang}
+                vendors={vendors} expectedRevision={(statement as any).revision || 1} lang={lang}
                 onClose={() => setShowAddExpense(false)} onAdded={onExpenseAdded} />
             )}
             {!hasExpenses ? (
