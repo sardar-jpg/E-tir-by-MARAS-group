@@ -113,7 +113,7 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
         title={tr("title", lang)}
         subtitle={tr("subtitle", lang)}
         actions={currencies.length > 1 ? (
-          <select value={active?.currency || ""} onChange={(e) => setCcy(e.target.value)} className="text-[12.5px] font-bold border border-slate-200 rounded-lg px-3 py-2 bg-white cursor-pointer">
+          <select value={active?.currency || ""} onChange={(e) => setCcy(e.target.value)} className="text-[12.5px] font-semibold text-slate-700 border border-slate-200 rounded-lg pl-3 pr-8 py-2 bg-white cursor-pointer hover:border-slate-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition">
             {currencies.map((c) => <option key={c.currency} value={c.currency}>{c.currency}</option>)}
           </select>
         ) : undefined}
@@ -125,8 +125,8 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
         <KpiCard icon={DollarSign} tone="blue" label={tr("revenue", lang)} value={money(active?.revenue.thisMonth || 0)} unit={cur} sub={`${money(active?.revenue.thisYear || 0)} ${cur} YTD`} subTone="muted" />
         <KpiCard icon={TrendingUp} tone="emerald" label={tr("grossProfit", lang)} value={money(active?.grossProfit.thisMonth || 0)} unit={cur} sub={`${money(active?.grossProfit.thisYear || 0)} ${cur} YTD`} subTone="up" />
-        <KpiCard icon={ArrowDownCircle} tone="amber" label={tr("receivables", lang)} value={money(active?.outstandingReceivables || 0)} unit={cur} sub={active && active.overdueReceivables > 0 ? `${money(active.overdueReceivables)} ${tr("overdue", lang)}` : undefined} subTone="warn" />
-        <KpiCard icon={ArrowUpCircle} tone="violet" label={tr("payables", lang)} value={money(active?.outstandingPayables || 0)} unit={cur} sub={active ? `${money(active.vendorPayables)} ${tr("vendorShare", lang)}` : undefined} subTone="muted" />
+        <KpiCard icon={ArrowDownCircle} tone="slate" label={tr("receivables", lang)} value={money(active?.outstandingReceivables || 0)} unit={cur} sub={active && active.overdueReceivables > 0 ? `${money(active.overdueReceivables)} ${tr("overdue", lang)}` : undefined} subTone="warn" />
+        <KpiCard icon={ArrowUpCircle} tone="amber" label={tr("payables", lang)} value={money(active?.outstandingPayables || 0)} unit={cur} sub={active ? `${money(active.vendorPayables)} ${tr("vendorShare", lang)}` : undefined} subTone="muted" />
         <KpiCard icon={FileBarChart} tone="slate" label={tr("openStatements", lang)} value={String(overview?.statementCount ?? 0)} sub={derivedAlerts.length ? tr("requiresAttention", lang) : tr("allSettled", lang)} subTone={derivedAlerts.length ? "warn" : "up"} />
       </div>
 
@@ -194,13 +194,13 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
           {derivedAlerts.length === 0 ? (
             <p className="text-[12.5px] text-slate-400">{tr("noAlerts", lang)}</p>
           ) : (
-            <div className="space-y-2.5">
+            <div className="space-y-2">
               {derivedAlerts.map((a, i) => (
-                <div key={i} className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2.5">
-                  <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${a.tone === "red" ? "text-red-500" : "text-amber-500"}`} />
+                <div key={i} className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 ${a.tone === "red" ? "border-red-100 bg-red-50/50" : "border-amber-100 bg-amber-50/50"}`}>
+                  <span className={`w-6 h-6 rounded-md flex items-center justify-center shrink-0 mt-0.5 ${a.tone === "red" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-600"}`}><AlertTriangle className="w-3.5 h-3.5" /></span>
                   <div className="min-w-0">
-                    <p className="text-[12.5px] font-bold text-slate-800 leading-snug">{a.title}</p>
-                    {a.detail && <p className="text-[11px] text-slate-400">{a.detail}</p>}
+                    <p className="text-[12.5px] font-semibold text-slate-800 leading-snug">{a.title}</p>
+                    {a.detail && <p className="text-[11px] text-slate-400 mt-0.5">{a.detail}</p>}
                   </div>
                 </div>
               ))}
@@ -216,19 +216,19 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
             <div className="overflow-x-auto">
               <table className="w-full text-[12.5px] min-w-[520px]">
                 <thead>
-                  <tr className="text-left text-slate-400 border-b border-slate-100">
-                    <th className="py-2.5 px-5 text-[10px] font-black uppercase tracking-wide">{tr("order", lang)}</th>
-                    <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide">{tr("customer", lang)}</th>
-                    <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide text-right">{tr("cost", lang)}</th>
-                    <th className="py-2.5 px-5 text-[10px] font-black uppercase tracking-wide text-right">{tr("status", lang)}</th>
+                  <tr className="text-left text-slate-500 bg-slate-50/70">
+                    <th className="py-2.5 px-5 text-[10px] font-semibold uppercase tracking-[0.05em] border-b border-slate-200">{tr("order", lang)}</th>
+                    <th className="py-2.5 px-3 text-[10px] font-semibold uppercase tracking-[0.05em] border-b border-slate-200">{tr("customer", lang)}</th>
+                    <th className="py-2.5 px-3 text-[10px] font-semibold uppercase tracking-[0.05em] text-right border-b border-slate-200">{tr("cost", lang)}</th>
+                    <th className="py-2.5 px-5 text-[10px] font-semibold uppercase tracking-[0.05em] text-right border-b border-slate-200">{tr("status", lang)}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {recent.map((s) => (
-                    <tr key={s.shipmentId} className="border-b border-slate-50 hover:bg-slate-50/60">
-                      <td className="py-3 px-5 font-mono font-bold text-slate-800">{s.shipmentNumber}</td>
+                    <tr key={s.shipmentId} className="border-b border-slate-50 hover:bg-blue-50/40 transition-colors">
+                      <td className="py-3 px-5 font-mono font-semibold text-slate-800">{s.shipmentNumber}</td>
                       <td className="py-3 px-3 text-slate-600 truncate max-w-[180px]">{s.companyName || "—"}</td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 tabular-nums">{money(s.totalCost || 0)} <span className="text-[10px] text-slate-400">{s.currency}</span></td>
+                      <td className="py-3 px-3 text-right font-mono font-semibold text-slate-800 tabular-nums">{money(s.totalCost || 0)} <span className="text-[10px] text-slate-400">{s.currency}</span></td>
                       <td className="py-3 px-5 text-right"><StatusPill label={s.paymentStatus} kind={paymentKind(s.paymentStatus)} /></td>
                     </tr>
                   ))}
@@ -240,15 +240,16 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
       </div>
 
       {/* MARAS AI strip */}
-      <div className="rounded-2xl border border-slate-200 bg-gradient-to-r from-slate-900 to-slate-800 p-5 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="w-11 h-11 rounded-xl bg-white/10 text-white flex items-center justify-center shrink-0"><Sparkles className="w-5 h-5" /></span>
+      <div className="relative overflow-hidden rounded-xl bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 p-5 flex items-center justify-between gap-4 flex-wrap shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
+        <div className="absolute -right-8 -top-10 w-40 h-40 rounded-full bg-blue-500/10 blur-2xl pointer-events-none" />
+        <div className="flex items-center gap-3.5 min-w-0 relative">
+          <span className="w-11 h-11 rounded-xl bg-white/10 ring-1 ring-white/15 text-white flex items-center justify-center shrink-0"><Sparkles className="w-5 h-5" /></span>
           <div className="min-w-0">
-            <p className="text-[14px] font-black text-white">{tr("aiTitle", lang)}</p>
-            <p className="text-[12px] text-slate-300 mt-0.5 max-w-xl">{tr("aiBody", lang)}</p>
+            <p className="text-[14px] font-bold text-white tracking-[-0.01em]">{tr("aiTitle", lang)}</p>
+            <p className="text-[12px] text-slate-300 mt-0.5 max-w-xl leading-relaxed">{tr("aiBody", lang)}</p>
           </div>
         </div>
-        <button onClick={() => onNavigate?.("acct_ai")} className={`${btnGhost} !bg-white/10 !border-white/15 !text-white hover:!bg-white/20`}>
+        <button onClick={() => onNavigate?.("acct_ai")} className={`${btnGhost} !bg-white/10 !border-white/15 !text-white hover:!bg-white/20 relative`}>
           <Sparkles className="w-4 h-4" />{tr("openAi", lang)}
         </button>
       </div>

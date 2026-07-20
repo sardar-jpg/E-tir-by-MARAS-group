@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Loader2, FileSpreadsheet, Printer, FileText, Search, ArrowDownCircle, ArrowUpCircle, Scale, RefreshCw,
+  Loader2, FileSpreadsheet, Printer, FileText, Search, RefreshCw, Users, Building2, X,
 } from "lucide-react";
 import type { Language } from "../../../types";
 import { apiFetch } from "../../../lib/api";
 import { statementToCsv, type StatementCsvRow } from "../../../lib/statementExport";
-import { PageHeader, Panel, EmptyState, StatusPill, money, btnGhost, inputCls } from "./AccountingUI";
+import {
+  PageHeader, Panel, EmptyState, StatusPill, StatementSummaryHeader, Pagination,
+  money, btnGhost, inputCls,
+} from "./AccountingUI";
 
 /** Normalized ledger shape shared by the customer (AR) and vendor (AP) statement APIs. */
 type LedgerRow = StatementCsvRow;
@@ -22,16 +25,21 @@ interface AccountStatement {
 
 interface Entity { id: string; name: string }
 
+const ROWS_PER_PAGE = 12;
+
 const L = {
   entity: { customer: { en: "Customer", tr: "Müşteri", ar: "العميل" }, vendor: { en: "Vendor", tr: "Tedarikçi", ar: "المورد" } },
+  entityId: { customer: { en: "Customer ID", tr: "Müşteri No", ar: "رقم العميل" }, vendor: { en: "Vendor ID", tr: "Tedarikçi No", ar: "رقم المورد" } },
   pickEntity: { customer: { en: "Select a customer", tr: "Müşteri seçin", ar: "اختر عميلاً" }, vendor: { en: "Select a vendor", tr: "Tedarikçi seçin", ar: "اختر مورداً" } },
   currency: { en: "Currency", tr: "Para Birimi", ar: "العملة" },
   from: { en: "From", tr: "Başlangıç", ar: "من" },
   to: { en: "To", tr: "Bitiş", ar: "إلى" },
   refresh: { en: "Refresh", tr: "Yenile", ar: "تحديث" },
-  opening: { en: "Opening Balance", tr: "Açılış Bakiyesi", ar: "الرصيد الافتتاحي" },
+  currentBalance: { en: "Current Balance", tr: "Güncel Bakiye", ar: "الرصيد الحالي" },
   totalDebit: { en: "Total Debit", tr: "Toplam Borç", ar: "إجمالي المدين" },
   totalCredit: { en: "Total Credit", tr: "Toplam Alacak", ar: "إجمالي الدائن" },
+  totalBills: { en: "Total Bills", tr: "Toplam Fatura", ar: "إجمالي الفواتير" },
+  totalPayments: { en: "Total Payments", tr: "Toplam Ödeme", ar: "إجمالي المدفوعات" },
   closing: { en: "Closing Balance", tr: "Kapanış Bakiyesi", ar: "الرصيد الختامي" },
   date: { en: "Date", tr: "Tarih", ar: "التاريخ" },
   type: { en: "Type", tr: "Tür", ar: "النوع" },
@@ -42,13 +50,19 @@ const L = {
   balance: { en: "Balance", tr: "Bakiye", ar: "الرصيد" },
   openingRow: { en: "Opening balance", tr: "Açılış bakiyesi", ar: "الرصيد الافتتاحي" },
   totals: { en: "Totals", tr: "Toplamlar", ar: "المجاميع" },
+  ledger: { en: "Transactions", tr: "İşlemler", ar: "المعاملات" },
+  searchRows: { en: "Search reference or description…", tr: "Referans veya açıklama ara…", ar: "ابحث في المرجع أو الوصف…" },
   noEntity: { en: "Choose an account to view its statement.", tr: "Ekstresini görmek için bir hesap seçin.", ar: "اختر حساباً لعرض كشفه." },
   noRows: { en: "No transactions in this period.", tr: "Bu dönemde işlem yok.", ar: "لا توجد معاملات في هذه الفترة." },
+  noMatch: { en: "No transactions match your search.", tr: "Aramanızla eşleşen işlem yok.", ar: "لا توجد معاملات مطابقة لبحثك." },
   loadErr: { en: "Could not load the statement.", tr: "Ekstre yüklenemedi.", ar: "تعذّر تحميل الكشف." },
   print: { en: "Print", tr: "Yazdır", ar: "طباعة" },
   excel: { en: "Excel", tr: "Excel", ar: "إكسل" },
-  owesUs: { en: "receivable (owed to us)", tr: "alacak (bize borçlu)", ar: "ذمة مدينة (مستحقة لنا)" },
-  weOwe: { en: "payable (we owe)", tr: "borç (biz borçluyuz)", ar: "ذمة دائنة (علينا)" },
+  owesUs: { en: "Receivable — owed to us", tr: "Alacak — bize borçlu", ar: "ذمة مدينة — مستحقة لنا" },
+  weOwe: { en: "Payable — we owe", tr: "Borç — biz borçluyuz", ar: "ذمة دائنة — علينا" },
+  showing: { en: "Showing", tr: "Gösterilen", ar: "عرض" },
+  of: { en: "of", tr: "/", ar: "من" },
+  page: { en: "Page", tr: "Sayfa", ar: "صفحة" },
 };
 const t = (o: { en: string; tr: string; ar: string }, lang: Language) => o[lang] || o.en;
 
@@ -65,9 +79,10 @@ function downloadCsv(filename: string, csv: string) {
 /**
  * Reusable account-statement page for both Customer (AR) and Vendor (AP)
  * ledgers. Fetches the server-authoritative running-balance statement and
- * renders it with currency + date filters, summary cards, and CSV/Print/PDF
- * export. `queryKey` selects the API contract (company= vs vendor=); the math
- * is entirely server-side, this view only shapes and exports it.
+ * renders a premium summary header + a professional, searchable, paginated
+ * ledger with CSV / Print / PDF export. `queryKey` selects the API contract
+ * (company= vs vendor=); the math is entirely server-side — this view only
+ * shapes, filters (client-side, never mutating data) and exports it.
  */
 export default function AccountStatementView({
   mode, lang, title, subtitle, entities, endpoint, queryKey, pdfPath,
@@ -90,6 +105,11 @@ export default function AccountStatementView({
   const [statement, setStatement] = useState<AccountStatement | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [rowQuery, setRowQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  const selectedEntity = useMemo(() => sorted.find((e) => e.name === selected), [sorted, selected]);
+  const EntityIcon = mode === "customer" ? Users : Building2;
 
   const load = useCallback(async (name: string, cur: string, f: string, tt: string) => {
     if (!name) { setStatement(null); setCurrencies([]); return; }
@@ -111,8 +131,10 @@ export default function AccountStatementView({
   }, [endpoint, queryKey, lang, currency]);
 
   useEffect(() => { if (selected) void load(selected, currency, from, to); }, [selected, currency, from, to, load]);
+  // Reset the client-side row view whenever the underlying dataset changes.
+  useEffect(() => { setPage(1); }, [selected, currency, from, to, rowQuery]);
 
-  const onPickEntity = (name: string) => { setSelected(name); setCurrency(""); setStatement(null); setCurrencies([]); };
+  const onPickEntity = (name: string) => { setSelected(name); setCurrency(""); setStatement(null); setCurrencies([]); setRowQuery(""); };
 
   const exportCsv = () => {
     if (!statement) return;
@@ -125,6 +147,19 @@ export default function AccountStatementView({
     const safe = selected.replace(/[^\w\-]+/g, "_");
     downloadCsv(`${mode}-statement-${safe}-${statement.currency}.csv`, csv);
   };
+
+  // Client-side row filter (presentation only — server totals are untouched).
+  const filteredRows = useMemo(() => {
+    if (!statement) return [];
+    const q = rowQuery.trim().toLowerCase();
+    if (!q) return statement.rows;
+    return statement.rows.filter((r) => `${r.ref} ${r.description} ${r.type}`.toLowerCase().includes(q));
+  }, [statement, rowQuery]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / ROWS_PER_PAGE));
+  const safePage = Math.min(page, pageCount);
+  const pageRows = filteredRows.slice((safePage - 1) * ROWS_PER_PAGE, safePage * ROWS_PER_PAGE);
+  const showOpeningRow = !rowQuery.trim() && safePage === 1;
 
   const balanceHint = mode === "customer" ? L.owesUs : L.weOwe;
 
@@ -148,25 +183,25 @@ export default function AccountStatementView({
       <Panel bodyClassName="p-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))_auto] gap-3 items-end">
           <div>
-            <label className="block text-[11px] font-black uppercase tracking-wide text-slate-400 mb-1">{t(L.entity[mode], lang)}</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-500 mb-1.5">{t(L.entity[mode], lang)}</label>
             <select value={selected} onChange={(e) => onPickEntity(e.target.value)} className={inputCls}>
               <option value="">{t(L.pickEntity[mode], lang)}</option>
               {sorted.map((e) => <option key={e.id} value={e.name}>{e.name}</option>)}
             </select>
           </div>
           <div>
-            <label className="block text-[11px] font-black uppercase tracking-wide text-slate-400 mb-1">{t(L.currency, lang)}</label>
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={!currencies.length} className={inputCls}>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-500 mb-1.5">{t(L.currency, lang)}</label>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={!currencies.length} className={`${inputCls} disabled:bg-slate-50 disabled:text-slate-400`}>
               {!currencies.length && <option value="">—</option>}
               {currencies.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div>
-            <label className="block text-[11px] font-black uppercase tracking-wide text-slate-400 mb-1">{t(L.from, lang)}</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-500 mb-1.5">{t(L.from, lang)}</label>
             <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={inputCls} />
           </div>
           <div>
-            <label className="block text-[11px] font-black uppercase tracking-wide text-slate-400 mb-1">{t(L.to, lang)}</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-500 mb-1.5">{t(L.to, lang)}</label>
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={inputCls} />
           </div>
           <button onClick={() => selected && load(selected, currency, from, to)} className={`${btnGhost} justify-center h-[38px]`} disabled={!selected}>
@@ -175,7 +210,7 @@ export default function AccountStatementView({
         </div>
       </Panel>
 
-      {err && <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[12.5px] font-bold text-red-700">{err}</div>}
+      {err && <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[12.5px] font-semibold text-red-700">{err}</div>}
 
       {!selected ? (
         <EmptyState icon={Search} title={t(L.noEntity, lang)} />
@@ -183,84 +218,104 @@ export default function AccountStatementView({
         <div className="flex items-center justify-center py-16 text-slate-400"><Loader2 className="w-6 h-6 animate-spin" /></div>
       ) : statement ? (
         <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <SummaryCard icon={Scale} tone="slate" label={t(L.opening, lang)} value={`${money(statement.openingBalance)}`} unit={statement.currency} />
-            <SummaryCard icon={ArrowDownCircle} tone="blue" label={t(L.totalDebit, lang)} value={`${money(statement.totalDebit)}`} unit={statement.currency} />
-            <SummaryCard icon={ArrowUpCircle} tone="emerald" label={t(L.totalCredit, lang)} value={`${money(statement.totalCredit)}`} unit={statement.currency} />
-            <SummaryCard icon={Scale} tone="amber" label={t(L.closing, lang)} value={`${money(statement.closingBalance)}`} unit={statement.currency} hint={t(balanceHint, lang)} />
-          </div>
+          {/* Premium summary header: identity + current balance + figures */}
+          <StatementSummaryHeader
+            icon={EntityIcon}
+            name={selected}
+            idLabel={t(L.entityId[mode], lang)}
+            idValue={selectedEntity?.id || "—"}
+            headline={{ label: t(L.currentBalance, lang), value: money(statement.closingBalance), unit: statement.currency, hint: t(balanceHint, lang) }}
+            cells={[
+              { label: mode === "customer" ? t(L.totalDebit, lang) : t(L.totalBills, lang), value: money(statement.totalDebit), unit: statement.currency, tone: "neutral" },
+              { label: mode === "customer" ? t(L.totalCredit, lang) : t(L.totalPayments, lang), value: money(statement.totalCredit), unit: statement.currency, tone: "credit" },
+              { label: t(L.closing, lang), value: money(statement.closingBalance), unit: statement.currency, tone: "strong" },
+            ]}
+          />
 
           {/* Ledger */}
-          <Panel title={`${selected} · ${statement.currency}`} bodyClassName="p-0">
+          <Panel
+            title={t(L.ledger, lang)}
+            subtitle={`${selected} · ${statement.currency}`}
+            bodyClassName="p-0"
+            action={statement.rows.length > 0 ? (
+              <div className="relative w-56 max-w-[52vw]">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <input
+                  value={rowQuery}
+                  onChange={(e) => setRowQuery(e.target.value)}
+                  placeholder={t(L.searchRows, lang)}
+                  className="w-full text-[12px] border border-slate-200 rounded-lg pl-8 pr-7 py-1.5 bg-white text-slate-800 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition placeholder:text-slate-400"
+                />
+                {rowQuery && (
+                  <button onClick={() => setRowQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer bg-transparent border-0 p-0"><X className="w-3.5 h-3.5" /></button>
+                )}
+              </div>
+            ) : undefined}
+          >
             {statement.rows.length === 0 ? (
               <div className="p-5"><EmptyState icon={FileText} title={t(L.noRows, lang)} /></div>
+            ) : filteredRows.length === 0 ? (
+              <div className="p-5"><EmptyState icon={Search} title={t(L.noMatch, lang)} /></div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-[12.5px] min-w-[720px]">
-                  <thead>
-                    <tr className="text-left text-slate-400 border-b border-slate-100 bg-slate-50/60">
-                      <th className="py-2.5 px-4 text-[10px] font-black uppercase tracking-wide">{t(L.date, lang)}</th>
-                      <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide">{t(L.type, lang)}</th>
-                      <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide">{t(L.ref, lang)}</th>
-                      <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide">{t(L.desc, lang)}</th>
-                      <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide text-right">{t(L.debit, lang)}</th>
-                      <th className="py-2.5 px-3 text-[10px] font-black uppercase tracking-wide text-right">{t(L.credit, lang)}</th>
-                      <th className="py-2.5 px-4 text-[10px] font-black uppercase tracking-wide text-right">{t(L.balance, lang)}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr className="border-b border-slate-50 text-slate-500 bg-white">
-                      <td className="py-2.5 px-4" colSpan={6}><span className="font-bold text-slate-600">{t(L.openingRow, lang)}</span></td>
-                      <td className="py-2.5 px-4 text-right font-mono font-bold tabular-nums">{money(statement.openingBalance)}</td>
-                    </tr>
-                    {statement.rows.map((r, i) => (
-                      <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/60">
-                        <td className="py-2.5 px-4 text-slate-500 whitespace-nowrap">{r.date}</td>
-                        <td className="py-2.5 px-3"><StatusPill label={r.type} kind={TYPE_KIND[r.type] || "draft"} /></td>
-                        <td className="py-2.5 px-3 font-mono font-bold text-slate-800 whitespace-nowrap">{r.ref}</td>
-                        <td className="py-2.5 px-3 text-slate-600 max-w-[280px] truncate">{r.description}</td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">{r.debit ? money(r.debit) : ""}</td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-emerald-700">{r.credit ? money(r.credit) : ""}</td>
-                        <td className="py-2.5 px-4 text-right font-mono font-bold tabular-nums text-slate-900">{money(r.balance)}</td>
+              <>
+                <div className="overflow-auto max-h-[560px]">
+                  <table className="w-full text-[12.5px] min-w-[760px] border-separate border-spacing-0">
+                    <thead>
+                      <tr className="text-left text-slate-500">
+                        {[L.date, L.type, L.ref, L.desc].map((h, i) => (
+                          <th key={i} className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur py-2.5 px-4 text-[10px] font-semibold uppercase tracking-[0.05em] border-b border-slate-200 first:pl-5">{t(h, lang)}</th>
+                        ))}
+                        {[L.debit, L.credit, L.balance].map((h, i) => (
+                          <th key={i} className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur py-2.5 px-4 text-[10px] font-semibold uppercase tracking-[0.05em] text-right border-b border-slate-200 last:pr-5">{t(h, lang)}</th>
+                        ))}
                       </tr>
-                    ))}
-                    <tr className="border-t-2 border-slate-200 bg-slate-50 font-black text-slate-800">
-                      <td className="py-3 px-4" colSpan={4}>{t(L.totals, lang)}</td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums">{money(statement.totalDebit)}</td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums">{money(statement.totalCredit)}</td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums">{money(statement.closingBalance)} {statement.currency}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {showOpeningRow && (
+                        <tr className="text-slate-500">
+                          <td className="py-3 px-4 pl-5 border-b border-slate-100" colSpan={6}><span className="font-semibold text-slate-500 italic">{t(L.openingRow, lang)}</span></td>
+                          <td className="py-3 px-4 pr-5 text-right font-mono font-semibold tabular-nums border-b border-slate-100 text-slate-600">{money(statement.openingBalance)}</td>
+                        </tr>
+                      )}
+                      {pageRows.map((r, i) => (
+                        <tr key={i} className="hover:bg-blue-50/40 transition-colors">
+                          <td className="py-3 px-4 pl-5 text-slate-500 whitespace-nowrap border-b border-slate-50 tabular-nums">{r.date}</td>
+                          <td className="py-3 px-4 border-b border-slate-50"><StatusPill label={r.type} kind={TYPE_KIND[r.type] || "draft"} /></td>
+                          <td className="py-3 px-4 font-mono font-semibold text-slate-800 whitespace-nowrap border-b border-slate-50">{r.ref}</td>
+                          <td className="py-3 px-4 text-slate-600 max-w-[300px] truncate border-b border-slate-50">{r.description}</td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700 border-b border-slate-50">{r.debit ? money(r.debit) : <span className="text-slate-300">—</span>}</td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums text-emerald-600 border-b border-slate-50">{r.credit ? money(r.credit) : <span className="text-slate-300">—</span>}</td>
+                          <td className="py-3 px-4 pr-5 text-right font-mono font-semibold tabular-nums text-slate-900 border-b border-slate-50">{money(r.balance)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-50 font-bold text-slate-800 sticky bottom-0">
+                        <td className="py-3 px-4 pl-5 border-t-2 border-slate-200 text-[11px] uppercase tracking-[0.05em]" colSpan={4}>{t(L.totals, lang)}</td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums border-t-2 border-slate-200">{money(statement.totalDebit)}</td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums border-t-2 border-slate-200 text-emerald-700">{money(statement.totalCredit)}</td>
+                        <td className="py-3 px-4 pr-5 text-right font-mono tabular-nums border-t-2 border-slate-200">{money(statement.closingBalance)} <span className="text-[10px] text-slate-400">{statement.currency}</span></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+                <Pagination
+                  page={safePage}
+                  pageCount={pageCount}
+                  total={filteredRows.length}
+                  from={(safePage - 1) * ROWS_PER_PAGE + 1}
+                  to={Math.min(safePage * ROWS_PER_PAGE, filteredRows.length)}
+                  labels={{ showing: t(L.showing, lang), of: t(L.of, lang), page: t(L.page, lang) }}
+                  onPrev={() => setPage((p) => Math.max(1, p - 1))}
+                  onNext={() => setPage((p) => Math.min(pageCount, p + 1))}
+                />
+              </>
             )}
           </Panel>
         </>
       ) : (
         <EmptyState icon={FileText} title={t(L.noRows, lang)} />
       )}
-    </div>
-  );
-}
-
-function SummaryCard({ icon: Icon, tone, label, value, unit, hint }: {
-  icon: React.ComponentType<{ className?: string }>;
-  tone: "slate" | "blue" | "emerald" | "amber";
-  label: string; value: string; unit?: string; hint?: string;
-}) {
-  const ring = tone === "blue" ? "bg-blue-50 text-blue-600" : tone === "emerald" ? "bg-emerald-50 text-emerald-600" : tone === "amber" ? "bg-amber-50 text-amber-600" : "bg-slate-100 text-slate-600";
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-center gap-2">
-        <span className={`w-8 h-8 rounded-lg ${ring} flex items-center justify-center shrink-0`}><Icon className="w-4 h-4" /></span>
-        <span className="text-[10.5px] font-black uppercase tracking-wide text-slate-400 leading-tight">{label}</span>
-      </div>
-      <div className="mt-2.5 flex items-baseline gap-1">
-        <span className="text-[20px] font-black text-slate-900 tabular-nums leading-none">{value}</span>
-        {unit && <span className="text-[11px] font-bold text-slate-400">{unit}</span>}
-      </div>
-      {hint && <div className="mt-1.5 text-[10.5px] font-semibold text-slate-400">{hint}</div>}
     </div>
   );
 }
