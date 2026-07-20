@@ -239,3 +239,39 @@ describe("14. actor/permissions wiring is preserved (no privilege regression)", 
     expect(adminPanelSrc).toContain("canWrite={canViewCostStatements(resolvedAdminType)}");
   });
 });
+
+describe("15. Receive Payment reuses the existing AR flow (no duplicated logic)", () => {
+  const accountPanelSrc = readFileSync(
+    join(ROOT, "src/components/admin/CustomerAccountPanel.tsx"),
+    "utf8",
+  );
+  it("the Customer Payments section exposes a Receive Payment action (canWrite-gated)", () => {
+    expect(workspaceSrc).toContain("receivePayment");
+    expect(workspaceSrc).toContain("setShowReceivePayment");
+  });
+  it("it mounts the existing CustomerAccountPanel — the same customer AR endpoints, no new payment logic", () => {
+    expect(workspaceSrc).toContain("<CustomerAccountPanel");
+    // The workspace itself issues NO API writes and has no editable field —
+    // all payment logic stays in the reused AR panel (no duplication).
+    expect(workspaceSrc).not.toContain("apiFetch(");
+    expect(workspaceSrc).not.toContain('method: "POST"');
+    expect(workspaceSrc).not.toContain("<input");
+    // The AR panel is the single implementation that talks to the payment API.
+    expect(accountPanelSrc).toContain("/api/customer-accounts/payments");
+    expect(accountPanelSrc).toContain('allocationMode: "auto"');
+  });
+  it("a recorded payment refreshes the statement and re-derives invoice status", () => {
+    expect(workspaceSrc).toContain("onCustomerPaymentChanged");
+    expect(workspaceSrc).toContain("onChanged={onCustomerPaymentChanged}");
+    expect(workspaceSrc).toContain("setArRefreshToken");
+    expect(workspaceSrc).toContain("onRefresh()");
+    // Remounting the invoice panel forces its status to reload after a payment.
+    expect(workspaceSrc).toContain("key={`inv-${arRefreshToken}`}");
+  });
+  it("the AR panel fires onChanged after payment / reversal / receipt (server writes unchanged)", () => {
+    // onChanged appears on all three success paths; the POSTs themselves are untouched.
+    expect((accountPanelSrc.match(/onChanged\?\.\(\)/g) || []).length).toBeGreaterThanOrEqual(3);
+    expect(accountPanelSrc).toContain("/reverse");
+    expect(accountPanelSrc).toContain("/receipt");
+  });
+});

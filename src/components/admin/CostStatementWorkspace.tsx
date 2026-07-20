@@ -3,13 +3,14 @@ import {
   ArrowLeft, Eye, MoreHorizontal, Save, Send, Plus, FileText, ScrollText,
   Receipt, Building2, CheckCircle2, Circle, AlertTriangle, Loader2, Lock, Download,
   Package, MapPin, Boxes, Coins, Tag, Calendar, Flag, Printer, TrendingUp,
-  Clock, ChevronDown,
+  Clock, ChevronDown, CreditCard,
 } from "lucide-react";
 import type { Language, CostStatement, Shipment, Client, BankAccount, CustomerInvoice, CostItem } from "../../types";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 import { deriveExpenseSummary, deriveCustomerSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../../lib/costStatementMath";
 import VendorPayablesPanel from "./VendorPayablesPanel";
 import CustomerInvoicePanel from "./CustomerInvoicePanel";
+import CustomerAccountPanel from "./CustomerAccountPanel";
 import CostApprovalWorkflowCard from "./CostApprovalWorkflowCard";
 import MobileAccountingQuickActions from "./mobile/MobileAccountingQuickActions";
 
@@ -45,6 +46,8 @@ const T = {
   invoice: { en: "Customer Invoice", ar: "فاتورة العميل", tr: "Müşteri Faturası" },
   customerPayments: { en: "Customer Payments", ar: "مدفوعات العميل", tr: "Müşteri Ödemeleri" },
   customerPaymentsDesc: { en: "Record payments received from your customer.", ar: "سجّل المدفوعات المستلمة من العميل.", tr: "Müşteriden alınan ödemeleri kaydedin." },
+  receivePayment: { en: "Receive Payment", ar: "استلام دفعة", tr: "Ödeme Al" },
+  paymentReceived: { en: "Customer payment recorded", ar: "تم تسجيل دفعة العميل", tr: "Müşteri ödemesi kaydedildi" },
   documents: { en: "Documents", ar: "المستندات", tr: "Belgeler" },
   approval: { en: "Approval Workflow", ar: "سير الاعتماد", tr: "Onay Akışı" },
   approvalDesc: { en: "Review and approval sequence.", ar: "تسلسل المراجعة والاعتماد.", tr: "İnceleme ve onay dizisi." },
@@ -128,6 +131,10 @@ export default function CostStatementWorkspace({
   const [showMore, setShowMore] = useState(false);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
   const [showAddExpense, setShowAddExpense] = useState(false);
+  const [showReceivePayment, setShowReceivePayment] = useState(false);
+  // Bumped after a customer AR write so the invoice panel remounts and reloads
+  // its status; the statement itself is refreshed via onRefresh().
+  const [arRefreshToken, setArRefreshToken] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
 
   const shipment = useMemo(() => shipments.find((s) => s.id === statement.shipmentId), [shipments, statement.shipmentId]);
@@ -210,6 +217,15 @@ export default function CostStatementWorkspace({
   const previewDoc = (path: string) => { void openAccountingPdf(path); };
   const notifyChanged = (kind: "expense" | "vendor" | "submit") => {
     setToast(kind === "expense" ? pick(T.expenseAdded, lang) : pick(T.paymentSaved, lang));
+    onRefresh();
+  };
+  // Reuses the existing customer AR flow (CustomerAccountPanel → the same
+  // /api/customer-accounts/payments endpoints, auto-allocation, receipts,
+  // reversals). After any AR write we refresh the statement (received/summary/
+  // workflow progress) and remount the invoice panel so its status re-derives.
+  const onCustomerPaymentChanged = () => {
+    setToast(pick(T.paymentReceived, lang));
+    setArRefreshToken((t) => t + 1);
     onRefresh();
   };
 
@@ -411,6 +427,7 @@ export default function CostStatementWorkspace({
             <SectionHead num={3} title={pick(T.invoice, lang)} />
             <div className="mt-2">
               <CustomerInvoicePanel
+                key={`inv-${arRefreshToken}`}
                 shipmentId={statement.shipmentId}
                 currency={agreedCurrency as any}
                 bankAccounts={bankAccounts}
@@ -423,8 +440,15 @@ export default function CostStatementWorkspace({
             </div>
           </section>
 
-          {/* 4. Customer Payments (status derived; no manual received field) */}
-          <SectionCard id="csw-payments" num={4} title={pick(T.customerPayments, lang)} desc={pick(T.customerPaymentsDesc, lang)}>
+          {/* 4. Customer Payments (status derived; no manual received field).
+              Receive Payment reuses the existing AR flow (CustomerAccountPanel
+              → the same /api/customer-accounts/payments endpoints). */}
+          <SectionCard id="csw-payments" num={4} title={pick(T.customerPayments, lang)} desc={pick(T.customerPaymentsDesc, lang)}
+            action={canWrite ? (
+              <button onClick={() => setShowReceivePayment((v) => !v)} className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5 transition-all shadow-sm shadow-blue-600/20">
+                <CreditCard className="w-3.5 h-3.5" />{pick(T.receivePayment, lang)}
+              </button>
+            ) : undefined}>
             {!hasIssuedInvoice ? (
               <EmptyHint>{pick(T.noInvoice, lang)}</EmptyHint>
             ) : (
@@ -436,6 +460,11 @@ export default function CostStatementWorkspace({
                   <div className="text-[9px] font-black uppercase tracking-wide text-slate-400">Status</div>
                   <div className="mt-1"><InvoiceStatusBadge status={issuedInvoice!.status} /></div>
                 </div>
+              </div>
+            )}
+            {canWrite && showReceivePayment && (
+              <div className="animate-in fade-in slide-in-from-top-1 duration-200">
+                <CustomerAccountPanel companyName={statement.companyName} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} onChanged={onCustomerPaymentChanged} />
               </div>
             )}
           </SectionCard>
