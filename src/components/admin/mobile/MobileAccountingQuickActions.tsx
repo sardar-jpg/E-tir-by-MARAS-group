@@ -36,9 +36,14 @@ const T = {
 const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
 const money = (v: number) => (Number.isFinite(v) ? v : 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
-export default function MobileAccountingQuickActions({ shipmentId, canWrite, sessionId, lang }: {
+export default function MobileAccountingQuickActions({ shipmentId, canWrite, sessionId, lang, embedded = false }: {
   shipmentId: string; canWrite: boolean; sessionId: string; lang: Language;
+  // When `embedded` (e.g. inside the full-screen CostStatementWorkspace) the
+  // panel is shown at every breakpoint; otherwise it stays mobile-only
+  // (lg:hidden) as the compact companion to the desktop accounting panels.
+  embedded?: boolean;
 }) {
+  const visibility = embedded ? "" : "lg:hidden";
   const [stmt, setStmt] = useState<CostStatement | null>(null);
   const [payments, setPayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59,8 +64,8 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
   }, [shipmentId]);
   useEffect(() => { void load(); }, [load]);
 
-  if (loading) return <div className="lg:hidden flex items-center gap-2 text-xs text-slate-400 p-3"><Loader2 className="w-4 h-4 animate-spin" />…</div>;
-  if (!stmt) return <div className="lg:hidden text-[11px] text-slate-400 italic p-3">{tr("noStmt", lang)}</div>;
+  if (loading) return <div className={`${visibility} flex items-center gap-2 text-xs text-slate-400 p-3`}><Loader2 className="w-4 h-4 animate-spin" />…</div>;
+  if (!stmt) return <div className={`${visibility} text-[11px] text-slate-400 italic p-3`}>{tr("noStmt", lang)}</div>;
 
   const items = (stmt.items as CostItem[]) || [];
   const status = resolveAccountingStatus(stmt as any);
@@ -108,7 +113,7 @@ export default function MobileAccountingQuickActions({ shipmentId, canWrite, ses
 
   const inp = "w-full text-sm border border-slate-200 rounded-lg px-2.5 py-2 bg-white";
   return (
-    <div className="lg:hidden bg-white rounded-xl border border-slate-200 shadow-sm p-3 space-y-3">
+    <div className={`${visibility} bg-white rounded-xl border border-slate-200 shadow-sm p-3 space-y-3`}>
       <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5"><Wallet className="w-4 h-4 text-orange-600" /><span>{tr("title", lang)}</span></h3>
 
       {/* Compact financial summary */}

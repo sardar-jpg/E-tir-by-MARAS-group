@@ -43,6 +43,12 @@ const T = {
   cancelInv: { en: "Cancel invoice", tr: "Faturayı iptal et", ar: "إلغاء الفاتورة" },
   bank: { en: "Bank account", tr: "Banka hesabı", ar: "الحساب المصرفي" },
   desc: { en: "Description (customer)", tr: "Açıklama (müşteri)", ar: "الوصف (العميل)" },
+  noCustomer: {
+    en: "This shipment is not linked to a valid customer account. Link or create the customer before creating an invoice.",
+    tr: "Bu sevkiyat geçerli bir müşteri hesabına bağlı değil. Fatura oluşturmadan önce müşteriyi bağlayın veya oluşturun.",
+    ar: "هذه الشحنة غير مرتبطة بحساب عميل صالح. اربط العميل أو أنشئه قبل إنشاء الفاتورة.",
+  },
+  linkCustomer: { en: "Link Customer", tr: "Müşteriyi Bağla", ar: "ربط العميل" },
 };
 const tr = (k: keyof typeof T, lang: Language) => T[k][lang] || T[k].en;
 const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -54,12 +60,18 @@ const STATUS_STYLE: Record<CustomerInvoiceStatus, string> = {
   cancelled: "bg-red-100 text-red-700",
 };
 
-export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang }: {
+export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, onInvoicesChange, onLinkCustomer }: {
   shipmentId: string;
   currency: Currency;
   bankAccounts: BankAccount[];
   canWrite: boolean;
   lang: Language;
+  /** Immutable customer identity — required to create/issue an invoice. */
+  clientId?: string;
+  /** Notifies the parent when the invoice list changes (for step/summary derivation). */
+  onInvoicesChange?: (invoices: CustomerInvoice[]) => void;
+  /** Opens the customer-link flow when the shipment has no valid clientId. */
+  onLinkCustomer?: () => void;
 }) {
   const [invoices, setInvoices] = useState<CustomerInvoice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,18 +84,21 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`); if (res.ok) setInvoices((await res.json()).invoices || []); }
+    try { const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`); if (res.ok) { const list = (await res.json()).invoices || []; setInvoices(list); onInvoicesChange?.(list); } }
     catch { /* panel-isolated */ } finally { setLoading(false); }
-  }, [shipmentId]);
+  }, [shipmentId, onInvoicesChange]);
   useEffect(() => { void load(); }, [load]);
 
   const numOrU = (s: string) => (s.trim() === "" ? undefined : Number(s));
   const createDraft = async () => {
     setErr(null); setBusy(true);
     try {
+      // Immutable clientId is required by the server; include it so a draft can
+      // actually be created (a missing/invalid customer link is surfaced below).
+      const identity = clientId ? { clientId } : {};
       const payload = form.pricingMode === "cost_plus"
-        ? { pricingMode: "cost_plus", markupType: form.markupType, markupValue: numOrU(form.markupValue), description: form.description, bankAccountId: form.bankAccountId || undefined }
-        : { pricingMode: "manual", manualAmount: numOrU(form.manualAmount), description: form.description, bankAccountId: form.bankAccountId || undefined };
+        ? { ...identity, pricingMode: "cost_plus", markupType: form.markupType, markupValue: numOrU(form.markupValue), description: form.description, bankAccountId: form.bankAccountId || undefined }
+        : { ...identity, pricingMode: "manual", manualAmount: numOrU(form.manualAmount), description: form.description, bankAccountId: form.bankAccountId || undefined };
       const res = await apiFetch(`/api/cost-statements/${shipmentId}/invoices`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -113,8 +128,16 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
           <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5"><FileText className="w-4 h-4 text-orange-600" /><span>{tr("title", lang)}</span></h3>
           <p className="text-[11px] text-slate-500 mt-0.5">{tr("intro", lang)}</p>
         </div>
-        {canWrite && !creating && <button onClick={() => { setCreating(true); setErr(null); }} className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1"><Plus className="w-3.5 h-3.5" />{tr("create", lang)}</button>}
+        {canWrite && !creating && clientId && <button onClick={() => { setCreating(true); setErr(null); }} className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1"><Plus className="w-3.5 h-3.5" />{tr("create", lang)}</button>}
       </div>
+
+      {/* Human-readable missing-customer state — never a raw "clientId required". */}
+      {canWrite && !clientId && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold text-amber-800">{tr("noCustomer", lang)}</p>
+          {onLinkCustomer && <button onClick={onLinkCustomer} className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">{tr("linkCustomer", lang)}</button>}
+        </div>
+      )}
 
       {loading && <div className="flex items-center gap-2 text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin" />…</div>}
       {!loading && invoices.length === 0 && !creating && <p className="text-[11px] text-slate-400 italic">{tr("none", lang)}</p>}
