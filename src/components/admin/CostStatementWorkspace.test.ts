@@ -392,13 +392,20 @@ describe("18. mobile responsive layout (Shipment Cost Statement)", () => {
     expect((workspaceSrc.match(/T\.submit, lang\)/g) || []).length).toBe(1);
     expect((workspaceSrc.match(/T\.saveDraft, lang\)/g) || []).length).toBe(1);
   });
-  it("Preview Documents is folded into the More Actions menu on mobile (shown once)", () => {
-    // The standalone Preview button is hidden below sm; Preview lives in the More menu on mobile.
-    expect(workspaceSrc).toContain('${btnGhost} hidden sm:flex');
+  it("Preview Documents is DESKTOP-only; on mobile it lives only in the More Actions menu", () => {
+    // The standalone Preview button shows from lg up; on mobile + tablet Preview is only in the menu.
+    expect(workspaceSrc).toContain('${btnGhost} hidden lg:flex');
+    expect(workspaceSrc).not.toContain('${btnGhost} hidden sm:flex');
   });
   it("the page title and header spacing are reduced on mobile (no clipped heading)", () => {
-    expect(workspaceSrc).toContain("text-[22px] sm:text-[28px]");
-    expect(workspaceSrc).toContain("pt-4 pb-5 sm:pt-6 sm:pb-7");
+    expect(workspaceSrc).toContain("text-[19px] sm:text-[28px]");
+    expect(workspaceSrc).toContain("pt-3 pb-4 sm:pt-6 sm:pb-7");
+  });
+  it("the Approval Workflow card is collapsible on mobile (expanded by default), always open on desktop", () => {
+    expect(workspaceSrc).toContain("const [approvalOpen, setApprovalOpen] = useState(true)");
+    // Mobile-only toggle + the card is hidden when collapsed on mobile but always shown at lg.
+    expect(workspaceSrc).toContain("setApprovalOpen((v) => !v)");
+    expect(workspaceSrc).toContain('${approvalOpen ? "block" : "hidden"} lg:block');
   });
   it("summary/route/etc cards stay one-per-row full-width on mobile (no desktop grid on small screens)", () => {
     // grid starts at a single column on mobile and only widens at sm/lg breakpoints.

@@ -54,6 +54,8 @@ const T = {
   documentsDesc: { en: "Preview, download or print accounting documents on demand.", ar: "معاينة أو تنزيل أو طباعة المستندات المحاسبية عند الطلب.", tr: "Muhasebe belgelerini isteğe bağlı önizleyin, indirin veya yazdırın." },
   approval: { en: "Approval Workflow", ar: "سير الاعتماد", tr: "Onay Akışı" },
   approvalDesc: { en: "Operations Manager → Accounts Manager → Managing Director.", ar: "مدير العمليات ← مدير الحسابات ← المدير العام.", tr: "Operasyon Müdürü → Muhasebe Müdürü → Genel Müdür." },
+  collapse: { en: "Collapse", ar: "طيّ", tr: "Daralt" },
+  expand: { en: "Expand", ar: "توسيع", tr: "Genişlet" },
   agreedPrice: { en: "Agreed Selling Price", ar: "سعر البيع المتفق", tr: "Anlaşılan Satış Fiyatı" },
   totalExpenses: { en: "Total Expenses", ar: "إجمالي المصاريف", tr: "Toplam Masraf" },
   paidVendors: { en: "Paid to Vendors", ar: "المدفوع للموردين", tr: "Tedarikçilere Ödenen" },
@@ -175,6 +177,8 @@ export default function CostStatementWorkspace({
   // its status; the statement itself is refreshed via onRefresh().
   const [arRefreshToken, setArRefreshToken] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  // Approval chain can get long; on mobile it is collapsible (expanded by default).
+  const [approvalOpen, setApprovalOpen] = useState(true);
 
   const shipment = useMemo(() => shipments.find((s) => s.id === statement.shipmentId), [shipments, statement.shipmentId]);
   // The statement carries only companyName; the immutable clientId is resolved
@@ -280,14 +284,15 @@ export default function CostStatementWorkspace({
     // and the mobile bottom navigation (+ iOS safe area). Desktop keeps pb-24.
     <div className="w-full min-h-full bg-slate-100/70 overflow-x-hidden pb-[calc(8.5rem+env(safe-area-inset-bottom))] lg:pb-24">
       {/* ─── Header ─────────────────────────────────────────────────────── */}
-      <div className="bg-white border-b border-slate-200 px-4 md:px-8 pt-4 pb-5 sm:pt-6 sm:pb-7 space-y-4 sm:space-y-6">
+      <div className="bg-white border-b border-slate-200 px-4 md:px-8 pt-3 pb-4 sm:pt-6 sm:pb-7 space-y-3.5 sm:space-y-6">
         <div className="flex items-center justify-between gap-3">
           <button onClick={onBack} className="text-[12px] font-bold text-slate-500 hover:text-slate-900 flex items-center gap-1.5 bg-transparent border-0 cursor-pointer p-0 transition-colors min-w-0">
             <ArrowLeft className="w-4 h-4 shrink-0" /><span className="truncate"><span className="sm:hidden">{pick(T.backShort, lang)}</span><span className="hidden sm:inline">{pick(T.back, lang)}</span></span>
           </button>
           <div className="flex items-center gap-2 shrink-0">
-            {/* Preview Documents is folded into the More Actions menu on mobile (shown once). */}
-            <button onClick={() => scrollTo("documents")} className={`${btnGhost} hidden sm:flex`}><Eye className="w-4 h-4" />{pick(T.preview, lang)}</button>
+            {/* Standalone Preview Documents is DESKTOP-only; on mobile + tablet it lives
+                exclusively inside the More / Actions menu to keep the top bar minimal. */}
+            <button onClick={() => scrollTo("documents")} className={`${btnGhost} hidden lg:flex`}><Eye className="w-4 h-4" />{pick(T.preview, lang)}</button>
             <div className="relative">
               <button onClick={() => setShowMore((v) => !v)} className={btnGhost}><MoreHorizontal className="w-4 h-4" />{pick(T.more, lang)}<ChevronDown className="w-3.5 h-3.5 opacity-60" /></button>
               {showMore && (
@@ -309,7 +314,7 @@ export default function CostStatementWorkspace({
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
-          <h1 className="text-[22px] sm:text-[28px] leading-tight sm:leading-none font-black text-slate-900 tracking-tight">{pick(T.title, lang)}</h1>
+          <h1 className="text-[19px] sm:text-[28px] leading-tight sm:leading-none font-black text-slate-900 tracking-tight">{pick(T.title, lang)}</h1>
           {/* Title badge = Statement Status ONLY (item 13). */}
           <StatusPill label={pick(statementStatus.label, lang)} tone={statementStatus.tone} large />
         </div>
@@ -518,7 +523,16 @@ export default function CostStatementWorkspace({
 
           {/* 6. Approval */}
           <section id="csw-review">
-            <SectionHead num={6} title={pick(T.approval, lang)} desc={pick(T.approvalDesc, lang)} />
+            <SectionHead num={6} title={pick(T.approval, lang)} desc={pick(T.approvalDesc, lang)}
+              action={
+                /* Mobile-only collapse toggle so long approval chains stay manageable
+                   (expanded by default). Desktop always shows the full card. */
+                <button onClick={() => setApprovalOpen((v) => !v)} aria-expanded={approvalOpen}
+                  className="lg:hidden inline-flex items-center gap-1 text-[11px] font-black uppercase tracking-wide text-slate-500 bg-slate-100 hover:bg-slate-200 rounded-lg px-2.5 py-1.5 cursor-pointer border-0 shrink-0">
+                  {approvalOpen ? pick(T.collapse, lang) : pick(T.expand, lang)}
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${approvalOpen ? "rotate-180" : ""}`} />
+                </button>
+              } />
             {!canSubmit && (
               <div className="mt-3 bg-white rounded-2xl border border-amber-200 p-5 space-y-2.5">
                 <p className="text-[12px] font-black text-amber-800 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" />{pick(T.checklist, lang)}</p>
@@ -530,7 +544,7 @@ export default function CostStatementWorkspace({
                 ))}
               </div>
             )}
-            <div className="mt-3">
+            <div className={`mt-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
               <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
             </div>
           </section>
