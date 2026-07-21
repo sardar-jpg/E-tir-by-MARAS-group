@@ -13,7 +13,7 @@ import {
   deriveExpenseSummary,
   deriveCustomerSummary,
   resolveCustomerReceivedAmount,
-  computeGrossProfit,
+  computeShipmentProfit,
 } from "./costStatementMath";
 import { latestStageApprovals, type ApprovalHistoryEntry, type ApprovalStage } from "./costApprovalWorkflow";
 
@@ -38,8 +38,11 @@ export interface FinalPdfModel {
   totalCost: number;
   paidAmount: number;
   expenseRemaining: number;
+  /** Driver Agreed Amount — REFERENCE ONLY. Never a customer price or profit input. */
   agreedAmount: number | null;
   agreedCurrency: string | null;
+  /** Currency of the customer-facing figures below (the issued invoice currency). */
+  invoiceCurrency: string | null;
   customerReceived: number;
   customerReceivable: number;
   customerCredit: number;
@@ -74,22 +77,40 @@ export function buildFinalPdfModel(params: {
   finalStatementRevision: number;
   company?: CompanyProfile | null;
   language?: Language;
+  /** Issued customer invoice total for this shipment (null = none issued). */
+  issuedInvoiceTotal?: number | null;
+  /** Currency of the issued invoice (for the customer-facing figures + profit). */
+  issuedInvoiceCurrency?: string | null;
 }): FinalPdfModel {
   const s = params.statement;
   const expense = deriveExpenseSummary(s.totalCost || 0, s.paidAmount || 0);
   const received = resolveCustomerReceivedAmount(s);
-  const agreed = typeof s.agreedAmount === "number" ? s.agreedAmount : null;
-  const customer = agreed !== null ? deriveCustomerSummary(agreed, received) : null;
+  // Driver Agreed Amount — reference only; never a customer price or profit input.
+  const driverAgreed = typeof s.agreedAmount === "number" ? s.agreedAmount : null;
 
-  // Gross profit only when the customer's agreed currency matches the
-  // statement (expense) currency — never converted (costStatementMath).
-  const grossProfit = computeGrossProfit(
-    agreed ?? 0,
-    (s.agreedCurrency as CostStatement["currency"]) || undefined,
-    s.totalCost || 0,
-    s.currency
-  );
-  const currenciesMatch = agreed !== null && s.agreedCurrency === s.currency;
+  // Accounting Phase 1: customer figures and profit come from the ISSUED
+  // customer invoice, never agreedAmount. The final PDF is produced at closure,
+  // so the cost statement is approved; profit is pending only when no invoice
+  // has been issued (or invoice/cost currencies differ — never converted).
+  const invoiceTotal = typeof params.issuedInvoiceTotal === "number" && Number.isFinite(params.issuedInvoiceTotal)
+    ? params.issuedInvoiceTotal : null;
+  const invoiceCurrency = params.issuedInvoiceCurrency || null;
+  const customer = invoiceTotal !== null ? deriveCustomerSummary(invoiceTotal, received) : null;
+
+  const profitResult = computeShipmentProfit({
+    issuedInvoiceTotal: invoiceTotal,
+    invoiceCurrency: (invoiceCurrency || undefined) as CostStatement["currency"] | undefined,
+    costsApproved: true,
+    approvedCostTotal: s.totalCost || 0,
+    costCurrency: s.currency,
+  });
+  const grossProfit = profitResult.status === "available" ? profitResult.profit : null;
+  const grossProfitNote =
+    profitResult.status === "pending_no_invoice"
+      ? "Profit Pending — No Issued Customer Invoice"
+      : profitResult.status === "unavailable_currency"
+        ? "Profit unavailable — the issued invoice and expense currencies differ (never converted)."
+        : "";
 
   const latest = latestStageApprovals(params.approvalHistory, params.cycleNumber);
   const approvals: FinalPdfApprovalLine[] = (["operations_manager", "accounts_manager", "managing_director"] as ApprovalStage[]).map(
@@ -122,13 +143,14 @@ export function buildFinalPdfModel(params: {
     totalCost: s.totalCost || 0,
     paidAmount: s.paidAmount || 0,
     expenseRemaining: expense.remainingBalance,
-    agreedAmount: agreed,
+    agreedAmount: driverAgreed,
     agreedCurrency: s.agreedCurrency || null,
+    invoiceCurrency,
     customerReceived: received,
     customerReceivable: customer?.customerReceivable ?? 0,
     customerCredit: customer?.customerCredit ?? 0,
-    grossProfit: currenciesMatch ? grossProfit : null,
-    grossProfitNote: currenciesMatch ? "" : "Gross profit not shown — customer and expense currencies differ (never converted).",
+    grossProfit,
+    grossProfitNote,
     notes: s.notes || "",
     approvals,
     finalStatementRevision: params.finalStatementRevision,

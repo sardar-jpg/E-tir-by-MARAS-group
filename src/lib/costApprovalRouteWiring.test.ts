@@ -85,7 +85,7 @@ describe("final closure integrity + idempotent, crash-recoverable finalization",
     expect(APPROVE).toContain('code: "final_pdf_failed"');
     expect(APPROVE).toContain("502");
     // finalize throws on failure (no silent close).
-    const FINALIZE = region("async function finalizeCostStatementPdf", 1800);
+    const FINALIZE = region("async function finalizeCostStatementPdf", 2800);
     expect(FINALIZE).toContain("renderFinalCostStatementPdf(model)");
     expect(FINALIZE).toContain("buildFinalPdfModel(");
   });

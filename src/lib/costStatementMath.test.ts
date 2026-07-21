@@ -4,6 +4,7 @@ import {
   ALLOWED_COST_CURRENCIES,
   applyCostStatementRevisionedWriteMemory,
   computeGrossProfit,
+  computeShipmentProfit,
   CostStatementRevisionConflictError,
   decideStatementRevision,
   deriveCustomerSummary,
@@ -50,7 +51,7 @@ describe("expense side — money MARAS pays", () => {
 });
 
 describe("customer side — money MARAS receives (independent of expenses)", () => {
-  it("derives Unpaid / Partial / Paid / Credit from customerReceivedAmount vs agreedAmount", () => {
+  it("derives Unpaid / Partial / Paid / Credit from customerReceivedAmount vs the customer invoice total", () => {
     expect(deriveCustomerSummary(5000, 0).customerStatus).toBe("Unpaid");
     expect(deriveCustomerSummary(5000, 2000).customerStatus).toBe("Partial");
     expect(deriveCustomerSummary(5000, 5000).customerStatus).toBe("Paid");
@@ -90,13 +91,53 @@ describe("customer side — money MARAS receives (independent of expenses)", () 
   });
 });
 
-describe("gross profit — internal only, one currency only", () => {
-  it("computes agreedAmount − totalCost when currencies match", () => {
+describe("legacy computeGrossProfit — retained but no longer used for accounting", () => {
+  it("still computes agreedAmount − totalCost when currencies match (deprecated helper)", () => {
     expect(computeGrossProfit(5000, "USD", 3200, "USD")).toBe(1800);
   });
   it("refuses to subtract unlike currencies (returns null, never converts)", () => {
     expect(computeGrossProfit(5000, "USD", 3200, "IQD")).toBeNull();
     expect(computeGrossProfit(5000, undefined, 3200, "USD")).toBeNull();
+  });
+});
+
+describe("computeShipmentProfit — canonical profit = issued invoice − approved cost", () => {
+  const base = { costsApproved: true, invoiceCurrency: "USD" as const, costCurrency: "USD" as const };
+
+  it("issued invoice 1,500 − approved cost 1,200 = 300 (available)", () => {
+    const r = computeShipmentProfit({ ...base, issuedInvoiceTotal: 1500, approvedCostTotal: 1200 });
+    expect(r).toEqual({ status: "available", profit: 300, currency: "USD" });
+  });
+
+  it("issued invoice 1,000 − approved cost 1,200 = -200 (available, negative allowed)", () => {
+    const r = computeShipmentProfit({ ...base, issuedInvoiceTotal: 1000, approvedCostTotal: 1200 });
+    expect(r).toEqual({ status: "available", profit: -200, currency: "USD" });
+  });
+
+  it("no issued invoice → pending_no_invoice, profit null", () => {
+    expect(computeShipmentProfit({ ...base, issuedInvoiceTotal: null, approvedCostTotal: 1200 }))
+      .toEqual({ status: "pending_no_invoice", profit: null, currency: null });
+    expect(computeShipmentProfit({ ...base, issuedInvoiceTotal: undefined, approvedCostTotal: 1200 }))
+      .toMatchObject({ status: "pending_no_invoice", profit: null });
+  });
+
+  it("costs not approved → pending_not_approved, profit null (no confirmed profit)", () => {
+    expect(computeShipmentProfit({ ...base, costsApproved: false, issuedInvoiceTotal: 1500, approvedCostTotal: 1200 }))
+      .toEqual({ status: "pending_not_approved", profit: null, currency: null });
+  });
+
+  it("different currencies → unavailable_currency, never converts", () => {
+    expect(computeShipmentProfit({ issuedInvoiceTotal: 1500, invoiceCurrency: "USD", costsApproved: true, approvedCostTotal: 1200, costCurrency: "IQD" }))
+      .toEqual({ status: "unavailable_currency", profit: null, currency: null });
+  });
+
+  it("agreedAmount cannot affect the result — it is not even a parameter", () => {
+    // Whatever a shipment's driver agreedAmount is, profit depends only on the
+    // issued invoice and the approved cost.
+    const r1 = computeShipmentProfit({ ...base, issuedInvoiceTotal: 2000, approvedCostTotal: 1500 });
+    expect(r1.profit).toBe(500);
+    // The function signature has no agreedAmount input at all.
+    expect(computeShipmentProfit.length).toBe(1);
   });
 });
 

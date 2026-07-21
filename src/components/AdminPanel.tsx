@@ -14,7 +14,8 @@ import {
   Vendor,
   CostStatement,
   CostItem,
-  BankAccount
+  BankAccount,
+  CustomerInvoice
 } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -41,7 +42,7 @@ import { computeBusyDriverIds, resolveDriverAvailability } from "../lib/driverAl
 import DriverAllianceOffers from "./admin/DriverAllianceOffers";
 import DriverRouteEditor from "./admin/DriverRouteEditor";
 import { resolveExportItems, resolveExportNotes, resolveExportHeaderStatus } from "../lib/costStatementExportView";
-import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../lib/costStatementMath";
+import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount } from "../lib/costStatementMath";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { resolveDefaultBankAccountForCurrency } from "../lib/accountingTemplateSettings";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
@@ -878,6 +879,11 @@ export default function AdminPanel({
   // Template Settings: configured bank accounts for customer-document payment details.
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [selectedCostStatement, setSelectedCostStatement] = useState<CostStatement | null>(null);
+  // Accounting Phase 1: the ISSUED customer invoice for the statement being
+  // previewed/exported. Customer-facing figures (invoice / client-statement
+  // modes) come from this — never the driver's agreedAmount. null = none
+  // issued yet, so the export shows a "No Issued Customer Invoice" notice.
+  const [previewIssuedInvoice, setPreviewIssuedInvoice] = useState<CustomerInvoice | null>(null);
 
   // Real coordinate-based progress calculator helper
   const getShipmentProgressPercentage = (s: Shipment): number => {
@@ -2362,6 +2368,32 @@ MARAS Group etir Center`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shipments.length]);
 
+  // Accounting Phase 1: load the ISSUED customer invoice for the selected
+  // statement so the invoice / client-statement export & preview show the
+  // invoiced amount (never agreedAmount). Reads the existing per-shipment
+  // invoices endpoint; picks the first issued/partially_paid/paid invoice.
+  useEffect(() => {
+    const shipmentId = selectedCostStatement?.shipmentId;
+    if (!shipmentId) { setPreviewIssuedInvoice(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/cost-statements/${encodeURIComponent(shipmentId)}/invoices`);
+        if (!res.ok) { if (!cancelled) setPreviewIssuedInvoice(null); return; }
+        const body = await res.json();
+        const list = (body.invoices || []) as CustomerInvoice[];
+        const issued = list.find((i) => i.status === "issued" || i.status === "partially_paid" || i.status === "paid") || null;
+        if (!cancelled) setPreviewIssuedInvoice(issued);
+      } catch { if (!cancelled) setPreviewIssuedInvoice(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCostStatement?.shipmentId]);
+
+  // The issued-invoice figures the customer-facing export/preview consume.
+  const previewIssuedInvoiceForExport = previewIssuedInvoice
+    ? { total: Number(previewIssuedInvoice.sellingAmount || 0), currency: previewIssuedInvoice.currency }
+    : null;
+
   const handleReloadLatestStatement = async () => {
     if (!selectedCostStatement) return;
     try {
@@ -2581,7 +2613,9 @@ MARAS Group etir Center`;
     // admins (shipments is always [] for that role — see
     // costStatementRegistryView.ts).
     const matchingShipment = resolveStatementShipmentContext(stmt, shipments);
-    const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement);
+    // Accounting Phase 1: customer-facing amounts come from the ISSUED invoice.
+    const issuedInvoice = previewIssuedInvoiceForExport;
+    const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement, issuedInvoice);
     items.forEach(item => {
       const row = [
         item.costType,
@@ -2595,19 +2629,24 @@ MARAS Group etir Center`;
       ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(",");
       csvContent += row + "\n";
     });
-    // Accounting Phase B: mode-aware summary rows through the SAME shared
+    // Accounting Phase B/1: mode-aware summary rows through the SAME shared
     // rules the preview and PDF use — customer documents get customer-side
-    // money and status only; the internal expense status never appears on
-    // an invoice/client CSV.
-    const headerStatus = resolveExportHeaderStatus(statementPreviewMode, stmt, matchingShipment);
+    // money and status only, sourced from the ISSUED invoice (never
+    // agreedAmount); the internal expense status never appears on an
+    // invoice/client CSV.
+    const headerStatus = resolveExportHeaderStatus(statementPreviewMode, stmt, issuedInvoice);
     csvContent += "\n";
     if (statementPreviewMode === 'invoice' || statementPreviewMode === 'client_statement') {
-      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(stmt));
-      const custCur = stmt.agreedCurrency || stmt.currency;
-      csvContent += `"Agreed Amount","${cust.agreedAmount}","${custCur}"\n`;
-      csvContent += `"Customer Payment Received","${cust.customerReceivedAmount}","${custCur}"\n`;
-      csvContent += `"Customer Receivable","${cust.customerReceivable}","${custCur}"\n`;
-      if (cust.customerCredit > 0) csvContent += `"Customer Credit","${cust.customerCredit}","${custCur}"\n`;
+      if (!issuedInvoice) {
+        csvContent += `"Customer Invoice","No Issued Customer Invoice"\n`;
+      } else {
+        const cust = deriveCustomerSummary(issuedInvoice.total, resolveCustomerReceivedAmount(stmt));
+        const custCur = issuedInvoice.currency;
+        csvContent += `"Invoiced Amount","${cust.customerInvoiceTotal}","${custCur}"\n`;
+        csvContent += `"Customer Payment Received","${cust.customerReceivedAmount}","${custCur}"\n`;
+        csvContent += `"Customer Receivable","${cust.customerReceivable}","${custCur}"\n`;
+        if (cust.customerCredit > 0) csvContent += `"Customer Credit","${cust.customerCredit}","${custCur}"\n`;
+      }
       if (headerStatus) csvContent += `"Customer Payment Status","${headerStatus.value}"\n`;
     } else if (statementPreviewMode === 'statement') {
       const exp = deriveExpenseSummary(Number(stmt.totalCost) || 0, Number(stmt.paidAmount) || 0);
@@ -2677,7 +2716,7 @@ MARAS Group etir Center`;
 
       // Filter items to render based on selection — customer-facing modes
       // never get raw internal cost items (see costStatementExportView.ts).
-      const itemsToRender = resolveExportItems(statementPreviewMode, selectedCostStatement, matchingShipment, selectedVendorForStatement);
+      const itemsToRender = resolveExportItems(statementPreviewMode, selectedCostStatement, matchingShipment, selectedVendorForStatement, previewIssuedInvoiceForExport);
 
       // Dynamic sub-titles and party details
       let docSubtitle = "OFFICIAL COST DECLARATION LEDGER";
@@ -2878,27 +2917,50 @@ MARAS Group etir Center`;
       let balanceVal = Number(selectedCostStatement.remainingBalance || 0);
 
       if (statementPreviewMode === 'invoice') {
-        // Accounting Phase B: customer documents show ONLY customer-side
-        // money — received-from-customer, never the expense paidAmount.
-        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
-        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
-        val1Label = lang === 'tr' ? "Matrah / Toplam Paket:" : "Base Transport Fee:";
-        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
-        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ ALACAĞI (KREDİ):" : "CUSTOMER CREDIT:") : (lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:");
-        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
-        val2Text = `- ${cust.customerReceivedAmount.toLocaleString()} ${custCur}`;
-        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
-        balanceVal = cust.customerReceivable;
+        // Accounting Phase 1: customer documents show ONLY customer-side money,
+        // sourced from the ISSUED customer invoice (never agreedAmount). With
+        // no issued invoice there is no customer figure — show a pending notice.
+        const invoice = previewIssuedInvoiceForExport;
+        if (!invoice) {
+          val1Label = lang === 'tr' ? "Fatura Durumu:" : "Invoice Status:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
+          val3Label = lang === 'tr' ? "Bakiye:" : "Balance:";
+          val1Text = lang === 'tr' ? "Fatura Düzenlenmedi" : "No Issued Customer Invoice";
+          val2Text = "—";
+          val3Text = "—";
+          balanceVal = 0;
+        } else {
+          const cust = deriveCustomerSummary(invoice.total, resolveCustomerReceivedAmount(selectedCostStatement));
+          const custCur = invoice.currency;
+          val1Label = lang === 'tr' ? "Fatura Tutarı:" : "Invoiced Amount:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
+          val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ ALACAĞI (KREDİ):" : "CUSTOMER CREDIT:") : (lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:");
+          val1Text = `${cust.customerInvoiceTotal.toLocaleString()} ${custCur}`;
+          val2Text = `- ${cust.customerReceivedAmount.toLocaleString()} ${custCur}`;
+          val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+          balanceVal = cust.customerReceivable;
+        }
       } else if (statementPreviewMode === 'client_statement') {
-        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
-        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
-        val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
-        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
-        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ KREDİSİ:" : "Customer Credit Balance:") : (lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:");
-        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
-        val2Text = `(${cust.customerReceivedAmount.toLocaleString()}) ${custCur}`;
-        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
-        balanceVal = cust.customerReceivable;
+        const invoice = previewIssuedInvoiceForExport;
+        if (!invoice) {
+          val1Label = lang === 'tr' ? "Fatura Durumu:" : "Invoice Status:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
+          val3Label = lang === 'tr' ? "Cari Bakiye:" : "Statement Outstanding:";
+          val1Text = lang === 'tr' ? "Fatura Düzenlenmedi" : "No Issued Customer Invoice";
+          val2Text = "—";
+          val3Text = "—";
+          balanceVal = 0;
+        } else {
+          const cust = deriveCustomerSummary(invoice.total, resolveCustomerReceivedAmount(selectedCostStatement));
+          const custCur = invoice.currency;
+          val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
+          val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ KREDİSİ:" : "Customer Credit Balance:") : (lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:");
+          val1Text = `${cust.customerInvoiceTotal.toLocaleString()} ${custCur}`;
+          val2Text = `(${cust.customerReceivedAmount.toLocaleString()}) ${custCur}`;
+          val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+          balanceVal = cust.customerReceivable;
+        }
       } else if (statementPreviewMode === 'vendor_statement') {
         const vendorTotal = itemsToRender.reduce((acc, it) => acc + (Number(it.totalAmount) || 0), 0);
         val1Label = lang === 'tr' ? "Alt Toplam Alacak:" : "Subtotal Credit Accrued:";
@@ -6738,7 +6800,7 @@ MARAS Group etir Center`;
           real UI; roadmap pages render the professional "coming soon"
           placeholder that keeps the full information architecture visible. */}
       {activeTab === 'acct_dashboard' && canViewCostStatements(resolvedAdminType) && (
-        <AccountingDashboard lang={lang} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
+        <AccountingDashboard lang={lang} clients={clients} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
       )}
       {activeTab === 'acct_customer_statements' && canViewCostStatements(resolvedAdminType) && (
         <CustomerStatementsPage lang={lang} clients={clients} initialEntity={acctFocusRef} />

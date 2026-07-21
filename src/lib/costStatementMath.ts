@@ -16,22 +16,24 @@
  *     expenseCredit      max(0, paidAmount − totalCost)  (overpayment)
  *     paymentStatus      Unpaid / Partial / Paid — expense-side only.
  *
- *   CUSTOMER SIDE — money MARAS RECEIVES:
- *     agreedAmount            the customer's contracted revenue (from the
- *                             authoritative shipment record)
+ *   CUSTOMER SIDE — money MARAS RECEIVES (Accounting Phase 1: revenue is the
+ *   ISSUED CUSTOMER INVOICE total, never the driver's agreedAmount):
+ *     customerInvoiceTotal    the issued customer invoice total (the customer's
+ *                             billed revenue for the shipment)
  *     customerReceivedAmount  what the customer has actually paid MARAS
  *                             (legacy statements without it resolve to 0)
- *     customerReceivable      max(0, agreedAmount − customerReceivedAmount)
- *     customerCredit          max(0, customerReceivedAmount − agreedAmount)
+ *     customerReceivable      max(0, customerInvoiceTotal − customerReceivedAmount)
+ *     customerCredit          max(0, customerReceivedAmount − customerInvoiceTotal)
  *     customerStatus          Unpaid / Partial / Paid / Credit — derived
  *                             from the customer side ONLY; the internal
  *                             expense paymentStatus is never reused here.
  *
  *   PROFITABILITY (internal-only, never persisted as authoritative,
  *   never shown to drivers/clients/public/customer exports):
- *     grossProfit = agreedAmount − totalCost, and only when both sides
- *     are in the SAME currency — this module refuses to subtract unlike
- *     currencies (no FX engine exists by design).
+ *     Canonical profit = computeShipmentProfit (issued customer invoice total
+ *     − approved cost), same-currency only — this module refuses to subtract
+ *     unlike currencies (no FX engine exists by design). The legacy
+ *     agreedAmount-based computeGrossProfit is deprecated and unused.
  */
 import type { CostItem, CostStatement, Currency } from "../types";
 
@@ -81,7 +83,8 @@ export function deriveExpenseSummary(totalCost: number, paidAmount: number): Exp
 export type CustomerPaymentStatus = "Unpaid" | "Partial" | "Paid" | "Credit";
 
 export interface CustomerSummary {
-  agreedAmount: number;
+  /** The issued customer invoice total (customer-billed revenue), NOT agreedAmount. */
+  customerInvoiceTotal: number;
   customerReceivedAmount: number;
   customerReceivable: number;
   customerCredit: number;
@@ -97,22 +100,22 @@ export function resolveCustomerReceivedAmount(
 }
 
 export function deriveCustomerSummary(
-  agreedAmount: number,
+  customerInvoiceTotal: number,
   customerReceivedAmount: number
 ): CustomerSummary {
   const received = Number.isFinite(customerReceivedAmount) ? customerReceivedAmount : 0;
-  const agreed = Number.isFinite(agreedAmount) ? agreedAmount : 0;
+  const invoiceTotal = Number.isFinite(customerInvoiceTotal) ? customerInvoiceTotal : 0;
   return {
-    agreedAmount: agreed,
+    customerInvoiceTotal: invoiceTotal,
     customerReceivedAmount: received,
-    customerReceivable: Math.max(0, agreed - received),
-    customerCredit: Math.max(0, received - agreed),
+    customerReceivable: Math.max(0, invoiceTotal - received),
+    customerCredit: Math.max(0, received - invoiceTotal),
     customerStatus:
       received <= 0
         ? "Unpaid"
-        : received < agreed
+        : received < invoiceTotal
           ? "Partial"
-          : received === agreed
+          : received === invoiceTotal
             ? "Paid"
             : "Credit",
   };
@@ -121,11 +124,12 @@ export function deriveCustomerSummary(
 // ── Profitability (internal only) ────────────────────────────────────
 
 /**
- * Gross shipment profit — computed on demand, never persisted as an
- * authoritative field, and only meaningful when both sides share one
- * currency. Returns null when the customer (agreed) currency and the
- * expense (statement) currency differ: this module never adds or
- * subtracts unlike currencies.
+ * @deprecated Accounting Phase 1 (invoice-based profit). This computed
+ * "profit" from the DRIVER's agreedAmount, which is NOT a customer selling
+ * price and must never drive accounting profit. It is retained only so its
+ * unit test and any external caller keep compiling; no accounting surface
+ * calls it any more. Use computeShipmentProfit below (issued invoice minus
+ * approved cost). Do not reintroduce this into any profit/margin display.
  */
 export function computeGrossProfit(
   agreedAmount: number,
@@ -136,6 +140,56 @@ export function computeGrossProfit(
   if (!agreedCurrency || !statementCurrency || agreedCurrency !== statementCurrency) return null;
   if (!Number.isFinite(agreedAmount) || !Number.isFinite(totalCost)) return null;
   return agreedAmount - totalCost;
+}
+
+/**
+ * Canonical shipment profit (Accounting Phase 1).
+ *
+ *   Shipment Profit = Issued Customer Invoice Total − Approved Cost Statement Total
+ *
+ * agreedAmount is deliberately NOT a parameter — it can never influence this.
+ * Profit is only a real number when ALL of these hold; otherwise it is a
+ * pending / unavailable state (never a fabricated figure):
+ *   - an issued customer invoice exists (issuedInvoiceTotal is a finite number),
+ *   - the cost statement is fully approved (costsApproved),
+ *   - the invoice currency and the cost currency match (no FX is guessed here).
+ */
+export type ShipmentProfitStatus =
+  | "available"
+  | "pending_no_invoice"
+  | "pending_not_approved"
+  | "unavailable_currency";
+
+export interface ShipmentProfitResult {
+  status: ShipmentProfitStatus;
+  /** The profit amount, or null in any pending/unavailable state. */
+  profit: number | null;
+  /** The currency the profit is expressed in when available, else null. */
+  currency: Currency | null;
+}
+
+export function computeShipmentProfit(input: {
+  issuedInvoiceTotal: number | null | undefined;
+  invoiceCurrency: Currency | null | undefined;
+  costsApproved: boolean;
+  approvedCostTotal: number;
+  costCurrency: Currency | null | undefined;
+}): ShipmentProfitResult {
+  const { issuedInvoiceTotal, invoiceCurrency, costsApproved, approvedCostTotal, costCurrency } = input;
+  if (issuedInvoiceTotal == null || !Number.isFinite(issuedInvoiceTotal)) {
+    return { status: "pending_no_invoice", profit: null, currency: null };
+  }
+  if (!costsApproved) {
+    return { status: "pending_not_approved", profit: null, currency: null };
+  }
+  if (!invoiceCurrency || !costCurrency || invoiceCurrency !== costCurrency) {
+    return { status: "unavailable_currency", profit: null, currency: null };
+  }
+  if (!Number.isFinite(approvedCostTotal)) {
+    return { status: "unavailable_currency", profit: null, currency: null };
+  }
+  const profit = Math.round((issuedInvoiceTotal - approvedCostTotal + Number.EPSILON) * 100) / 100;
+  return { status: "available", profit, currency: invoiceCurrency };
 }
 
 // ── Revision (optimistic concurrency) ────────────────────────────────

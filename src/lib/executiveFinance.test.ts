@@ -1,29 +1,39 @@
 import { describe, it, expect } from "vitest";
 import { buildExecutiveFinanceOverview, isOpenShipmentStatus, RECEIVABLE_OVERDUE_DAYS } from "./executiveFinance";
-import type { CostStatement, Shipment } from "../types";
+import type { CostStatement, CustomerInvoice, Shipment } from "../types";
 
 const NOW = "2026-07-18T12:00:00Z";
 
 const shipment = (over: Partial<Shipment>): Shipment =>
   ({ id: "s1", shipmentNumber: "MAR-2026-1001", status: "Delivered", currency: "USD", agreedAmount: 500, createdAt: "2026-07-01T00:00:00Z", updatedAt: "2026-07-18T09:00:00Z", ...over }) as unknown as Shipment;
 
+// Accounting Phase 1: statements are approved (final_closed) so profit is
+// recognized; agreedAmount is kept on the fixtures ONLY to prove it is ignored.
 const statement = (over: Partial<CostStatement>): CostStatement =>
   ({
     shipmentId: "s1", shipmentNumber: "MAR-2026-1001", companyName: "Client Ltd", shipmentType: "land",
     date: "2026-07-18", currency: "USD", totalCost: 300, paidAmount: 300, remainingBalance: 0,
-    paymentStatus: "Paid", customerReceivedAmount: 500, agreedAmount: 500, agreedCurrency: "USD",
+    paymentStatus: "Paid", customerReceivedAmount: 500, agreedAmount: 9999, agreedCurrency: "USD",
+    accountingStatus: "final_closed",
     notes: "", items: [{ id: "i1", costType: "fuel", description: "Fuel", quantity: 1, unitPrice: 300, totalAmount: 300, currency: "USD", supplierName: "PO" }],
     createdAt: "t", updatedAt: "t", ...over,
   }) as CostStatement;
 
-describe("executive finance — real accounting data, per currency, delivery-recognized", () => {
-  it("revenue and gross profit bucket into today/month/year on the delivery date", () => {
+// Issued customer invoice fixture — the ONLY source of revenue.
+const inv = (shipmentNumber: string, sellingAmount: number, over: Partial<CustomerInvoice> = {}): CustomerInvoice =>
+  ({ id: "inv-" + shipmentNumber, invoiceNumber: shipmentNumber, shipmentId: "x", shipmentNumber,
+     companyName: "Client Ltd", currency: "USD", pricingMode: "manual", costBasis: 0,
+     sellingAmount, status: "issued", createdAt: "2026-07-18", ...over }) as CustomerInvoice;
+
+describe("executive finance — invoice-based revenue & profit, per currency, delivery-recognized", () => {
+  it("revenue and profit bucket into today/month/year on the delivery date (from issued invoices)", () => {
     const fin = buildExecutiveFinanceOverview(
       [
-        statement({}), // delivered today: revenue 500, profit 200
-        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", totalCost: 100, agreedAmount: 400 }),
+        statement({}), // invoice 500 − cost 300 = profit 200, delivered today
+        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", totalCost: 100 }), // invoice 400 − 100 = 300
       ],
-      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2", updatedAt: "2026-07-02T09:00:00Z" })], // s2 delivered this month, not today
+      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2", updatedAt: "2026-07-02T09:00:00Z" })],
+      [inv("MAR-2026-1001", 500), inv("MAR-2", 400)],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
@@ -32,25 +42,73 @@ describe("executive finance — real accounting data, per currency, delivery-rec
     expect(fin.deliveredWithStatementCount).toBe(2);
   });
 
-  it("NEVER mixes currencies — each currency reports separately; mismatched profit is excluded and counted", () => {
+  it("agreedAmount is ignored — revenue and profit come only from the issued invoice", () => {
+    const fin = buildExecutiveFinanceOverview(
+      [statement({ agreedAmount: 1 })], // absurd agreed; must not appear anywhere
+      [shipment({ agreedAmount: 1 })],
+      [inv("MAR-2026-1001", 500)],
+      NOW
+    );
+    const usd = fin.currencies.find((c) => c.currency === "USD")!;
+    expect(usd.revenue.thisYear).toBe(500); // invoice, not the agreed 1
+    expect(usd.grossProfit.thisYear).toBe(200); // 500 − 300
+  });
+
+  it("a delivered shipment with NO issued invoice recognizes no revenue or profit (pending)", () => {
+    const fin = buildExecutiveFinanceOverview(
+      [statement({})],
+      [shipment({})],
+      [], // no invoice issued
+      NOW
+    );
+    const usd = fin.currencies.find((c) => c.currency === "USD")!;
+    expect(usd.revenue.thisYear).toBe(0);
+    expect(usd.grossProfit.thisYear).toBe(0);
+    expect(usd.outstandingReceivables).toBe(0); // no invoice → no receivable
+  });
+
+  it("a cancelled/draft invoice is NOT revenue", () => {
+    const fin = buildExecutiveFinanceOverview(
+      [statement({})],
+      [shipment({})],
+      [inv("MAR-2026-1001", 500, { status: "cancelled" }), inv("MAR-2026-1001", 999, { status: "draft" })],
+      NOW
+    );
+    const usd = fin.currencies.find((c) => c.currency === "USD");
+    expect(usd?.revenue.thisYear ?? 0).toBe(0);
+  });
+
+  it("profit is excluded (not fabricated) when the cost statement is NOT approved", () => {
+    const fin = buildExecutiveFinanceOverview(
+      [statement({ accountingStatus: "draft" })], // invoice exists but costs unapproved
+      [shipment({})],
+      [inv("MAR-2026-1001", 500)],
+      NOW
+    );
+    const usd = fin.currencies.find((c) => c.currency === "USD")!;
+    expect(usd.revenue.thisYear).toBe(500); // revenue still recognized from the issued invoice
+    expect(usd.grossProfit.thisYear).toBe(0); // profit pending until approval
+  });
+
+  it("NEVER mixes currencies — mismatched invoice/cost profit is excluded and counted", () => {
     const fin = buildExecutiveFinanceOverview(
       [
         statement({}),
-        // Revenue agreed in EUR but costs in USD: profit must be EXCLUDED (computeGrossProfit refuses), never converted.
-        statement({ shipmentId: "s3", shipmentNumber: "MAR-3", agreedCurrency: "EUR" as CostStatement["currency"], currency: "USD" }),
+        statement({ shipmentId: "s3", shipmentNumber: "MAR-3", currency: "USD" }),
       ],
       [shipment({}), shipment({ id: "s3", shipmentNumber: "MAR-3" })],
+      [inv("MAR-2026-1001", 500), inv("MAR-3", 500, { currency: "EUR" })], // EUR invoice vs USD cost
       NOW
     );
     const eur = fin.currencies.find((c) => c.currency === "EUR")!;
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
     expect(eur.revenue.thisYear).toBe(500);
-    expect(usd.revenue.thisYear).toBe(500); // only the matching-currency shipment
+    expect(usd.revenue.thisYear).toBe(500);
     expect(usd.grossProfit.thisYear).toBe(200);
     expect(eur.profitExcludedCount).toBe(1);
   });
 
-  it("receivables: outstanding = agreed - received; overdue only when finished past the grace window", () => {
+  it("receivables: outstanding = issued invoice − received; overdue only when finished past the grace window", () => {
     const oldFinish = new Date(new Date(NOW).getTime() - (RECEIVABLE_OVERDUE_DAYS + 2) * 86400000).toISOString();
     const fin = buildExecutiveFinanceOverview(
       [
@@ -58,6 +116,7 @@ describe("executive finance — real accounting data, per currency, delivery-rec
         statement({ shipmentId: "s4", shipmentNumber: "MAR-4", customerReceivedAmount: 0 }), // outstanding 500, finished long ago -> overdue
       ],
       [shipment({}), shipment({ id: "s4", shipmentNumber: "MAR-4", updatedAt: oldFinish })],
+      [inv("MAR-2026-1001", 500), inv("MAR-4", 500)],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
@@ -78,6 +137,7 @@ describe("executive finance — real accounting data, per currency, delivery-rec
         }),
       ],
       [shipment({})],
+      [],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
@@ -90,9 +150,10 @@ describe("executive finance — real accounting data, per currency, delivery-rec
     const fin = buildExecutiveFinanceOverview(
       [
         statement({}),
-        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", totalCost: 50, agreedAmount: 600, companyName: "Big Co" }),
+        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", totalCost: 50, companyName: "Big Co" }),
       ],
-      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2", agreedAmount: 600 })],
+      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2" })],
+      [inv("MAR-2026-1001", 500), inv("MAR-2", 600)],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
@@ -104,13 +165,12 @@ describe("executive finance — real accounting data, per currency, delivery-rec
   it("Top Customer This Month ranks by GROSS PROFIT first — revenue alone never wins", () => {
     const fin = buildExecutiveFinanceOverview(
       [
-        // Whale Ltd: huge revenue, thin margin (profit 50).
-        statement({ shipmentId: "s1", companyName: "Whale Ltd", agreedAmount: 2000, totalCost: 1950 }),
-        // Lean Co: modest revenue across two shipments, fat margin (profit 150 + 150 = 300).
-        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Lean Co", agreedAmount: 400, totalCost: 250 }),
-        statement({ shipmentId: "s3", shipmentNumber: "MAR-3", companyName: "Lean Co", agreedAmount: 400, totalCost: 250 }),
+        statement({ shipmentId: "s1", companyName: "Whale Ltd", totalCost: 1950 }), // invoice 2000 − 1950 = 50
+        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Lean Co", totalCost: 250 }), // 400 − 250 = 150
+        statement({ shipmentId: "s3", shipmentNumber: "MAR-3", companyName: "Lean Co", totalCost: 250 }), // 400 − 250 = 150
       ],
-      [shipment({ agreedAmount: 2000 }), shipment({ id: "s2", shipmentNumber: "MAR-2", agreedAmount: 400 }), shipment({ id: "s3", shipmentNumber: "MAR-3", agreedAmount: 400 })],
+      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2" }), shipment({ id: "s3", shipmentNumber: "MAR-3" })],
+      [inv("MAR-2026-1001", 2000), inv("MAR-2", 400), inv("MAR-3", 400)],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
@@ -120,10 +180,11 @@ describe("executive finance — real accounting data, per currency, delivery-rec
   it("Top Customer ties break deterministically: equal profit -> higher revenue; equal both -> name order", () => {
     const equalProfit = buildExecutiveFinanceOverview(
       [
-        statement({ shipmentId: "s1", companyName: "Alpha", agreedAmount: 500, totalCost: 300 }), // profit 200
-        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Beta", agreedAmount: 700, totalCost: 500 }), // profit 200, more revenue
+        statement({ shipmentId: "s1", companyName: "Alpha", totalCost: 300 }), // 500 − 300 = 200
+        statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Beta", totalCost: 500 }), // 700 − 500 = 200, more revenue
       ],
-      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2", agreedAmount: 700 })],
+      [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2" })],
+      [inv("MAR-2026-1001", 500), inv("MAR-2", 700)],
       NOW
     );
     expect(equalProfit.currencies.find((c) => c.currency === "USD")!.topCustomerThisMonth!.companyName).toBe("Beta");
@@ -134,26 +195,26 @@ describe("executive finance — real accounting data, per currency, delivery-rec
         statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Alpha" }),
       ],
       [shipment({}), shipment({ id: "s2", shipmentNumber: "MAR-2" })],
+      [inv("MAR-2026-1001", 500), inv("MAR-2", 500)],
       NOW
     );
-    // Identical profit AND revenue -> alphabetical company name, so the
-    // result is stable no matter the input order.
     expect(fullTie.currencies.find((c) => c.currency === "USD")!.topCustomerThisMonth!.companyName).toBe("Alpha");
   });
 
   it("Top Customer only counts THIS MONTH's deliveries", () => {
     const fin = buildExecutiveFinanceOverview(
       [
-        statement({ shipmentId: "s1", companyName: "Old Glory", agreedAmount: 900, totalCost: 100 }), // delivered in June
+        statement({ shipmentId: "s1", companyName: "Old Glory", totalCost: 100 }), // delivered in June
         statement({ shipmentId: "s2", shipmentNumber: "MAR-2", companyName: "Fresh Co" }), // delivered today
       ],
-      [shipment({ updatedAt: "2026-06-10T09:00:00Z", agreedAmount: 900 }), shipment({ id: "s2", shipmentNumber: "MAR-2" })],
+      [shipment({ updatedAt: "2026-06-10T09:00:00Z" }), shipment({ id: "s2", shipmentNumber: "MAR-2" })],
+      [inv("MAR-2026-1001", 900), inv("MAR-2", 500)],
       NOW
     );
     expect(fin.currencies.find((c) => c.currency === "USD")!.topCustomerThisMonth!.companyName).toBe("Fresh Co");
   });
 
-  it("Open Shipments Value: agreed value of non-terminal shipments, per currency, never revenue", () => {
+  it("Open Shipments Value: agreed value of non-terminal shipments (operational pipeline, never revenue)", () => {
     const fin = buildExecutiveFinanceOverview(
       [],
       [
@@ -163,15 +224,17 @@ describe("executive finance — real accounting data, per currency, delivery-rec
         shipment({ id: "s4", shipmentNumber: "MAR-4", status: "Delivered", agreedAmount: 9999 }), // terminal -> excluded
         shipment({ id: "s5", shipmentNumber: "MAR-5", status: "Closed", agreedAmount: 8888 }), // terminal -> excluded
       ],
+      [],
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;
     const eur = fin.currencies.find((c) => c.currency === "EUR")!;
-    expect(usd.openShipmentsValue).toBe(1000); // 700 + 300 — currencies never mixed
+    // Open Shipments Value is the agreed value of in-flight work — an operational
+    // pipeline figure, NOT revenue/profit/margin/receivable.
+    expect(usd.openShipmentsValue).toBe(1000);
     expect(usd.openShipmentsCount).toBe(2);
     expect(eur.openShipmentsValue).toBe(250);
     expect(eur.openShipmentsCount).toBe(1);
-    // NOT recognized revenue: nothing here touches the revenue figures.
     expect(usd.revenue).toEqual({ today: 0, thisMonth: 0, thisYear: 0 });
     expect(eur.revenue).toEqual({ today: 0, thisMonth: 0, thisYear: 0 });
     expect(isOpenShipmentStatus("In Transit")).toBe(true);
@@ -179,10 +242,11 @@ describe("executive finance — real accounting data, per currency, delivery-rec
     expect(isOpenShipmentStatus("Completed")).toBe(false);
   });
 
-  it("undelivered shipments contribute receivables/payables but never revenue or profit", () => {
+  it("undelivered shipments contribute receivables/payables (once invoiced) but never revenue or profit", () => {
     const fin = buildExecutiveFinanceOverview(
       [statement({ customerReceivedAmount: 0, paidAmount: 100, remainingBalance: 200, paymentStatus: "Partial" })],
       [shipment({ status: "In Transit" })],
+      [inv("MAR-2026-1001", 500)], // invoice issued while still in transit
       NOW
     );
     const usd = fin.currencies.find((c) => c.currency === "USD")!;

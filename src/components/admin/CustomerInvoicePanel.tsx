@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
-import { FileText, Plus, Send, Ban, Loader2, Eye, Download, Printer, X, ChevronDown, Check, Search, AlertTriangle, CheckCircle2, Trash2, Copy, CreditCard, History, Receipt } from "lucide-react";
+import { FileText, Plus, Send, Ban, Loader2, Eye, Download, Printer, X, ChevronDown, Check, Search, CheckCircle2, Trash2, Copy, CreditCard, History, Receipt } from "lucide-react";
 import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, Currency } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 import {
-  INVOICE_SERVICE_TYPES, PAYMENT_TERMS, PRICE_DIFFERENCE_REASONS,
+  INVOICE_SERVICE_TYPES, PAYMENT_TERMS,
   isOtherServiceType, isCustomPaymentTerm, paymentTermDays, type CatalogOption, type L3,
 } from "../../lib/invoiceLineCatalog";
 import { computeLineAmount, computeInvoiceTotals } from "../../lib/customerInvoiceLines";
@@ -109,7 +109,7 @@ const num = (s: string): number => { const n = Number(s); return Number.isFinite
 /** Mask an account number, keeping only the last four digits. */
 const maskAccount = (acc?: string): string => { const s = (acc || "").replace(/\s+/g, ""); return s.length > 4 ? `••••${s.slice(-4)}` : s ? `••••${s}` : ""; };
 
-export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, companyName, agreedAmount, customerHasPayments, onInvoicesChange, onLinkCustomer, onReceivePayment, onViewPayments }: {
+export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, companyName, customerHasPayments, onInvoicesChange, onLinkCustomer, onReceivePayment, onViewPayments }: {
   shipmentId: string;
   currency: Currency;
   bankAccounts: BankAccount[];
@@ -118,8 +118,6 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   clientId?: string;
   /** Read-only customer name from the shipment/order. */
   companyName?: string;
-  /** Read-only agreed shipment selling price, for the price-difference comparison. */
-  agreedAmount?: number;
   /** True when the customer already has payments/receipts (drives quick-access actions). */
   customerHasPayments?: boolean;
   onInvoicesChange?: (invoices: CustomerInvoice[]) => void;
@@ -135,7 +133,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
-  const [hdr, setHdr] = useState({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" });
+  const [hdr, setHdr] = useState({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "" });
   const [lines, setLines] = useState<LineDraft[]>([emptyLineDraft()]);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   // Focus handoff: when a row is added/duplicated, focus its Service Type control.
@@ -160,7 +158,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     setFocusLineId(null);
   }, [focusLineId, lines]);
 
-  const resetForm = () => { setHdr({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" }); setLines([emptyLineDraft()]); setConfirmDeleteId(null); };
+  const resetForm = () => { setHdr({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "" }); setLines([emptyLineDraft()]); setConfirmDeleteId(null); };
 
   // Auto-fill due date from a controlled payment term (Custom leaves it manual).
   const chooseTerm = (term: string) => {
@@ -176,17 +174,15 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   // Client-side preview (SERVER RECOMPUTES on save — never trusted here).
   const previewLines = useMemo(() => lines.map((l) => ({ ...l, amount: computeLineAmount(num(l.quantity), num(l.unitPrice)) })), [lines]);
   const totals = useMemo(() => computeInvoiceTotals(previewLines.map((l) => ({ id: l.id, serviceType: l.serviceType, quantity: num(l.quantity), unit: l.unit, unitPrice: num(l.unitPrice), amount: l.amount })), { discountAmount: num(hdr.discountAmount), taxAmount: num(hdr.taxAmount), additionalCharges: num(hdr.additionalCharges) }), [previewLines, hdr.discountAmount, hdr.taxAmount, hdr.additionalCharges]);
-  const agreed = Number.isFinite(agreedAmount) ? Number(agreedAmount) : 0;
-  const priceDiff = Math.round((totals.grandTotal - agreed + Number.EPSILON) * 100) / 100;
-  const hasAgreed = agreed > 0;
-  const hasDiff = hasAgreed && Math.abs(priceDiff) > 0.001;
+  // Accounting Phase 1: the invoice amount is entered manually and independently.
+  // The driver's agreedAmount is NOT a customer price, so there is no agreed-price
+  // comparison, no price-difference warning, and no price-difference reason here.
 
   // Unit is no longer part of the line UI (item 3); it is not required to save a line.
   const lineValid = (l: LineDraft) => !!l.serviceType && (!isOtherServiceType(l.serviceType) || l.customServiceType.trim().length > 0) && num(l.quantity) > 0 && num(l.unitPrice) >= 0;
   const allLinesValid = lines.length > 0 && lines.every(lineValid);
   const headerValid = !!hdr.invoiceDate && !!hdr.dueDate && !!hdr.bankAccountId;
-  const reasonOk = !hasDiff || hdr.priceDifferenceReason.trim().length > 0;
-  const canSave = canWrite && !!clientId && allLinesValid && headerValid && reasonOk;
+  const canSave = canWrite && !!clientId && allLinesValid && headerValid;
 
   const buildPayload = () => ({
     clientId,
@@ -199,7 +195,6 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     discountAmount: num(hdr.discountAmount),
     taxAmount: num(hdr.taxAmount),
     additionalCharges: num(hdr.additionalCharges),
-    priceDifferenceReason: hasDiff ? hdr.priceDifferenceReason.trim() : undefined,
     invoiceLines: lines.map((l) => ({
       serviceType: l.serviceType,
       customServiceType: isOtherServiceType(l.serviceType) ? l.customServiceType.trim() : undefined,
@@ -217,13 +212,13 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); return null;
   };
   const onSaveDraft = async () => {
-    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
+    if (!canSave) { setErr(tr("needFields", lang)); return; }
     setErr(null); setBusy(true);
     try { const inv = await createDraft(); if (inv) { setCreating(false); resetForm(); await load(); } }
     catch { setErr("Save failed."); } finally { setBusy(false); }
   };
   const onIssue = async () => {
-    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
+    if (!canSave) { setErr(tr("needFields", lang)); return; }
     setErr(null); setBusy(true);
     try {
       const inv = await createDraft();
@@ -424,45 +419,9 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
             )}
           </div>
 
-          {/* Totals + agreed price */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              {/* Agreed price reference (read only) */}
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3">
-                <div className="text-[10px] font-black uppercase tracking-wide text-emerald-700">{tr("agreedPrice", lang)}</div>
-                <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-xl font-black font-mono text-emerald-700 tabular-nums">{money(agreed)}</span>
-                  <span className="text-[11px] font-bold text-emerald-500">{currency}</span>
-                  <span className="text-[9px] font-bold uppercase text-emerald-400 ml-auto">{tr("readOnly", lang)}</span>
-                </div>
-              </div>
-              {/* Comparison state: green match vs orange difference */}
-              {hasAgreed && !hasDiff && (
-                <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">
-                  <p className="text-[12px] font-black text-emerald-700 flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4 shrink-0" />{tr("matchTitle", lang)}</p>
-                  <div className="flex items-center justify-between mt-1.5">
-                    <span className="text-[10px] font-black uppercase tracking-wide text-emerald-600">{tr("difference", lang)}</span>
-                    <span className="text-[13px] font-black font-mono text-emerald-700 tabular-nums">{money(0)} {currency}</span>
-                  </div>
-                </div>
-              )}
-              {hasDiff && (
-                <div className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[12px] font-black text-orange-700 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4 shrink-0" />{tr("diffTitle", lang)}</p>
-                    <span className="text-[9px] font-black uppercase tracking-wide text-orange-700 bg-orange-200/70 rounded px-1.5 py-0.5 shrink-0">{tr("reasonRequired", lang)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-black uppercase tracking-wide text-orange-600">{tr("difference", lang)}</span>
-                    <span className="text-[15px] font-black font-mono text-orange-700 tabular-nums">{money(Math.abs(priceDiff))} {currency}</span>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase tracking-wide text-orange-700 mb-1">{tr("diffReason", lang)} *</label>
-                    <CatalogSelect options={PRICE_DIFFERENCE_REASONS} value={hdr.priceDifferenceReason} lang={lang} placeholder={tr("diffReasonPick", lang)} onChange={(v) => setHdr({ ...hdr, priceDifferenceReason: v })} invalid={!hdr.priceDifferenceReason} />
-                  </div>
-                </div>
-              )}
-            </div>
+          {/* Totals (Accounting Phase 1: no agreed-price comparison — the
+              customer invoice amount is entered manually and independently). */}
+          <div className="grid grid-cols-1 gap-4">
             <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
               <TotRow label={tr("subtotal", lang)} value={`${money(totals.subtotal)} ${currency}`} />
               <TotAdj label={tr("discount", lang)} v={hdr.discountAmount} onChange={(v) => setHdr({ ...hdr, discountAmount: v })} />

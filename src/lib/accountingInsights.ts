@@ -1,5 +1,6 @@
-import type { CostStatement, Currency } from "../types";
-import { computeGrossProfit } from "./costStatementMath";
+import type { CostStatement, CustomerInvoice, Currency } from "../types";
+import { computeShipmentProfit } from "./costStatementMath";
+import { resolveAccountingStatus } from "./costApprovalWorkflow";
 import type { ReceivableRow, PayableRow } from "./receivablesPayables";
 import type { MonthlyFigures } from "./monthlyReport";
 
@@ -37,6 +38,12 @@ export interface InsightInput {
   receivables: ReceivableRow[];
   payables: PayableRow[];
   costStatements: CostStatement[];
+  /**
+   * Issued customer invoices (Accounting Phase 1). Profit/margin insights use
+   * ONLY the issued invoice total minus the approved cost — never agreedAmount.
+   * Absent/empty means no shipment has profit yet (all pending).
+   */
+  customerInvoices?: CustomerInvoice[];
   /** Per-currency current + previous month figures (optional trend source). */
   monthly?: { currency: Currency; current: MonthlyFigures; previous: MonthlyFigures }[];
 }
@@ -97,35 +104,63 @@ export function buildInsights(input: InsightInput): Insight[] {
   }
 
   // 4) Negative or Low-Profit Orders + 5) Missing Cost Warnings.
+  //
+  // Accounting Phase 1: profit/margin come ONLY from the issued customer
+  // invoice minus the approved cost (computeShipmentProfit) — agreedAmount is
+  // never used. A shipment with no issued invoice, or whose costs are not yet
+  // approved, is "profit pending" and produces NO negative/low-profit alert.
+  const issuedByShipment = new Map<string, { total: number; currency: Currency }>();
+  for (const inv of input.customerInvoices || []) {
+    if (inv.status !== "issued" && inv.status !== "partially_paid" && inv.status !== "paid") continue;
+    const amt = Number(inv.sellingAmount || 0);
+    const prev = issuedByShipment.get(inv.shipmentNumber);
+    if (!prev) issuedByShipment.set(inv.shipmentNumber, { total: amt, currency: inv.currency });
+    else if (prev.currency === inv.currency) prev.total = round2(prev.total + amt);
+    else prev.total = NaN; // mixed-currency issued invoices → profit unavailable
+  }
+
   for (const st of input.costStatements) {
-    const agreed = Number((st as any).agreedAmount ?? 0);
-    const agreedCur = ((st as any).agreedCurrency || st.currency) as Currency;
     const items = ((st.items as any[]) || []);
-    if (agreed > 0.005 && items.length === 0) {
+    const issued = issuedByShipment.get(st.shipmentNumber);
+    const approved = resolveAccountingStatus(st as any) === "final_closed";
+
+    // Missing costs: the customer was invoiced but no expenses were recorded.
+    if (issued && items.length === 0) {
       out.push({
         id: `missing-cost-${st.shipmentNumber}`, category: "Missing Cost", kind: "rule", priority: "medium",
-        title: `${st.shipmentNumber} — no costs recorded`,
-        detail: `This order has an agreed price but no expenses yet. Complete shipment costs before profit approval.`,
+        title: `${st.shipmentNumber} — invoiced but no costs recorded`,
+        detail: `This order has an issued customer invoice but no expenses on its cost statement. Record the shipment costs.`,
         link: { kind: "order", label: "Open Cost Statement", tab: "costs", ref: st.shipmentNumber },
       });
       continue;
     }
-    const gp = computeGrossProfit(agreed, agreedCur, st.totalCost || 0, st.currency);
-    if (gp === null) continue;
+
+    const result = computeShipmentProfit({
+      issuedInvoiceTotal: issued ? issued.total : null,
+      invoiceCurrency: issued ? issued.currency : null,
+      costsApproved: approved,
+      approvedCostTotal: st.totalCost || 0,
+      costCurrency: st.currency,
+    });
+    // Pending / unavailable → no profit alert at all (never a fabricated one).
+    if (result.status !== "available" || result.profit === null || !result.currency) continue;
+    const gp = result.profit;
+    const cur = result.currency;
+    const revenue = issued!.total;
     if (gp < -0.005) {
       out.push({
         id: `neg-profit-${st.shipmentNumber}`, category: "Negative Profit", kind: "rule", priority: "critical",
-        title: `${st.shipmentNumber} — negative profit ${round2(gp).toLocaleString()} ${agreedCur}`,
-        detail: `Costs exceed the agreed selling price. Review pricing and expenses for this order.`,
-        impact: { amount: round2(gp), currency: agreedCur },
+        title: `${st.shipmentNumber} — negative profit ${gp.toLocaleString()} ${cur}`,
+        detail: `Approved costs exceed the issued invoice amount. Review pricing and expenses for this order.`,
+        impact: { amount: gp, currency: cur },
         link: { kind: "order", label: "Open Cost Statement", tab: "costs", ref: st.shipmentNumber },
       });
-    } else if (agreed > 0.005 && gp / agreed < LOW_MARGIN) {
+    } else if (revenue > 0.005 && gp / revenue < LOW_MARGIN) {
       out.push({
         id: `low-profit-${st.shipmentNumber}`, category: "Low Profit", kind: "rule", priority: "high",
-        title: `${st.shipmentNumber} — thin margin (${round2((gp / agreed) * 100)}%)`,
-        detail: `Gross profit ${round2(gp).toLocaleString()} ${agreedCur} is below ${LOW_MARGIN * 100}% of the selling price. Review before approval.`,
-        impact: { amount: round2(gp), currency: agreedCur },
+        title: `${st.shipmentNumber} — thin margin (${round2((gp / revenue) * 100)}%)`,
+        detail: `Profit ${gp.toLocaleString()} ${cur} is below ${LOW_MARGIN * 100}% of the issued invoice amount.`,
+        impact: { amount: gp, currency: cur },
         link: { kind: "order", label: "Open Cost Statement", tab: "costs", ref: st.shipmentNumber },
       });
     }

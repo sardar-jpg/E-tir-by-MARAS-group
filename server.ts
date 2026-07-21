@@ -93,7 +93,7 @@ import {
   computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
   canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
 } from "./src/lib/customerInvoice";
-import { sanitizeInvoiceLines, computeInvoiceTotals, priceDifference } from "./src/lib/customerInvoiceLines";
+import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerInvoiceLines";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
@@ -10835,7 +10835,24 @@ async function startServer() {
   ): Promise<{ url: string; path: string; fileName: string }> {
     const company = await loadCompanyProfile().catch(() => ({} as CompanyProfile));
     const tpl = await loadTemplateConfig("cost_statement").catch(() => null);
-    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage });
+    // Accounting Phase 1: the final PDF's profit + customer figures come from the
+    // issued customer invoice for this shipment (never agreedAmount). No issued
+    // invoice → the PDF shows "Profit Pending — No Issued Customer Invoice".
+    let issuedInvoiceTotal: number | null = null;
+    let issuedInvoiceCurrency: string | null = null;
+    try {
+      const invSnap = await getDocs(collection(db, "customerInvoices"));
+      for (const d of invSnap.docs) {
+        const inv = d.data() as CustomerInvoice;
+        if (inv.shipmentNumber !== stmt.shipmentNumber) continue;
+        if (inv.status !== "issued" && inv.status !== "partially_paid" && inv.status !== "paid") continue;
+        const amt = Number(inv.sellingAmount || 0);
+        if (issuedInvoiceTotal === null) { issuedInvoiceTotal = amt; issuedInvoiceCurrency = inv.currency; }
+        else if (issuedInvoiceCurrency === inv.currency) { issuedInvoiceTotal += amt; }
+        else { issuedInvoiceTotal = NaN; } // mixed currencies → profit unavailable
+      }
+    } catch { /* invoice lookup failure → profit pending in the PDF, never fabricated */ }
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage, issuedInvoiceTotal, issuedInvoiceCurrency });
     const buffer = await renderFinalCostStatementPdf(model);
     const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
     const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
@@ -11833,15 +11850,12 @@ async function startServer() {
         taxAmount: typeof body.taxAmount === "number" ? body.taxAmount : 0,
         additionalCharges: typeof body.additionalCharges === "number" ? body.additionalCharges : 0,
       });
-      const agreedAmount = Number.isFinite(shipment?.agreedAmount) ? Number(shipment!.agreedAmount)
-        : Number.isFinite((stmt as any).agreedAmount) ? Number((stmt as any).agreedAmount) : 0;
-      const agreedPriceDifference = priceDifference(totals.grandTotal, agreedAmount);
-      const reason = typeof body.priceDifferenceReason === "string" ? body.priceDifferenceReason.trim() : "";
-      // A non-zero difference vs the agreed selling price must carry a reason
-      // (stored for the audit trail). Creation is never auto-blocked otherwise.
-      if (Math.abs(agreedPriceDifference) > 0.001 && !reason) {
-        return { ok: false, code: "price_difference_reason_required", error: "The invoice total differs from the agreed shipment selling price. A price-difference reason is required." };
-      }
+      // Accounting Phase 1: the customer invoice amount is entered manually and
+      // independently. The driver's agreedAmount is NOT a customer selling price,
+      // so it is no longer compared here — no agreed-price difference, and no
+      // price-difference reason is ever required. (Legacy invoices may still
+      // carry an agreedPriceDifference/priceDifferenceReason from before this
+      // change; new invoices simply do not set them.)
       const grossProfit = computeInvoiceGrossProfit({ sellingAmount: totals.grandTotal, costBasis, invoiceCurrency, costCurrency: stmt.currency });
       return {
         ok: true,
@@ -11862,8 +11876,6 @@ async function startServer() {
           taxAmount: totals.taxAmount,
           additionalCharges: totals.additionalCharges,
           grandTotal: totals.grandTotal,
-          agreedPriceDifference,
-          priceDifferenceReason: reason || undefined,
           invoiceDate: typeof body.invoiceDate === "string" ? body.invoiceDate.slice(0, 10) : new Date().toISOString().slice(0, 10),
           dueDate: typeof body.dueDate === "string" ? body.dueDate.slice(0, 10) : undefined,
           paymentTerms: typeof body.paymentTerms === "string" ? body.paymentTerms.slice(0, 120) : undefined,
@@ -13714,13 +13726,15 @@ async function startServer() {
       if (!canViewCostStatements(req.session!.adminType as any)) {
         return res.status(403).json({ error: "Financial overview requires accounting access." });
       }
-      const [statementsSnap, shipmentsSnap] = await Promise.all([
+      const [statementsSnap, shipmentsSnap, invoicesSnap] = await Promise.all([
         getDocs(collection(db, "costStatements")),
         getDocs(collection(db, "shipments")),
+        getDocs(collection(db, "customerInvoices")),
       ]);
       const financial = buildExecutiveFinanceOverview(
         statementsSnap.docs.map((d) => d.data() as CostStatement),
         shipmentsSnap.docs.map((d) => d.data() as Shipment),
+        invoicesSnap.docs.map((d) => d.data() as CustomerInvoice),
         new Date().toISOString()
       );
       res.json({ financial });

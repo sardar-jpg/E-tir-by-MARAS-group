@@ -59,7 +59,7 @@ export default function AIFinancialAssistantPage({ lang, clients, costStatements
       current: computeMonthlyFigures(input, cur, thisMonth),
       previous: computeMonthlyFigures(input, cur, prevMonthKey(thisMonth)),
     }));
-    return buildInsights({ receivables, payables, costStatements, monthly });
+    return buildInsights({ receivables, payables, costStatements, customerInvoices: ds.invoices, monthly });
   }, [ds.customers, ds.vendorBills, ds.invoices, ds.customerPayments, ds.vendorPayments, costStatements]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counts = useMemo(() => countByPriority(insights), [insights]);
