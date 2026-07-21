@@ -351,15 +351,31 @@ export default function AdminClientsSection({
   // company's row (and its Staff, via ClientStaffSection) stays reachable
   // whether or not the Owner record still exists — see the orphaned-
   // company handling below (`group.owner === null`).
-  const companyGroups = groupClientsByCompany(clients);
+  // Perf Phase 2: memoize the company grouping + search filter so they don't
+  // re-run on every parent poll re-render or unrelated state change — only
+  // when the clients list or the search text actually changes.
+  const companyGroups = React.useMemo(() => groupClientsByCompany(clients), [clients]);
   const query = clientSearchQuery.toLowerCase();
-  const filteredCompanyGroups = companyGroups.filter(group =>
+  const filteredCompanyGroups = React.useMemo(() => companyGroups.filter(group =>
     group.companyName.toLowerCase().includes(query) ||
     (!!group.owner && (
       group.owner.contactName.toLowerCase().includes(query) ||
       group.owner.email.toLowerCase().includes(query)
     ))
-  );
+  ), [companyGroups, query]);
+
+  // Perf Phase 2: index shipments by normalized company name ONCE per
+  // shipments change. The row map below previously ran
+  // `shipments.filter(...)` per company group — O(groups × shipments) on
+  // every render; this makes each group's lookup O(1).
+  const shipmentsByCompany = React.useMemo(() => {
+    const idx: Record<string, typeof shipments> = {};
+    for (const s of shipments) {
+      const key = (s.companyName || "").toLowerCase().trim();
+      (idx[key] ||= []).push(s);
+    }
+    return idx;
+  }, [shipments]);
 
   return (
     <div className="space-y-6 animate-fade-in font-sans">
@@ -422,7 +438,7 @@ export default function AdminClientsSection({
                 </tr>
               ) : (
                 filteredCompanyGroups.map((group) => {
-                  const clientShipments = shipments.filter(s => s.companyName.toLowerCase().trim() === group.companyName.toLowerCase().trim());
+                  const clientShipments = shipmentsByCompany[group.companyName.toLowerCase().trim()] || [];
                   const isExpanded = expandedClientOrdersCompanyName === group.companyName;
                   const owner = group.owner;
                   const rowKey = owner ? owner.id : `orphaned:${group.companyName.toLowerCase().trim()}`;

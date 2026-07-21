@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   Shipment,
   Language,
@@ -667,8 +667,23 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     }
   }, [drivers]);
 
-  // Dynamically filter shipments based on state
-  const inTransitShipments = shipments.filter(s => {
+  // Perf Phase 2: O(1) driver lookups. This component re-renders every 4s
+  // (the animation ticker) and on every search keystroke / filter toggle;
+  // the map/filter passes below used to run `localDrivers.find(...)` per
+  // shipment (O(shipments × drivers)) on each of those renders. A driver-by-id
+  // index makes every lookup O(1) and only rebuilds when the drivers change.
+  // NB: `Map` here would resolve to the @vis.gl/react-google-maps <Map>
+  // component (imported above), so we use a plain Record as the O(1) index.
+  const driversById = useMemo(() => {
+    const idx: Record<string, Driver> = {};
+    for (const d of localDrivers) idx[d.id] = d;
+    return idx;
+  }, [localDrivers]);
+
+  // Dynamically filter shipments based on state.
+  // Perf Phase 2: memoized so the status filter isn't re-run on every 4s
+  // animation tick (only when the shipment list or the status filter change).
+  const inTransitShipments = useMemo(() => shipments.filter(s => {
     if (mapStatusFilter === "in_transit") {
       return s.status === "In Transit";
     }
@@ -677,7 +692,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       return s.status !== "Closed" && s.status !== "Delivered";
     }
     return true; // "all" shows all statuses
-  });
+  }), [shipments, mapStatusFilter]);
 
   // Simple state count for a ticking timer that slightly alters the position of transit trucks
   const [ticker, setTicker] = useState<number>(0);
@@ -690,10 +705,12 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     return () => clearInterval(interval);
   }, []);
 
-  // Filter by dynamic search query AND active truck filter selections
-  const filteredTransit = inTransitShipments.filter(s => {
+  // Filter by dynamic search query AND active truck filter selections.
+  // Perf Phase 2: memoized (was recomputed on every 4s ticker tick and every
+  // unrelated re-render) and driver lookups are now O(1) via driversById.
+  const filteredTransit = useMemo(() => inTransitShipments.filter(s => {
     // 1. Truck Type Filter
-    const driver = localDrivers.find(d => d.id === s.assignedDriverId);
+    const driver = driversById[s.assignedDriverId || ""];
     const tType = driver?.truckType || "unspecified";
     if (!selectedTruckTypes.includes(tType)) {
       return false;
@@ -708,19 +725,24 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       s.deliveryCity.toLowerCase().includes(q) ||
       (s.assignedDriverName && s.assignedDriverName.toLowerCase().includes(q))
     );
-  });
+  }), [inTransitShipments, driversById, selectedTruckTypes, searchQuery]);
 
-  // Calculate the count of active trucks matching each type
-  const getTruckTypeCount = (typeId: string): number => {
-    return inTransitShipments.filter(s => {
-      const driver = localDrivers.find(d => d.id === s.assignedDriverId);
+  // Perf Phase 2: precompute per-truck-type counts once per render pass
+  // (was O(types × shipments × drivers) via a getTruckTypeCount() called
+  // inside the truck-type filter's .map on every render — now O(shipments)).
+  const truckTypeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const s of inTransitShipments) {
+      const driver = driversById[s.assignedDriverId || ""];
       const tType = driver?.truckType || "unspecified";
-      return tType === typeId;
-    }).length;
-  };
+      counts[tType] = (counts[tType] || 0) + 1;
+    }
+    return counts;
+  }, [inTransitShipments, driversById]);
+  const getTruckTypeCount = (typeId: string): number => truckTypeCounts[typeId] || 0;
 
   const getShipmentGpsState = (s: Shipment): "live_gps" | "dead_reckoning" | "static" => {
-    const driver = localDrivers.find(d => d.id === s.assignedDriverId);
+    const driver = driversById[s.assignedDriverId || ""];
     if (
       driver &&
       typeof driver.latitude === "number" &&
@@ -735,7 +757,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   // Get vector graphical SVG coordinates and real GPS coordinates
   const getShipmentVectorLocation = (s: Shipment): { x: number; y: number; percentage: number; isActualGps?: boolean; lat: number; lng: number } => {
-    const driver = localDrivers.find(d => d.id === s.assignedDriverId);
+    const driver = driversById[s.assignedDriverId || ""];
     if (driver && typeof driver.latitude === 'number' && typeof driver.longitude === 'number' && driver.latitude !== 0 && driver.longitude !== 0) {
       // Map Lat/Lng to Vector 850x550 coordinate space
       const latMin = 30.0;
