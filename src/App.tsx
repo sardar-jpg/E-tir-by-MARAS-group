@@ -3,6 +3,7 @@ import { usePushNotifications } from "./hooks/usePushNotifications";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { attachBrowserPolling } from "./hooks/browserPolling";
 import { createToastTimer, type ToastTimer } from "./lib/toastTimer";
+import { touchStoredSessionActivity } from "./lib/sessionActivity";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 // BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
@@ -435,24 +436,18 @@ export default function App() {
     };
   }, []);
 
-  // Update session activity helper
+  // Update session activity helper.
+  //
+  // Perf Phase 3: STORAGE-ONLY. Every consumer of lastActive — the passive
+  // 30s expiration checker below, the boot-time 24h check, and the
+  // localSessionFastPath validator — reads the STORED session, never React
+  // state, so the setSession call this used to make bought nothing except a
+  // root-App re-render (plus activity-listener teardown/resubscribe via the
+  // [session] effect dep) every 30 seconds of activity. The 24-hour
+  // inactivity policy, throttle, events, and logout flows are unchanged;
+  // touchStoredSessionActivity never throws (src/lib/sessionActivity.ts).
   const updateSessionActivity = () => {
-    try {
-      const stored = localStorage.getItem("etir_session");
-      if (stored) {
-        const parsed: AppSession = JSON.parse(stored);
-        parsed.lastActive = Date.now();
-        localStorage.setItem("etir_session", JSON.stringify(parsed));
-        setSession(prev => {
-          if (prev) {
-            return { ...prev, lastActive: parsed.lastActive };
-          }
-          return prev;
-        });
-      }
-    } catch (e) {
-      console.error("Error updating session activity status:", e);
-    }
+    touchStoredSessionActivity(localStorage);
   };
 
   // Passive expiration checker interval
