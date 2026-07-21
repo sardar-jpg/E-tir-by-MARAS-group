@@ -145,9 +145,10 @@ describe("status-code contract and PR #137 protections remain intact", () => {
     expect(SERVER).toContain('res.status(403).json({ error: "You do not have access to this shipment." })');
     expect(SERVER).toContain('res.status(404).json({ error: "Driver not found." })');
     expect(SERVER).toContain("SESSION_VERIFICATION_UNAVAILABLE_CODE");
-    // Owner + fail-closed session machinery untouched.
+    // Owner + fail-closed session machinery untouched. Perf Phase 1 caches
+    // only the backing READ; the pure verdict still runs on every request.
     expect(SERVER).toContain("isOwnerSession(payload, ownerEmail)");
-    expect(SERVER).toContain("evaluateSessionBacking(payload, { exists: snap.exists()");
+    expect(SERVER).toContain("evaluateSessionBacking(payload, backing)");
     const gateCalls = SERVER.split("if (respondIfSessionVerificationUnavailable(req, res)) return;").length - 1;
     expect(gateCalls).toBeGreaterThanOrEqual(11);
   });

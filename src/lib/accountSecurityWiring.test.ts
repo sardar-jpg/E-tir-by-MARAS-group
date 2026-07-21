@@ -22,7 +22,13 @@ describe("stale-session invalidation is wired into the session middleware (fail-
   it("every authenticated request verifies the backing account through the tested pure module", () => {
     expect(MW).toContain("isOwnerSession(payload, ownerEmail)");
     expect(MW).toContain("backingCollectionForRole(payload.role)");
-    expect(MW).toContain("evaluateSessionBacking(payload, { exists: snap.exists()");
+    // Perf Phase 1: the verdict is still re-computed on EVERY request through
+    // the pure module; only the backing READ is cached (a miss still reads
+    // Firestore and builds the backing from the live snapshot).
+    expect(MW).toContain("evaluateSessionBacking(payload, backing)");
+    expect(MW).toContain("sessionVerificationCache.get(payload.role, payload.id)");
+    expect(MW).toContain("exists: snap.exists()");
+    expect(MW).toContain("projectBackingRecord(snap.data()");
     // Definitive rejection: the session is simply not attached (ordinary
     // 401 downstream); nothing is ever created from stale session data.
     expect(MW).not.toContain("setDoc(");
@@ -37,6 +43,9 @@ describe("stale-session invalidation is wired into the session middleware (fail-
     const catchAt = MW.indexOf("} catch (err) {");
     const catchBlock = MW.slice(catchAt, MW.indexOf("next();", catchAt));
     expect(catchBlock).not.toContain("req.session = payload");
+    // Perf Phase 1: a Firestore ERROR must never poison the cache with a
+    // "successful" backing — the cache is only written on the try path.
+    expect(catchBlock).not.toContain("sessionVerificationCache.set");
     expect(catchBlock).toContain("verification unavailable");
     // The old fail-open wording is gone from the server entirely.
     expect(SERVER).not.toContain("keeping session for this request");

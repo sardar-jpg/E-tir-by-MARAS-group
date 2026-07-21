@@ -15,6 +15,7 @@ if (process.env.DD_API_KEY) {
 }
 
 import express from "express";
+import compression from "compression";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -42,6 +43,8 @@ import { assessProductionConfig } from "./src/lib/productionConfig";
 import { evaluateSchedulerAuth, shouldSkipAutomaticRun, isDuplicateSchedulerFire, canTakeOverAuditLock, summarizeRunForLog, assessSchedulerHealth, shouldRecordSchedulerTimeout, SCHEDULER_HTTP_DEADLINE_MS, type SchedulerState } from "./src/lib/auditScheduler";
 import { findGlobalIdentityCollision, identityConflictMessage, buildOwnerIdentityRecord, validateCreatedAdminType, parseAdminType, type IdentityRecord } from "./src/lib/accountIdentity";
 import { evaluateSessionBacking, backingCollectionForRole, isOwnerSession, SESSION_VERIFICATION_UNAVAILABLE_CODE, SESSION_VERIFICATION_UNAVAILABLE_MESSAGE } from "./src/lib/sessionBacking";
+import { sessionVerificationCache, projectBackingRecord } from "./src/lib/sessionVerificationCache";
+import { cacheControlForAsset, shouldCompress } from "./src/lib/httpCaching";
 import { IDENTITY_KEYS_COLLECTION, OWNER_RESERVATION_SOURCE, IdentityConflictError, computeIdentityClaims, computeOwnerClaims, diffIdentityClaims, findClaimConflict, canReleaseReservation, buildReservationRecord, applyIdentityReservationMemory, type IdentityKeyClaim, type IdentityReservationRecord } from "./src/lib/identityReservation";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
 import {
@@ -4011,6 +4014,25 @@ async function startServer() {
   app.set("trust proxy", 1);
 
   // Use JSON middleware with reasonable limits for inline file mock uploads (base64)
+  // Perf Phase 1: origin gzip. This app is served directly by Express on
+  // Cloud Run (deploy/cloudbuild.yaml) with no fronting CDN/load-balancer in
+  // the repo, and Cloud Run does not auto-compress — so JSON/JS/CSS/HTML/SVG
+  // responses would otherwise ship uncompressed. The filter follows the pure,
+  // unit-tested policy in src/lib/httpCaching.ts (skips already-compressed
+  // images/fonts/pdf/zip), and honours the conventional `x-no-compression`
+  // opt-out. It never changes response bodies or contracts, only encoding.
+  app.use(
+    compression({
+      filter: (req, res) => {
+        if (req.headers["x-no-compression"]) return false;
+        const ct = res.getHeader("Content-Type");
+        const ctStr = Array.isArray(ct) ? ct[0] : typeof ct === "string" ? ct : undefined;
+        if (ctStr) return shouldCompress(ctStr);
+        return compression.filter(req, res);
+      },
+    })
+  );
+
   app.use(express.json({ limit: "20mb" }));
 
   // PR #128 — monitoring observer: classifies every finished /api request
@@ -4212,8 +4234,22 @@ async function startServer() {
     if (!collectionName) return next(); // unknown role: never attach
 
     try {
-      const snap = await getDoc(doc(db, collectionName, payload.id));
-      const check = evaluateSessionBacking(payload, { exists: snap.exists(), record: snap.exists() ? (snap.data() as Record<string, unknown>) : undefined });
+      // Performance Phase 1: cache the BACKING READ ONLY (see
+      // src/lib/sessionVerificationCache.ts). The token signature+expiry are
+      // already verified above on every request, and the pure verdict
+      // (evaluateSessionBacking) below still runs on every request against
+      // the live payload — only the Firestore document read is collapsed
+      // across a short (5s) window so polling bursts don't fan out into one
+      // read per request. A cache miss/expiry reads Firestore; a Firestore
+      // ERROR (catch below) is never cached and keeps the fail-closed 503
+      // path; account mutations invalidate the entry immediately.
+      let backing = sessionVerificationCache.get(payload.role, payload.id);
+      if (!backing) {
+        const snap = await getDoc(doc(db, collectionName, payload.id));
+        backing = { exists: snap.exists(), record: snap.exists() ? projectBackingRecord(snap.data() as Record<string, unknown>) : undefined };
+        sessionVerificationCache.set(payload.role, payload.id, backing);
+      }
+      const check = evaluateSessionBacking(payload, backing);
       if (check.ok) {
         req.session = payload;
       } else {
@@ -7758,6 +7794,9 @@ async function startServer() {
         `Admin account deleted: ${deletedAdmin?.name || id}${deletedAdmin?.adminType ? ` (${deletedAdmin.adminType})` : ""}`,
         `Yönetici hesabı silindi: ${deletedAdmin?.name || id}`,
         `تم حذف حساب المسؤول: ${deletedAdmin?.name || id}`).catch(() => {});
+      // Perf Phase 1: drop any cached backing so the deleted admin's stale
+      // session is rejected on its very next request, not up to one TTL later.
+      sessionVerificationCache.invalidate("admin", id);
       res.json({ success: true, message: "Admin deleted successfully" });
     } catch (err) {
       console.error(err);
@@ -7812,6 +7851,8 @@ async function startServer() {
         if (added.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionGranted, entityType: "employee", entityId: req.params.id, result: "success", metadata: { grantedKeys: added }, afterSnapshot: { grantedKeys: added } });
         if (removed.length) await recordAudit(req, { action: AUDIT_ACTIONS.permissionRevoked, entityType: "employee", entityId: req.params.id, result: "success", metadata: { revokedKeys: removed }, afterSnapshot: { revokedKeys: removed } });
       }
+      // Perf Phase 1: permission/adminType change must take effect immediately.
+      sessionVerificationCache.invalidate("admin", req.params.id);
       res.json({ id: req.params.id, permissions: after, added, removed });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -7977,6 +8018,8 @@ async function startServer() {
         });
       }
 
+      // Perf Phase 1: invalidate the deleted driver's cached backing.
+      sessionVerificationCache.invalidate("driver", id);
       res.json({
         success: true,
         message: "Driver deleted successfully",
@@ -8104,6 +8147,8 @@ async function startServer() {
           accountDelete: { collection: "clients", id: targetId },
         });
       }
+      // Perf Phase 1: invalidate the deleted client's cached backing.
+      sessionVerificationCache.invalidate("client", targetId);
       res.json({ success: true, message: "Client deleted successfully" });
     } catch (err) {
       console.error(err);
@@ -8767,6 +8812,8 @@ async function startServer() {
         }
       }
 
+      // Perf Phase 1: approval/rejection changes driver session validity now.
+      sessionVerificationCache.invalidate("driver", id);
       res.json({ success: true, status });
     } catch (err) {
       console.error(err);
@@ -8959,6 +9006,9 @@ async function startServer() {
       }
 
       const updated = { ...clientDoc.data(), ...updates } as Client;
+      // Perf Phase 1: a client update can flip `active` (disable), which is
+      // session-authorization-relevant — invalidate so it takes effect now.
+      sessionVerificationCache.invalidate("client", req.params.id);
       res.json(stripPassword(updated));
     } catch (err) {
       console.error(err);
@@ -9148,6 +9198,9 @@ async function startServer() {
         }
       }
 
+      // Perf Phase 1: profile update never changes approval status, but
+      // invalidate defensively so the cached backing can never lag a write.
+      sessionVerificationCache.invalidate("driver", req.params.id);
       res.json(sanitizeDriver(updatedDriver));
     } catch (err) {
       console.error(err);
@@ -13652,8 +13705,22 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    // Perf Phase 1: content-hashed Vite assets under /assets/ are immutable
+    // for a year; the HTML entry document is no-cache so a new deploy is seen
+    // on the next load. Policy is the pure, unit-tested cacheControlForAsset
+    // (src/lib/httpCaching.ts) — never applied to API/data responses.
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const urlPath = "/" + path.relative(distPath, filePath).split(path.sep).join("/");
+          res.setHeader("Cache-Control", cacheControlForAsset(urlPath));
+        },
+      })
+    );
     app.get("*", (req, res) => {
+      // SPA fallback always returns the entry HTML — must revalidate so a
+      // deploy is picked up immediately (never immutably cached).
+      res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
