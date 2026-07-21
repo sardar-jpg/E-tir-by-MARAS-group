@@ -4,8 +4,10 @@ import type { ChatMessage } from "../types";
 
 describe("filterShipmentsBySearch", () => {
   const shipments = [
-    { shipmentNumber: "ETIR-2026-001" },
-    { shipmentNumber: "ETIR-2026-002" },
+    // Canonical Order Number format: MAR-YYYY-#### (exactly four zero-padded
+    // sequence digits). Replaces the obsolete ETIR-2026-00# fixtures (audit F-4).
+    { shipmentNumber: "MAR-2026-0001" },
+    { shipmentNumber: "MAR-2026-0002" },
     { shipmentNumber: "MARAS-0099" },
   ];
 
@@ -15,8 +17,8 @@ describe("filterShipmentsBySearch", () => {
   });
 
   it("matches case-insensitively on a substring", () => {
-    expect(filterShipmentsBySearch(shipments, "2026-001")).toEqual([shipments[0]]);
-    expect(filterShipmentsBySearch(shipments, "etir-2026")).toEqual([shipments[0], shipments[1]]);
+    expect(filterShipmentsBySearch(shipments, "2026-0001")).toEqual([shipments[0]]);
+    expect(filterShipmentsBySearch(shipments, "mar-2026")).toEqual([shipments[0], shipments[1]]);
   });
 
   it("returns an empty array when nothing matches", () => {
