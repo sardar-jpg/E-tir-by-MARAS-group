@@ -16,10 +16,12 @@ const region = (needle: string, length: number): string => {
 };
 
 describe("route permissions", () => {
-  it("settings: view = costs.view; workflow config write = Super Admin only", () => {
+  it("settings: view = costs.view; workflow config write = costs.manageApprovalWorkflow permission (NOT Super Admin only)", () => {
     expect(SERVER).toContain('app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view")');
-    expect(SERVER).toContain('app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin');
-    expect(region('app.put("/api/admin/accounting/approval-workflow"', 900)).toContain("validateWorkflowConfig(");
+    // Phase 2: approval-settings editing is the granular permission, never requireSuperAdmin.
+    expect(SERVER).toContain('app.put("/api/admin/accounting/approval-workflow", requirePermission("costs.manageApprovalWorkflow")');
+    expect(SERVER).not.toContain('app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin');
+    expect(region('app.put("/api/admin/accounting/approval-workflow"', 900)).toContain("validateApproverList(");
   });
   it("submit requires costs.edit; approve/reject require costs.approve (assigned-approver still enforced in the pure logic)", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/submit", requirePermission("costs.edit")');
@@ -34,15 +36,18 @@ describe("route permissions", () => {
 
 describe("actor identity is server-derived, decisions go through the pure module", () => {
   it("submit/approve/reject/reopen use pure guards and the session id, never body identity", () => {
-    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 2600);
+    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 3200);
     expect(SUBMIT).toContain("canSubmitForApproval(status)");
-    expect(SUBMIT).toContain("isWorkflowConfigUsable(config");
+    // Phase 2: submit validates the ordered approver list and CAPTURES it onto the cycle.
+    expect(SUBMIT).toContain("validateApproverList(");
+    expect(SUBMIT).toContain("cycleApproverUserIds:");
     expect(SUBMIT).toContain("resolveWorkflowActorName(req.session!)");
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
-    expect(APPROVE).toContain("canApproveStage({ status, config, actorId: req.session!.id");
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
+    // Phase 2: approval decides against the captured cycle approver list, not live config.
+    expect(APPROVE).toContain("canApproveCyclePosition({ status, cycleApprovers, actorId: req.session!.id");
     expect(APPROVE).not.toContain("req.body.actorId");
-    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 2400);
-    expect(REJECT).toContain("canRejectStage({ status, config, actorId: req.session!.id");
+    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 3200);
+    expect(REJECT).toContain("canRejectCyclePosition({ status, cycleApprovers, actorId: req.session!.id");
   });
   it("every workflow transition re-reads + re-decides INSIDE an atomic mutation (BLOCKER 2)", () => {
     // All five simple routes and the finalization route funnel their state
@@ -73,9 +78,9 @@ describe("actor identity is server-derived, decisions go through the pure module
 
 describe("final closure integrity + idempotent, crash-recoverable finalization", () => {
   it("finalization reserves a 'finalizing' state, then stores the PDF BEFORE closing; failure returns 502 and does not close", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
-    // A deterministic finalization decision drives begin/resume/close.
-    expect(APPROVE).toContain("decideFinalization({");
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
+    // A deterministic finalization decision (cycle-snapshot based) drives begin/resume/close.
+    expect(APPROVE).toContain("decideCycleFinalization({");
     expect(APPROVE).toContain('accountingStatus: "finalizing"');
     const finalizeAt = APPROVE.indexOf("finalizeCostStatementPdf(");
     const closedAt = APPROVE.indexOf('accountingStatus: "final_closed"');
@@ -90,7 +95,7 @@ describe("final closure integrity + idempotent, crash-recoverable finalization",
     expect(FINALIZE).toContain("buildFinalPdfModel(");
   });
   it("the closure commit is idempotent — it dedupes on the key and appends versions, never overwrites", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
     expect(APPROVE).toContain("hasFinalVersionFor(");
     expect(APPROVE).toContain("[...((stmt.finalVersions");
   });

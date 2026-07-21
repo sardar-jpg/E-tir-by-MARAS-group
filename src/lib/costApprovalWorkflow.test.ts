@@ -5,6 +5,11 @@ import {
   canRequestReopen, canDecideReopen, pendingStageForStatus, nextStatusAfterApproval, nextStageAfterApproval,
   appendHistory, approvalsForCycle, latestStageApprovals, buildFinalPdfFileName,
   finalizationKeyFor, hasFinalVersionFor, decideFinalization,
+  // Phase 2 — user-based ordered approver chains + per-cycle snapshot.
+  MIN_APPROVERS, MAX_APPROVERS, validateApproverList, isApproverConfigUsable, resolveConfiguredApprovers,
+  resolveCycleApprovers, hasCycleApproverSnapshot, statusForApproverPosition, approverPositionForStatus,
+  stageLabelForPosition, nextStatusAfterPosition, nextPositionToNotify,
+  canApproveCyclePosition, canRejectCyclePosition, decideCycleFinalization,
   type CostApprovalWorkflowConfig, type ApprovalHistoryEntry, type FinalPdfVersion,
 } from "./costApprovalWorkflow";
 
@@ -192,5 +197,159 @@ describe("idempotent finalization primitives", () => {
     if (other.action === "reject") expect(other.code).toBe("finalizing_in_progress");
     // A mismatched key (someone else's finalization) is also rejected.
     expect(decideFinalization({ status: "finalizing", config: CONFIG, actorId: "md1", actingRevision: 3, storedRevision: 3, cycle: 1, existingKey: "s1:1:2", shipmentId: "s1" }).action).toBe("reject");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2 — configurable user-based approvers + per-cycle snapshot
+// ═══════════════════════════════════════════════════════════════════════════
+const ACTIVE2 = ["u1", "u2", "u3", "u4"];
+
+describe("Phase 2 — approver list validation", () => {
+  it("bounds are two required, three maximum", () => {
+    expect(MIN_APPROVERS).toBe(2);
+    expect(MAX_APPROVERS).toBe(3);
+  });
+  it("accepts two distinct active users", () => {
+    const r = validateApproverList({ approverUserIds: ["u1", "u2"], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.approverUserIds).toEqual(["u1", "u2"]);
+  });
+  it("accepts three distinct active users", () => {
+    expect(validateApproverList({ approverUserIds: ["u1", "u2", "u3"], activeAdminIds: ACTIVE2 }).ok).toBe(true);
+  });
+  it("rejects a single user (Approver 2 required)", () => {
+    const r = validateApproverList({ approverUserIds: ["u1"], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("two approvers");
+  });
+  it("rejects more than three users", () => {
+    const r = validateApproverList({ approverUserIds: ["u1", "u2", "u3", "u4"], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("maximum of three");
+  });
+  it("rejects a duplicate user", () => {
+    const r = validateApproverList({ approverUserIds: ["u1", "u1"], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("more than once");
+  });
+  it("rejects an inactive/invalid selected user by position", () => {
+    const r = validateApproverList({ approverUserIds: ["u1", "ghost"], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("Approver 2");
+  });
+  it("blank entries are ignored (so a cleared Approver 3 leaves a valid two-approver list)", () => {
+    const r = validateApproverList({ approverUserIds: ["u1", "u2", ""], activeAdminIds: ACTIVE2 });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.approverUserIds).toEqual(["u1", "u2"]);
+  });
+  it("replacing an approver keeps the list valid", () => {
+    const replaced = ["u1", "u2"].map((x) => (x === "u2" ? "u3" : x));
+    expect(validateApproverList({ approverUserIds: replaced, activeAdminIds: ACTIVE2 }).ok).toBe(true);
+  });
+  it("isApproverConfigUsable reflects the resolved list; a legacy 3-title config still resolves", () => {
+    expect(isApproverConfigUsable({ approverUserIds: ["u1", "u2"] }, ACTIVE2)).toBe(true);
+    expect(isApproverConfigUsable({ approverUserIds: ["u1"] }, ACTIVE2)).toBe(false);
+    // legacy fixed-title config → ordered [ops, acc, md].
+    expect(resolveConfiguredApprovers({ operations_manager: "u1", accounts_manager: "u2", managing_director: "u3" })).toEqual(["u1", "u2", "u3"]);
+    expect(isApproverConfigUsable({ operations_manager: "u1", accounts_manager: "u2", managing_director: "u3" }, ACTIVE2)).toBe(true);
+    // approverUserIds takes precedence over legacy fields when both present.
+    expect(resolveConfiguredApprovers({ approverUserIds: ["u4", "u1"], operations_manager: "u2" })).toEqual(["u4", "u1"]);
+  });
+});
+
+describe("Phase 2 — position helpers", () => {
+  it("maps positions 0/1/2 to the three internal pending statuses and back", () => {
+    expect(statusForApproverPosition(0)).toBe("pending_operations_approval");
+    expect(statusForApproverPosition(1)).toBe("pending_accounts_approval");
+    expect(statusForApproverPosition(2)).toBe("pending_managing_director_approval");
+    expect(approverPositionForStatus("pending_operations_approval")).toBe(0);
+    expect(approverPositionForStatus("pending_accounts_approval")).toBe(1);
+    expect(approverPositionForStatus("pending_managing_director_approval")).toBe(2);
+    expect(approverPositionForStatus("draft")).toBeNull();
+    expect(approverPositionForStatus("final_closed")).toBeNull();
+  });
+  it("stage label per position stays stable for PDF/history compatibility", () => {
+    expect(stageLabelForPosition(0)).toBe("operations_manager");
+    expect(stageLabelForPosition(1)).toBe("accounts_manager");
+    expect(stageLabelForPosition(2)).toBe("managing_director");
+  });
+  it("finalizes after the LAST position for two- and three-approver chains", () => {
+    // Two approvers: position 1 is last → final_closed.
+    expect(nextStatusAfterPosition(0, 2)).toBe("pending_accounts_approval");
+    expect(nextStatusAfterPosition(1, 2)).toBe("final_closed");
+    expect(nextPositionToNotify(0, 2)).toBe(1);
+    expect(nextPositionToNotify(1, 2)).toBeNull();
+    // Three approvers: position 2 is last → final_closed.
+    expect(nextStatusAfterPosition(0, 3)).toBe("pending_accounts_approval");
+    expect(nextStatusAfterPosition(1, 3)).toBe("pending_managing_director_approval");
+    expect(nextStatusAfterPosition(2, 3)).toBe("final_closed");
+    expect(nextPositionToNotify(1, 3)).toBe(2);
+    expect(nextPositionToNotify(2, 3)).toBeNull();
+  });
+});
+
+describe("Phase 2 — per-cycle snapshot resolution", () => {
+  it("hasCycleApproverSnapshot requires at least two captured ids", () => {
+    expect(hasCycleApproverSnapshot({ cycleApproverUserIds: ["u1", "u2"] })).toBe(true);
+    expect(hasCycleApproverSnapshot({ cycleApproverUserIds: ["u1"] })).toBe(false);
+    expect(hasCycleApproverSnapshot({})).toBe(false);
+    expect(hasCycleApproverSnapshot(undefined)).toBe(false);
+  });
+  it("prefers the captured snapshot over the current config (settings changes never touch an active cycle)", () => {
+    const state = { cycleApproverUserIds: ["u1", "u2", "u3"] };
+    const changedConfig: CostApprovalWorkflowConfig = { approverUserIds: ["u4", "u1"] };
+    expect(resolveCycleApprovers(state, changedConfig)).toEqual(["u1", "u2", "u3"]);
+  });
+  it("falls back to the current config ONCE for a legacy in-flight cycle without a snapshot", () => {
+    const legacyState = { accountingStatus: "pending_operations_approval" as const };
+    expect(resolveCycleApprovers(legacyState, { approverUserIds: ["u1", "u2"] })).toEqual(["u1", "u2"]);
+    // legacy fixed-title config resolves too.
+    expect(resolveCycleApprovers(legacyState, { operations_manager: "u1", accounts_manager: "u2", managing_director: "u3" })).toEqual(["u1", "u2", "u3"]);
+  });
+});
+
+describe("Phase 2 — cycle-snapshot approve/reject/finalize decisions", () => {
+  const THREE = ["u1", "u2", "u3"];
+  const TWO = ["u1", "u2"];
+  it("only the captured approver for the pending position may approve; wrong approver / stale revision rejected", () => {
+    const base = { status: "pending_operations_approval" as const, cycleApprovers: THREE, actingRevision: 3, storedRevision: 3 };
+    expect(canApproveCyclePosition({ ...base, actorId: "u1" }).ok).toBe(true);
+    const wrong = canApproveCyclePosition({ ...base, actorId: "u2" });
+    expect(wrong.ok).toBe(false);
+    if (!wrong.ok) expect(wrong.code).toBe("wrong_approver");
+    const stale = canApproveCyclePosition({ ...base, actorId: "u1", actingRevision: 2, storedRevision: 5 });
+    if (!stale.ok) expect(stale.code).toBe("stale_revision");
+  });
+  it("a position beyond the captured list is not pending (safe for a shortened legacy chain)", () => {
+    // A two-approver cycle has no position 2 (pending_managing_director).
+    const r = canApproveCyclePosition({ status: "pending_managing_director_approval", cycleApprovers: TWO, actorId: "u1", actingRevision: 1, storedRevision: 1 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("not_pending");
+  });
+  it("reject requires the captured approver and a reason", () => {
+    const base = { status: "pending_accounts_approval" as const, cycleApprovers: THREE };
+    expect(canRejectCyclePosition({ ...base, actorId: "u2", reason: "" }).ok).toBe(false);
+    expect(canRejectCyclePosition({ ...base, actorId: "u1", reason: "fix" }).ok).toBe(false); // wrong approver
+    expect(canRejectCyclePosition({ ...base, actorId: "u2", reason: "fix" }).ok).toBe(true);
+  });
+  it("two-approver chain finalizes at position 1 (accounts slot); three-approver at position 2", () => {
+    // Two-approver: the SECOND approver (position 1) begins finalization.
+    const twoFinal = decideCycleFinalization({ status: "pending_accounts_approval", cycleApprovers: TWO, actorId: "u2", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" });
+    expect(twoFinal.action).toBe("begin");
+    // Position 0 of a two-approver chain is NOT the final stage.
+    const twoNotFinal = decideCycleFinalization({ status: "pending_operations_approval", cycleApprovers: TWO, actorId: "u1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" });
+    expect(twoNotFinal.action).toBe("reject");
+    if (twoNotFinal.action === "reject") expect(twoNotFinal.code).toBe("not_final_stage");
+    // Three-approver: position 2 (third approver) begins finalization.
+    const threeFinal = decideCycleFinalization({ status: "pending_managing_director_approval", cycleApprovers: THREE, actorId: "u3", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: undefined, shipmentId: "s1" });
+    expect(threeFinal.action).toBe("begin");
+  });
+  it("only the captured last approver may resume an in-progress finalization", () => {
+    const key = "s1:1:2";
+    expect(decideCycleFinalization({ status: "finalizing", cycleApprovers: TWO, actorId: "u2", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" }).action).toBe("resume");
+    const other = decideCycleFinalization({ status: "finalizing", cycleApprovers: TWO, actorId: "u1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" });
+    expect(other.action).toBe("reject");
+    expect(decideCycleFinalization({ status: "final_closed", cycleApprovers: TWO, actorId: "u2", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" }).action).toBe("already_closed");
   });
 });

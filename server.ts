@@ -73,11 +73,15 @@ import {
 } from "./src/lib/accountDeletion";
 import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError, CostStatementAccountingLockedError } from "./src/lib/costStatementMath";
 import {
-  validateWorkflowConfig, isWorkflowConfigUsable, resolveAccountingStatus, resolveApprovalCycle,
-  isFinancialEditingAllowed, canSubmitForApproval, canApproveStage, canRejectStage,
-  canRequestReopen, canDecideReopen, pendingStageForStatus, assigneeForStage,
-  nextStatusAfterApproval, nextStageAfterApproval, appendHistory, approvalsForCycle,
-  buildFinalPdfFileName, APPROVAL_STAGES, decideFinalization, hasFinalVersionFor,
+  resolveAccountingStatus, resolveApprovalCycle,
+  isFinancialEditingAllowed, canSubmitForApproval,
+  canRequestReopen, canDecideReopen, appendHistory, approvalsForCycle,
+  buildFinalPdfFileName, hasFinalVersionFor,
+  // Phase 2 — user-based, ordered approver chains + per-cycle snapshot.
+  validateApproverList, isApproverConfigUsable, resolveConfiguredApprovers,
+  resolveCycleApprovers, hasCycleApproverSnapshot, approverPositionForStatus,
+  statusForApproverPosition, stageLabelForPosition, nextStatusAfterPosition,
+  nextPositionToNotify, canApproveCyclePosition, canRejectCyclePosition, decideCycleFinalization,
   type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
 } from "./src/lib/costApprovalWorkflow";
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
@@ -10576,7 +10580,7 @@ async function startServer() {
    * always active. This same filtered set drives both the Settings
    * selectors and workflow-config validation, so a disabled/defective or
    * deleted employee cannot be assigned, fails validation if saved, and
-   * (via isWorkflowConfigUsable at submit time) blocks submission if it
+   * (via isApproverConfigUsable at submit time) blocks submission if it
    * was assigned before becoming unavailable.
    */
   async function loadActiveAdminIds(): Promise<string[]> {
@@ -10810,11 +10814,9 @@ async function startServer() {
     }
   }
 
-  /** Super + Accounts admins to notify when a statement is finalized. */
-  function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
-    const ids = new Set<string>();
-    for (const stage of APPROVAL_STAGES) { const id = assigneeForStage(config, stage); if (id) ids.add(id); }
-    return [...ids];
+  /** The cycle's approvers to notify when a statement is finalized. */
+  function approverIdsToNotifyOnFinal(cycleApprovers: string[]): string[] {
+    return [...new Set(cycleApprovers.filter((id) => typeof id === "string" && id.length > 0))];
   }
 
   /**
@@ -10875,35 +10877,39 @@ async function startServer() {
     return { url: `/api/uploads/${fileId}`, path, fileName };
   }
 
-  // GET workflow settings (any accounting viewer); PUT (Super Admin only).
+  // GET workflow settings (any accounting viewer). PUT is Phase 2: a user-based
+  // ORDERED approver list (2 required, 3rd optional), gated by the granular
+  // costs.manageApprovalWorkflow permission — NOT hardcoded to Super Admin.
   app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
-      const usable = isWorkflowConfigUsable(config, await loadActiveAdminIds());
-      res.json({ config, usable });
+      const usable = isApproverConfigUsable(config, await loadActiveAdminIds());
+      // Always surface the resolved ordered list so the client is user-based
+      // even when reading a legacy fixed-title config.
+      res.json({ config, usable, approverUserIds: resolveConfiguredApprovers(config) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to load approval workflow settings." });
     }
   });
-  app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin, async (req, res) => {
+  app.put("/api/admin/accounting/approval-workflow", requirePermission("costs.manageApprovalWorkflow"), async (req, res) => {
     try {
       const body = req.body || {};
-      const result = validateWorkflowConfig({
-        operations_manager: body.operations_manager,
-        accounts_manager: body.accounts_manager,
-        managing_director: body.managing_director,
-        activeAdminIds: await loadActiveAdminIds(),
-      });
+      // Accept the new ordered list; fall back to the legacy three named fields
+      // so an older client payload still validates into an ordered list.
+      const submitted = Array.isArray(body.approverUserIds)
+        ? body.approverUserIds
+        : [body.operations_manager, body.accounts_manager, body.managing_director].filter((x) => typeof x === "string" && x.trim().length > 0);
+      const result = validateApproverList({ approverUserIds: submitted, activeAdminIds: await loadActiveAdminIds() });
       if (!result.ok) return res.status(400).json({ error: result.error });
       const config: CostApprovalWorkflowConfig = {
-        ...result.config,
+        approverUserIds: result.approverUserIds,
         updatedAt: new Date().toISOString(),
         updatedBy: req.session!.id,
       };
       await setDoc(doc(db, "accountingSettings", COST_WORKFLOW_SETTINGS_ID), config);
-      await logActivity("", "Accounting", req.session!.id, "Cost approval workflow assignments updated", "Maliyet onay iş akışı atamaları güncellendi", "تم تحديث تعيينات سير عمل اعتماد التكلفة");
-      res.json({ config });
+      await logActivity("", "Accounting", req.session!.id, "Cost approval workflow approvers updated", "Maliyet onay iş akışı onaycıları güncellendi", "تم تحديث معتمدي سير عمل اعتماد التكلفة");
+      res.json({ config, approverUserIds: result.approverUserIds });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to save approval workflow settings." });
@@ -10932,29 +10938,35 @@ async function startServer() {
         if (!decision.ok) return { httpStatus: 409, body: { code: decision.code, error: decision.error } };
         const validated = validateCostStatementInput(stmt as any);
         if (!validated.ok) return { httpStatus: 400, body: { error: `Cannot submit an incomplete statement: ${validated.error}` } };
-        if (!isWorkflowConfigUsable(config, activeAdminIds)) {
-          return { httpStatus: 409, body: { code: "workflow_not_configured", error: "The cost approval workflow is not fully configured with active employees. A Super Admin must set it in Settings first." } };
+        // Phase 2: validate the current ORDERED approver configuration (2–3
+        // distinct active users) and CAPTURE it onto this cycle. Approve/reject
+        // read this snapshot only, so later settings changes never touch it.
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) {
+          return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The cost approval workflow is not configured with at least two active approvers. ${approverCheck.error}` } };
         }
+        const cycleApprovers = approverCheck.approverUserIds;
         const cycleNumber = status === "draft" ? 1 : resolveApprovalCycle(stmt as any);
         const revision = stmt.revision || 1;
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: "operations_manager", action: "submitted",
+          cycleNumber, stage: stageLabelForPosition(0), action: "submitted",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: revision, comment: "",
         }, now, "submit");
         const next: CostStatement = {
           ...stmt,
-          accountingStatus: "pending_operations_approval",
+          accountingStatus: statusForApproverPosition(0),
           approvalCycle: cycleNumber,
+          cycleApproverUserIds: cycleApprovers,
           approvalHistory: history,
           submittedAt: now, submittedBy: req.session!.id, submittedRevision: revision,
         };
-        notifyTarget = assigneeForStage(config, "operations_manager");
+        notifyTarget = cycleApprovers[0];
         shipmentNumber = stmt.shipmentNumber;
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
       if (result.httpStatus === 200) {
-        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting Operations Manager approval.`);
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} submitted for approval`, "", "");
       }
       res.status(result.httpStatus).json(result.body);
@@ -10968,14 +10980,15 @@ async function startServer() {
   // Approve the current stage.
   //
   // BLOCKER 2 (atomic transitions) + FINAL PDF IDEMPOTENCY. Non-final
-  // stages are a single atomic transition: the statement is re-read inside
-  // the transaction and canApproveStage re-checks stage/approver/revision
-  // against that fresh value, so two simultaneous approvals serialize (one
-  // winner). The Managing-Director stage cannot store its PDF inside a
-  // Firestore transaction, so it runs as three steps around a deterministic
-  // finalization identity (shipmentId:cycle:revision):
-  //   1. atomic RESERVE — decideFinalization moves the doc to "finalizing"
-  //      and records the MD approval + finalizationKey (begin), or resumes
+  // positions are a single atomic transition: the statement is re-read inside
+  // the transaction and canApproveCyclePosition re-checks position/approver/
+  // revision against that fresh value (using the cycle's captured approver
+  // snapshot), so two simultaneous approvals serialize (one winner). The final
+  // approver cannot store its PDF inside a Firestore transaction, so it runs as
+  // three steps around a deterministic finalization identity
+  // (shipmentId:cycle:revision):
+  //   1. atomic RESERVE — decideCycleFinalization moves the doc to "finalizing"
+  //      and records the final approval + finalizationKey (begin), or resumes
   //      an interrupted one (resume), or is an idempotent no-op if already
   //      closed. A second MD approval loses the race and is rejected.
   //   2. generate + store the PDF OUTSIDE the transaction.
@@ -10993,7 +11006,7 @@ async function startServer() {
       let completedStage: ApprovalStage | null = null;
       let notifyTarget: string | undefined;
       let idempotentClosed = false;
-      let finalizeCtx: { cycle: number; revision: number; key: string } | null = null;
+      let finalizeCtx: { cycle: number; revision: number; key: string; approvers: string[] } | null = null;
 
       // ── Phase 1: atomic stage decision / finalization reservation.
       const phase1 = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
@@ -11002,50 +11015,59 @@ async function startServer() {
         const storedRevision = stmt.revision || 1;
         const actingRevision = actingRevisionInput ?? storedRevision;
         const cycleNumber = resolveApprovalCycle(stmt as any);
-        const stage = pendingStageForStatus(status);
         shipmentNumber = stmt.shipmentNumber;
 
-        // Final stage, or an in-progress/finished finalization.
-        if (status === "finalizing" || status === "final_closed" || stage === "managing_director") {
-          const fin = decideFinalization({
-            status, config, actorId: req.session!.id,
+        // Phase 2: the approver list for this cycle comes from the captured
+        // snapshot; a legacy in-flight cycle with none falls back to the
+        // current config ONCE and is captured onto every saved transition
+        // below (never re-reading changed settings afterwards).
+        const cycleApprovers = resolveCycleApprovers(stmt as any, config);
+        const captureSnapshot = !hasCycleApproverSnapshot(stmt as any);
+        const snapshotPatch = captureSnapshot ? { cycleApproverUserIds: cycleApprovers } : {};
+        const position = approverPositionForStatus(status);
+        const lastPosition = cycleApprovers.length - 1;
+
+        // Final position, or an in-progress/finished finalization.
+        if (status === "finalizing" || status === "final_closed" || position === lastPosition) {
+          const fin = decideCycleFinalization({
+            status, cycleApprovers, actorId: req.session!.id,
             actingRevision, storedRevision, cycle: cycleNumber,
             existingKey: stmt.finalizationKey, shipmentId: stmt.shipmentId,
           });
           if (fin.action === "already_closed") { idempotentClosed = true; return { httpStatus: 200, body: { statement: stmt } }; }
           if (fin.action === "reject") return { httpStatus: fin.code === "wrong_approver" ? 403 : 409, body: { code: fin.code, error: fin.error } };
           if (fin.action === "resume") {
-            // The MD approval + reservation were already committed; resume
+            // The final approval + reservation were already committed; resume
             // straight to PDF + commit without re-appending history.
-            finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+            finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key, approvers: cycleApprovers };
             return { httpStatus: 202, body: { resume: true } };
           }
-          // begin: record the MD approval and reserve finalization atomically.
+          // begin: record the final approval and reserve finalization atomically.
           const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-            cycleNumber, stage: "managing_director", action: "approved",
+            cycleNumber, stage: stageLabelForPosition(lastPosition), action: "approved",
             actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
             statementRevision: storedRevision, comment,
-          }, now, "approve-managing_director");
+          }, now, `approve-position-${lastPosition}`);
           const reserved: CostStatement = {
-            ...stmt, accountingStatus: "finalizing", approvalHistory: history,
+            ...stmt, ...snapshotPatch, accountingStatus: "finalizing", approvalHistory: history,
             finalizationKey: fin.key, finalizingAt: now, finalizingBy: req.session!.id,
           };
-          finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+          finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key, approvers: cycleApprovers };
           return { httpStatus: 202, body: { reserved: true }, save: reserved };
         }
 
-        // Non-final stage: one atomic transition.
-        const decision = canApproveStage({ status, config, actorId: req.session!.id, actingRevision, storedRevision });
+        // Non-final position: one atomic transition.
+        const decision = canApproveCyclePosition({ status, cycleApprovers, actorId: req.session!.id, actingRevision, storedRevision });
         if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : 409, body: { code: decision.code, error: decision.error } };
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: stage!, action: "approved",
+          cycleNumber, stage: stageLabelForPosition(position!), action: "approved",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: storedRevision, comment,
-        }, now, `approve-${stage}`);
-        const next: CostStatement = { ...stmt, accountingStatus: nextStatusAfterApproval(stage!), approvalHistory: history };
-        completedStage = stage!;
-        const nextStage = nextStageAfterApproval(stage!);
-        notifyTarget = nextStage ? assigneeForStage(config, nextStage) : undefined;
+        }, now, `approve-position-${position}`);
+        const next: CostStatement = { ...stmt, ...snapshotPatch, accountingStatus: nextStatusAfterPosition(position!, cycleApprovers.length), approvalHistory: history };
+        completedStage = stageLabelForPosition(position!);
+        const notifyPosition = nextPositionToNotify(position!, cycleApprovers.length);
+        notifyTarget = notifyPosition !== null ? cycleApprovers[notifyPosition] : undefined;
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
 
@@ -11064,10 +11086,10 @@ async function startServer() {
       // without a stored PDF.
       const reservedStmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!reservedStmt) return;
-      const ctx = finalizeCtx as { cycle: number; revision: number; key: string };
+      const ctx = finalizeCtx as { cycle: number; revision: number; key: string; approvers: string[] };
       const closedAt = reservedStmt.finalizingAt || now;
       const closingHistory = appendHistory(reservedStmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-        cycleNumber: ctx.cycle, stage: "managing_director", action: "closed",
+        cycleNumber: ctx.cycle, stage: stageLabelForPosition(ctx.approvers.length - 1), action: "closed",
         actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
         statementRevision: ctx.revision, comment: "",
       }, closedAt, "closed");
@@ -11110,7 +11132,7 @@ async function startServer() {
         return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
       });
       if (phase3.httpStatus === 200 && !idempotentClosed) {
-        for (const id of assigneeIdsToNotifyOnFinal(config)) {
+        for (const id of approverIdsToNotifyOnFinal(ctx.approvers)) {
           await notifyAccountingRecipient(id, shipmentNumber, "Cost statement finalized", `Statement for ${shipmentNumber} is now final and closed.`);
         }
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} finalized and closed`, "", "");
@@ -11123,8 +11145,8 @@ async function startServer() {
     }
   });
 
-  // Reject for correction. Atomic: canRejectStage re-checks the stage and
-  // assigned approver inside the transaction, so an approve-vs-reject race
+  // Reject for correction. Atomic: canRejectCyclePosition re-checks the position
+  // and captured approver inside the transaction, so an approve-vs-reject race
   // resolves to exactly one winner (the loser re-reads a no-longer-pending
   // status and is rejected).
   app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve"), async (req, res) => {
@@ -11139,23 +11161,32 @@ async function startServer() {
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canRejectStage({ status, config, actorId: req.session!.id, reason });
+        // Phase 2: reject against this cycle's captured approver snapshot (legacy
+        // cycles fall back to the current config once).
+        const cycleApprovers = resolveCycleApprovers(stmt as any, config);
+        const decision = canRejectCyclePosition({ status, cycleApprovers, actorId: req.session!.id, reason });
         if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        const stage = pendingStageForStatus(status)!;
+        const position = approverPositionForStatus(status)!;
+        const stage = stageLabelForPosition(position);
         const cycleNumber = resolveApprovalCycle(stmt as any);
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
           cycleNumber, stage, action: "rejected",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
-        }, now, `reject-${stage}`);
+        }, now, `reject-position-${position}`);
         // Correction opens a NEW cycle on the next submission; bump the cycle
         // now so a fresh submit starts its history under a new number and old
-        // approvals are retained but never reused.
-        const next: CostStatement = { ...stmt, accountingStatus: "rejected_for_correction", approvalCycle: cycleNumber + 1, approvalHistory: history };
+        // approvals are retained but never reused. Clear the cycle snapshot so
+        // the next submission recaptures the (possibly changed) approver list.
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "rejected_for_correction", approvalCycle: cycleNumber + 1, approvalHistory: history,
+          cycleApproverUserIds: undefined,
+        };
         shipmentNumber = stmt.shipmentNumber;
         notifyTarget = stmt.submittedBy;
         rejectedStage = stage;
-        return { httpStatus: 200, body: { statement: next }, save: next };
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
       });
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement returned for correction", `Statement for ${shipmentNumber} was returned for correction.`);

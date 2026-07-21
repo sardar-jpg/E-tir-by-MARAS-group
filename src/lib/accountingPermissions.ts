@@ -14,7 +14,7 @@
 // ── Canonical permission keys (never duplicated as string literals elsewhere) ──
 export const ACCOUNTING_PERMISSION_KEYS = [
   "accounting.view",
-  "costs.view", "costs.create", "costs.edit", "costs.deleteDraft", "costs.approve", "costs.reopen",
+  "costs.view", "costs.create", "costs.edit", "costs.deleteDraft", "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
   "vendorPayments.view", "vendorPayments.create", "vendorPayments.reverse", "vendorPayments.printVoucher",
   "invoices.view", "invoices.create", "invoices.editDraft", "invoices.issue", "invoices.cancel", "invoices.print",
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate", "customerPayments.reverse",
@@ -62,6 +62,7 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
       p("costs.deleteDraft", "Delete draft cost line", "حذف بند تكلفة مسودة", "Taslak maliyet satırını sil"),
       p("costs.approve", "Approve costs", "اعتماد التكاليف", "Maliyetleri onayla"),
       p("costs.reopen", "Reopen closed costs", "إعادة فتح التكاليف المغلقة", "Kapalı maliyetleri yeniden aç"),
+      p("costs.manageApprovalWorkflow", "Manage cost approval workflow", "إدارة سير عمل اعتماد التكلفة", "Maliyet onay iş akışını yönet"),
       p("costStatements.print", "Print cost statement", "طباعة كشف التكاليف", "Maliyet tablosunu yazdır"),
     ],
   },
@@ -185,7 +186,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
 // Sensitive permissions NEVER granted by the legacy default (documented +
 // asserted): they require explicit Super Admin approval.
 export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] = [
-  "costs.approve", "costs.reopen",
+  "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
   "vendorPayments.reverse",
   "customerPayments.reverse",
   "invoices.cancel",

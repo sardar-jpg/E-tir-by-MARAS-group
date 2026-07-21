@@ -839,6 +839,11 @@ export interface CostStatement {
   accountingStatus?: string;
   approvalCycle?: number;
   approvalHistory?: unknown[];
+  // Phase 2 (user-based approval chains): the ordered approver user ids
+  // captured for the current approval cycle at submit time. approve/reject
+  // read this snapshot, never the live settings, so changing Accounting
+  // Settings never alters an in-progress cycle.
+  cycleApproverUserIds?: string[];
   submittedAt?: string;
   submittedBy?: string;
   submittedRevision?: number;

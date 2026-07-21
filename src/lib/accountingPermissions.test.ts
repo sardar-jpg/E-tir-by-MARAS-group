@@ -33,6 +33,23 @@ describe("registry integrity", () => {
   });
 });
 
+describe("Phase 2 — costs.manageApprovalWorkflow permission (approval-settings management)", () => {
+  it("is a known, sensitive permission excluded from the legacy default", () => {
+    expect(isKnownAccountingPermission("costs.manageApprovalWorkflow")).toBe(true);
+    expect(SENSITIVE_ACCOUNTING_PERMISSIONS).toContain("costs.manageApprovalWorkflow");
+    expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).not.toContain("costs.manageApprovalWorkflow");
+  });
+  it("Super Admin has it; an explicit grant enables it; an ordinary accounts admin does NOT (so it is not super-only, nor everyone)", () => {
+    expect(hasPermission(superAdmin, "costs.manageApprovalWorkflow")).toBe(true);
+    // An authorized non-super admin explicitly granted the permission can manage it.
+    expect(hasPermission(accounts({ permissions: ["costs.view", "costs.manageApprovalWorkflow"] }), "costs.manageApprovalWorkflow")).toBe(true);
+    // A default accounts admin (legacy defaults only) cannot.
+    expect(hasPermission(accounts(), "costs.manageApprovalWorkflow")).toBe(false);
+    // An operation admin without a grant cannot.
+    expect(hasPermission(operation, "costs.manageApprovalWorkflow")).toBe(false);
+  });
+});
+
 describe("resolveEffectivePermissions — mandatory tests 1-7", () => {
   it("1. Super Admin can perform every accounting action", () => {
     const eff = resolveEffectivePermissions(superAdmin);

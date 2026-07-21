@@ -6,7 +6,7 @@
  * independently (costApprovalWorkflow.ts). Never the security boundary.
  */
 import {
-  resolveAccountingStatus, pendingStageForStatus, assigneeForStage, isFinancialEditingAllowed,
+  resolveAccountingStatus, approverPositionForStatus, resolveCycleApprovers, isFinancialEditingAllowed,
   type AccountingStatus, type CostApprovalState, type CostApprovalWorkflowConfig,
 } from "./costApprovalWorkflow";
 
@@ -35,8 +35,11 @@ export function deriveCostApprovalUiActions(
 ): CostApprovalUiActions {
   const status = resolveAccountingStatus(state);
   const cfg = config || {};
-  const pendingStage = pendingStageForStatus(status);
-  const isAssignedApprover = !!pendingStage && assigneeForStage(cfg, pendingStage) === actor.sessionId;
+  // Phase 2: the pending approver is the captured cycle approver at the pending
+  // position (legacy cycles with no snapshot fall back to the resolved config).
+  const position = approverPositionForStatus(status);
+  const cycleApprovers = resolveCycleApprovers(state, cfg);
+  const isAssignedApprover = position !== null && position < cycleApprovers.length && cycleApprovers[position] === actor.sessionId;
   const editable = isFinancialEditingAllowed(status);
   const hasFinalPdf = !!state?.finalPdfUrl;
 
