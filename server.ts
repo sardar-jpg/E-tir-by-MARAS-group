@@ -4371,8 +4371,13 @@ async function startServer() {
    */
   function requireSuperAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canViewAdminRoster(req.session.adminType)) {
       return res.status(403).json({ error: "Only the super-admin can perform this action." });
@@ -4391,8 +4396,13 @@ async function startServer() {
    */
   function requireCanViewClients(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canViewClients(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view clients." });
@@ -4401,8 +4411,13 @@ async function startServer() {
   }
   function requireCanViewVendors(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canViewVendors(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view vendors." });
@@ -4419,8 +4434,13 @@ async function startServer() {
    */
   function requireCanViewCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canViewCostStatements(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view cost statements." });
@@ -4441,8 +4461,13 @@ async function startServer() {
    */
   function requireCanWriteCostStatements(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canWriteCostStatements(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to write cost statements." });
@@ -4480,8 +4505,14 @@ async function startServer() {
   function requirePermission(permission: AccountingPermission) {
     return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (respondIfSessionVerificationUnavailable(req, res)) return;
-      if (!req.session || req.session.role !== "admin") {
+      if (!req.session) {
         return res.status(401).json({ error: "Authentication required." });
+      }
+      if (req.session.role !== "admin") {
+        // Audit F-2: authenticated driver/client hitting an accounting route
+        // is authenticated but not authorized — 403, not 401. Keep the
+        // route's non-enumerating permission_denied contract.
+        return res.status(403).json({ error: "You do not have permission to perform this action.", code: "permission_denied", requiredPermission: permission });
       }
       try {
         const cache = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
@@ -4509,8 +4540,13 @@ async function startServer() {
    */
   function requireCanViewAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canViewAuditLogs(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to view audit logs." });
@@ -4531,8 +4567,13 @@ async function startServer() {
    */
   function requireCanWriteAuditLogs(req: express.Request, res: express.Response, next: express.NextFunction) {
     if (respondIfSessionVerificationUnavailable(req, res)) return;
-    if (!req.session || req.session.role !== "admin") {
+    if (!req.session) {
       return res.status(401).json({ error: "Authentication required." });
+    }
+    if (req.session.role !== "admin") {
+      // Audit F-2: an authenticated non-admin (driver/client) is authenticated
+      // but not authorized — 403, not 401.
+      return res.status(403).json({ error: "You do not have permission to perform this action." });
     }
     if (!canWriteAuditLogs(req.session.adminType)) {
       return res.status(403).json({ error: "You do not have permission to write to the audit log." });
