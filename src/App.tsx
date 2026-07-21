@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { attachBrowserPolling } from "./hooks/browserPolling";
+import { createToastTimer, type ToastTimer } from "./lib/toastTimer";
+import { touchStoredSessionActivity } from "./lib/sessionActivity";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 // BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
@@ -79,10 +81,16 @@ export default function App() {
 
   // Custom premium toast notifier
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(prev => prev === msg ? null : prev), 3500);
-  };
+  // Perf Phase 3: one ref-managed dismiss timer (src/lib/toastTimer.ts) —
+  // re-arming cancels the previous timer, so an older toast's timer can
+  // never cut a newer (or repeated identical) toast short, and unmount
+  // cleanup clears any pending timer. Same 3.5s duration and visuals.
+  const toastTimerRef = useRef<ToastTimer | null>(null);
+  if (toastTimerRef.current === null) {
+    toastTimerRef.current = createToastTimer({ onChange: setToastMessage, delayMs: 3500 });
+  }
+  useEffect(() => () => toastTimerRef.current?.dispose(), []);
+  const triggerToast = (msg: string) => toastTimerRef.current!.show(msg);
 
   // Gmail OAuth States
   const [gmailUser, setGmailUser] = useState<any>(null);
@@ -428,24 +436,18 @@ export default function App() {
     };
   }, []);
 
-  // Update session activity helper
+  // Update session activity helper.
+  //
+  // Perf Phase 3: STORAGE-ONLY. Every consumer of lastActive — the passive
+  // 30s expiration checker below, the boot-time 24h check, and the
+  // localSessionFastPath validator — reads the STORED session, never React
+  // state, so the setSession call this used to make bought nothing except a
+  // root-App re-render (plus activity-listener teardown/resubscribe via the
+  // [session] effect dep) every 30 seconds of activity. The 24-hour
+  // inactivity policy, throttle, events, and logout flows are unchanged;
+  // touchStoredSessionActivity never throws (src/lib/sessionActivity.ts).
   const updateSessionActivity = () => {
-    try {
-      const stored = localStorage.getItem("etir_session");
-      if (stored) {
-        const parsed: AppSession = JSON.parse(stored);
-        parsed.lastActive = Date.now();
-        localStorage.setItem("etir_session", JSON.stringify(parsed));
-        setSession(prev => {
-          if (prev) {
-            return { ...prev, lastActive: parsed.lastActive };
-          }
-          return prev;
-        });
-      }
-    } catch (e) {
-      console.error("Error updating session activity status:", e);
-    }
+    touchStoredSessionActivity(localStorage);
   };
 
   // Passive expiration checker interval

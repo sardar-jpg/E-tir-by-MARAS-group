@@ -21,6 +21,7 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
+import { createToastTimer, type ToastTimer } from "../lib/toastTimer";
 import {
   Plus, Search, Filter, ShieldCheck, Share2, MessageSquare,
   Building2, Ship, Truck, Calendar, DollarSign, Eye, EyeOff,
@@ -3042,10 +3043,16 @@ MARAS Group etir Center`;
     }
   };
 
-  const triggerToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
+  // Perf Phase 3: ref-managed dismiss timer (src/lib/toastTimer.ts). The old
+  // bare setTimeout let an earlier toast's timer dismiss a NEWER toast early
+  // whenever two fired within 3s; re-arming fixes that, and unmount cleanup
+  // clears any pending timer. Same 3s duration and visuals.
+  const toastTimerRef = React.useRef<ToastTimer | null>(null);
+  if (toastTimerRef.current === null) {
+    toastTimerRef.current = createToastTimer({ onChange: setToast, delayMs: 3000 });
+  }
+  useEffect(() => () => toastTimerRef.current?.dispose(), []);
+  const triggerToast = (msg: string) => toastTimerRef.current!.show(msg);
 
   // Submit New Client Action
   const handleAddClientSubmit = async (e: React.FormEvent) => {

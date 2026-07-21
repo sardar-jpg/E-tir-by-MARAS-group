@@ -4,6 +4,7 @@ import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { usePolling } from "../hooks/usePolling";
+import { createToastTimer, type ToastTimer } from "../lib/toastTimer";
 
 const fetch = apiFetch;
 import {
@@ -89,10 +90,15 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
   const [isSubmittingSubscription, setIsSubmittingSubscription] = useState(false);
   const [subscriptionSuccess, setSubscriptionSuccess] = useState(false);
 
-  const triggerToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3500);
-  };
+  // Perf Phase 3: ref-managed dismiss timer (src/lib/toastTimer.ts) — an
+  // older toast's timer can no longer dismiss a newer one early, and unmount
+  // cleanup clears any pending timer. Same 3.5s duration and visuals.
+  const toastTimerRef = useRef<ToastTimer | null>(null);
+  if (toastTimerRef.current === null) {
+    toastTimerRef.current = createToastTimer({ onChange: setToast, delayMs: 3500 });
+  }
+  useEffect(() => () => toastTimerRef.current?.dispose(), []);
+  const triggerToast = (msg: string) => toastTimerRef.current!.show(msg);
 
   const handleSubscribeCustomer = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -26,6 +26,7 @@ import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { attachBrowserPolling, type AttachedPolling } from "../hooks/browserPolling";
+import { createToastTimer, type ToastTimer } from "../lib/toastTimer";
 import { useDriverActiveJob } from "../hooks/driver/useDriverActiveJob";
 import { isDriverChatAvailable } from "../lib/driverJobFlow";
 import type { DriverOfferView } from "../lib/driverAlliance";
@@ -396,10 +397,16 @@ export default function DriverApplication({
   const [isForceOffline, setIsForceOffline] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  const triggerToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
+  // Perf Phase 3: ref-managed dismiss timer (src/lib/toastTimer.ts). The old
+  // bare setTimeout meant an earlier toast's timer dismissed a NEWER toast
+  // early whenever two fired within 3s; re-arming fixes that, and unmount
+  // cleanup clears any pending timer. Same 3s duration and visuals.
+  const toastTimerRef = useRef<ToastTimer | null>(null);
+  if (toastTimerRef.current === null) {
+    toastTimerRef.current = createToastTimer({ onChange: setToast, delayMs: 3000 });
+  }
+  useEffect(() => () => toastTimerRef.current?.dispose(), []);
+  const triggerToast = (msg: string) => toastTimerRef.current!.show(msg);
 
   // Location reporting — see useDriverLocationReporting for the two
   // redesign corrections (location-only payload; lifecycle keyed to the
