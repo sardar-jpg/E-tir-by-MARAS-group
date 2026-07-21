@@ -865,6 +865,11 @@ export interface CostStatement {
   reopenRequestedBy?: string;
   reopenRequestedAt?: string;
   reopenReason?: string;
+  // Accounting Phase 3: sequential, user-based reopen approval cycles (each
+  // carrying its own captured ordered approver snapshot + decision history).
+  // Append-only; the active cycle is the last with status "pending". Full
+  // shape is ReopenCycle in costApprovalWorkflow.ts.
+  reopenCycles?: unknown[];
 }
 
 

@@ -590,7 +590,7 @@ export default function CostStatementWorkspace({
               </div>
             )}
             <div className={`mt-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
-              <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
+              <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} hasActiveInvoice={hasIssuedInvoice} onChanged={onRefresh} />
             </div>
           </section>
       </div>

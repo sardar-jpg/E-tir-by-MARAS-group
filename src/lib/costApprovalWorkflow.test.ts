@@ -10,7 +10,10 @@ import {
   resolveCycleApprovers, hasCycleApproverSnapshot, statusForApproverPosition, approverPositionForStatus,
   stageLabelForPosition, nextStatusAfterPosition, nextPositionToNotify,
   canApproveCyclePosition, canRejectCyclePosition, decideCycleFinalization,
-  type CostApprovalWorkflowConfig, type ApprovalHistoryEntry, type FinalPdfVersion,
+  // Phase 3 — issued-invoice lock + reopen approval chain.
+  ACTIVE_INVOICE_LOCK_MESSAGE, activeReopenCycle, hasPendingReopen, canRequestReopenChain,
+  buildReopenCycle, canDecideReopenPosition, applyReopenApproval, applyReopenRejection, nextReopenPositionToNotify,
+  type CostApprovalWorkflowConfig, type ApprovalHistoryEntry, type FinalPdfVersion, type ReopenCycle,
 } from "./costApprovalWorkflow";
 
 const ACTIVE = ["ops1", "acc1", "md1", "other"];
@@ -351,5 +354,111 @@ describe("Phase 2 — cycle-snapshot approve/reject/finalize decisions", () => {
     const other = decideCycleFinalization({ status: "finalizing", cycleApprovers: TWO, actorId: "u1", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" });
     expect(other.action).toBe("reject");
     expect(decideCycleFinalization({ status: "final_closed", cycleApprovers: TWO, actorId: "u2", actingRevision: 2, storedRevision: 2, cycle: 1, existingKey: key, shipmentId: "s1" }).action).toBe("already_closed");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3 — issued-invoice lock + reopen approval chain
+// ═══════════════════════════════════════════════════════════════════════════
+const mkReopenCycle = (over: Partial<ReopenCycle> = {}): ReopenCycle => ({
+  reopenCycleNumber: 1, approverUserIds: ["u1", "u2"], currentPosition: 0, status: "pending",
+  requestedBy: "author", requestedAt: "t0", reason: "correct a cost", decisions: [], ...over,
+});
+const actor = (id: string) => ({ id, name: id.toUpperCase(), role: "accounts" });
+
+describe("Phase 3 — reopen request eligibility (active-invoice lock)", () => {
+  it("blocks the request while an active invoice exists, with the clear lock message", () => {
+    const r = canRequestReopenChain({ status: "final_closed", hasActiveInvoice: true, hasPendingReopen: false, reason: "fix" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) { expect(r.code).toBe("active_invoice_lock"); expect(r.error).toBe(ACTIVE_INVOICE_LOCK_MESSAGE); }
+  });
+  it("allows the request once no active invoice remains and the statement is closed", () => {
+    expect(canRequestReopenChain({ status: "final_closed", hasActiveInvoice: false, hasPendingReopen: false, reason: "fix" }).ok).toBe(true);
+  });
+  it("rejects a blank / whitespace reason", () => {
+    expect(canRequestReopenChain({ status: "final_closed", hasActiveInvoice: false, hasPendingReopen: false, reason: "   " }).ok).toBe(false);
+  });
+  it("rejects a duplicate pending reopen request", () => {
+    const r = canRequestReopenChain({ status: "final_closed", hasActiveInvoice: false, hasPendingReopen: true, reason: "fix" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("reopen_already_pending");
+  });
+  it("rejects when the statement is not finalized (already editable/draft)", () => {
+    for (const s of ["draft", "reopened", "rejected_for_correction"] as const) {
+      const r = canRequestReopenChain({ status: s, hasActiveInvoice: false, hasPendingReopen: false, reason: "fix" });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.code).toBe("not_closed");
+    }
+  });
+});
+
+describe("Phase 3 — reopen cycle state helpers", () => {
+  it("activeReopenCycle / hasPendingReopen find the last pending cycle", () => {
+    const approved = mkReopenCycle({ reopenCycleNumber: 1, status: "approved" });
+    const pending = mkReopenCycle({ reopenCycleNumber: 2, status: "pending" });
+    expect(activeReopenCycle({ reopenCycles: [approved] })).toBeNull();
+    expect(activeReopenCycle({ reopenCycles: [approved, pending] })?.reopenCycleNumber).toBe(2);
+    expect(hasPendingReopen({ reopenCycles: [approved, pending] })).toBe(true);
+    // Legacy in-flight reopen (status reopen_requested, no snapshot).
+    expect(hasPendingReopen({ accountingStatus: "reopen_requested" })).toBe(true);
+    expect(hasPendingReopen({ accountingStatus: "final_closed" })).toBe(false);
+  });
+});
+
+describe("Phase 3 — two-approver reopen chain", () => {
+  it("Approver 1 → Approver 2 → approved; only the pending approver may decide", () => {
+    let cycle = mkReopenCycle({ approverUserIds: ["u1", "u2"] });
+    // Wrong approver blocked.
+    expect(canDecideReopenPosition({ cycle, actorId: "u2" }).ok).toBe(false);
+    expect(canDecideReopenPosition({ cycle, actorId: "u1" }).ok).toBe(true);
+    let step = applyReopenApproval(cycle, actor("u1"), "ok", "t1");
+    expect(step.finalized).toBe(false);
+    cycle = step.cycle;
+    expect(cycle.currentPosition).toBe(1);
+    expect(canDecideReopenPosition({ cycle, actorId: "u1" }).ok).toBe(false); // u1 already acted
+    step = applyReopenApproval(cycle, actor("u2"), "ok2", "t2");
+    expect(step.finalized).toBe(true);
+    expect(step.cycle.status).toBe("approved");
+    expect(step.cycle.decisions.map((d) => d.actorId)).toEqual(["u1", "u2"]);
+  });
+});
+
+describe("Phase 3 — three-approver reopen chain", () => {
+  it("Approver 1 → 2 → 3 → approved (finalizes only after the third)", () => {
+    let cycle = mkReopenCycle({ approverUserIds: ["u1", "u2", "u3"] });
+    let step = applyReopenApproval(cycle, actor("u1"), "", "t1"); cycle = step.cycle;
+    expect(step.finalized).toBe(false); expect(cycle.currentPosition).toBe(1);
+    step = applyReopenApproval(cycle, actor("u2"), "", "t2"); cycle = step.cycle;
+    expect(step.finalized).toBe(false); expect(cycle.currentPosition).toBe(2);
+    step = applyReopenApproval(cycle, actor("u3"), "", "t3");
+    expect(step.finalized).toBe(true); expect(step.cycle.status).toBe("approved");
+  });
+});
+
+describe("Phase 3 — reopen rejection", () => {
+  it("the pending approver rejects; earlier decisions preserved; cycle ends rejected", () => {
+    let cycle = mkReopenCycle({ approverUserIds: ["u1", "u2", "u3"] });
+    cycle = applyReopenApproval(cycle, actor("u1"), "ok", "t1").cycle; // u1 approved
+    const rejected = applyReopenRejection(cycle, actor("u2"), "not now", "t2");
+    expect(rejected.status).toBe("rejected");
+    expect(rejected.decisions).toHaveLength(2);
+    expect(rejected.decisions[0].action).toBe("approved"); // earlier decision preserved
+    expect(rejected.decisions[1].action).toBe("rejected");
+    // A rejected cycle is no longer pending → another attempt needs a new cycle.
+    expect(canDecideReopenPosition({ cycle: rejected, actorId: "u3" }).ok).toBe(false);
+    expect(activeReopenCycle({ reopenCycles: [rejected] })).toBeNull();
+  });
+});
+
+describe("Phase 3 — notify helper + build", () => {
+  it("nextReopenPositionToNotify advances until the last approver", () => {
+    expect(nextReopenPositionToNotify(mkReopenCycle({ approverUserIds: ["u1", "u2", "u3"], currentPosition: 0 }))).toBe(1);
+    expect(nextReopenPositionToNotify(mkReopenCycle({ approverUserIds: ["u1", "u2", "u3"], currentPosition: 2 }))).toBeNull();
+    expect(nextReopenPositionToNotify(mkReopenCycle({ approverUserIds: ["u1", "u2"], currentPosition: 1 }))).toBeNull();
+  });
+  it("buildReopenCycle captures the ordered list at position 0, pending", () => {
+    const c = buildReopenCycle({ approverUserIds: ["u1", "u2", "u3"], requestedBy: "author", requestedAt: "t", reason: "fix", reopenCycleNumber: 2 });
+    expect(c).toMatchObject({ reopenCycleNumber: 2, approverUserIds: ["u1", "u2", "u3"], currentPosition: 0, status: "pending", requestedBy: "author", reason: "fix" });
+    expect(c.decisions).toEqual([]);
   });
 });

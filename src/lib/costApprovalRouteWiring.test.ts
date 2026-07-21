@@ -28,9 +28,45 @@ describe("route permissions", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/approve", requirePermission("costs.approve")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve")');
   });
-  it("reopen request = accounting write; reopen decision = Super Admin only", () => {
+  it("reopen request + decision = costs.reopen permission (Phase 3 chain decides by captured approver, not Super Admin)", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen")');
+  });
+});
+
+describe("Phase 3 — active-invoice lock + reopen approval chain wiring", () => {
+  it("financial mutation routes reject edits while an active customer invoice exists", () => {
+    // Full-statement edit route.
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 6500);
+    expect(EDIT).toContain("loadInvoicesForShipment(shipmentId)");
+    expect(EDIT).toContain("hasActiveCustomerInvoice(relatedInvoices)");
+    expect(EDIT).toContain("active_invoice_lock");
+    // Vendor cost add route.
+    const ITEMS = region('app.post("/api/cost-statements/:shipmentId/items"', 1600);
+    expect(ITEMS).toContain("hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))");
+    expect(ITEMS).toContain("active_invoice_lock");
+  });
+  it("reopen request is blocked by an active invoice and captures its own approver snapshot", () => {
+    const REQ = region('app.post("/api/cost-statements/:shipmentId/reopen-request"', 2600);
+    expect(REQ).toContain("hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))");
+    expect(REQ).toContain("canRequestReopenChain(");
+    expect(REQ).toContain("validateApproverList(");
+    expect(REQ).toContain("buildReopenCycle(");
+  });
+  it("reopen decision routes through the captured cycle by position (never live settings), and finalizes to reopened", () => {
+    const DEC = region('app.post("/api/cost-statements/:shipmentId/reopen-decision"', 8000);
+    expect(DEC).toContain("activeReopenCycle(stmt");
+    expect(DEC).toContain("canDecideReopenPosition({ cycle, actorId: req.session!.id");
+    expect(DEC).toContain("applyReopenApproval(");
+    expect(DEC).toContain("applyReopenRejection(");
+    expect(DEC).toContain('accountingStatus: "reopened"');
+    // Legacy in-flight reopen captures the config once, else a controlled error.
+    expect(DEC).toContain("reopen_config_unavailable");
+  });
+  it("issuing an invoice requires the cost statement to be approved (final_closed) — enforced via canIssueInvoice", () => {
+    const ISSUE = region('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue"', 3000);
+    expect(ISSUE).toContain("canIssueInvoice(");
+    expect(ISSUE).toContain("costStatementStatus: resolveAccountingStatus(stmt");
   });
 });
 

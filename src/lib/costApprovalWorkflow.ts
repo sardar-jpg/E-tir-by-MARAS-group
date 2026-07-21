@@ -636,3 +636,149 @@ export function decideCycleFinalization(params: {
   }
   return { action: "begin", cycle: params.cycle, revision: params.storedRevision, key };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3 — Issued-Invoice Lock + Reopen Approval Chain
+//
+// A finalized Cost Statement is corrected only through a controlled sequence:
+//   active invoice → LOCKED → cancel invoice → request reopen (reason) →
+//   sequential reopen approval chain (same user-based Phase 2 approvers,
+//   captured per reopen cycle) → editing enabled → resubmit → normal chain.
+// The reopen chain reuses the ordered-approver model but stores its own
+// per-cycle snapshot so settings changes never touch an active reopen cycle.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Shown when a financial edit / reopen request is blocked by an active invoice. */
+export const ACTIVE_INVOICE_LOCK_MESSAGE =
+  "This Cost Statement is locked because an active issued customer invoice exists. Cancel the invoice before requesting to reopen the Cost Statement.";
+
+export interface ReopenDecisionEntry {
+  /** Zero-based position in this reopen cycle's approver list. */
+  position: number;
+  approverUserId: string;
+  action: "approved" | "rejected";
+  actorId: string;
+  actorName: string;
+  comment: string;
+  createdAt: string;
+}
+
+export interface ReopenCycle {
+  reopenCycleNumber: number;
+  /** Ordered approver user ids captured at request time (2 or 3). */
+  approverUserIds: string[];
+  /** Zero-based pending approver position. */
+  currentPosition: number;
+  status: "pending" | "approved" | "rejected";
+  requestedBy: string;
+  requestedAt: string;
+  reason: string;
+  decisions: ReopenDecisionEntry[];
+  decidedAt?: string;
+}
+
+/** The active (pending) reopen cycle, or null. The last pending cycle wins. */
+export function activeReopenCycle(state: (CostApprovalState & { reopenCycles?: ReopenCycle[] }) | undefined | null): ReopenCycle | null {
+  const cycles = state?.reopenCycles;
+  if (!Array.isArray(cycles)) return null;
+  for (let i = cycles.length - 1; i >= 0; i--) {
+    if (cycles[i]?.status === "pending") return cycles[i];
+  }
+  return null;
+}
+
+/** True when a reopen request is already pending for this statement. */
+export function hasPendingReopen(state: (CostApprovalState & { reopenCycles?: ReopenCycle[] }) | undefined | null): boolean {
+  if (activeReopenCycle(state) !== null) return true;
+  // Legacy in-flight reopen (status reopen_requested, no reopenCycles snapshot).
+  return resolveAccountingStatus(state) === "reopen_requested";
+}
+
+/**
+ * Phase 3 eligibility to REQUEST a reopen. A reopen may be requested only when:
+ *   - no related customer invoice is active (issued/partially_paid/paid),
+ *   - no reopen request is already pending,
+ *   - the statement is finalized (final_closed) — an already editable/draft
+ *     statement is not eligible,
+ *   - a non-empty reason is given.
+ */
+export function canRequestReopenChain(params: {
+  status: AccountingStatus;
+  hasActiveInvoice: boolean;
+  hasPendingReopen: boolean;
+  reason: string;
+}): WorkflowDecision {
+  if (params.hasActiveInvoice) return { ok: false, code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE };
+  if (params.hasPendingReopen) return { ok: false, code: "reopen_already_pending", error: "A reopening request is already pending for this statement." };
+  if (params.status !== "final_closed") return { ok: false, code: "not_closed", error: "Only a finalized statement can be reopened." };
+  if (!params.reason || !params.reason.trim()) return { ok: false, code: "reason_required", error: "A reopening reason is required." };
+  return { ok: true };
+}
+
+/** Build a fresh reopen cycle from a validated ordered approver list. */
+export function buildReopenCycle(params: {
+  approverUserIds: string[];
+  requestedBy: string;
+  requestedAt: string;
+  reason: string;
+  reopenCycleNumber: number;
+}): ReopenCycle {
+  return {
+    reopenCycleNumber: params.reopenCycleNumber,
+    approverUserIds: [...params.approverUserIds],
+    currentPosition: 0,
+    status: "pending",
+    requestedBy: params.requestedBy,
+    requestedAt: params.requestedAt,
+    reason: params.reason,
+    decisions: [],
+  };
+}
+
+/** Only the captured approver at the pending position may decide (regardless of permission). */
+export function canDecideReopenPosition(params: { cycle: ReopenCycle | null | undefined; actorId: string }): WorkflowDecision {
+  const cycle = params.cycle;
+  if (!cycle || cycle.status !== "pending") return { ok: false, code: "not_reopen_requested", error: "There is no pending reopening request." };
+  if (approverForPosition(cycle.approverUserIds, cycle.currentPosition) !== params.actorId) {
+    return { ok: false, code: "wrong_approver", error: "You are not the assigned approver for this reopening stage." };
+  }
+  return { ok: true };
+}
+
+/**
+ * Apply an approval to the pending position. Returns the updated cycle and
+ * whether the chain is now fully approved (the last captured approver signed).
+ */
+export function applyReopenApproval(cycle: ReopenCycle, actor: WorkflowActor, comment: string, now: string): { cycle: ReopenCycle; finalized: boolean } {
+  const position = cycle.currentPosition;
+  const entry: ReopenDecisionEntry = {
+    position, approverUserId: cycle.approverUserIds[position], action: "approved",
+    actorId: actor.id, actorName: actor.name, comment: comment || "", createdAt: now,
+  };
+  const finalized = position >= cycle.approverUserIds.length - 1;
+  return {
+    cycle: {
+      ...cycle,
+      decisions: [...cycle.decisions, entry],
+      currentPosition: finalized ? position : position + 1,
+      status: finalized ? "approved" : "pending",
+      ...(finalized ? { decidedAt: now } : {}),
+    },
+    finalized,
+  };
+}
+
+/** Apply a rejection to the pending position — the cycle ends rejected (history preserved). */
+export function applyReopenRejection(cycle: ReopenCycle, actor: WorkflowActor, comment: string, now: string): ReopenCycle {
+  const position = cycle.currentPosition;
+  const entry: ReopenDecisionEntry = {
+    position, approverUserId: cycle.approverUserIds[position], action: "rejected",
+    actorId: actor.id, actorName: actor.name, comment: comment || "", createdAt: now,
+  };
+  return { ...cycle, decisions: [...cycle.decisions, entry], status: "rejected", decidedAt: now };
+}
+
+/** The next reopen approver position to notify, or null when the just-approved one was last. */
+export function nextReopenPositionToNotify(cycle: ReopenCycle): number | null {
+  return cycle.currentPosition >= cycle.approverUserIds.length - 1 ? null : cycle.currentPosition + 1;
+}

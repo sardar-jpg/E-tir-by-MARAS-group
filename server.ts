@@ -75,14 +75,17 @@ import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevisi
 import {
   resolveAccountingStatus, resolveApprovalCycle,
   isFinancialEditingAllowed, canSubmitForApproval,
-  canRequestReopen, canDecideReopen, appendHistory, approvalsForCycle,
+  appendHistory, approvalsForCycle,
   buildFinalPdfFileName, hasFinalVersionFor,
   // Phase 2 — user-based, ordered approver chains + per-cycle snapshot.
   validateApproverList, isApproverConfigUsable, resolveConfiguredApprovers,
   resolveCycleApprovers, hasCycleApproverSnapshot, approverPositionForStatus,
   statusForApproverPosition, stageLabelForPosition, nextStatusAfterPosition,
   nextPositionToNotify, canApproveCyclePosition, canRejectCyclePosition, decideCycleFinalization,
-  type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
+  // Phase 3 — issued-invoice lock + sequential reopen approval chain.
+  ACTIVE_INVOICE_LOCK_MESSAGE, activeReopenCycle, hasPendingReopen, canRequestReopenChain,
+  buildReopenCycle, canDecideReopenPosition, applyReopenApproval, applyReopenRejection, nextReopenPositionToNotify,
+  type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion, type ReopenCycle,
 } from "./src/lib/costApprovalWorkflow";
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
 import { buildDraftCostStatement } from "./src/lib/costStatementDraft";
@@ -96,6 +99,7 @@ import {
 import {
   computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
   canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
+  hasActiveCustomerInvoice,
 } from "./src/lib/customerInvoice";
 import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerInvoiceLines";
 import {
@@ -10385,6 +10389,19 @@ async function startServer() {
       }
       const shipment = sDoc.data() as Shipment;
 
+      // Accounting Phase 3 — Active Invoice Lock: a Cost Statement is
+      // financially locked while ANY related customer invoice is active
+      // (issued / partially_paid / paid). The lock is based ONLY on real
+      // related invoices — never agreedAmount, draft, or cancelled invoices.
+      // The invoice must be cancelled before the statement can be edited (via
+      // the reopen flow). Enforced on the backend regardless of the frontend.
+      {
+        const relatedInvoices = await loadInvoicesForShipment(shipmentId);
+        if (hasActiveCustomerInvoice(relatedInvoices)) {
+          return res.status(409).json({ code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE });
+        }
+      }
+
       // Accounting Phase B — server-authoritative money: every submitted
       // number is validated (finite, non-negative), item totals are
       // RECOMPUTED as quantity × unitPrice (a client-sent totalAmount is
@@ -11200,31 +11217,68 @@ async function startServer() {
     }
   });
 
-  // Request reopening of a finalized statement. Atomic: canRequestReopen
-  // re-checks final_closed inside the transaction, so only one request can
-  // move the doc to reopen_requested.
+  /** Replace (or append) a reopen cycle in the append-only reopenCycles array. */
+  function upsertReopenCycle(existing: ReopenCycle[] | undefined, updated: ReopenCycle): ReopenCycle[] {
+    const arr = Array.isArray(existing) ? [...existing] : [];
+    const idx = arr.findIndex((c) => c.reopenCycleNumber === updated.reopenCycleNumber);
+    if (idx >= 0) arr[idx] = updated; else arr.push(updated);
+    return arr;
+  }
+
+  // Phase 3 — Request reopening of a finalized statement. Blocked while any
+  // related customer invoice is ACTIVE (issued/partially_paid/paid) — the
+  // invoice must be cancelled first. Captures the current ordered approver
+  // list onto a new REOPEN cycle (its own per-cycle snapshot), then routes
+  // through the sequential reopen approval chain. Atomic: eligibility is
+  // re-checked against the transaction-fresh statement.
   app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
+      // Loaded outside the contended cost-statement doc: the current approver
+      // config (to capture) and whether an active invoice still locks it.
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
+      const invoiceActive = hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId));
       let shipmentNumber = "";
+      let notifyTarget: string | undefined;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canRequestReopen(status, reason);
+        const decision = canRequestReopenChain({ status, hasActiveInvoice: invoiceActive, hasPendingReopen: hasPendingReopen(stmt as any), reason });
         if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        // Capture the current ordered approver list for THIS reopen cycle.
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) {
+          return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The reopen approval chain is not configured with at least two active approvers. ${approverCheck.error}` } };
+        }
+        const existingCycles = (stmt.reopenCycles as ReopenCycle[] | undefined) || [];
+        const reopenCycle = buildReopenCycle({
+          approverUserIds: approverCheck.approverUserIds,
+          requestedBy: req.session!.id, requestedAt: now, reason: reason.slice(0, 1000),
+          reopenCycleNumber: existingCycles.length + 1,
+        });
         const cycleNumber = resolveApprovalCycle(stmt as any);
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
           cycleNumber, stage: "reopen", action: "reopen_requested",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
         }, now, "reopen-req");
-        const next: CostStatement = { ...stmt, accountingStatus: "reopen_requested", approvalHistory: history, reopenRequestedBy: req.session!.id, reopenRequestedAt: now, reopenReason: reason.slice(0, 1000) };
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "reopen_requested",
+          approvalHistory: history,
+          reopenCycles: upsertReopenCycle(existingCycles, reopenCycle),
+          // Legacy mirror fields kept for backward-compatible reads/notifications.
+          reopenRequestedBy: req.session!.id, reopenRequestedAt: now, reopenReason: reason.slice(0, 1000),
+        };
         shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = reopenCycle.approverUserIds[0];
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
       if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Reopening requested for cost statement ${shipmentNumber}`, "", "");
       }
       res.status(result.httpStatus).json(result.body);
@@ -11235,44 +11289,114 @@ async function startServer() {
     }
   });
 
-  // Decide a reopening request (Super Admin only; requester cannot
-  // self-approve). Atomic: canDecideReopen re-checks the reopen_requested
-  // status and requester separation inside the transaction, so two
-  // simultaneous decisions resolve to exactly one winner (the loser
-  // re-reads a no-longer-reopen_requested status and is rejected).
+  // Phase 3 — Decide the current position of the sequential REOPEN approval
+  // chain. Only the captured approver at the pending position may approve or
+  // reject (regardless of how broad their permission is). Uses the reopen
+  // cycle's captured snapshot — never live settings. A legacy in-flight reopen
+  // (status reopen_requested with no snapshot) captures the current config
+  // ONCE on the first decision; if that config is unusable the request is left
+  // untouched and a controlled error is returned. Atomic: two simultaneous
+  // decisions serialize to exactly one winner.
   app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const approve = req.body?.approve === true;
       const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 1000) : "";
       const now = new Date().toISOString();
+      // Only used to CAPTURE a legacy reopen with no snapshot (once).
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
       let shipmentNumber = "";
       let notifyTarget: string | undefined;
+      let finalized = false;
+      let rejected = false;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canDecideReopen({ status, requesterId: stmt.reopenRequestedBy, deciderId: req.session!.id });
-        if (!decision.ok) return { httpStatus: decision.code === "self_decision" ? 403 : 409, body: { code: decision.code, error: decision.error } };
+        if (status !== "reopen_requested") return { httpStatus: 409, body: { code: "not_reopen_requested", error: "There is no pending reopening request." } };
+
+        // Resolve the active reopen cycle; legacy in-flight reopens capture the
+        // current config ONCE here (and are persisted below).
+        let cycle = activeReopenCycle(stmt as any);
+        let existingCycles = (stmt.reopenCycles as ReopenCycle[] | undefined) || [];
+        if (!cycle) {
+          const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+          if (!approverCheck.ok) {
+            return { httpStatus: 409, body: { code: "reopen_config_unavailable", error: `This legacy reopening cannot continue because the approval chain is not configured with active approvers. ${approverCheck.error}` } };
+          }
+          cycle = buildReopenCycle({
+            approverUserIds: approverCheck.approverUserIds,
+            requestedBy: stmt.reopenRequestedBy || req.session!.id,
+            requestedAt: stmt.reopenRequestedAt || now,
+            reason: stmt.reopenReason || "",
+            reopenCycleNumber: existingCycles.length + 1,
+          });
+          existingCycles = upsertReopenCycle(existingCycles, cycle);
+        }
+
+        const guard = canDecideReopenPosition({ cycle, actorId: req.session!.id });
+        if (!guard.ok) return { httpStatus: guard.code === "wrong_approver" ? 403 : 409, body: { code: guard.code, error: guard.error } };
+
+        const actor = { id: req.session!.id, name: actorName, role: req.session!.adminType || "admin" };
         const cycleNumber = resolveApprovalCycle(stmt as any);
-        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: "reopen", action: approve ? "reopen_approved" : "reopen_rejected",
-          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
-          statementRevision: stmt.revision || 1, comment: note,
-        }, now, approve ? "reopen-ok" : "reopen-no");
-        // On approval: reopen editing under a NEW cycle; the previous final
-        // PDF and all approvals are preserved (finalVersions untouched). On
-        // rejection: stays final_closed.
-        const next: CostStatement = approve
-          ? { ...stmt, accountingStatus: "reopened", approvalCycle: cycleNumber + 1, approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined }
-          : { ...stmt, accountingStatus: "final_closed", approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined };
         shipmentNumber = stmt.shipmentNumber;
-        notifyTarget = stmt.reopenRequestedBy;
+
+        if (approve) {
+          const applied = applyReopenApproval(cycle, actor, note, now);
+          finalized = applied.finalized;
+          const nextPos = nextReopenPositionToNotify(cycle);
+          const cycles = upsertReopenCycle(existingCycles, applied.cycle);
+          if (finalized) {
+            // Final reopen approval → editing enabled under a NEW approval cycle.
+            // Previous final PDF + all prior approvals + cancelled invoices are
+            // preserved (untouched). No invoice is restored or created.
+            const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+              cycleNumber, stage: "reopen", action: "reopen_approved",
+              actorId: req.session!.id, actorName, actorRole: actor.role,
+              statementRevision: stmt.revision || 1, comment: note,
+            }, now, "reopen-ok");
+            const next: CostStatement = {
+              ...stmt, accountingStatus: "reopened", approvalCycle: cycleNumber + 1, approvalHistory: history,
+              reopenCycles: cycles,
+              reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined,
+            };
+            notifyTarget = applied.cycle.requestedBy;
+            const cleaned = cleanUndefined(next) as CostStatement;
+            return { httpStatus: 200, body: { statement: cleaned }, save: cleaned };
+          }
+          // Intermediate approval — advance to the next captured approver.
+          const next: CostStatement = { ...stmt, reopenCycles: cycles };
+          notifyTarget = nextPos !== null ? applied.cycle.approverUserIds[nextPos] : undefined;
+          return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+        }
+
+        // Rejection — the cycle ends rejected; earlier decisions are preserved
+        // and the statement stays closed/locked. A new reopen request is needed.
+        rejected = true;
+        const rejectedCycle = applyReopenRejection(cycle, actor, note, now);
+        const cycles = upsertReopenCycle(existingCycles, rejectedCycle);
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: "reopen", action: "reopen_rejected",
+          actorId: req.session!.id, actorName, actorRole: actor.role,
+          statementRevision: stmt.revision || 1, comment: note,
+        }, now, "reopen-no");
+        const next: CostStatement = {
+          ...stmt, accountingStatus: "final_closed", approvalHistory: history, reopenCycles: cycles,
+          reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined,
+        };
+        notifyTarget = rejectedCycle.requestedBy;
         const cleaned = cleanUndefined(next) as CostStatement;
         return { httpStatus: 200, body: { statement: cleaned }, save: cleaned };
       });
       if (result.httpStatus === 200) {
-        await notifyAccountingRecipient(notifyTarget, shipmentNumber, approve ? "Reopening approved" : "Reopening rejected", `Reopening for ${shipmentNumber} was ${approve ? "approved" : "rejected"}.`);
-        await logActivity("", "Accounting", req.session!.id, `Reopening ${approve ? "approved" : "rejected"} for cost statement ${shipmentNumber}`, "", "");
+        if (finalized) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening approved — editing enabled", `Reopening for ${shipmentNumber} was fully approved. The cost statement can now be edited.`);
+        } else if (rejected) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening rejected", `Reopening for ${shipmentNumber} was rejected. The cost statement remains closed.`);
+        } else {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval.`);
+        }
+        await logActivity("", "Accounting", req.session!.id, `Reopening ${finalized ? "approved" : rejected ? "rejected" : "advanced"} for cost statement ${shipmentNumber}`, "", "");
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11669,6 +11793,11 @@ async function startServer() {
       const scopedKey = idemKey ? scopeIdempotencyKey("cost-item", idemKey) : undefined;
       const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
       const now = new Date().toISOString();
+      // Phase 3 — Active Invoice Lock: no vendor cost may be added while a
+      // related customer invoice is active (issued/partially_paid/paid).
+      if (hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))) {
+        return res.status(409).json({ code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE });
+      }
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);

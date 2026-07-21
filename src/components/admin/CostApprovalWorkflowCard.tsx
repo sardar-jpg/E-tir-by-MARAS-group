@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { ShieldCheck, FileCheck2, Check, Clock, Circle, X, UserRound } from "lucide-react";
+import { ShieldCheck, FileCheck2, Check, Clock, Circle, X, UserRound, Lock, RotateCcw } from "lucide-react";
 import type { Language, CostStatement } from "../../types";
 import { apiFetch } from "../../lib/api";
 import {
   resolveAccountingStatus, resolveApprovalCycle, approverPositionForStatus, resolveCycleApprovers,
-  stageLabelForPosition, latestStageApprovals,
-  type ApprovalHistoryEntry, type CostApprovalWorkflowConfig,
+  stageLabelForPosition, latestStageApprovals, activeReopenCycle, ACTIVE_INVOICE_LOCK_MESSAGE,
+  type ApprovalHistoryEntry, type CostApprovalWorkflowConfig, type ReopenCycle,
 } from "../../lib/costApprovalWorkflow";
 import { deriveCostApprovalUiActions } from "../../lib/costApprovalUiActions";
 
@@ -28,10 +28,12 @@ interface Props {
   lang: Language;
   statement: CostStatement;
   actor: { sessionId: string; isSuperAdmin: boolean; canWriteCostStatements: boolean };
+  /** Phase 3: whether a related customer invoice is active (issued/partially_paid/paid). */
+  hasActiveInvoice?: boolean;
   onChanged: (next: CostStatement) => void;
 }
 
-export default function CostApprovalWorkflowCard({ lang, statement, actor, onChanged }: Props) {
+export default function CostApprovalWorkflowCard({ lang, statement, actor, hasActiveInvoice = false, onChanged }: Props) {
   const [config, setConfig] = useState<CostApprovalWorkflowConfig>({});
   const [admins, setAdmins] = useState<AdminOption[]>([]);
   const [busy, setBusy] = useState(false);
@@ -53,8 +55,10 @@ export default function CostApprovalWorkflowCard({ lang, statement, actor, onCha
   const cycle = resolveApprovalCycle(statement as any);
   const pendingPosition = approverPositionForStatus(status);
   const latest = latestStageApprovals(statement.approvalHistory as ApprovalHistoryEntry[] | undefined, cycle);
-  const ui = deriveCostApprovalUiActions(statement as any, config, actor);
+  const ui = deriveCostApprovalUiActions(statement as any, config, actor, hasActiveInvoice);
   const rejected = status === "rejected_for_correction";
+  // Phase 3: the active (pending) reopen approval cycle, if any.
+  const reopenCycle: ReopenCycle | null = activeReopenCycle(statement as any);
 
   // The approver chain shown = this cycle's captured snapshot (legacy in-flight
   // cycles fall back to the resolved current config). Names come from /api/admins.
@@ -103,6 +107,48 @@ export default function CostApprovalWorkflowCard({ lang, statement, actor, onCha
         </span>
       </div>
       <p className="text-[11px] text-slate-400 font-semibold">Cycle {cycle}{statement.submittedAt ? ` · submitted ${new Date(statement.submittedAt).toLocaleString()}` : ""}{statement.finalizedAt ? ` · finalized ${new Date(statement.finalizedAt).toLocaleString()}` : ""}</p>
+
+      {/* Phase 3 — Active Invoice Lock banner. */}
+      {hasActiveInvoice && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+          <Lock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-[11.5px] font-semibold text-amber-800 leading-snug">{ACTIVE_INVOICE_LOCK_MESSAGE}</p>
+        </div>
+      )}
+
+      {/* Phase 3 — Reopen approval chain (user-based, per-cycle snapshot). */}
+      {reopenCycle && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2">
+          <div className="flex items-center gap-2">
+            <RotateCcw className="w-4 h-4 text-slate-500" />
+            <span className="text-[12px] font-black text-slate-700">Reopen Request — Approval {reopenCycle.status === "approved" ? "Complete" : reopenCycle.status === "rejected" ? "Rejected" : "In Progress"}</span>
+          </div>
+          {reopenCycle.reason && <p className="text-[11px] text-slate-500 italic">Reason: “{reopenCycle.reason}”</p>}
+          <div className="relative pl-1">
+            {reopenCycle.approverUserIds.map((approverId, i) => {
+              const decided = reopenCycle.decisions.find((d) => d.position === i);
+              const isPending = reopenCycle.status === "pending" && reopenCycle.currentPosition === i;
+              const rState: "approved" | "current" | "rejected" | "pending" =
+                decided?.action === "approved" ? "approved" : decided?.action === "rejected" ? "rejected" : isPending ? "current" : "pending";
+              const ring = rState === "approved" ? "bg-emerald-500 border-emerald-500 text-white" : rState === "current" ? "bg-blue-600 border-blue-600 text-white" : rState === "rejected" ? "bg-red-500 border-red-500 text-white" : "bg-white border-slate-300 text-slate-400";
+              const Icon = rState === "approved" ? Check : rState === "current" ? Clock : rState === "rejected" ? X : Circle;
+              return (
+                <div key={i} className="flex gap-3 pb-2.5 last:pb-0 items-start">
+                  <span className={`w-7 h-7 rounded-full border-2 flex items-center justify-center shrink-0 ${ring}`}><Icon className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[12px] font-bold text-slate-700">Approver {i + 1}</span>
+                      <span className="text-[11px] text-slate-500 truncate">{decided?.actorName || nameFor(approverId)}</span>
+                    </div>
+                    {decided && <div className="text-[10.5px] text-slate-400">{decided.action === "approved" ? "Approved" : "Rejected"} · {new Date(decided.createdAt).toLocaleString()}</div>}
+                    {decided?.comment && <div className="text-[11px] text-slate-600 italic mt-0.5">“{decided.comment}”</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Ordered approver chain — enterprise vertical timeline (user-based) */}
       <div className="relative pl-2">
@@ -156,7 +202,7 @@ export default function CostApprovalWorkflowCard({ lang, statement, actor, onCha
         {ui.canDecideReopen && (
           <>
             <button disabled={busy} onClick={() => act("/reopen-decision", { approve: true })} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">Approve Reopening</button>
-            <button disabled={busy} onClick={() => act("/reopen-decision", { approve: false })} className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">Reject Reopening</button>
+            <button disabled={busy} onClick={() => { const note = window.prompt("Optional note for rejecting this reopening:") || ""; void act("/reopen-decision", { approve: false, note: note.trim() }); }} className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">Reject Reopening</button>
           </>
         )}
         {ui.canViewFinalPdf && (
