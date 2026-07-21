@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { attachBrowserPolling } from "./hooks/browserPolling";
+import { createToastTimer, type ToastTimer } from "./lib/toastTimer";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 // BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
@@ -79,10 +80,16 @@ export default function App() {
 
   // Custom premium toast notifier
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(prev => prev === msg ? null : prev), 3500);
-  };
+  // Perf Phase 3: one ref-managed dismiss timer (src/lib/toastTimer.ts) —
+  // re-arming cancels the previous timer, so an older toast's timer can
+  // never cut a newer (or repeated identical) toast short, and unmount
+  // cleanup clears any pending timer. Same 3.5s duration and visuals.
+  const toastTimerRef = useRef<ToastTimer | null>(null);
+  if (toastTimerRef.current === null) {
+    toastTimerRef.current = createToastTimer({ onChange: setToastMessage, delayMs: 3500 });
+  }
+  useEffect(() => () => toastTimerRef.current?.dispose(), []);
+  const triggerToast = (msg: string) => toastTimerRef.current!.show(msg);
 
   // Gmail OAuth States
   const [gmailUser, setGmailUser] = useState<any>(null);
