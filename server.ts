@@ -47,6 +47,7 @@ import { sessionVerificationCache, projectBackingRecord } from "./src/lib/sessio
 import { cacheControlForAsset, shouldCompress } from "./src/lib/httpCaching";
 import { IDENTITY_KEYS_COLLECTION, OWNER_RESERVATION_SOURCE, IdentityConflictError, computeIdentityClaims, computeOwnerClaims, diffIdentityClaims, findClaimConflict, canReleaseReservation, buildReservationRecord, applyIdentityReservationMemory, type IdentityKeyClaim, type IdentityReservationRecord } from "./src/lib/identityReservation";
 import { buildShipmentViewForRole } from "./src/lib/shipmentView";
+import { authorizeUploadedFileAccess, type UploadedFileAccessMeta } from "./src/lib/uploadedFileAccess";
 import {
   resolveOutgoingChatChannel,
   resolveSeenChannelFilter,
@@ -3687,6 +3688,10 @@ interface UploadedFileStore {
   filename: string;
   mimeType: string;
   buffer: Buffer;
+  // Authorization descriptor consumed by GET /api/uploads/:id (audit F-1).
+  // Internal only — never echoed back in an HTTP response. An entry without
+  // this fails closed at retrieval time.
+  access?: UploadedFileAccessMeta;
 }
 const uploadedFiles = new Map<string, UploadedFileStore>();
 
@@ -4781,15 +4786,85 @@ async function startServer() {
   // pre-fix uploads referenced here were already lost on the first server
   // restart after they were created, since they only ever existed in
   // memory — this just avoids a broken-link error for the link itself.
-  app.get("/api/uploads/:id", (req, res) => {
-    const fileId = req.params.id;
-    const fileObj = uploadedFiles.get(fileId);
-    if (!fileObj) {
-      return res.status(404).send("File not found (this was an older in-memory upload that didn't survive a server restart)");
+  // Audit F-1: authenticate AND authorize every retrieval. This route serves
+  // the NON-durable memory/dev fallback map (empty in production — files live
+  // in Firebase Storage there). It historically had neither guard, so anyone
+  // who knew or guessed an upload id could read internal accounting PDFs. Now:
+  // requireAuth handles 401 (missing/invalid/tampered/expired/revoked token),
+  // and authorizeUploadedFileAccess enforces resource-level authorization from
+  // the file's stored classification metadata. An entry without valid metadata
+  // fails closed (404). The internal `access` descriptor is never returned.
+  app.get("/api/uploads/:id", requireAuth, async (req, res) => {
+    try {
+      const fileId = req.params.id;
+      const fileObj = uploadedFiles.get(fileId);
+      // Unknown id → 404 (non-enumerating; same code as an unauthorized entry).
+      if (!fileObj) {
+        return res.status(404).json({ error: "File not found." });
+      }
+      const meta = fileObj.access;
+
+      // Resolve only the authorization facts this file's classification needs.
+      let hasPermission: ((permission: string) => boolean) | undefined;
+      let shipment: { assignedDriverId?: string; additionalDriverIds?: string[]; companyName?: string } | null | undefined;
+      let clientCompanyName: string | null | undefined;
+
+      if (meta && (meta.classification === "internal-accounting" || meta.classification === "admin-only")) {
+        // Accounting permission is resolved fresh from the admin record
+        // (never trusted from the token) — same source as requirePermission.
+        if (req.session!.role === "admin") {
+          const perms = await loadEffectivePermissionsForSession(req.session!);
+          hasPermission = (permission: string) => perms.has(permission as AccountingPermission);
+        }
+      } else if (meta && meta.shipmentId && (
+        meta.classification === "driver-shareable" ||
+        meta.classification === "customer-shareable" ||
+        meta.classification === "shipment-participant"
+      )) {
+        const sDoc = await getDoc(doc(db, "shipments", meta.shipmentId));
+        if (sDoc.exists()) {
+          const s = sDoc.data() as Shipment;
+          shipment = {
+            assignedDriverId: s.assignedDriverId,
+            additionalDriverIds: Array.isArray(s.additionalDrivers) ? s.additionalDrivers.map((ad: any) => ad?.driverId).filter(Boolean) : [],
+            companyName: s.companyName,
+          };
+        } else {
+          shipment = null; // fail closed
+        }
+        if (req.session!.role === "client") {
+          const cDoc = await getDoc(doc(db, "clients", req.session!.id));
+          clientCompanyName = cDoc.exists() ? (cDoc.data() as Client).companyName : null;
+        }
+      }
+
+      const decision = authorizeUploadedFileAccess(meta, {
+        session: { role: req.session!.role, id: req.session!.id, adminType: req.session!.adminType },
+        hasPermission,
+        shipment,
+        clientCompanyName,
+        companyMatches: isShipmentVisibleToClientCompany,
+      });
+
+      if (!decision.ok) {
+        if (decision.status === 403) {
+          logSecurityDenial("uploaded_file_access", req.session, `${fileId} (${decision.reason})`);
+        }
+        // Non-revealing bodies: 404 = "not found", 403 = "no access". Never
+        // expose the internal classification/metadata.
+        return res.status(decision.status).json(
+          decision.status === 404 ? { error: "File not found." } : { error: "You do not have access to this file." }
+        );
+      }
+
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(fileObj.filename)}"`);
+      res.setHeader("Content-Type", fileObj.mimeType);
+      res.send(fileObj.buffer);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[uploads] retrieval failed:", err instanceof Error ? err.message : err);
+      return res.status(500).json({ error: "Failed to retrieve the file." });
     }
-    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(fileObj.filename)}"`);
-    res.setHeader("Content-Type", fileObj.mimeType);
-    res.send(fileObj.buffer);
   });
 
   // API Endpoints
@@ -10733,7 +10808,12 @@ async function startServer() {
     // Memory/dev fallback: keep the generated bytes addressable so closure
     // still has a real, retrievable PDF reference (not a fabricated one).
     const fileId = `costpdf-${stmt.shipmentId}-${finalRevision}-${Date.now()}`;
-    uploadedFiles.set(fileId, { filename: fileName, mimeType: "application/pdf", buffer });
+    uploadedFiles.set(fileId, {
+      filename: fileName, mimeType: "application/pdf", buffer,
+      // Internal accounting document: admins only, gated by the same
+      // permission as the authenticated final-PDF route (costs.view).
+      access: { classification: "internal-accounting", requiredPermission: "costs.view", shipmentId: stmt.shipmentId, label: "cost-statement-final-pdf" },
+    });
     return { url: `/api/uploads/${fileId}`, path, fileName };
   }
 
@@ -12603,7 +12683,15 @@ async function startServer() {
       await file.save(buffer, { metadata: { contentType: mimeType } });
       return;
     }
-    if (useMemoryFallback || ATTACHMENT_TEST_ADAPTER) { uploadedFiles.set(attachmentId, { filename: storagePath, mimeType, buffer }); return; }
+    if (useMemoryFallback || ATTACHMENT_TEST_ADAPTER) {
+      // Internal accounting proof/supporting file — admins with the
+      // attachment-view permission only (matches the dedicated download route).
+      uploadedFiles.set(attachmentId, {
+        filename: storagePath, mimeType, buffer,
+        access: { classification: "internal-accounting", requiredPermission: "accountingAttachments.view", label: "accounting-attachment" },
+      });
+      return;
+    }
     const err: any = new Error("attachment_storage_unavailable");
     err.code = "attachment_storage_unavailable";
     throw err;
