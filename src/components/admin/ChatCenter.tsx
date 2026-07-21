@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Search, MessageSquare, Lock, Truck, Building2, ExternalLink, Send, Paperclip, FileText, Download, AlertTriangle, RefreshCw, Check, CheckCheck, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ChatChannel, ChatMessage, DocumentCategory, Language, Shipment } from '../../types';
 import { apiFetch } from '../../lib/api';
@@ -25,6 +25,50 @@ import { MAX_UPLOAD_BYTES } from '../../lib/uploadValidation';
 import { isShipmentClosed } from '../../lib/shipmentStatusTransitions';
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from '../../lib/chatDisplay';
 import { encodePageCursor } from '../../lib/pagination';
+
+/**
+ * Perf Phase 2: a single conversation-list row, memoized.
+ *
+ * The left rail re-renders on every composer keystroke and on the 3s chat
+ * poll. Its props are stable across those renders — `shipment` is a stable
+ * element of the (now-memoized) filteredShipments array, `onSelect` is a
+ * stable useCallback, and `unreadChatMessages` only changes identity when the
+ * unread set actually changes (not on keystrokes). So React.memo lets an
+ * unrelated re-render (typing a message) skip re-rendering every row, while a
+ * real unread/selection change still updates the affected rows. Unread is
+ * computed INSIDE the row so passing a fresh object each render can't defeat
+ * the memo. Behavior/markup are identical to the previous inline row.
+ */
+interface ChatSidebarRowProps {
+  shipment: Shipment;
+  isSelected: boolean;
+  unreadChatMessages: ChatMessage[];
+  onSelect: (id: string) => void;
+}
+const ChatSidebarRow = memo(function ChatSidebarRow({ shipment: s, isSelected, unreadChatMessages, onSelect }: ChatSidebarRowProps) {
+  const unread = summarizeUnreadForShipment(unreadChatMessages, s.id);
+  const preview = unread.lastMessage?.text || unread.lastMessage?.fileName || null;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(s.id)}
+      className={`w-full text-start px-4 py-3 border-b border-slate-100 transition-colors ${
+        isSelected ? 'bg-orange-50 border-s-2 border-s-orange-500' : 'hover:bg-white'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
+        {formatUnreadBadge(unread.count) && (
+          <span className="shrink-0 min-w-[20px] h-[20px] px-1 rounded-full bg-orange-500 text-white text-[11px] font-bold flex items-center justify-center">
+            {formatUnreadBadge(unread.count)}
+          </span>
+        )}
+      </div>
+      <p className="text-[11px] text-slate-500 truncate mt-0.5">{s.companyName} · {shipmentRouteLabel(s)}</p>
+      {preview && <p className="text-[11px] text-slate-400 truncate mt-1 italic">{preview}</p>}
+    </button>
+  );
+});
 
 // Categories offered for Internal Staff attachments (PR #35). Subset of
 // DocumentCategory — 'photo' is left out here since these are staff
@@ -705,11 +749,24 @@ export default function ChatCenter({
   // search filters first, the surviving rows keep the same
   // recent-activity order (sort is pure: same rows out as in, nothing
   // duplicated or dropped).
-  const filteredShipments = sortShipmentsByChatActivity(
-    filterShipmentsBySearch(shipments, searchQuery),
-    unreadChatMessages,
-    localActivity
+  // Perf Phase 2: this list drives the left rail and re-derives a filter +
+  // WhatsApp-style activity sort over all shipments. The Chat Center
+  // re-renders on every composer keystroke and on the 3s chat poll; without
+  // memoization that sort+filter ran on each of those. Memoized on its real
+  // inputs only (shipments, the search text, unread set, and local activity),
+  // so ordering/behavior is unchanged — it simply doesn't recompute when an
+  // unrelated piece of state (e.g. the message draft) changes.
+  const filteredShipments = useMemo(
+    () => sortShipmentsByChatActivity(
+      filterShipmentsBySearch(shipments, searchQuery),
+      unreadChatMessages,
+      localActivity
+    ),
+    [shipments, searchQuery, unreadChatMessages, localActivity]
   );
+  // Perf Phase 2: stable identity so memoized ChatSidebarRow children don't
+  // re-render just because this parent re-rendered (e.g. composer keystrokes).
+  const handleSelectShipmentRow = useCallback((id: string) => setSelectedShipmentId(id), []);
   const selectedShipment = selectedShipmentId
     ? shipments.find((s) => s.id === selectedShipmentId) ?? null
     : null;
@@ -1627,32 +1684,15 @@ export default function ChatCenter({
             {filteredShipments.length === 0 && (
               <p className="text-xs text-slate-400 text-center py-8 px-4">{label.noShipments}</p>
             )}
-            {filteredShipments.map((s) => {
-              const isSelected = s.id === selectedShipmentId;
-              const unread = summarizeUnreadForShipment(unreadChatMessages, s.id);
-              const preview = unread.lastMessage?.text || unread.lastMessage?.fileName || null;
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => setSelectedShipmentId(s.id)}
-                  className={`w-full text-start px-4 py-3 border-b border-slate-100 transition-colors ${
-                    isSelected ? 'bg-orange-50 border-s-2 border-s-orange-500' : 'hover:bg-white'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-[11px] font-bold text-slate-900 truncate">{s.shipmentNumber}</span>
-                    {formatUnreadBadge(unread.count) && (
-                      <span className="shrink-0 min-w-[20px] h-[20px] px-1 rounded-full bg-orange-500 text-white text-[11px] font-bold flex items-center justify-center">
-                        {formatUnreadBadge(unread.count)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-slate-500 truncate mt-0.5">{s.companyName} · {shipmentRouteLabel(s)}</p>
-                  {preview && <p className="text-[11px] text-slate-400 truncate mt-1 italic">{preview}</p>}
-                </button>
-              );
-            })}
+            {filteredShipments.map((s) => (
+              <ChatSidebarRow
+                key={s.id}
+                shipment={s}
+                isSelected={s.id === selectedShipmentId}
+                unreadChatMessages={unreadChatMessages}
+                onSelect={handleSelectShipmentRow}
+              />
+            ))}
           </div>
         </div>
 
