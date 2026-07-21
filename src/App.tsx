@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { attachBrowserPolling } from "./hooks/browserPolling";
 import { Language, Shipment, Driver, ChatChannel } from "./types";
 import { TRANSLATIONS } from "./translations";
 // BUG-25: AdminPanel, DriverApplication, and ClientDashboard are only ever
@@ -735,7 +736,7 @@ export default function App() {
 
   // Fetch direct chat context periodically for active chat drawer
   useEffect(() => {
-    let interval: any;
+    let poller: ReturnType<typeof attachBrowserPolling> | undefined;
     // fix/chat-safety-reliability-phase1: `cancelled` guards against a
     // stale response landing after the admin has already switched to a
     // different shipment or channel — without it, a slow in-flight fetch
@@ -753,18 +754,22 @@ export default function App() {
       // read-receipt-staleness trade-off note (this drawer has the same
       // one: a status-only update on an already-loaded message is picked
       // up on the next full reopen, not mid-poll).
-      const fetchChat = async () => {
+      const fetchChat = async (): Promise<boolean> => {
+        let changed = false;
         try {
           const cursor = chatNewestCursorRef.current;
           const url = cursor
             ? `/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}&since=${encodeURIComponent(cursor)}`
             : `/api/shipments/${chatShipment.id}/chat?channel=${chatChannel}`;
           const res = await apiFetch(url);
-          if (cancelled) return;
+          if (cancelled) return false;
           if (res.ok) {
             const parsed = await res.json();
-            if (cancelled) return;
+            if (cancelled) return false;
             const data: any[] = Array.isArray(parsed) ? parsed : parsed.items;
+            // Perf Phase 1: adaptive-poll change signal — the first load and
+            // any tick that delivered new messages count as a change.
+            changed = !cursor || data.length > 0;
             setChatMessages((prev) => (cursor ? mergeNewerChatMessages(prev, data) : data));
             const newest = data[data.length - 1];
             if (newest) {
@@ -805,13 +810,18 @@ export default function App() {
         } catch (e) {
           console.error(e);
         }
+        return changed;
       };
       fetchChat();
-      interval = setInterval(fetchChat, 3000);
+      // Perf Phase 1: adaptive, visibility/online-aware polling. Pauses while
+      // the tab/app is backgrounded or offline; backs off 3s→5s→10s→20s→30s
+      // while the thread is idle; snaps back to 3s on new messages or resume.
+      // Replaces the fixed 3s setInterval that ran even in the background.
+      poller = attachBrowserPolling({ poll: () => fetchChat() });
     }
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      poller?.stop();
     };
   }, [chatShipment?.id, chatChannel]);
 

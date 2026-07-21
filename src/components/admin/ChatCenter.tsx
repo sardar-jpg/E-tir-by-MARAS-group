@@ -5,6 +5,7 @@ import { apiFetch } from '../../lib/api';
 import { filterShipmentsBySearch, shipmentRouteLabel, summarizeUnreadForShipment, countUnreadForChannel, sortShipmentsByChatActivity } from '../../lib/chatCenterView';
 import { formatUnreadBadge } from '../../lib/chatUnreadAccess';
 import ImageLightbox, { type ImageLightboxTarget } from '../ImageLightbox';
+import { attachBrowserPolling, type AttachedPolling } from '../../hooks/browserPolling';
 import { MAX_CHAT_TEXT_LENGTH } from '../../lib/chatMessageValidation';
 import {
   canSubmitChatMessage,
@@ -371,6 +372,9 @@ export default function ChatCenter({
   // successfully-fetched messages stay on screen while this is true.
   const [pollError, setPollError] = useState(false);
   const retryNowRef = useRef<() => void>(() => {});
+  // Perf Phase 1: the active thread's adaptive poller, so sending a message
+  // can snap it back to the fast interval for a prompt reply.
+  const chatPollerRef = useRef<AttachedPolling | null>(null);
   // Phase 4 (Firestore scalability audit): newest-seen cursor driving the
   // 3s poll's `?since=` catch-up fetch (see fetchAndMarkRead below), and
   // the "Load older messages" cursor/availability from the initial page's
@@ -767,8 +771,9 @@ export default function ChatCenter({
     // status-only update on an already-loaded message (e.g. a read
     // receipt) is picked up on the next full reselect of the
     // shipment/channel, not mid-poll — see this PR's description.
-    const fetchAndMarkRead = async (showLoading: boolean) => {
+    const fetchAndMarkRead = async (showLoading: boolean): Promise<boolean> => {
       if (showLoading) setIsLoadingMessages(true);
+      let changed = false;
       try {
         const cursor = newestCursorRef.current;
         const url = cursor
@@ -779,7 +784,10 @@ export default function ChatCenter({
         const parsed = await res.json();
         if (Array.isArray(parsed)) throw new Error('Unexpected chat response shape');
         const data: ChatMessage[] = parsed.items;
-        if (cancelled) return;
+        if (cancelled) return false;
+        // Perf Phase 1: adaptive-poll change signal (first load + any tick
+        // that delivered new messages count as a change → stay fast).
+        changed = !cursor || data.length > 0;
 
         setChannelMessages((prev) => (cursor ? mergeNewerChatMessages(prev, data) : data));
         setHasLoadedMessagesOnce(true);
@@ -832,14 +840,21 @@ export default function ChatCenter({
       } finally {
         if (!cancelled && showLoading) setIsLoadingMessages(false);
       }
+      return changed;
     };
 
     retryNowRef.current = () => { fetchAndMarkRead(true); };
     fetchAndMarkRead(true);
-    const interval = setInterval(() => fetchAndMarkRead(false), 3000);
+    // Perf Phase 1: adaptive, visibility/online-aware polling (was a fixed 3s
+    // setInterval that ran even when the Chat Center tab was backgrounded).
+    // Pauses while hidden/offline, backs off 3s→…→30s while idle, snaps back
+    // to 3s on new messages or on resume.
+    const poller = attachBrowserPolling({ poll: () => fetchAndMarkRead(false) });
+    chatPollerRef.current = poller;
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      poller.stop();
+      if (chatPollerRef.current === poller) chatPollerRef.current = null;
     };
   }, [selectedShipment?.id, activeChannel]);
 
@@ -1050,6 +1065,9 @@ export default function ChatCenter({
         // never leaves the view parked at an older scroll position.
         isNearBottomRef.current = true;
         setChannelMessages((prev) => [...prev, msg]);
+        // Perf Phase 1: sending is fresh activity — snap the poller back to the
+        // fast interval so a reply is picked up promptly even after idle backoff.
+        chatPollerRef.current?.reset(false);
         setInternalMessageText('');
         // feature/admin-chat-mobile-ux-pass: a successful send keeps the
         // conversation going — restore focus so the iOS keyboard stays up
