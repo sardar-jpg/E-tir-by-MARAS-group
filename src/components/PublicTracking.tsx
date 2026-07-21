@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Language } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { apiFetch } from "../lib/api";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { usePolling } from "../hooks/usePolling";
 
 const fetch = apiFetch;
 import {
@@ -129,11 +130,15 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     }
   };
 
-  const fetchSharedInfo = async () => {
+  // Perf Phase 1: change signature so adaptive polling can back off while the
+  // shipment is idle and snap back the moment its status/updatedAt changes.
+  const lastSharedSigRef = useRef<string>("");
+
+  const fetchSharedInfo = async (): Promise<boolean> => {
     if (!tokenFromUrl) {
       setErrorNotice("Invalid tracking link parameter. Please retrieve a secure token from MARAS Administration.");
       setLoading(false);
-      return;
+      return false;
     }
 
     try {
@@ -142,6 +147,10 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
         const data = await res.json();
         setShipment(data);
         setErrorNotice(null);
+        const sig = `${data?.updatedAt || ""}|${data?.status || ""}`;
+        const changed = sig !== lastSharedSigRef.current;
+        lastSharedSigRef.current = sig;
+        return changed;
       } else {
         const errObj = await res.json();
         setErrorNotice(errObj.error || t('notAuthorizedDesc'));
@@ -151,13 +160,24 @@ export default function PublicTracking({ lang: initialLang, tokenFromUrl, onView
     } finally {
       setLoading(false);
     }
+    return false;
   };
 
+  // Immediate load on mount and whenever the token/language changes.
   useEffect(() => {
-    fetchSharedInfo();
-    const interval = setInterval(fetchSharedInfo, 5000);
-    return () => clearInterval(interval);
+    void fetchSharedInfo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenFromUrl, lang]);
+
+  // Perf Phase 1: adaptive, visibility-aware background polling. Pauses while
+  // the tab/app is hidden or offline; backs off 5s→10s→20s→30s while the
+  // shipment is unchanged; resumes fast on any change. Replaces the fixed
+  // 5s setInterval that ran even in the background.
+  usePolling({
+    enabled: !!tokenFromUrl,
+    schedule: [5000, 10000, 20000, 30000],
+    poll: () => fetchSharedInfo(),
+  });
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);

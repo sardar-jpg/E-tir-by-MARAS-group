@@ -25,6 +25,7 @@ import { isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { attachBrowserPolling, type AttachedPolling } from "../hooks/browserPolling";
 import { useDriverActiveJob } from "../hooks/driver/useDriverActiveJob";
 import { isDriverChatAvailable } from "../lib/driverJobFlow";
 import type { DriverOfferView } from "../lib/driverAlliance";
@@ -106,6 +107,9 @@ export default function DriverApplication({
   // with a full latest-page fetch, never a stale cursor from a different
   // shipment's thread.
   const newestChatCursorRef = React.useRef<string | null>(null);
+  // Perf Phase 1: the active chat thread's adaptive poller, so sending a
+  // message can reset it to the fast interval for a prompt reply.
+  const driverChatPollerRef = React.useRef<AttachedPolling | null>(null);
   // Phase 4: cursor/availability for "Load older messages" — set from the
   // initial (non-`since`) page's own `nextCursor`/`hasMore`, consumed by
   // loadOlderChatMessages below. Reset alongside newestChatCursorRef on
@@ -651,8 +655,17 @@ export default function DriverApplication({
     }
     prevSelectedDriverIdRef.current = selectedDriverId;
     fetchData();
-    const interval = setInterval(() => fetchData(false), 12000);
-    return () => clearInterval(interval);
+    // Perf Phase 1: visibility/online-gated 12s delta poll. Deliberately a
+    // FIXED cadence (single-step schedule) — driver-facing data such as new
+    // offers/assignments must never be delayed by idle backoff. It only
+    // pauses while the app is backgrounded/offline and does one immediate
+    // refresh on resume; transient errors still back off. Replaces the plain
+    // 12s setInterval that ran even when the app was in the background.
+    const dataPoller = attachBrowserPolling({
+      schedule: [12000],
+      poll: async () => { await fetchData(false); return false; },
+    });
+    return () => dataPoller.stop();
   }, [selectedDriverId, activeShipment?.id]);
 
   // Fast chat-only polling when active tab is chat to support snappy read
@@ -665,13 +678,14 @@ export default function DriverApplication({
   // thread no longer re-fetches the whole thread every 3.5s — only
   // messages newer than the last one this tab has already seen.
   useEffect(() => {
-    let interval: any;
+    let chatPoller: AttachedPolling | undefined;
     newestChatCursorRef.current = null;
     olderChatCursorRef.current = null;
     setHasOlderChatMessages(false);
     if (activeShipment && activeTab === 'chat') {
       const requestedShipmentId = activeShipment.id;
-      const fetchChatOnly = async () => {
+      const fetchChatOnly = async (): Promise<boolean> => {
+        let changed = false;
         try {
           const cursor = newestChatCursorRef.current;
           const url = cursor
@@ -687,8 +701,11 @@ export default function DriverApplication({
               // fix/chat-safety-reliability-phase1: guard against this
               // response landing after the driver has already switched to
               // a different shipment or left the chat tab.
-              if (isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) return;
+              if (isStaleChatPollResponse(activeShipmentIdRef.current, requestedShipmentId)) return false;
 
+              // Perf Phase 1: change signal for adaptive backoff (first load
+              // or any tick that delivered new messages counts as a change).
+              changed = !cursor || msgs.length > 0;
               setChatMessages((prev) => (cursor ? mergeNewerChatMessages(prev, msgs) : msgs));
               const newest = msgs[msgs.length - 1];
               if (newest) {
@@ -724,13 +741,25 @@ export default function DriverApplication({
         } catch (err) {
           console.warn("Active driver chat fast poll error:", err);
         }
+        return changed;
       };
 
-      // Initial trigger and set quick 3.5s interval
+      // Perf Phase 1: adaptive, visibility/online-aware chat poll. Starts at
+      // 3.5s (as before) and backs off 3.5s→7s→15s→30s while the thread is
+      // idle, snapping back on new messages or on resume; pauses entirely
+      // while the app is backgrounded or offline. Replaces the fixed 3.5s
+      // setInterval that ran even when the phone screen was off.
       fetchChatOnly();
-      interval = setInterval(fetchChatOnly, 3500);
+      chatPoller = attachBrowserPolling({
+        schedule: [3500, 7000, 15000, 30000],
+        poll: () => fetchChatOnly(),
+      });
+      driverChatPollerRef.current = chatPoller;
     }
-    return () => clearInterval(interval);
+    return () => {
+      chatPoller?.stop();
+      if (driverChatPollerRef.current === chatPoller) driverChatPollerRef.current = null;
+    };
   }, [activeShipment?.id, activeTab]);
 
   // Phase 4 (Firestore scalability audit): explicit "Load older messages"
@@ -930,6 +959,9 @@ export default function DriverApplication({
         setNewMessageText("");
         const msg = await res.json();
         setChatMessages(prev => [...prev, msg]);
+        // Perf Phase 1: sending is fresh activity — reset the chat poller to
+        // its fast interval so a reply is picked up promptly after idle backoff.
+        driverChatPollerRef.current?.reset(false);
       } else {
         // PR #111 review (Delivered/Closed terminal & chat rules): the
         // shipment was closed (by another session) since this driver last
