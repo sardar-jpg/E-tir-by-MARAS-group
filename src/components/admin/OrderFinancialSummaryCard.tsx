@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, FileText, FileSpreadsheet, Loader2 } from "lucide-react";
 import type { Language, CostStatement } from "../../types";
 import { apiFetch } from "../../lib/api";
 
@@ -24,13 +24,34 @@ const L = (l: { en: string; tr: string; ar: string }, lang: Language) => l[lang]
 
 export default function OrderFinancialSummaryCard({ lang, statement }: { lang: Language; statement: CostStatement }) {
   const [data, setData] = useState<Summary | null>(null);
+  const [canExport, setCanExport] = useState(false);
+  const [busy, setBusy] = useState<"pdf" | "csv" | null>(null);
+  const [error, setError] = useState("");
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch(`/api/accounting/reports/orders/${statement.shipmentId}/financial-summary`);
+      const [res, permRes] = await Promise.all([
+        apiFetch(`/api/accounting/reports/orders/${statement.shipmentId}/financial-summary`),
+        apiFetch("/api/accounting/my-permissions"),
+      ]);
       if (res.ok) setData(await res.json());
+      if (permRes.ok) { const d = await permRes.json(); setCanExport(Array.isArray(d.permissions) && d.permissions.includes("reports.export")); }
     } catch { /* card-isolated */ }
   }, [statement.shipmentId]);
   useEffect(() => { void load(); }, [load]);
+
+  const exportSummary = async (format: "pdf" | "csv") => {
+    if (busy) return;
+    setBusy(format); setError("");
+    try {
+      const res = await apiFetch(`/api/accounting/reports/orders/${statement.shipmentId}/financial-summary/export?format=${format}`);
+      if (!res.ok) { const d = await res.json().catch(() => ({})); setError(d.error || "Export failed."); return; }
+      const blob = await res.blob();
+      const m = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = m ? m[1] : `order-summary.${format}`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch { setError("Export failed."); } finally { setBusy(null); }
+  };
 
   if (!data) return null;
   const currencies = Object.keys(data.currencies).sort();
@@ -38,7 +59,16 @@ export default function OrderFinancialSummaryCard({ lang, statement }: { lang: L
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3 min-w-0">
-      <h3 className="text-[14px] font-black text-slate-900 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-blue-600" /><span>{L({ en: "Order Financial Summary", tr: "Sipariş Mali Özeti", ar: "الملخص المالي للطلب" }, lang)}</span></h3>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="text-[14px] font-black text-slate-900 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-blue-600" /><span>{L({ en: "Order Financial Summary", tr: "Sipariş Mali Özeti", ar: "الملخص المالي للطلب" }, lang)}</span></h3>
+        {canExport && (
+          <div className="flex items-center gap-1.5">
+            <button disabled={!!busy} onClick={() => exportSummary("pdf")} className="px-2.5 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5 disabled:opacity-50">{busy === "pdf" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}PDF</button>
+            <button disabled={!!busy} onClick={() => exportSummary("csv")} className="px-2.5 py-1.5 bg-white border border-slate-200 hover:border-slate-300 text-slate-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5 disabled:opacity-50">{busy === "csv" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileSpreadsheet className="w-3.5 h-3.5" />}CSV</button>
+          </div>
+        )}
+      </div>
+      {error && <p className="text-[11px] font-semibold text-red-600">{error}</p>}
       {currencies.map((c) => {
         const f = data.currencies[c];
         return (

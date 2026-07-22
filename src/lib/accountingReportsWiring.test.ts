@@ -26,9 +26,10 @@ describe("Phase 7 report permissions", () => {
     expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).not.toContain("profitReports.view");
     expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).not.toContain("cashReports.view");
   });
-  it("general report view + export ARE in the legacy default (matches statement export policy)", () => {
+  it("general report VIEW is in the legacy default; EXPORT is sensitive and NOT default (Phase 8 hardening)", () => {
     expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).toContain("reports.view");
-    expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).toContain("reports.export");
+    expect(LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS).not.toContain("reports.export");
+    expect(SENSITIVE_ACCOUNTING_PERMISSIONS).toContain("reports.export");
   });
   it("super admin has every report permission; a report-only grant is not super-only", () => {
     const superPerms = resolveEffectivePermissions({ role: "admin", adminType: "super" });

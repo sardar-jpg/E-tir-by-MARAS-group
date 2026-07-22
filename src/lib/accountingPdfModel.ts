@@ -34,7 +34,7 @@ export interface PdfColumn { key: string; label: string; align?: "left" | "right
 export interface PdfTotalRow { label: string; value: string; strong?: boolean }
 export interface AccountingPdfFlags { showBank: boolean; showSignature: boolean; showStamp: boolean; showPageNumbers: boolean }
 export interface AccountingPdfModel {
-  docType: "invoice" | "receipt" | "statement" | "voucher" | "cost_statement";
+  docType: "invoice" | "receipt" | "statement" | "voucher" | "cost_statement" | "report";
   title: string;
   badge?: { text: string; kind: "draft" | "issued" | "final" | "void" };
   language: Language;

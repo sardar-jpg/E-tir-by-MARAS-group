@@ -150,6 +150,7 @@ import {
   applyTemplateToModel, buildSamplePreviewModel,
 } from "./src/lib/accountingPdfModel";
 import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
+import * as ReportExport from "./src/lib/accountingReportExportModel";
 import {
   validateTemplateConfig, defaultTemplateConfig, TEMPLATE_DOC_TYPES, type TemplateDocType, type TemplateConfig,
 } from "./src/lib/accountingTemplateConfig";
@@ -13409,6 +13410,234 @@ async function startServer() {
         note: "Official Profit is issued customer invoices minus approved vendor costs; it is separate from Operational Cash Movement and payment timing never changes it.",
       });
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build financial overview." }); }
+  });
+
+  // The caller's own effective report permissions (for the UI to show/hide the
+  // export controls). Reveals only the session's own permissions — no listing.
+  app.get("/api/accounting/my-permissions", async (req, res) => {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
+    if (!req.session || req.session.role !== "admin") return res.status(403).json({ error: "Admin session required." });
+    try {
+      const perms = (req as any)._effectiveAccountingPerms ?? (await loadEffectivePermissionsForSession(req.session));
+      const relevant = ["reports.view", "reports.export", "profitReports.view", "cashReports.view"] as const;
+      res.json({ permissions: relevant.filter((k) => perms.has(k)) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load permissions." }); }
+  });
+
+  // ── Accounting Phase 8 — Professional report exports (PDF + CSV) ──
+  // Every export route is a read-only GET that: requires the report's VIEW
+  // permission (route middleware) AND reports.export (checked here, so export
+  // can never bypass a sensitive profit/cash view); builds the SAME Phase 7
+  // report result the UI/CSV use; normalizes it into ONE shared export model;
+  // and renders PDF (shared renderAccountingPdf) or CSV (shared toCsv) from it.
+  // The only write is a single report.exported audit event.
+  const reportGeneratedBy = (req: express.Request) => ({ userId: req.session?.id || "unknown", name: (req.session as any)?.name || req.session?.id || "unknown" });
+  // Sanitized, human-labelled filters for the export header + audit (only the
+  // filters actually applied; empty ones are dropped).
+  const FILTER_LABELS: Record<string, string> = {
+    customer: "Customer", vendor: "Vendor", currency: "Currency", financialStatus: "Financial Status",
+    paymentStatus: "Payment Status", aging: "Aging Bucket", method: "Payment Method", orderRef: "Order Number",
+  };
+  const buildFilterLabels = (f: Record<string, string | undefined>): Array<{ label: string; value: string }> =>
+    Object.entries(f).filter(([, v]) => v && String(v).trim()).map(([k, v]) => ({ label: FILTER_LABELS[k] || k, value: String(v) }));
+  async function sendReportExport(
+    req: express.Request, res: express.Response,
+    build: (ctx: ReportExport.ExportContext) => ReportExport.AccountingReportExportModel,
+    opts: { period?: { dateFrom?: string; dateTo?: string; asOfDate?: string }; filters: Array<{ label: string; value: string }>; entityScope?: Record<string, unknown> },
+  ): Promise<void> {
+    const format = reportStr(req.query.format).toLowerCase() || "pdf";
+    if (format !== "pdf" && format !== "csv") { res.status(400).json({ code: "invalid_format", error: "Unsupported export format. Use pdf or csv." }); return; }
+    if (!(await sessionHasReportPermission(req, "reports.export"))) {
+      res.status(403).json({ code: "permission_denied", error: "You do not have permission to export reports.", requiredPermission: "reports.export" });
+      return;
+    }
+    const exportId = ReportExport.makeExportId(`${req.session?.id || ""}|${format}`);
+    const model = build({ generatedBy: reportGeneratedBy(req), generatedAt: new Date().toISOString(), exportId, filters: opts.filters, period: opts.period });
+    if (model.rows.length > ReportExport.MAX_EXPORT_ROWS) {
+      res.status(413).json({ code: "report_export_too_large", error: "The filtered report is too large to export. Narrow the date range or filters." });
+      return;
+    }
+    // Generate the output FIRST — a render failure must not write a "success"
+    // audit or a partial response. Only after the bytes exist do we audit + send.
+    const day = new Date().toISOString().slice(0, 10);
+    let contentType: string, filename: string, payload: Buffer | string;
+    if (format === "csv") {
+      contentType = "text/csv; charset=utf-8";
+      filename = ReportExport.sanitizeExportFilename("MARAS_" + model.title + "_" + day, "csv");
+      payload = ReportExport.reportExportModelToCsv(model);
+    } else {
+      const pdfModel = ReportExport.reportExportModelToPdfModel(model, await loadCompanyProfile(), pdfLang(req));
+      contentType = "application/pdf";
+      filename = ReportExport.sanitizeExportFilename("MARAS_" + model.title + "_" + day, "pdf");
+      payload = await renderAccountingPdf(pdfModel);
+    }
+    await recordAudit(req, {
+      action: AUDIT_ACTIONS.reportExported, entityType: "report", entityId: model.reportType, result: "success",
+      metadata: {
+        exportId, format, rowCount: model.rows.length, currencyGroups: model.currencySummaries.map((c) => c.currency),
+        dateFrom: opts.period?.dateFrom || undefined, dateTo: opts.period?.dateTo || undefined,
+        filters: model.filters, entityScope: opts.entityScope,
+      },
+    });
+    res.setHeader("X-Export-Id", exportId);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(payload);
+  }
+
+  // 1) Order Financial Summary export.
+  app.get("/api/accounting/reports/orders/:shipmentId/financial-summary/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const ds = await loadReportingDataset();
+      const summary = Reports.buildOrderFinancialSummary({ statement: stmt, invoices: ds.invoicesByShipment(req.params.shipmentId), customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(req.params.shipmentId), asOfDate: REPORT_ASOF(req) });
+      await sendReportExport(req, res, (ctx) => ReportExport.orderSummaryExportModel(summary, ctx), { filters: [], entityScope: { type: "order", shipmentId: req.params.shipmentId, orderRef: summary.orderRef } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export order financial summary." }); }
+  });
+
+  // 2) Accounts Receivable export.
+  app.get("/api/accounting/reports/receivables/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), aging = reportStr(req.query.agingBucket);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (aging) rows = rows.filter((r) => r.agingBucket === aging);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable");
+      if (reportStr(req.query.includePaid) !== "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.receivablesExportModel(rows, Reports.summarizeReceivables(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, financialStatus, aging }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export receivables report." }); }
+  });
+
+  // 3) Accounts Payable export.
+  app.get("/api/accounting/reports/payables/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), paymentStatus = reportStr(req.query.paymentStatus);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.approvedDate || undefined, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.payablesExportModel(rows, Reports.summarizePayables(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ vendor, currency, financialStatus, paymentStatus }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export payables report." }); }
+  });
+
+  // 4) Official Profit export (SENSITIVE view + export).
+  app.get("/api/accounting/reports/profit/export", requirePermission("profitReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.latestInvoiceDate || undefined, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.profitExportModel(rows, Reports.summarizeProfit(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, financialStatus, orderRef }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export profit report." }); }
+  });
+
+  // 5) Operational Cash Movement export (SENSITIVE view + export).
+  app.get("/api/accounting/reports/cash-movement/export", requirePermission("cashReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const currency = reportStr(req.query.currency);
+      const inRange = (d: string) => (!range.from && !range.to) || Reports.withinRange(d, range.from, range.to);
+      const cp = ds.customerPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)) && (!currency || p.currency === currency));
+      const vp = ds.vendorPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)) && (!currency || p.currency === currency));
+      const totals = Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp });
+      await sendReportExport(req, res, (ctx) => ReportExport.cashMovementExportModel(totals, ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ currency }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export cash movement report." }); }
+  });
+
+  // 6) Customer Receipts export.
+  app.get("/api/accounting/reports/customer-receipts/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildCustomerReceiptRows({ payments: ds.customerPayments, invoicesById: ds.invoicesById, includeReversed: reportStr(req.query.includeReversed) === "true" });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.customerReceiptsExportModel(rows, Reports.summarizeReceipts(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, method }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export customer receipts report." }); }
+  });
+
+  // 7) Vendor Payments export.
+  app.get("/api/accounting/reports/vendor-payments/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildVendorPaymentRows({ payments: ds.vendorPayments, includeReversed: reportStr(req.query.includeCancelledOrReversed) === "true" });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.vendorPaymentsExportModel(rows, Reports.summarizeVendorPaymentRows(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ vendor, currency, method }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export vendor payments report." }); }
+  });
+
+  // 8) Financial Closing export.
+  app.get("/api/accounting/reports/financial-closing/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildFinancialClosingRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const financialStatus = reportStr(req.query.financialStatus), customer = reportStr(req.query.customer);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      await sendReportExport(req, res, (ctx) => ReportExport.financialClosingExportModel(rows, ctx), { filters: buildFilterLabels({ financialStatus, customer }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export financial closing report." }); }
+  });
+
+  // 9) Customer Account Statement export (a customer-scoped receivable statement).
+  app.get("/api/accounting/reports/customers/:customerId/statement/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const customerName = decodeURIComponent(req.params.customerId);
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices.filter((i) => (i.companyName || "") === customerName), customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const currency = reportStr(req.query.currency);
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (reportStr(req.query.includePaid) === "false") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.receivablesExportModel(rows, Reports.summarizeReceivables(rows), ctx, { type: "customer", name: customerName }), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined, asOfDate: REPORT_ASOF(req) }, filters: buildFilterLabels({ currency }), entityScope: { type: "customer", name: customerName } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export customer statement." }); }
+  });
+
+  // 10) Vendor Account Statement export (a vendor-scoped payable statement).
+  app.get("/api/accounting/reports/vendors/:vendorId/statement/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const vendorName = decodeURIComponent(req.params.vendorId);
+      const ds = await loadReportingDataset();
+      // Match by Phase 7 vendor display name; keep only this vendor's lines.
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) }).filter((r) => r.vendor === vendorName);
+      const currency = reportStr(req.query.currency), paymentStatus = reportStr(req.query.paymentStatus);
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      await sendReportExport(req, res, (ctx) => ReportExport.payablesExportModel(rows, Reports.summarizePayables(rows), ctx, { type: "vendor", name: vendorName }), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ currency, paymentStatus }), entityScope: { type: "vendor", name: vendorName } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export vendor statement." }); }
   });
 
   // ── Payment Receipts ──────────────────────────────────────────────

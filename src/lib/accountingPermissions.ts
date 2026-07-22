@@ -187,7 +187,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
-  "reports.view", "reports.export",
+  "reports.view",
   "costStatements.print",
   "bankAccounts.view",
   "accountingTemplates.view",
@@ -202,7 +202,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
 export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] = [
   "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
   "accounting.financialClose", "accounting.financialReopen",
-  "profitReports.view", "cashReports.view",
+  "profitReports.view", "cashReports.view", "reports.export",
   "vendorPayments.reverse",
   "customerPayments.reverse",
   "invoices.cancel",

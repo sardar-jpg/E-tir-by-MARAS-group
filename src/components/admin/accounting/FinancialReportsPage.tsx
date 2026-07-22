@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import {
   Loader2, PieChart, Scale, Wallet, TrendingUp, ArrowDownCircle, ArrowUpCircle,
-  Coins, Lock, Download, RefreshCw, CalendarDays,
+  Coins, Lock, RefreshCw, CalendarDays, FileText, FileSpreadsheet,
 } from "lucide-react";
 import type { Language, Client, CostStatement } from "../../../types";
 import { apiFetch } from "../../../lib/api";
@@ -36,6 +36,15 @@ const CUR = money;
 
 export default function FinancialReportsPage({ lang, clients, costStatements }: { lang: Lang; clients: Client[]; costStatements: CostStatement[] }) {
   const [tab, setTab] = useState<TabId>("overview");
+  const [canExport, setCanExport] = useState(false);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/accounting/my-permissions");
+        if (res.ok) { const d = await res.json(); setCanExport(Array.isArray(d.permissions) && d.permissions.includes("reports.export")); }
+      } catch { /* default: no export controls */ }
+    })();
+  }, []);
   return (
     <div className="space-y-5">
       <PageHeader
@@ -51,13 +60,13 @@ export default function FinancialReportsPage({ lang, clients, costStatements }: 
         ))}
       </div>
       {tab === "overview" && <OverviewTab lang={lang} />}
-      {tab === "receivables" && <ListReport lang={lang} tabId="receivables" />}
-      {tab === "payables" && <ListReport lang={lang} tabId="payables" />}
-      {tab === "profit" && <ListReport lang={lang} tabId="profit" />}
-      {tab === "customer-receipts" && <ListReport lang={lang} tabId="customer-receipts" />}
-      {tab === "vendor-payments" && <ListReport lang={lang} tabId="vendor-payments" />}
-      {tab === "cash-movement" && <CashMovementTab lang={lang} />}
-      {tab === "financial-closing" && <ListReport lang={lang} tabId="financial-closing" />}
+      {tab === "receivables" && <ListReport lang={lang} tabId="receivables" canExport={canExport} />}
+      {tab === "payables" && <ListReport lang={lang} tabId="payables" canExport={canExport} />}
+      {tab === "profit" && <ListReport lang={lang} tabId="profit" canExport={canExport} />}
+      {tab === "customer-receipts" && <ListReport lang={lang} tabId="customer-receipts" canExport={canExport} />}
+      {tab === "vendor-payments" && <ListReport lang={lang} tabId="vendor-payments" canExport={canExport} />}
+      {tab === "cash-movement" && <CashMovementTab lang={lang} canExport={canExport} />}
+      {tab === "financial-closing" && <ListReport lang={lang} tabId="financial-closing" canExport={canExport} />}
       {tab === "monthly" && <MonthlyReportPage lang={lang} clients={clients} costStatements={costStatements} />}
     </div>
   );
@@ -145,7 +154,7 @@ function Metric({ label, value, unit, tone, locked }: { label: string; value: st
 }
 
 // ── Cash Movement (standalone per-currency, not a list) ──────────────────────
-function CashMovementTab({ lang }: { lang: Lang }) {
+function CashMovementTab({ lang, canExport }: { lang: Lang; canExport: boolean }) {
   const [data, setData] = useState<{ note: string; currencies: Array<{ currency: string; customerReceipts: number; vendorPayments: number; netCashMovement: number }> } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -166,6 +175,8 @@ function CashMovementTab({ lang }: { lang: Lang }) {
       <div className={`${CARD} p-3 flex items-end gap-3 flex-wrap`}>
         <DateField label={t({ en: "From", tr: "Başlangıç", ar: "من" }, lang)} value={from} onChange={setFrom} />
         <DateField label={t({ en: "To", tr: "Bitiş", ar: "إلى" }, lang)} value={to} onChange={setTo} />
+        <div className="flex-1" />
+        {canExport && <ExportButtons lang={lang} path="/api/accounting/reports/cash-movement/export" query={() => { const q = new URLSearchParams(); if (from) q.set("dateFrom", from); if (to) q.set("dateTo", to); return q; }} onError={setError} />}
       </div>
       <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[11.5px] font-semibold text-amber-700">
         {t({ en: "This is a cash movement report and is NOT the Official Profit calculation.", tr: "Bu bir nakit hareket raporudur, Resmî Kâr hesabı DEĞİLDİR.", ar: "هذا تقرير حركة نقدية وليس حساب الربح الرسمي." }, lang)}
@@ -264,7 +275,7 @@ const REPORT_COLUMNS: Record<string, { columns: ColumnDef[]; searchLabel: { en: 
   },
 };
 
-function ListReport({ lang, tabId }: { lang: Lang; tabId: string }) {
+function ListReport({ lang, tabId, canExport }: { lang: Lang; tabId: string; canExport: boolean }) {
   const cfg = REPORT_COLUMNS[tabId];
   const [rows, setRows] = useState<any[]>([]);
   const [totals, setTotals] = useState<any>(null);
@@ -298,17 +309,7 @@ function ListReport({ lang, tabId }: { lang: Lang; tabId: string }) {
   }, [tabId, query]);
   useEffect(() => { void load(); }, [load]);
 
-  const exportCsv = async () => {
-    const q = new URLSearchParams(query); q.set("format", "csv"); q.delete("page"); q.delete("pageSize");
-    try {
-      const res = await apiFetch(`/api/accounting/reports/${tabId}?${q.toString()}`);
-      if (!res.ok) { setError((await res.json().catch(() => ({}))).error || "Export not permitted."); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = `${tabId}-${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    } catch { setError("Export failed."); }
-  };
+  const exportQuery = () => { const q = new URLSearchParams(query); q.delete("page"); q.delete("pageSize"); return q; };
 
   return (
     <div className="space-y-4">
@@ -320,7 +321,7 @@ function ListReport({ lang, tabId }: { lang: Lang; tabId: string }) {
           <input value={search} onChange={(e) => { setPage(1); setSearch(e.target.value); }} className={inputCls} placeholder="…" />
         </div>
         <button onClick={load} className={btnGhost} title="Refresh"><RefreshCw className="w-4 h-4" /></button>
-        <button onClick={exportCsv} className={btnGhost}><Download className="w-4 h-4" />CSV</button>
+        {canExport && <ExportButtons lang={lang} path={`/api/accounting/reports/${tabId}/export`} query={exportQuery} onError={setError} />}
       </div>
 
       {/* Per-currency totals */}
@@ -397,6 +398,45 @@ function DateField({ label, value, onChange }: { label: string; value: string; o
     </div>
   );
 }
+/**
+ * Export controls (PDF + CSV) — hit the read-only Phase 8 export routes with
+ * the current report filters (never just the visible page). Buttons disable
+ * while exporting; a controlled error surfaces on failure (403/413/etc.).
+ */
+export function ExportButtons({ lang, path, query, onError }: { lang: Lang; path: string; query: () => URLSearchParams; onError: (m: string) => void }) {
+  const [busy, setBusy] = useState<"pdf" | "csv" | null>(null);
+  const run = async (format: "pdf" | "csv") => {
+    if (busy) return;
+    setBusy(format); onError("");
+    try {
+      const q = query(); q.set("format", format);
+      const res = await apiFetch(`${path}?${q.toString()}`);
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        onError(d.error || (res.status === 403 ? "You do not have permission to export." : res.status === 413 ? "Report too large — narrow the filters." : "Export failed."));
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = /filename="?([^";]+)"?/.exec(cd);
+      const name = m ? m[1] : `report-${new Date().toISOString().slice(0, 10)}.${format}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch { onError("Export failed."); } finally { setBusy(null); }
+  };
+  return (
+    <div className="flex items-center gap-2">
+      <button disabled={!!busy} onClick={() => run("pdf")} className={btnGhost} title={t({ en: "Export PDF", tr: "PDF Dışa Aktar", ar: "تصدير PDF" }, lang)}>
+        {busy === "pdf" ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}PDF
+      </button>
+      <button disabled={!!busy} onClick={() => run("csv")} className={btnGhost} title={t({ en: "Export CSV", tr: "CSV Dışa Aktar", ar: "تصدير CSV" }, lang)}>
+        {busy === "csv" ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4" />}CSV
+      </button>
+    </div>
+  );
+}
+
 function Loading() { return <div className="flex items-center justify-center py-16 text-slate-400"><Loader2 className="w-6 h-6 animate-spin" /></div>; }
 function ErrorState({ msg, onRetry }: { msg: string; onRetry: () => void }) {
   return (
