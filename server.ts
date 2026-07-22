@@ -185,6 +185,9 @@ import { canDeletePushToken, selectPushTokensForAccountDeletion } from "./src/li
 import { buildSecureShareView, resolveShareTokenLookup, type ShareTokenLookupResult } from "./src/lib/publicShareView";
 import { isMissingIndexError } from "./src/lib/firestoreErrors";
 import { computePersistenceReadiness } from "./src/lib/persistenceReadiness";
+import { installGoogleAuthRejectionGuard } from "./src/lib/googleAuthRejectionGuard";
+import { resolveFirestoreStartupFailureOutcome } from "./src/lib/firestoreStartupPolicy";
+import { resolveBodyParserErrorResponse } from "./src/lib/bodyParserErrorResponse";
 import { validateUpload } from "./src/lib/uploadValidation";
 import { sanitizeLogInput, maskLoginIdentifier } from "./src/lib/activityLogInput";
 import {
@@ -305,6 +308,21 @@ import { adaptDocSnapshot, AdaptedDocSnapshot } from "./src/lib/firestoreSnapsho
 import { buildFirebaseDownloadUrl } from "./src/lib/firebaseStorageUrl";
 
 export let useMemoryFallback = false;
+
+// Confirmed production-risk fix: @google-cloud/firestore/google-gax issues a
+// second, entirely internal credential-resolution attempt whenever
+// Application Default Credentials fail to resolve — a promise our own code
+// never receives a reference to, so it can never be caught at any call site
+// no matter how attemptFirestoreConnect (below) is written. Left unguarded,
+// that duplicate becomes a fatal unhandled rejection under Node's default
+// `--unhandled-rejections=throw` behavior even though the SAME failure was
+// already caught, logged, and handled gracefully via our own awaited call.
+// Installed this early (before any Firebase Admin SDK call below) so it
+// covers the entire process lifetime, not just server startup — see
+// src/lib/googleAuthRejectionGuard.ts for the full explanation and why this
+// is a narrow, signature-matched guard rather than a general
+// unhandled-rejection swallower.
+installGoogleAuthRejectionGuard();
 
 // Memory-fallback data safety controls.
 // STRICT_PERSISTENCE is ON by default. When Firestore is unavailable,
@@ -2392,9 +2410,12 @@ if (adminApp && adminStorageBucketName) {
 // therefore the ONLY way to find out whether ADC is actually available and
 // usable: locally, that means `gcloud auth application-default login` was
 // run; on Cloud Run, that the attached runtime service account has the
-// necessary Firestore IAM role. A failure here still falls back to the
-// in-memory store (logged loudly, since silent data loss is far worse than
-// a visible startup error).
+// necessary Firestore IAM role. A single failed attempt here just returns
+// false (logged loudly) — startFirestoreConnection below decides, once all
+// of ITS retries are exhausted, whether that means memory-fallback or a
+// controlled startup failure, based on STRICT_PERSISTENCE
+// (firestoreStartupPolicy.ts).
+let lastFirestoreConnectError = "";
 async function attemptFirestoreConnect(timeoutMs: number): Promise<boolean> {
   if (!db) return false;
   try {
@@ -2403,12 +2424,12 @@ async function attemptFirestoreConnect(timeoutMs: number): Promise<boolean> {
     useMemoryFallback = false;
     return true;
   } catch (err: any) {
+    lastFirestoreConnectError = err instanceof Error ? err.message : String(err);
     console.warn(
-      "[Firestore] Connection check failed — falling back to in-memory storage. ALL DATA WILL BE LOST ON " +
-      "RESTART until this is resolved. This usually means Application Default Credentials are missing or " +
+      "[Firestore] Connection check failed. This usually means Application Default Credentials are missing or " +
       "the runtime identity lacks Firestore access: locally, run `gcloud auth application-default login`; " +
       "on Cloud Run, verify the service's attached service account has the Cloud Datastore User role. " +
-      `Error: ${err instanceof Error ? err.message : String(err)}`
+      `Error: ${lastFirestoreConnectError}`
     );
     return false;
   }
@@ -2446,7 +2467,20 @@ async function startFirestoreConnection(): Promise<void> {
     if (ok) return;
     if (attempts[i].wait > 0) await new Promise<void>(r => setTimeout(r, attempts[i].wait));
   }
-  console.warn("[Firestore] All startup connection attempts failed — serving from memory fallback. Background recovery scheduled.");
+  // All startup retries exhausted. STRICT_PERSISTENCE (on by default) must
+  // never silently degrade into memory-fallback here — that would defeat
+  // its whole purpose for the one case that matters most: the server never
+  // successfully connected in the first place. See
+  // src/lib/firestoreStartupPolicy.ts for the full rationale; this does NOT
+  // change any of the per-request STRICT_PERSISTENCE checks elsewhere in
+  // this file, which separately (and unchanged) cover a mid-session
+  // connected-then-disconnected transition.
+  const outcome = resolveFirestoreStartupFailureOutcome(STRICT_PERSISTENCE, lastFirestoreConnectError);
+  if (outcome.mode === "fatal-exit") {
+    console.error(`[FATAL] ${outcome.message}`);
+    process.exit(1);
+  }
+  console.warn(`[Firestore] ${outcome.message}`);
   useMemoryFallback = true;
   scheduleFirestoreRecovery(30_000);
 }
@@ -4060,6 +4094,23 @@ async function startServer() {
   );
 
   app.use(express.json({ limit: "20mb" }));
+
+  // express.json() above throws synchronously — before any route handler
+  // runs — for a body over its limit or malformed JSON. Unhandled, that's
+  // Express's default raw HTML error page ("Payload Too Large" / "Bad
+  // Request") on what is otherwise a 100%-JSON API. This only reformats the
+  // response (413/400 status codes are unchanged); the precise per-file
+  // MAX_UPLOAD_BYTES check in uploadValidation.ts (decoded byte length)
+  // still runs exactly as before for any request that gets past this coarse
+  // whole-body cap.
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const resolved = resolveBodyParserErrorResponse(err);
+    if (resolved) {
+      res.status(resolved.status).json(resolved.body);
+      return;
+    }
+    next(err);
+  });
 
   // PR #128 — monitoring observer: classifies every finished /api request
   // (5xx families, unusually slow responses) into the bounded, grouped

@@ -174,10 +174,26 @@ Recommended, in order:
    reports `Configured persistence mode: firestore`, not `memory-fallback`.
 8. Deliberately test the unsafe-fallback path once: run
    `gcloud auth application-default revoke` (or temporarily point at a
-   nonexistent project) and restart — confirm the server logs the
-   `[Firestore] Connection check failed` warning and falls back to memory
-   rather than silently proceeding as if nothing were wrong. Then run
+   nonexistent project) and restart. **With `STRICT_PERSISTENCE=true` (the
+   default), the server now refuses to start**: after exhausting its startup
+   connection retries it logs a `[FATAL]` message explaining why and exits
+   with a non-zero code, instead of silently proceeding in memory-fallback
+   mode — see `src/lib/firestoreStartupPolicy.ts`. Only with
+   `STRICT_PERSISTENCE=false` does it fall back to memory and keep running
+   (logging the `[Firestore] Connection check failed` warning), matching the
+   description this step used to give unconditionally. Then run
    `gcloud auth application-default login` again to restore it.
+   - **Historical note:** earlier versions of this exact test (missing/
+     revoked ADC + `STRICT_PERSISTENCE=true`) crashed the process outright
+     with an uncaught `Could not load the default credentials` exception,
+     instead of either of the above — a duplicate, internal
+     credential-resolution promise inside `@google-cloud/firestore`/
+     `google-gax` that the server's own `attemptFirestoreConnect` try/catch
+     could never observe or catch, no matter how it was written. Fixed via
+     `src/lib/googleAuthRejectionGuard.ts`, a narrow, signature-matched
+     guard for exactly that known duplicate — not a general
+     unhandled-rejection swallower; anything else still crashes the process
+     as before.
 
 ## 5. Firestore rules verification
 
@@ -471,7 +487,12 @@ environment is not production-ready:
   Fallback"` in startup logs
 - `[Firestore] Connection check failed` in startup logs — usually means ADC
   is missing or unusable (run `gcloud auth application-default login`
-  locally; verify the Cloud Run service account's IAM roles in production)
+  locally; verify the Cloud Run service account's IAM roles in production).
+  With the default `STRICT_PERSISTENCE=true`, this now leads to a `[FATAL]`
+  message and a non-zero process exit once startup retries are exhausted
+  (`src/lib/firestoreStartupPolicy.ts`) rather than silently continuing —
+  a container stuck restarting on this message means ADC/IAM needs fixing,
+  not that the app is "just running on memory fallback."
 - `Configured persistence mode: memory-fallback` in the `[Startup]` block
 - Uploads returning "File storage is temporarily unavailable"
   (`useMemoryFallback || !storageBucketRef` — means Firestore/Storage isn't
