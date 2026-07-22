@@ -95,6 +95,7 @@ import {
 } from "./src/lib/accountingTemplateSettings";
 import {
   summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
+  canRecordVendorPaymentForStatus, hasActiveVendorPayment,
 } from "./src/lib/vendorPayments";
 import {
   computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
@@ -11237,16 +11238,19 @@ async function startServer() {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
       // Loaded outside the contended cost-statement doc: the current approver
-      // config (to capture) and whether an active invoice still locks it.
+      // config (to capture) and the two financial locks — an active customer
+      // invoice (Phase 3) and any active vendor payment (Phase 4). Both must
+      // be clear before a reopen may be requested; neither weakens the other.
       const config = await loadWorkflowConfig();
       const activeAdminIds = await loadActiveAdminIds();
       const invoiceActive = hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId));
+      const vendorPaymentActive = hasActiveVendorPayment(await loadVendorPaymentsForShipment(req.params.shipmentId));
       let shipmentNumber = "";
       let notifyTarget: string | undefined;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canRequestReopenChain({ status, hasActiveInvoice: invoiceActive, hasPendingReopen: hasPendingReopen(stmt as any), reason });
+        const decision = canRequestReopenChain({ status, hasActiveInvoice: invoiceActive, hasActiveVendorPayment: vendorPaymentActive, hasPendingReopen: hasPendingReopen(stmt as any), reason });
         if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
         // Capture the current ordered approver list for THIS reopen cycle.
         const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
@@ -11871,6 +11875,12 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      // Accounting Phase 4 — eligibility: vendor payments may be recorded ONLY
+      // against an approved-and-closed statement (final_closed). Draft, pending,
+      // rejected, finalizing, reopen_requested, and reopened all block — the
+      // vendor cost amounts are not authoritative until approval completes.
+      const eligibility = canRecordVendorPaymentForStatus(resolveAccountingStatus(stmt as any));
+      if (!eligibility.ok) return res.status(409).json({ code: eligibility.code, error: eligibility.error });
       const body = req.body || {};
       const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
       if (!item) return res.status(404).json({ code: "item_not_found", error: "Cost item not found." });

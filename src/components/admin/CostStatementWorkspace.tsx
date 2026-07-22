@@ -497,7 +497,7 @@ export default function CostStatementWorkspace({
             {!hasExpenses ? (
               <EmptyHint>{pick(T.noVendorYet, lang)}</EmptyHint>
             ) : (
-              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} />
+              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} recordingEnabled={costsApproved} />
             )}
           </SectionCard>
 

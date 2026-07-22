@@ -652,6 +652,10 @@ export function decideCycleFinalization(params: {
 export const ACTIVE_INVOICE_LOCK_MESSAGE =
   "This Cost Statement is locked because an active issued customer invoice exists. Cancel the invoice before requesting to reopen the Cost Statement.";
 
+/** Phase 4: shown when a reopen request is blocked by active vendor payments. */
+export const ACTIVE_VENDOR_PAYMENT_LOCK_MESSAGE =
+  "This Cost Statement cannot be reopened because active Vendor Payments exist. Cancel the Vendor Payments before requesting to reopen the Cost Statement.";
+
 export interface ReopenDecisionEntry {
   /** Zero-based position in this reopen cycle's approver list. */
   position: number;
@@ -695,20 +699,26 @@ export function hasPendingReopen(state: (CostApprovalState & { reopenCycles?: Re
 }
 
 /**
- * Phase 3 eligibility to REQUEST a reopen. A reopen may be requested only when:
+ * Phase 3/4 eligibility to REQUEST a reopen. A reopen may be requested only when:
  *   - no related customer invoice is active (issued/partially_paid/paid),
+ *   - no active vendor payment exists (Phase 4 — approved cost amounts must
+ *     never change beneath recorded payments; cancel the payments first),
  *   - no reopen request is already pending,
  *   - the statement is finalized (final_closed) — an already editable/draft
  *     statement is not eligible,
  *   - a non-empty reason is given.
+ * Both financial locks are independent; neither weakens the other.
  */
 export function canRequestReopenChain(params: {
   status: AccountingStatus;
   hasActiveInvoice: boolean;
   hasPendingReopen: boolean;
   reason: string;
+  /** Phase 4: whether any active (non-reversed) vendor payment exists. */
+  hasActiveVendorPayment?: boolean;
 }): WorkflowDecision {
   if (params.hasActiveInvoice) return { ok: false, code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE };
+  if (params.hasActiveVendorPayment) return { ok: false, code: "active_vendor_payment_lock", error: ACTIVE_VENDOR_PAYMENT_LOCK_MESSAGE };
   if (params.hasPendingReopen) return { ok: false, code: "reopen_already_pending", error: "A reopening request is already pending for this statement." };
   if (params.status !== "final_closed") return { ok: false, code: "not_closed", error: "Only a finalized statement can be reopened." };
   if (!params.reason || !params.reason.trim()) return { ok: false, code: "reason_required", error: "A reopening reason is required." };

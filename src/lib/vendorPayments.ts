@@ -18,6 +18,29 @@ export function isActivePayment(p: Pick<VendorPaymentTransaction, "status">): bo
   return p.status === "active";
 }
 
+// ── Accounting Phase 4 — payment eligibility + reopen lock ────────────────
+/**
+ * Vendor payments may be recorded ONLY against an approved-and-closed Cost
+ * Statement (final_closed). Every other state — draft, pending approval,
+ * rejected, finalizing, reopen_requested, reopened — blocks recording:
+ * costs are not authoritative until the approval chain has completed.
+ */
+export const VENDOR_PAYMENT_ELIGIBLE_STATUS = "final_closed";
+
+export function canRecordVendorPaymentForStatus(status: string | undefined): { ok: true } | { ok: false; code: string; error: string } {
+  if (status === VENDOR_PAYMENT_ELIGIBLE_STATUS) return { ok: true };
+  return {
+    ok: false,
+    code: "statement_not_approved",
+    error: "Vendor payments can be recorded only after the Cost Statement is approved and closed.",
+  };
+}
+
+/** True when ANY active (non-reversed) vendor payment exists (Phase 4 reopen lock). */
+export function hasActiveVendorPayment(payments: ReadonlyArray<Pick<VendorPaymentTransaction, "status">>): boolean {
+  return payments.some(isActivePayment);
+}
+
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
