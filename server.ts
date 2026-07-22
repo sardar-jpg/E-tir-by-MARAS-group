@@ -106,6 +106,8 @@ import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerIn
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
+  // Phase 5 — per-invoice Accounts Receivable.
+  canRecordInvoicePayment, summarizeInvoiceReceivable, paymentsForInvoice,
 } from "./src/lib/customerPayments";
 import { canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { requireClientId } from "./src/lib/customerIdentity";
@@ -12592,53 +12594,186 @@ async function startServer() {
   // allocations from the referenced invoice ledgers happen in ONE Firestore
   // transaction, so ledger and payment can never diverge. A repeat on an
   // already-reversed payment replays 200. Original allocations are preserved.
+  /**
+   * Shared reversal core for a customer payment (used by the account-level
+   * route and the Phase 5 per-invoice route — identical behavior). One
+   * transaction restores the payment's allocations to the invoice ledgers,
+   * marks the payment reversed (never deleted), restages invoice statuses,
+   * and audits; afterwards any issued receipt is voided idempotently.
+   */
+  async function performCustomerPaymentReversal(req: express.Request, paymentId: string, reason: string): Promise<{ http: number; body: any }> {
+    const now = new Date().toISOString();
+    const actor = req.session!.id;
+    let didReverse = false;
+    const result = await runAccountingTransaction(async (tx) => {
+      const payment = await tx.get<CustomerPayment>("customerPayments", paymentId);
+      if (!payment) return { http: 404, body: { error: "Payment not found." } };
+      if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
+      const decision = canReversePayment(payment, reason);
+      if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+      // Subtract this payment's active allocations from each invoice ledger.
+      const ledgersById = new Map<string, InvoiceAccountingLedger>();
+      const invoicesTxById = new Map<string, CustomerInvoice>();
+      for (const a of payment.allocations || []) {
+        const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
+        if (l) ledgersById.set(a.invoiceId, l);
+        const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
+        if (inv) invoicesTxById.set(a.invoiceId, inv);
+      }
+      const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+      if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
+      const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+      tx.set("customerPayments", payment.id, reversed);
+      for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+      stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
+      stageAudit(tx, auditActorFromReq(req), now, {
+        action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
+        paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
+        beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+      });
+      didReverse = true;
+      return { http: 200, body: { payment: cleanUndefined(reversed) } };
+    });
+    if (result.http === 200 && didReverse) {
+      // Void any issued receipt for this payment (never delete). Different
+      // collection than the reversed payment; safe + idempotent (voiding an
+      // already-void receipt is a no-op) so a retry can't corrupt state.
+      const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
+      for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
+        if (r.paymentId === paymentId && r.status === "issued") {
+          await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+        }
+      }
+      await logActivity("", "Accounting", actor, `Customer payment reversed (${paymentId})`, "", "");
+    }
+    return result;
+  }
+
   app.post("/api/customer-accounts/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
-      const now = new Date().toISOString();
-      const actor = req.session!.id;
-      let didReverse = false;
-      const result = await runAccountingTransaction(async (tx) => {
-        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
-        if (!payment) return { http: 404, body: { error: "Payment not found." } };
-        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
-        const decision = canReversePayment(payment, reason);
-        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        // Subtract this payment's active allocations from each invoice ledger.
-        const ledgersById = new Map<string, InvoiceAccountingLedger>();
-        const invoicesTxById = new Map<string, CustomerInvoice>();
-        for (const a of payment.allocations || []) {
-          const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
-          if (l) ledgersById.set(a.invoiceId, l);
-          const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
-          if (inv) invoicesTxById.set(a.invoiceId, inv);
-        }
-        const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
-        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
-        const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-        tx.set("customerPayments", payment.id, reversed);
-        for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
-        stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
-        stageAudit(tx, auditActorFromReq(req), now, {
-          action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
-          paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
-          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
-        });
-        didReverse = true;
-        return { http: 200, body: { payment: cleanUndefined(reversed) } };
-      });
-      if (result.http === 200 && didReverse) {
-        // Void any issued receipt for this payment (never delete). Different
-        // collection than the reversed payment; safe + idempotent (voiding an
-        // already-void receipt is a no-op) so a retry can't corrupt state.
-        const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
-        for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
-          if (r.paymentId === req.params.paymentId && r.status === "issued") {
-            await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
-          }
-        }
-        await logActivity("", "Accounting", actor, `Customer payment reversed (${req.params.paymentId})`, "", "");
+      const result = await performCustomerPaymentReversal(req, req.params.paymentId, reason);
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to reverse customer payment." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Phase 5 — per-invoice Customer Payments (Accounts
+  // Receivable). Each payment belongs to EXACTLY ONE issued customer
+  // invoice: it is stored as a CustomerPayment with a single allocation
+  // covering the full amount, so the existing ledgers, derived invoice
+  // statuses (issued → partially_paid → paid), reversal, receipts,
+  // statements, and audit all keep working unchanged. Completely
+  // independent from Vendor Payments. Manual entry only — no gateway,
+  // no bank integration, no FX, no credit notes.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadCustomerPaymentsAll(): Promise<CustomerPayment[]> {
+    const snap = await getDocs(collection(db, "customerPayments"));
+    return snap.docs.map((d) => d.data() as CustomerPayment);
+  }
+
+  // Per-invoice receivable summary + full payment history (active + reversed).
+  app.get("/api/customer-invoices/:invoiceId/payments", requirePermission("customerPayments.view"), async (req, res) => {
+    try {
+      const invSnap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!invSnap.exists()) return res.status(404).json({ code: "invoice_not_found", error: "Invoice not found." });
+      const invoice = invSnap.data() as CustomerInvoice;
+      const all = await loadCustomerPaymentsAll();
+      const history = paymentsForInvoice(invoice.id, all).map((r) => ({ ...cleanUndefined(r.payment), allocatedAmount: r.allocatedAmount }));
+      res.json({ summary: summarizeInvoiceReceivable(invoice, all), payments: history });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load invoice payments." });
+    }
+  });
+
+  // Record a manual payment against exactly ONE invoice. Eligibility
+  // (issued/partially_paid only), currency match, and overpayment are
+  // validated by the pure module, then RE-ENFORCED atomically by the ledger
+  // transaction (applyAllocationDeltas), so two competing payments can never
+  // both exceed the invoice total. Amount is never prefilled or derived.
+  app.post("/api/customer-invoices/:invoiceId/payments", requirePermission("customerPayments.create"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const invSnap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!invSnap.exists()) return res.status(404).json({ code: "invoice_not_found", error: "Invoice not found." });
+      const invoice = invSnap.data() as CustomerInvoice;
+      const allPayments = await loadCustomerPaymentsAll();
+      const check = canRecordInvoicePayment({ invoice, amount: body.amount, currency: body.currency, payments: allPayments });
+      if (!check.ok) {
+        return res.status(check.code === "invalid_amount" || check.code === "currency_mismatch" ? 400 : 409).json({ code: check.code, error: check.error });
       }
+      const amount = check.amount;
+      // Identity comes from the invoice (immutable clientId), never the client.
+      const payerClientId = typeof invoice.clientId === "string" ? invoice.clientId.trim() : "";
+      if (!payerClientId) return res.status(400).json({ code: "unresolved_identity", error: "This invoice carries no customer identity; record the payment from the Customer Account page." });
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      if (isDuplicatePayment(allPayments, { companyName: invoice.companyName, amount, paymentDate, reference, currency: invoice.currency })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      const now = new Date().toISOString();
+      const paymentId = `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const result = await runAccountingTransaction(async (tx) => {
+        // Transaction-fresh invoice + ledger; the CONTENDED overpayment math
+        // happens here, never on the pre-read.
+        const invTx = (await tx.get<CustomerInvoice>("customerInvoices", invoice.id)) || invoice;
+        let ledger = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", invoice.id);
+        if (!ledger) ledger = initInvoiceLedgerFromInvoice(invTx, now);
+        const ledgersById = new Map<string, InvoiceAccountingLedger>([[invoice.id, ledger]]);
+        const applied = applyAllocationDeltas({ payerClientId, currency: invoice.currency, ledgersById, deltas: [{ invoiceId: invoice.id, delta: amount }], nowIso: now });
+        if (!applied.ok) return { http: applied.code === "over_invoice" || applied.code === "customer_mismatch" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+        const payment: CustomerPayment = {
+          id: paymentId, companyName: invoice.companyName, clientId: payerClientId,
+          amount, currency: invoice.currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          reference: reference || undefined,
+          notes: typeof body.note === "string" ? body.note.slice(0, 1000) : typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
+          allocations: [{ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, amount }],
+          status: "active", createdBy: req.session!.id, createdAt: now,
+        };
+        const invoicesTxById = new Map<string, CustomerInvoice>([[invoice.id, invTx]]);
+        tx.set("customerPayments", payment.id, payment);
+        for (const l of applied.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, applied.ledgers, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentCreated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, invoiceId: invoice.id, clientId: payerClientId, currency: invoice.currency,
+          afterSnapshot: { amount, currency: invoice.currency, method: payment.paymentMethod, reference: payment.reference, invoiceNumber: invoice.invoiceNumber, singleInvoice: true },
+        });
+        return { http: 201, body: { payment: cleanUndefined(payment) } };
+      });
+      if (result.http === 201) {
+        await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for invoice ${invoice.invoiceNumber} (${amount} ${invoice.currency})`, "", "");
+        // Fresh summary/history for the response (post-commit read).
+        const after = await loadCustomerPaymentsAll();
+        const invAfter = await getDoc(doc(db, "customerInvoices", invoice.id));
+        (result.body as any).summary = summarizeInvoiceReceivable(invAfter.exists() ? (invAfter.data() as CustomerInvoice) : invoice, after);
+        (result.body as any).payments = paymentsForInvoice(invoice.id, after).map((r) => ({ ...cleanUndefined(r.payment), allocatedAmount: r.allocatedAmount }));
+      }
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice payment failed:", err);
+      res.status(500).json({ error: "Failed to record customer payment." });
+    }
+  });
+
+  // Reverse a payment from the invoice context — verifies the payment actually
+  // belongs to this invoice, then runs the SAME shared reversal core.
+  app.post("/api/customer-invoices/:invoiceId/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
+    try {
+      const paySnap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!paySnap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = paySnap.data() as CustomerPayment;
+      if (!(payment.allocations || []).some((a) => a.invoiceId === req.params.invoiceId)) {
+        return res.status(404).json({ code: "payment_not_for_invoice", error: "Payment not found for this invoice." });
+      }
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const result = await performCustomerPaymentReversal(req, req.params.paymentId, reason);
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;

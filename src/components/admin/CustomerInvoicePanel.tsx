@@ -12,6 +12,7 @@ import { computeLineAmount, computeInvoiceTotals } from "../../lib/customerInvoi
 import {
   emptyLineDraft, addLineDraft, duplicateLineDraft, deleteLineDraft, lineDraftHasData, type LineDraft,
 } from "../../lib/invoiceLineEditor";
+import type { InvoiceReceivableSummary } from "../../lib/customerPayments";
 
 /**
  * Customer Invoice panel — build a real customer-facing logistics invoice with
@@ -309,6 +310,9 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
               {canWrite && inv.status === "draft" && <button onClick={() => issueExisting(inv)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5"><Send className="w-3.5 h-3.5" />{tr("issue", lang)}</button>}
               {canWrite && issued && <button onClick={() => cancelInvoice(inv)} className="px-3 py-1.5 bg-white border border-red-200 hover:bg-red-50 text-red-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Ban className="w-3.5 h-3.5" />{tr("cancelInv", lang)}</button>}
             </div>
+            {/* Accounting Phase 5 — per-invoice payments: total / paid / remaining /
+                derived status + append-only history + manual Record Payment. */}
+            {issued && <InvoicePaymentsBlock invoiceId={inv.id} canWrite={canWrite} lang={lang} onInvoiceChanged={() => void load()} />}
             {/* Payment quick access — reuses the existing Customer Account / receipts flow (no duplicate payment logic). */}
             {issued && (onReceivePayment || onViewPayments) && (
               <div className="flex items-center gap-2 flex-wrap mt-2.5 pt-2.5 border-t border-slate-100">
@@ -464,6 +468,140 @@ function InvField({ label, value, strong }: { label: string; value: string; stro
 }
 function TotRow({ label, value }: { label: string; value: string }) {
   return <div className="flex items-center justify-between text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><span className="font-mono font-bold text-slate-700 tabular-nums">{value}</span></div>;
+}
+
+/**
+ * Accounting Phase 5 — per-invoice Accounts Receivable block. Shows invoice
+ * total / paid / remaining / derived payment status + the append-only payment
+ * history, and records a MANUAL payment against exactly THIS invoice via
+ * POST /api/customer-invoices/:invoiceId/payments. Amount is never prefilled
+ * (remaining is shown as reference only); Record is hidden once fully paid.
+ * All figures are server-authoritative — this block re-fetches after writes.
+ */
+const PAY_T = {
+  title: { en: "Payments (this invoice)", tr: "Ödemeler (bu fatura)", ar: "الدفعات (هذه الفاتورة)" },
+  total: { en: "Invoice Total", tr: "Fatura Toplamı", ar: "إجمالي الفاتورة" },
+  paid: { en: "Paid", tr: "Ödenen", ar: "المدفوع" },
+  remaining: { en: "Remaining", tr: "Kalan", ar: "المتبقي" },
+  record: { en: "Record Payment", tr: "Ödeme Kaydet", ar: "تسجيل دفعة" },
+  amount: { en: "Amount", tr: "Tutar", ar: "المبلغ" },
+  date: { en: "Date", tr: "Tarih", ar: "التاريخ" },
+  method: { en: "Method", tr: "Yöntem", ar: "الطريقة" },
+  reference: { en: "Reference", tr: "Referans", ar: "المرجع" },
+  note: { en: "Note (optional)", tr: "Not (isteğe bağlı)", ar: "ملاحظة (اختياري)" },
+  save: { en: "Save", tr: "Kaydet", ar: "حفظ" },
+  cancel: { en: "Cancel", tr: "İptal", ar: "إلغاء" },
+  none: { en: "No payments yet.", tr: "Henüz ödeme yok.", ar: "لا توجد دفعات بعد." },
+  reversed: { en: "Reversed", tr: "Geri alındı", ar: "معكوسة" },
+  reverse: { en: "Reverse", tr: "Geri al", ar: "عكس" },
+  reverseReason: { en: "Reason for reversing this payment:", tr: "Bu ödemeyi geri alma nedeni:", ar: "سبب عكس هذه الدفعة:" },
+  fullyPaid: { en: "This invoice is fully paid.", tr: "Bu fatura tamamen ödendi.", ar: "هذه الفاتورة مدفوعة بالكامل." },
+};
+const payTr = (k: keyof typeof PAY_T, lang: Language) => PAY_T[k][lang] || PAY_T[k].en;
+const PAY_STATUS_STYLE: Record<string, string> = { Unpaid: "bg-slate-100 text-slate-600", "Partially Paid": "bg-amber-100 text-amber-700", Paid: "bg-blue-100 text-blue-700" };
+type InvoicePaymentRow = { id: string; allocatedAmount: number; currency: string; paymentDate: string; paymentMethod?: string; reference?: string; notes?: string; status: string; createdBy?: string; createdAt?: string; reversalReason?: string };
+
+function InvoicePaymentsBlock({ invoiceId, canWrite, lang, onInvoiceChanged }: { invoiceId: string; canWrite: boolean; lang: Language; onInvoiceChanged: () => void }) {
+  const [summary, setSummary] = useState<InvoiceReceivableSummary | null>(null);
+  const [history, setHistory] = useState<InvoicePaymentRow[]>([]);
+  const [recording, setRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [form, setForm] = useState({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "bank_transfer", reference: "", note: "" });
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments`);
+      if (res.ok) { const b = await res.json(); setSummary(b.summary || null); setHistory(b.payments || []); }
+    } catch { /* block-isolated */ }
+  }, [invoiceId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: Number(form.amount), currency: summary?.currency, paymentDate: form.paymentDate, paymentMethod: form.paymentMethod, reference: form.reference || undefined, note: form.note || undefined }),
+      });
+      const b = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setRecording(false);
+        setForm({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "bank_transfer", reference: "", note: "" });
+        await load();
+        onInvoiceChanged(); // invoice status may have advanced (partially_paid/paid)
+      } else setErr(b.error || "Save failed.");
+    } catch { setErr("Save failed."); } finally { setBusy(false); }
+  };
+
+  const reverse = async (paymentId: string) => {
+    const reason = window.prompt(payTr("reverseReason", lang));
+    if (!reason || !reason.trim()) return;
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments/${paymentId}/reverse`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) });
+      if (res.ok) { await load(); onInvoiceChanged(); }
+      else { const b = await res.json().catch(() => ({})); setErr(b.error || "Reversal failed."); }
+    } catch { setErr("Reversal failed."); }
+  };
+
+  if (!summary) return null;
+  const fullyPaid = summary.remainingAmount <= 0;
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="text-[11px] font-black text-slate-700">{payTr("title", lang)}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${PAY_STATUS_STYLE[summary.paymentStatus] || "bg-slate-100 text-slate-600"}`}>{summary.paymentStatus}</span>
+        <span className="text-[11px] text-slate-500">{payTr("total", lang)}: <strong className="font-mono">{money(summary.invoiceTotal)} {summary.currency}</strong></span>
+        <span className="text-[11px] text-slate-500">{payTr("paid", lang)}: <strong className="font-mono">{money(summary.paidAmount)}</strong></span>
+        <span className="text-[11px] text-slate-500">{payTr("remaining", lang)}: <strong className="font-mono">{money(summary.remainingAmount)}</strong></span>
+        {canWrite && !fullyPaid && !recording && (
+          <button onClick={() => { setRecording(true); setErr(null); }} className="ml-auto px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold rounded-md cursor-pointer border-0 flex items-center gap-1"><CreditCard className="w-3 h-3" />{payTr("record", lang)}</button>
+        )}
+        {fullyPaid && <span className="ml-auto text-[10px] font-bold text-blue-600">{payTr("fullyPaid", lang)}</span>}
+      </div>
+
+      {history.length === 0 && <p className="text-[10.5px] text-slate-400 italic">{payTr("none", lang)}</p>}
+      {history.map((p) => (
+        <div key={p.id} className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] rounded px-2 py-1 ${p.status === "reversed" ? "bg-slate-50 text-slate-400 line-through" : "bg-slate-50 text-slate-600"}`}>
+          <span className="font-mono font-bold">{money(p.allocatedAmount)} {p.currency}</span>
+          <span>{p.paymentDate}</span>
+          {p.paymentMethod && <span>· {p.paymentMethod}</span>}
+          {p.reference && <span>· {p.reference}</span>}
+          {p.notes && <span className="italic">· {p.notes}</span>}
+          {p.createdBy && <span className="text-slate-400">· {p.createdBy}{p.createdAt ? ` · ${new Date(p.createdAt).toLocaleString()}` : ""}</span>}
+          <span className="ml-auto">
+            {p.status === "reversed" ? (
+              <span className="text-[10px] font-bold">{payTr("reversed", lang)}{p.reversalReason ? ` — ${p.reversalReason}` : ""}</span>
+            ) : canWrite ? (
+              <button onClick={() => reverse(p.id)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0">{payTr("reverse", lang)}</button>
+            ) : null}
+          </span>
+        </div>
+      ))}
+
+      {recording && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-2 space-y-2">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            <input type="number" min="0" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder={`${payTr("amount", lang)} (${summary.currency})`} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <input type="date" value={form.paymentDate} onChange={(e) => setForm({ ...form, paymentDate: e.target.value })} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
+              <option value="cash">Cash</option>
+              <option value="bank_transfer">Bank Transfer</option>
+              <option value="cheque">Cheque</option>
+              <option value="other">Other</option>
+            </select>
+            <input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} placeholder={payTr("reference", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder={payTr("note", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white col-span-2" />
+          </div>
+          {err && <p className="text-[11px] font-bold text-red-600">{err}</p>}
+          <div className="flex items-center gap-2">
+            <button onClick={save} disabled={busy || !form.amount} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">{payTr("save", lang)}</button>
+            <button onClick={() => { setRecording(false); setErr(null); }} className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[11px] font-bold rounded-lg cursor-pointer">{payTr("cancel", lang)}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 function TotAdj({ label, v, onChange }: { label: string; v: string; onChange: (v: string) => void }) {
   return <div className="flex items-center justify-between gap-2 text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><input type="number" min="0" step="0.01" value={v} onChange={(e) => onChange(e.target.value)} placeholder="0.00" className="w-28 text-[12px] text-right tabular-nums border border-slate-200 rounded-md px-2 py-1 bg-white outline-none focus:border-blue-300" /></div>;
