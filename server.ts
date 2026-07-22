@@ -102,6 +102,11 @@ import {
   canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
   hasActiveCustomerInvoice,
 } from "./src/lib/customerInvoice";
+import {
+  resolveFinancialStatus, isFinanciallyClosed, FINANCIAL_CLOSED_LOCK_MESSAGE,
+  evaluateFinancialCloseReadiness, activeFinancialReopenCycle, hasPendingFinancialReopen,
+  canRequestFinancialReopen,
+} from "./src/lib/financialClosing";
 import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerInvoiceLines";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
@@ -10441,6 +10446,11 @@ async function startServer() {
       };
       const existingForEdit = await getDoc(doc(db, "costStatements", shipmentId));
       if (existingForEdit.exists()) {
+        // Phase 6 — Financial Closing freeze: a financially closed statement is
+        // fully read-only until an approved Financial Reopen.
+        if (isFinanciallyClosed(existingForEdit.data() as CostStatement)) {
+          return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+        }
         try {
           assertEditableInAtomicSection(existingForEdit.data() as CostStatement);
         } catch (lockErr) {
@@ -11251,6 +11261,11 @@ async function startServer() {
       let notifyTarget: string | undefined;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        // Phase 6 — a financially closed statement must be financially reopened
+        // first (accounting reopen is blocked under the financial freeze).
+        if (isFinanciallyClosed(stmt as any)) {
+          return { httpStatus: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+        }
         const status = resolveAccountingStatus(stmt as any);
         const decision = canRequestReopenChain({ status, hasActiveInvoice: invoiceActive, hasActiveVendorPayment: vendorPaymentActive, hasPendingReopen: hasPendingReopen(stmt as any), reason });
         if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
@@ -11409,6 +11424,200 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] reopen-decision failed:", err);
       res.status(500).json({ error: "Failed to decide reopening." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Phase 6 — Financial Closing workflow. The official final
+  // accounting completion of a shipment: a top-level freeze layered ABOVE
+  // the Phase 1–5 locks. Close requires the cost statement final_closed,
+  // every vendor line paid, every issued invoice paid, no draft invoice,
+  // and no active (accounting or financial) reopen. Once closed, every
+  // accounting mutation is read-only until an approved Financial Reopen
+  // (a sequential, user-based approval chain reusing the Phase 3 model).
+  // Financial Closing NEVER recalculates profit.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadFinancialCloseInputs(shipmentId: string, stmt: CostStatement): Promise<{ vendorRemaining: number[]; invoiceRemaining: number[]; hasDraftInvoice: boolean }> {
+    const items = (stmt.items as CostItem[]) || [];
+    const vendorPayments = await loadVendorPaymentsForShipment(shipmentId);
+    const vendorRemaining = items.map((it) => summarizeVendorPayable(it, vendorPayments).remaining);
+    const invoices = await loadInvoicesForShipment(shipmentId);
+    const custPayments = await loadCustomerPaymentsAll();
+    const invoiceRemaining = invoices
+      .filter((i) => i.status === "issued" || i.status === "partially_paid" || i.status === "paid")
+      .map((inv) => summarizeInvoiceReceivable(inv, custPayments).remainingAmount);
+    const hasDraftInvoice = invoices.some((i) => i.status === "draft");
+    return { vendorRemaining, invoiceRemaining, hasDraftInvoice };
+  }
+
+  // Financial status + close readiness + reopen cycle snapshot (reporting).
+  app.get("/api/cost-statements/:shipmentId/financial-status", requirePermission("costs.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const financialStatus = resolveFinancialStatus(stmt as any);
+      const inputs = await loadFinancialCloseInputs(req.params.shipmentId, stmt);
+      const readiness = evaluateFinancialCloseReadiness({
+        accountingStatus: resolveAccountingStatus(stmt as any), financialStatus,
+        vendorRemaining: inputs.vendorRemaining, invoiceRemaining: inputs.invoiceRemaining, hasDraftInvoice: inputs.hasDraftInvoice,
+        hasPendingReopen: hasPendingReopen(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any),
+      });
+      res.json({
+        financialStatus,
+        canClose: readiness.ok,
+        closeBlockedReason: readiness.ok ? null : { code: (readiness as any).code, error: (readiness as any).error },
+        financialClosedAt: stmt.financialClosedAt, financialClosedBy: stmt.financialClosedBy, financialCloseReason: stmt.financialCloseReason,
+        financialReopenedAt: stmt.financialReopenedAt, financialReopenedBy: stmt.financialReopenedBy,
+        financialReopenCycles: (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [],
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load financial status." });
+    }
+  });
+
+  // Financially close a shipment. Readiness is loaded outside the contended
+  // doc; the core invariants (status, pending reopens) are re-checked inside
+  // the atomic mutation. Never recalculates profit.
+  app.post("/api/cost-statements/:shipmentId/financial-close", requirePermission("accounting.financialClose"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 1000) : "";
+      const preStmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!preStmt) return;
+      const inputs = await loadFinancialCloseInputs(req.params.shipmentId, preStmt);
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const readiness = evaluateFinancialCloseReadiness({
+          accountingStatus: resolveAccountingStatus(stmt as any), financialStatus: resolveFinancialStatus(stmt as any),
+          vendorRemaining: inputs.vendorRemaining, invoiceRemaining: inputs.invoiceRemaining, hasDraftInvoice: inputs.hasDraftInvoice,
+          hasPendingReopen: hasPendingReopen(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any),
+        });
+        if (!readiness.ok) return { httpStatus: 409, body: { code: readiness.code, error: readiness.error } };
+        const next: CostStatement = {
+          ...stmt, financialStatus: "financial_closed",
+          financialClosedAt: now, financialClosedBy: req.session!.id, financialCloseReason: reason || undefined,
+          financialReopenedAt: undefined, financialReopenedBy: undefined,
+        };
+        shipmentNumber = stmt.shipmentNumber;
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        await recordAudit(req, {
+          action: AUDIT_ACTIONS.financialClosed, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success",
+          orderId: shipmentNumber, reason: reason || undefined, afterSnapshot: { financialStatus: "financial_closed" },
+        });
+        await logActivity("", "Accounting", req.session!.id, `Shipment ${shipmentNumber} financially closed`, "", "");
+      } else if (result.httpStatus === 409) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.financialCloseRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "rejected", errorCode: result.body?.code });
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-close failed:", err);
+      res.status(500).json({ error: "Failed to financially close the shipment." });
+    }
+  });
+
+  // Request a Financial Reopen — captures the current ordered approver list
+  // onto a NEW financial-reopen cycle (its own snapshot), then routes through
+  // the sequential approval chain (same model as the Phase 3 accounting reopen).
+  app.post("/api/cost-statements/:shipmentId/financial-reopen-request", requirePermission("accounting.financialReopen"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const decision = canRequestFinancialReopen({ financialStatus: resolveFinancialStatus(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any), reason });
+        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The Financial Reopen approval chain is not configured with at least two active approvers. ${approverCheck.error}` } };
+        const existing = (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [];
+        const cycle = buildReopenCycle({ approverUserIds: approverCheck.approverUserIds, requestedBy: req.session!.id, requestedAt: now, reason: reason.slice(0, 1000), reopenCycleNumber: existing.length + 1 });
+        const next: CostStatement = { ...stmt, financialReopenCycles: [...existing, cycle] };
+        shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = cycle.approverUserIds[0];
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
+        await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRequested, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: reason.slice(0, 1000) });
+        await logActivity("", "Accounting", req.session!.id, `Financial Reopen requested for ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-reopen-request failed:", err);
+      res.status(500).json({ error: "Failed to request Financial Reopen." });
+    }
+  });
+
+  // Decide the pending position of the Financial Reopen chain. Only the
+  // captured approver at the pending position may approve or reject. On final
+  // approval the shipment moves to financial_reopened (accounting unfrozen —
+  // Phase 1–5 behavior resumes); a rejection keeps it financial_closed.
+  app.post("/api/cost-statements/:shipmentId/financial-reopen-decision", requirePermission("accounting.financialReopen"), async (req, res) => {
+    try {
+      const approve = req.body?.approve === true;
+      const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 1000) : "";
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      let finalized = false;
+      let rejected = false;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const cycle = activeFinancialReopenCycle(stmt as any);
+        if (!cycle) return { httpStatus: 409, body: { code: "no_pending_financial_reopen", error: "There is no pending Financial Reopen request." } };
+        const guard = canDecideReopenPosition({ cycle, actorId: req.session!.id });
+        if (!guard.ok) return { httpStatus: guard.code === "wrong_approver" ? 403 : 409, body: { code: guard.code, error: guard.error } };
+        const actor = { id: req.session!.id, name: actorName, role: req.session!.adminType || "admin" };
+        const cycles = (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [];
+        shipmentNumber = stmt.shipmentNumber;
+        if (approve) {
+          const applied = applyReopenApproval(cycle, actor, note, now);
+          finalized = applied.finalized;
+          const nextCycles = upsertReopenCycle(cycles, applied.cycle);
+          if (finalized) {
+            const next: CostStatement = { ...stmt, financialStatus: "financial_reopened", financialReopenedAt: now, financialReopenedBy: req.session!.id, financialReopenCycles: nextCycles };
+            notifyTarget = applied.cycle.requestedBy;
+            return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+          }
+          const next: CostStatement = { ...stmt, financialReopenCycles: nextCycles };
+          const nextPos = nextReopenPositionToNotify(cycle);
+          notifyTarget = nextPos !== null ? applied.cycle.approverUserIds[nextPos] : undefined;
+          return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+        }
+        rejected = true;
+        const rejectedCycle = applyReopenRejection(cycle, actor, note, now);
+        const next: CostStatement = { ...stmt, financialReopenCycles: upsertReopenCycle(cycles, rejectedCycle) };
+        notifyTarget = rejectedCycle.requestedBy;
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        if (finalized) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen approved", `The Financial Reopen for ${shipmentNumber} was fully approved. Accounting changes are unlocked.`);
+          await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenApproved, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, afterSnapshot: { financialStatus: "financial_reopened" } });
+        } else if (rejected) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen rejected", `The Financial Reopen for ${shipmentNumber} was rejected. It remains financially closed.`);
+          await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: note || undefined });
+        } else {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval.`);
+        }
+        await logActivity("", "Accounting", req.session!.id, `Financial Reopen ${finalized ? "approved" : rejected ? "rejected" : "advanced"} for ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-reopen-decision failed:", err);
+      res.status(500).json({ error: "Failed to decide the Financial Reopen." });
     }
   });
 
@@ -11806,6 +12015,9 @@ async function startServer() {
       }
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        if (isFinanciallyClosed(stmt as any)) {
+          return { httpStatus: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+        }
         const status = resolveAccountingStatus(stmt as any);
         if (!isFinancialEditingAllowed(status)) {
           return { httpStatus: 409, body: { code: "accounting_locked", error: "This statement is in the approval workflow or finalized and cannot be edited." } };
@@ -11877,6 +12089,8 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      // Phase 6 — financially closed statements are fully read-only.
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       // Accounting Phase 4 — eligibility: vendor payments may be recorded ONLY
       // against an approved-and-closed statement (final_closed). Draft, pending,
       // rejected, finalizing, reopen_requested, and reopened all block — the
@@ -11955,6 +12169,11 @@ async function startServer() {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
       const actor = req.session!.id;
+      // Phase 6 — a financially closed statement is fully read-only.
+      const stmtSnap = await getDoc(doc(db, "costStatements", req.params.shipmentId));
+      if (stmtSnap.exists() && isFinanciallyClosed(stmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      }
       let didReverse = false;
       const result = await runAccountingTransaction(async (tx) => {
         const payment = await tx.get<VendorPaymentTransaction>("vendorPayments", req.params.paymentId);
@@ -12123,6 +12342,7 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
@@ -12177,6 +12397,7 @@ async function startServer() {
       if (!isInvoiceEditable(existing.status)) return res.status(409).json({ code: "not_draft", error: "Only a draft invoice can be edited." });
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, { ...existing, ...(req.body || {}) });
@@ -12224,6 +12445,7 @@ async function startServer() {
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
       const scopedKey = idemKey ? scopeIdempotencyKey("invoice-issue", idemKey) : undefined;
       // Idempotent replay: a repeat with the same key returns the ALREADY issued
@@ -12305,6 +12527,11 @@ async function startServer() {
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
       const invoice = snap.data() as CustomerInvoice;
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      // Phase 6 — a financially closed statement is fully read-only.
+      const cancelStmtSnap = await getDoc(doc(db, "costStatements", req.params.shipmentId));
+      if (cancelStmtSnap.exists() && isFinanciallyClosed(cancelStmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      }
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const decision = canCancelInvoice(invoice.status, reason);
       if (!decision.ok) {
@@ -12604,6 +12831,26 @@ async function startServer() {
   async function performCustomerPaymentReversal(req: express.Request, paymentId: string, reason: string): Promise<{ http: number; body: any }> {
     const now = new Date().toISOString();
     const actor = req.session!.id;
+    // Phase 6 — a reversal touches invoice ledgers, so it is blocked while any
+    // affected shipment is financially closed (both the account-level and the
+    // per-invoice reverse routes funnel through here).
+    {
+      const preSnap = await getDoc(doc(db, "customerPayments", paymentId));
+      if (preSnap.exists()) {
+        const prePayment = preSnap.data() as CustomerPayment;
+        const shipmentIds = new Set<string>();
+        for (const a of prePayment.allocations || []) {
+          const invSnap = await getDoc(doc(db, "customerInvoices", a.invoiceId));
+          if (invSnap.exists()) { const sid = (invSnap.data() as CustomerInvoice).shipmentId; if (sid) shipmentIds.add(sid); }
+        }
+        for (const sid of shipmentIds) {
+          const cs = await getDoc(doc(db, "costStatements", sid));
+          if (cs.exists() && isFinanciallyClosed(cs.data() as CostStatement)) {
+            return { http: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+          }
+        }
+      }
+    }
     let didReverse = false;
     const result = await runAccountingTransaction(async (tx) => {
       const payment = await tx.get<CustomerPayment>("customerPayments", paymentId);
@@ -12701,6 +12948,11 @@ async function startServer() {
       const invSnap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
       if (!invSnap.exists()) return res.status(404).json({ code: "invoice_not_found", error: "Invoice not found." });
       const invoice = invSnap.data() as CustomerInvoice;
+      // Phase 6 — payments are frozen while the shipment is financially closed.
+      const payStmtSnap = invoice.shipmentId ? await getDoc(doc(db, "costStatements", invoice.shipmentId)) : null;
+      if (payStmtSnap?.exists() && isFinanciallyClosed(payStmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      }
       const allPayments = await loadCustomerPaymentsAll();
       const check = canRecordInvoicePayment({ invoice, amount: body.amount, currency: body.currency, payments: allPayments });
       if (!check.ok) {

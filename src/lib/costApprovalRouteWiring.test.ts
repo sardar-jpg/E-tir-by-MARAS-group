@@ -101,7 +101,7 @@ describe("actor identity is server-derived, decisions go through the pure module
     expect(HELPER).toContain("getMemoryStore().costStatements");
   });
   it("edit route is locked while pending/finalizing/closed — enforced inside the atomic section", () => {
-    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 4200);
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 5200);
     expect(EDIT).toContain("assertEditableInAtomicSection");
     expect(EDIT).toContain("isFinancialEditingAllowed(currentStatus)");
     expect(EDIT).toContain('code: lockErr.code');

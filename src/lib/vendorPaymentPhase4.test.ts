@@ -148,7 +148,7 @@ describe("Phase 4 — server wiring", () => {
     expect(REQ).toContain("hasActiveVendorPayment: vendorPaymentActive");
   });
   it("reversal (payment cancellation) stays reason-required, permissioned, never a delete", () => {
-    const REV = region('app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requirePermission("vendorPayments.reverse")', 1600);
+    const REV = region('app.post("/api/cost-statements/:shipmentId/vendor-payments/:paymentId/reverse", requirePermission("vendorPayments.reverse")', 2400);
     expect(REV).toContain("canReverseVendorPayment(payment, reason)");
     expect(REV).toContain('status: "reversed"');
     // No delete route exists for vendor payments.

@@ -180,7 +180,7 @@ describe("Phase 5 — server wiring", () => {
     const ACCOUNT_REV = region('app.post("/api/customer-accounts/payments/:paymentId/reverse"', 700);
     expect(ACCOUNT_REV).toContain("performCustomerPaymentReversal(req, req.params.paymentId, reason)");
     // The shared core never deletes: it marks reversed + restores ledgers.
-    const CORE = region("async function performCustomerPaymentReversal", 2600);
+    const CORE = region("async function performCustomerPaymentReversal", 3600);
     expect(CORE).toContain('status: "reversed"');
     expect(CORE).toContain("applyAllocationDeltas(");
     expect(CORE).toContain("stageInvoiceStatusUpdates(");

@@ -42,6 +42,13 @@ export const AUDIT_ACTIONS = {
   costStatementFinalized: "cost_statement.finalized",
   costStatementCancelled: "cost_statement.cancelled",
 
+  // Accounting Phase 6 — Financial Closing workflow.
+  financialClosed: "financial.closed",
+  financialCloseRejected: "financial.close_rejected",
+  financialReopenRequested: "financial.reopen_requested",
+  financialReopenApproved: "financial.reopen_approved",
+  financialReopenRejected: "financial.reopen_rejected",
+
   bankAccountCreated: "bank_account.created",
   bankAccountUpdated: "bank_account.updated",
   bankAccountDeactivated: "bank_account.deactivated",

@@ -870,6 +870,20 @@ export interface CostStatement {
   // Append-only; the active cycle is the last with status "pending". Full
   // shape is ReopenCycle in costApprovalWorkflow.ts.
   reopenCycles?: unknown[];
+  // Accounting Phase 6: official Financial Closing state — a top-level
+  // accounting freeze layered ABOVE the approval/payment locks. Absent ⇒
+  // "financial_open". financial_closed makes ALL accounting mutations
+  // read-only until an approved Financial Reopen. Full logic in
+  // financialClosing.ts.
+  financialStatus?: string;
+  financialClosedAt?: string;
+  financialClosedBy?: string;
+  financialCloseReason?: string;
+  financialReopenedAt?: string;
+  financialReopenedBy?: string;
+  // Sequential Financial Reopen approval cycles (same ReopenCycle shape as
+  // Phase 3, stored separately). Append-only.
+  financialReopenCycles?: unknown[];
 }
 
 

@@ -13,6 +13,7 @@ import VendorPayablesPanel from "./VendorPayablesPanel";
 import CustomerInvoicePanel from "./CustomerInvoicePanel";
 import CustomerAccountPanel from "./CustomerAccountPanel";
 import CostApprovalWorkflowCard from "./CostApprovalWorkflowCard";
+import FinancialClosingCard from "./FinancialClosingCard";
 import ExpenseDrawer from "./ExpenseDrawer";
 
 /**
@@ -219,6 +220,8 @@ export default function CostStatementWorkspace({
   // Three SEPARATE status vocabularies (item 13).
   const acctStatus = resolveAccountingStatus(statement as any);
   const costsApproved = acctStatus === "final_closed";
+  // Phase 6 — a financially closed shipment is fully read-only for accounting.
+  const financiallyClosed = statement.financialStatus === "financial_closed";
 
   // Customer balance/status is derived from the ISSUED INVOICE, not agreedAmount.
   const issuedInvoiceTotal = issuedInvoice ? Number(issuedInvoice.sellingAmount || 0) : null;
@@ -497,7 +500,7 @@ export default function CostStatementWorkspace({
             {!hasExpenses ? (
               <EmptyHint>{pick(T.noVendorYet, lang)}</EmptyHint>
             ) : (
-              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} recordingEnabled={costsApproved} />
+              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite && !financiallyClosed} lang={lang} recordingEnabled={costsApproved && !financiallyClosed} />
             )}
           </SectionCard>
 
@@ -589,8 +592,10 @@ export default function CostStatementWorkspace({
                 ))}
               </div>
             )}
-            <div className={`mt-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
+            <div className={`mt-3 space-y-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
               <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} hasActiveInvoice={hasIssuedInvoice} onChanged={onRefresh} />
+              {/* Phase 6 — Financial Closing (final accounting completion). */}
+              <FinancialClosingCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
             </div>
           </section>
       </div>
