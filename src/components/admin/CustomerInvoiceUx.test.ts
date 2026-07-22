@@ -87,19 +87,20 @@ describe("4. customer notes label", () => {
   });
 });
 
-describe("5. agreed-price comparison states", () => {
-  it("shows a green match state with a 0.00 difference when totals equal the agreed price", () => {
-    expect(panel).toContain('tr("matchTitle", lang)');
-    expect(panel).toContain("hasAgreed && !hasDiff");
+describe("5. no agreed-price comparison (Accounting Phase 1)", () => {
+  it("does not compare the invoice total against the driver agreedAmount", () => {
+    // The agreed-price difference UI and its state were removed: the customer
+    // invoice amount is entered manually and independently.
+    expect(panel).not.toContain('tr("matchTitle", lang)');
+    expect(panel).not.toContain('tr("diffTitle", lang)');
+    expect(panel).not.toContain("hasDiff");
+    expect(panel).not.toContain("priceDiff");
   });
-  it("shows an orange difference state with the amount + Reason Required when they differ", () => {
-    expect(panel).toContain('tr("diffTitle", lang)');
-    expect(panel).toContain('tr("reasonRequired", lang)');
-    expect(panel).toContain("money(Math.abs(priceDiff))");
-  });
-  it("keeps the existing server-side price-difference-reason requirement", () => {
-    expect(panel).toContain("reasonOk = !hasDiff || hdr.priceDifferenceReason.trim().length > 0");
-    expect(panel).toContain("priceDifferenceReason: hasDiff ? hdr.priceDifferenceReason.trim() : undefined");
+  it("does not require a price-difference reason and does not send one", () => {
+    expect(panel).not.toContain("reasonOk");
+    expect(panel).not.toContain("priceDifferenceReason: hasDiff");
+    // Saving is gated only on real invoice fields, never on a price difference.
+    expect(panel).toContain("canSave = canWrite && !!clientId && allLinesValid && headerValid");
   });
 });
 

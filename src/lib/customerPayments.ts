@@ -153,6 +153,104 @@ export function validateAllocations(params: {
   return { ok: true, allocations: result };
 }
 
+// ── Accounting Phase 5 — per-invoice Accounts Receivable ──────────────────
+// A Phase 5 payment belongs to EXACTLY ONE issued customer invoice (one
+// allocation covering the full payment amount) — never shipment-level,
+// customer-level, or split across invoices. These helpers derive the
+// per-invoice paid/remaining/status and validate a new single-invoice
+// payment; the atomic authority stays in the ledger transaction.
+
+/** Invoice statuses a NEW customer payment may target: issued | partially_paid. */
+export function isInvoicePaymentEligibleStatus(status: CustomerInvoice["status"]): boolean {
+  return status === "issued" || status === "partially_paid";
+}
+
+export type InvoicePaymentStatus = "Unpaid" | "Partially Paid" | "Paid";
+
+export interface InvoiceReceivableSummary {
+  invoiceId: string;
+  invoiceNumber: string;
+  currency: Currency;
+  invoiceTotal: number;
+  paidAmount: number;
+  remainingAmount: number;
+  paymentStatus: InvoicePaymentStatus;
+  activePaymentCount: number;
+  reversedPaymentCount: number;
+}
+
+/** All payments touching this invoice (active AND reversed), with the allocated slice — the history rows. */
+export function paymentsForInvoice(invoiceId: string, payments: CustomerPayment[]): Array<{ payment: CustomerPayment; allocatedAmount: number }> {
+  const rows: Array<{ payment: CustomerPayment; allocatedAmount: number }> = [];
+  for (const p of payments) {
+    const allocated = round2((p.allocations || []).filter((a) => a.invoiceId === invoiceId).reduce((s, a) => s + (Number.isFinite(a.amount) ? a.amount : 0), 0));
+    if (allocated > 0) rows.push({ payment: p, allocatedAmount: allocated });
+  }
+  return rows.sort((a, b) => (a.payment.paymentDate || "").localeCompare(b.payment.paymentDate || "") || (a.payment.createdAt || "").localeCompare(b.payment.createdAt || ""));
+}
+
+/**
+ * Derive one invoice's receivable state from ACTIVE payments only. Reversed
+ * payments are retained in history but excluded from totals. A legacy invoice
+ * with no payments is Unpaid with remaining = invoice total. Never Overpaid —
+ * overpayment is refused at write time.
+ */
+export function summarizeInvoiceReceivable(
+  invoice: Pick<CustomerInvoice, "id" | "invoiceNumber" | "currency" | "sellingAmount">,
+  payments: CustomerPayment[]
+): InvoiceReceivableSummary {
+  const rows = paymentsForInvoice(invoice.id, payments);
+  const active = rows.filter((r) => isActivePayment(r.payment));
+  const paidAmount = round2(active.reduce((s, r) => s + r.allocatedAmount, 0));
+  const invoiceTotal = round2(Number.isFinite(invoice.sellingAmount) ? invoice.sellingAmount : 0);
+  const paymentStatus: InvoicePaymentStatus = paidAmount <= 0 ? "Unpaid" : paidAmount < invoiceTotal ? "Partially Paid" : "Paid";
+  return {
+    invoiceId: invoice.id,
+    invoiceNumber: invoice.invoiceNumber,
+    currency: invoice.currency,
+    invoiceTotal,
+    paidAmount,
+    remainingAmount: round2(invoiceTotal - paidAmount),
+    paymentStatus,
+    activePaymentCount: active.length,
+    reversedPaymentCount: rows.length - active.length,
+  };
+}
+
+export type InvoicePaymentValidation = { ok: true; amount: number } | { ok: false; code: string; error: string };
+
+/**
+ * Validate a NEW payment against exactly one invoice: the invoice must exist
+ * and be issued/partially_paid (never draft/cancelled/paid), the amount must
+ * be a positive finite number in the invoice currency, and it may not exceed
+ * the remaining balance from active payments. No FX. The ledger transaction
+ * re-enforces all of this atomically at write time.
+ */
+export function canRecordInvoicePayment(params: {
+  invoice: Pick<CustomerInvoice, "id" | "invoiceNumber" | "currency" | "sellingAmount" | "status"> | null | undefined;
+  amount: unknown;
+  currency: unknown;
+  payments: CustomerPayment[];
+}): InvoicePaymentValidation {
+  const inv = params.invoice;
+  if (!inv) return { ok: false, code: "invoice_not_found", error: "The customer invoice for this payment was not found." };
+  if (!isInvoicePaymentEligibleStatus(inv.status)) {
+    return { ok: false, code: "invoice_not_receivable", error: `Payments can be recorded only against an issued invoice (this one is ${inv.status}).` };
+  }
+  const amount = typeof params.amount === "number" && Number.isFinite(params.amount) ? round2(params.amount) : NaN;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { ok: false, code: "invalid_amount", error: "Payment amount must be a positive number." };
+  }
+  if (params.currency !== inv.currency) {
+    return { ok: false, code: "currency_mismatch", error: `Payment currency must match the invoice currency (${inv.currency}).` };
+  }
+  const summary = summarizeInvoiceReceivable(inv, params.payments);
+  if (amount > summary.remainingAmount) {
+    return { ok: false, code: "over_invoice", error: `This payment would exceed the invoice's remaining balance (${summary.remainingAmount} ${inv.currency}).` };
+  }
+  return { ok: true, amount };
+}
+
 export function canReversePayment(payment: Pick<CustomerPayment, "status"> | null | undefined, reason: string): { ok: true } | { ok: false; code: string; error: string } {
   if (!payment) return { ok: false, code: "not_found", error: "Payment not found." };
   if (payment.status !== "active") return { ok: false, code: "not_active", error: "Only an active payment can be reversed." };

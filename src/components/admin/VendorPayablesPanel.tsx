@@ -33,6 +33,12 @@ const T = {
   reversed: { en: "Reversed", tr: "Geri alındı", ar: "معكوس" },
   reverseReason: { en: "Reason for reversal:", tr: "Geri alma nedeni:", ar: "سبب العكس:" },
   viewProof: { en: "Proof", tr: "Kanıt", ar: "إثبات" },
+  note: { en: "Note (optional)", tr: "Not (isteğe bağlı)", ar: "ملاحظة (اختياري)" },
+  notApproved: {
+    en: "Vendor payments can be recorded only after the Cost Statement is approved and closed.",
+    tr: "Tedarikçi ödemeleri yalnızca Maliyet Tablosu onaylanıp kapatıldıktan sonra kaydedilebilir.",
+    ar: "لا يمكن تسجيل مدفوعات الموردين إلا بعد اعتماد كشف التكلفة وإغلاقه.",
+  },
   filterAll: { en: "All", tr: "Tümü", ar: "الكل" },
   filterUnpaid: { en: "Unpaid", tr: "Ödenmemiş", ar: "غير مدفوع" },
   filterPartial: { en: "Partial", tr: "Kısmi", ar: "جزئي" },
@@ -50,17 +56,24 @@ const STATUS_STYLE: Record<string, string> = {
 
 type Filter = "all" | "unpaid" | "partial" | "paid" | "overdue";
 
-export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, canWrite, lang }: {
+export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, canWrite, lang, recordingEnabled = true }: {
   shipmentId: string;
   items: CostItem[];
   bankAccounts: BankAccount[];
   canWrite: boolean;
   lang: Language;
+  /**
+   * Accounting Phase 4: recording is possible only while the Cost Statement is
+   * approved and closed (final_closed). When false, the Pay Vendor action is
+   * hidden and the clear reason is shown instead. History stays visible.
+   * The server enforces the same rule independently.
+   */
+  recordingEnabled?: boolean;
 }) {
   const [payments, setPayments] = useState<VendorPaymentTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [addingFor, setAddingFor] = useState<string | null>(null);
-  const [draft, setDraft] = useState({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "wire", reference: "", bankAccountId: "", attachmentUrl: "" });
+  const [draft, setDraft] = useState({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "wire", reference: "", bankAccountId: "", attachmentUrl: "", note: "" });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -83,9 +96,9 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
     try {
       const res = await apiFetch(`/api/cost-statements/${shipmentId}/vendor-payments`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ costItemId: item.id, amount: Number(draft.amount), currency: item.currency, paymentDate: draft.paymentDate, paymentMethod: draft.paymentMethod, reference: draft.reference || undefined, bankAccountId: draft.bankAccountId || undefined, attachmentUrl: draft.attachmentUrl || undefined }),
+        body: JSON.stringify({ costItemId: item.id, amount: Number(draft.amount), currency: item.currency, paymentDate: draft.paymentDate, paymentMethod: draft.paymentMethod, reference: draft.reference || undefined, bankAccountId: draft.bankAccountId || undefined, attachmentUrl: draft.attachmentUrl || undefined, internalNotes: draft.note || undefined }),
       });
-      if (res.ok) { setAddingFor(null); setDraft({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "wire", reference: "", bankAccountId: "", attachmentUrl: "" }); await load(); }
+      if (res.ok) { setAddingFor(null); setDraft({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "wire", reference: "", bankAccountId: "", attachmentUrl: "", note: "" }); await load(); }
       else { const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); }
     } catch { setErr("Save failed."); } finally { setBusy(false); }
   };
@@ -115,6 +128,10 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
 
       {loading && <div className="flex items-center gap-2 text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin" />…</div>}
       {!loading && visibleItems.length === 0 && <p className="text-[11px] text-slate-400 italic">{tr("none", lang)}</p>}
+      {/* Phase 4: the clear reason recording is unavailable (history stays visible). */}
+      {!recordingEnabled && canWrite && (
+        <p className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{tr("notApproved", lang)}</p>
+      )}
 
       <div className="space-y-2">
         {visibleItems.map((item) => {
@@ -128,7 +145,7 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
                 <span className="text-[11px] text-slate-500">{tr("cost", lang)}: <strong>{money(s.costAmount)} {item.currency}</strong></span>
                 <span className="text-[11px] text-slate-500">{tr("paid", lang)}: <strong>{money(s.totalPaid)}</strong></span>
                 <span className="text-[11px] text-slate-500">{tr("remaining", lang)}: <strong>{money(s.remaining)}</strong></span>
-                {canWrite && s.remaining > 0 && addingFor !== item.id && (
+                {canWrite && recordingEnabled && s.remaining > 0 && addingFor !== item.id && (
                   <button onClick={() => { setAddingFor(item.id); setErr(null); }} className="ml-auto px-2 py-1 bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-bold rounded-md cursor-pointer border-0 flex items-center gap-1"><Plus className="w-3 h-3" />{tr("addPayment", lang)}</button>
                 )}
               </div>
@@ -142,6 +159,7 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
                       {p.paymentMethod && <span>· {p.paymentMethod}</span>}
                       {p.reference && <span>· {p.reference}</span>}
                       {p.bankAccountSnapshot && <span>· {p.bankAccountSnapshot}</span>}
+                      {p.internalNotes && <span className="italic">· {p.internalNotes}</span>}
                       {p.attachmentUrl && <a href={p.attachmentUrl} target="_blank" rel="noreferrer" className="text-orange-600 no-underline flex items-center gap-0.5"><Paperclip className="w-3 h-3" />{tr("viewProof", lang)}</a>}
                       <span className="ml-auto flex items-center gap-2">
                         <button onClick={() => openAccountingPdf(`/api/cost-statements/${shipmentId}/vendor-payments/${p.id}/voucher?lang=${lang}`)} className="text-[10px] font-bold text-slate-500 hover:underline cursor-pointer bg-transparent border-0 p-0 flex items-center gap-0.5"><Printer className="w-3 h-3" />Voucher</button>
@@ -168,6 +186,7 @@ export default function VendorPayablesPanel({ shipmentId, items, bankAccounts, c
                       {banksFor(item.currency).map((b) => <option key={b.id} value={b.id}>{b.bankName} ({b.currency})</option>)}
                     </select>
                     <input value={draft.attachmentUrl} onChange={(e) => setDraft({ ...draft, attachmentUrl: e.target.value })} placeholder={tr("proof", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+                    <input value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} placeholder={tr("note", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white col-span-2 md:col-span-3" />
                   </div>
                   {err && <p className="text-[11px] font-bold text-red-600">{err}</p>}
                   <div className="flex items-center gap-2">

@@ -101,6 +101,20 @@ export function isInvoiceEditable(status: CustomerInvoiceStatus): boolean {
 export function isReceivableInvoiceStatus(status: CustomerInvoiceStatus): boolean {
   return status === "issued" || status === "partially_paid" || status === "paid";
 }
+
+/**
+ * Accounting Phase 3 — the "active invoice" that financially locks a Cost
+ * Statement. An ACTIVE invoice is one that is issued / partially_paid / paid
+ * (NEVER a draft or a cancelled invoice). agreedAmount is irrelevant here.
+ */
+export function isActiveInvoiceStatus(status: CustomerInvoiceStatus): boolean {
+  return isReceivableInvoiceStatus(status);
+}
+
+/** True when ANY related customer invoice is active (issued/partially_paid/paid). */
+export function hasActiveCustomerInvoice(invoices: ReadonlyArray<{ status: CustomerInvoiceStatus }>): boolean {
+  return invoices.some((i) => isActiveInvoiceStatus(i.status));
+}
 /** Statuses that can still receive (more) payment allocation. */
 export function isAllocatableInvoiceStatus(status: CustomerInvoiceStatus): boolean {
   return status === "issued" || status === "partially_paid";
@@ -109,10 +123,12 @@ export function isAllocatableInvoiceStatus(status: CustomerInvoiceStatus): boole
 export type InvoiceDecision = { ok: true } | { ok: false; code: string; error: string };
 
 /**
- * Whether an invoice may be issued. cost_plus pricing requires the internal
- * cost to be signed off first (the cost statement final_closed) — "after the
- * cost is reviewed and approved, add the markup". Manual pricing doesn't depend
- * on the internal cost and may be issued once the statement exists.
+ * Whether an invoice may be issued. Accounting Phase 3: an invoice may be
+ * issued ONLY after its cost statement is approved and closed (final_closed) —
+ * for every pricing mode. This enforces the controlled-correction rule that a
+ * NEW invoice can only follow a completed (re-)approval: while a statement is
+ * reopened/editing, or still pending its (new) approval chain, no invoice may
+ * be issued. (Previously only cost_plus required approval; manual did not.)
  */
 export function canIssueInvoice(params: {
   status: CustomerInvoiceStatus;
@@ -122,8 +138,8 @@ export function canIssueInvoice(params: {
 }): InvoiceDecision {
   if (params.status !== "draft") return { ok: false, code: "not_draft", error: "Only a draft invoice can be issued." };
   if (!(params.sellingAmount > 0)) return { ok: false, code: "zero_amount", error: "The invoice amount must be greater than zero." };
-  if (params.pricingMode === "cost_plus" && params.costStatementStatus !== "final_closed") {
-    return { ok: false, code: "cost_not_approved", error: "Cost-plus pricing requires the cost statement to be approved and closed first." };
+  if (params.costStatementStatus !== "final_closed") {
+    return { ok: false, code: "cost_not_approved", error: "The cost statement must be approved and closed before an invoice can be issued." };
   }
   return { ok: true };
 }

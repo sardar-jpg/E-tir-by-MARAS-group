@@ -5,15 +5,15 @@ import {
 } from "./accountingNav";
 
 describe("accountingNav registry", () => {
-  it("lists the nine accounting pages in the reference order, dashboard first", () => {
+  it("lists the accounting pages in the reference order, dashboard first", () => {
     expect(ACCOUNTING_PAGES.map((p) => p.id)).toEqual([
-      "acct_dashboard", "costs", "acct_customer_statements", "acct_vendor_statements",
+      "acct_dashboard", "acct_action_center", "costs", "acct_customer_statements", "acct_vendor_statements",
       "acct_invoices", "acct_payments", "acct_receivables", "acct_reports", "acct_ai",
     ]);
   });
   it("marks every accounting page live once the module is complete", () => {
     expect(ACCOUNTING_LIVE_TAB_IDS).toEqual([
-      "acct_dashboard", "costs", "acct_customer_statements", "acct_vendor_statements",
+      "acct_dashboard", "acct_action_center", "costs", "acct_customer_statements", "acct_vendor_statements",
       "acct_invoices", "acct_payments", "acct_receivables", "acct_reports", "acct_ai",
     ]);
     expect(isLiveAccountingTab("acct_receivables")).toBe(true);

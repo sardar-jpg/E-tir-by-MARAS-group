@@ -7,12 +7,14 @@ import {
 } from "lucide-react";
 import type { Language, CostStatement, Shipment, Client, BankAccount, CustomerInvoice, CostItem, Vendor } from "../../types";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
-import { deriveExpenseSummary, deriveCustomerSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../../lib/costStatementMath";
+import { deriveExpenseSummary, deriveCustomerSummary, resolveCustomerReceivedAmount, computeShipmentProfit } from "../../lib/costStatementMath";
 import { resolveAccountingStatus, type AccountingStatus } from "../../lib/costApprovalWorkflow";
 import VendorPayablesPanel from "./VendorPayablesPanel";
 import CustomerInvoicePanel from "./CustomerInvoicePanel";
 import CustomerAccountPanel from "./CustomerAccountPanel";
 import CostApprovalWorkflowCard from "./CostApprovalWorkflowCard";
+import FinancialClosingCard from "./FinancialClosingCard";
+import OrderFinancialSummaryCard from "./OrderFinancialSummaryCard";
 import ExpenseDrawer from "./ExpenseDrawer";
 
 /**
@@ -56,7 +58,10 @@ const T = {
   approvalDesc: { en: "Operations Manager → Accounts Manager → Managing Director.", ar: "مدير العمليات ← مدير الحسابات ← المدير العام.", tr: "Operasyon Müdürü → Muhasebe Müdürü → Genel Müdür." },
   collapse: { en: "Collapse", ar: "طيّ", tr: "Daralt" },
   expand: { en: "Expand", ar: "توسيع", tr: "Genişlet" },
-  agreedPrice: { en: "Agreed Selling Price", ar: "سعر البيع المتفق", tr: "Anlaşılan Satış Fiyatı" },
+  agreedPrice: { en: "Driver Agreed Amount", ar: "المبلغ المتفق مع السائق", tr: "Sürücü Anlaşılan Tutar" },
+  referenceOnly: { en: "Reference Only", ar: "للاطلاع فقط", tr: "Yalnızca Referans" },
+  profitPendingInvoice: { en: "Profit Pending — No Issued Invoice", ar: "الربح معلّق — لا توجد فاتورة صادرة", tr: "Kâr Beklemede — Fatura Kesilmedi" },
+  profitPendingApproval: { en: "Profit Pending — Cost Statement Not Approved", ar: "الربح معلّق — كشف التكاليف غير معتمد", tr: "Kâr Beklemede — Masraf Onaylanmadı" },
   totalExpenses: { en: "Total Expenses", ar: "إجمالي المصاريف", tr: "Toplam Masraf" },
   paidVendors: { en: "Paid to Vendors", ar: "المدفوع للموردين", tr: "Tedarikçilere Ödenen" },
   remainingVendors: { en: "Remaining Payable", ar: "المتبقي للموردين", tr: "Kalan Borç" },
@@ -198,13 +203,14 @@ export default function CostStatementWorkspace({
   }, [statement.companyName, clients]);
 
   const items: CostItem[] = statement.items || [];
+  // Accounting Phase 1: agreedAmount is the DRIVER's agreed amount — a passive
+  // REFERENCE only. It is never used for profit, the customer price, or the
+  // customer balance/status below.
   const agreedAmount = (shipment?.agreedAmount ?? statement.agreedAmount) || 0;
   const agreedCurrency = statement.agreedCurrency || statement.currency;
   const totalCost = Number(statement.totalCost || 0);
   const paidAmount = Number(statement.paidAmount || 0);
   const expense = deriveExpenseSummary(totalCost, paidAmount);
-  const customer = deriveCustomerSummary(agreedAmount, resolveCustomerReceivedAmount(statement));
-  const grossProfit = computeGrossProfit(agreedAmount, agreedCurrency, totalCost, statement.currency);
 
   const hasExpenses = items.length > 0;
   const issuedInvoice = invoices.find((i) => i.status === "issued" || i.status === "partially_paid" || i.status === "paid");
@@ -214,6 +220,24 @@ export default function CostStatementWorkspace({
 
   // Three SEPARATE status vocabularies (item 13).
   const acctStatus = resolveAccountingStatus(statement as any);
+  const costsApproved = acctStatus === "final_closed";
+  // Phase 6 — a financially closed shipment is fully read-only for accounting.
+  const financiallyClosed = statement.financialStatus === "financial_closed";
+
+  // Customer balance/status is derived from the ISSUED INVOICE, not agreedAmount.
+  const issuedInvoiceTotal = issuedInvoice ? Number(issuedInvoice.sellingAmount || 0) : null;
+  const customerCurrency = issuedInvoice?.currency || statement.currency;
+  const customer = deriveCustomerSummary(issuedInvoiceTotal ?? 0, resolveCustomerReceivedAmount(statement));
+
+  // Canonical shipment profit = issued customer invoice − approved cost.
+  // Pending until an invoice is issued AND the cost statement is approved.
+  const profit = computeShipmentProfit({
+    issuedInvoiceTotal,
+    invoiceCurrency: issuedInvoice?.currency,
+    costsApproved,
+    approvedCostTotal: totalCost,
+    costCurrency: statement.currency,
+  });
   const statementStatus = deriveStatementStatus(acctStatus);
   const vendorStatus = PAY_STATUS[expense.paymentStatus] || PAY_STATUS.Unpaid;
   const custStatus = PAY_STATUS[customer.customerStatus] || PAY_STATUS.Unpaid;
@@ -336,7 +360,7 @@ export default function CostStatementWorkspace({
           <InfoCard icon={<MapPin className="w-5 h-5" />} tone="violet" label={pick(T.hRoute, lang)} value={shipment ? `${shipment.loadingCountry || "?"} → ${shipment.deliveryCountry || "?"}` : "—"} sub={(statement.shipmentType || "").toString().toLowerCase() === "land" ? "Cross-Border TIR" : undefined} />
           <InfoCard icon={<Boxes className="w-5 h-5" />} tone="amber" label={pick(T.hCargo, lang)} value={`${(statement.shipmentType || "").toString().toUpperCase()} FREIGHT`} sub={shipment?.cargoDescription || undefined} />
           <InfoCard icon={<Coins className="w-5 h-5" />} tone="teal" label={pick(T.hCurrency, lang)} value={statement.currency} mono />
-          <InfoCard icon={<Tag className="w-5 h-5" />} tone="emerald" label={pick(T.agreedPrice, lang)} value={`${money(agreedAmount)}`} sub={agreedCurrency} strong />
+          <InfoCard icon={<Tag className="w-5 h-5" />} tone="slate" label={pick(T.agreedPrice, lang)} value={`${money(agreedAmount)}`} sub={`${agreedCurrency} · ${pick(T.referenceOnly, lang)}`} />
           <InfoCard icon={<Calendar className="w-5 h-5" />} tone="slate" label={pick(T.hStatementDate, lang)} value={statement.date || "—"} mono />
           <InfoCard icon={<Flag className="w-5 h-5" />} tone={statementStatus.tone as any} label={pick(T.hStatus, lang)} value={pick(statementStatus.label, lang)} strong />
         </div>
@@ -393,25 +417,28 @@ export default function CostStatementWorkspace({
           <section id="csw-summary" className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 scroll-mt-24">
             <SectionHead num={1} title={pick(T.summary, lang)} desc={pick(T.summaryDesc, lang)} />
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
-              <BigKpi label={pick(T.agreedPrice, lang)} value={money(agreedAmount)} unit={agreedCurrency} tone="blue" />
+              <BigKpi label={`${pick(T.agreedPrice, lang)} · ${pick(T.referenceOnly, lang)}`} value={money(agreedAmount)} unit={agreedCurrency} tone="blue" />
               <BigKpi label={pick(T.totalExpenses, lang)} value={money(totalCost)} unit={statement.currency} tone="navy" />
               <BigKpi label={pick(T.paidVendors, lang)} value={money(paidAmount)} unit={statement.currency} tone="green" />
               <BigKpi label={pick(T.remainingVendors, lang)} value={money(expense.expenseRemaining)} unit={statement.currency} tone="orange" />
-              <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={agreedCurrency} tone="green" />
-              <BigKpi label={pick(T.remainingCustomer, lang)} value={money(customer.customerReceivable)} unit={agreedCurrency} tone="orange" />
+              <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={customerCurrency} tone="green" />
+              <BigKpi label={pick(T.remainingCustomer, lang)} value={money(customer.customerReceivable)} unit={customerCurrency} tone="orange" />
             </div>
-            {/* Gross profit — internal only; never shown to the customer. */}
+            {/* Shipment profit = issued invoice − approved cost. Internal only;
+                never shown to the customer, and never derived from agreedAmount. */}
             <div className="mt-3 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white px-4 py-3.5 flex items-center justify-between">
               <div>
                 <div className="text-[12px] font-black uppercase tracking-wide text-emerald-700">{pick(T.grossProfit, lang)}</div>
                 <div className="text-[9px] font-bold uppercase tracking-wide text-emerald-400 flex items-center gap-1 mt-0.5"><Lock className="w-2.5 h-2.5" />{pick(T.internal, lang)}</div>
               </div>
               <div className="text-right">
-                <div className="text-2xl font-black font-mono text-emerald-700 leading-none">{grossProfit === null ? "—" : money(grossProfit)}</div>
-                <div className="text-[10px] font-bold text-emerald-500 mt-1">{grossProfit === null ? "" : agreedCurrency}</div>
+                <div className="text-2xl font-black font-mono text-emerald-700 leading-none">{profit.status === "available" ? money(profit.profit as number) : "—"}</div>
+                <div className="text-[10px] font-bold text-emerald-500 mt-1">{profit.status === "available" ? profit.currency : ""}</div>
               </div>
             </div>
-            {grossProfit === null && <p className="text-[11px] text-slate-400 mt-2">{pick(T.notAggregated, lang)}</p>}
+            {profit.status === "pending_no_invoice" && <p className="text-[11px] text-slate-500 mt-2">{pick(T.profitPendingInvoice, lang)}</p>}
+            {profit.status === "pending_not_approved" && <p className="text-[11px] text-slate-500 mt-2">{pick(T.profitPendingApproval, lang)}</p>}
+            {profit.status === "unavailable_currency" && <p className="text-[11px] text-slate-400 mt-2">{pick(T.notAggregated, lang)}</p>}
           </section>
 
           {/* 2. Costs / Expenses */}
@@ -474,7 +501,7 @@ export default function CostStatementWorkspace({
             {!hasExpenses ? (
               <EmptyHint>{pick(T.noVendorYet, lang)}</EmptyHint>
             ) : (
-              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite} lang={lang} />
+              <VendorPayablesPanel shipmentId={statement.shipmentId} items={items} bankAccounts={bankAccounts} canWrite={canWrite && !financiallyClosed} lang={lang} recordingEnabled={costsApproved && !financiallyClosed} />
             )}
           </SectionCard>
 
@@ -491,7 +518,6 @@ export default function CostStatementWorkspace({
                 lang={lang}
                 clientId={resolvedClientId || undefined}
                 companyName={statement.companyName}
-                agreedAmount={agreedAmount}
                 customerHasPayments={customer.customerReceivedAmount > 0}
                 onInvoicesChange={setInvoices}
                 onLinkCustomer={onOpenCustomer ? () => onOpenCustomer(resolvedClientId) : undefined}
@@ -518,8 +544,8 @@ export default function CostStatementWorkspace({
             ) : (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <BigKpi label={pick(T.invoiceAmount, lang)} value={money(issuedInvoice!.sellingAmount)} unit={issuedInvoice!.currency} tone="navy" />
-                <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={agreedCurrency} tone="green" />
-                <BigKpi label={pick(T.remaining, lang)} value={money(customer.customerReceivable)} unit={agreedCurrency} tone="orange" />
+                <BigKpi label={pick(T.receivedCustomer, lang)} value={money(customer.customerReceivedAmount)} unit={customerCurrency} tone="green" />
+                <BigKpi label={pick(T.remaining, lang)} value={money(customer.customerReceivable)} unit={customerCurrency} tone="orange" />
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 flex flex-col justify-center">
                   <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">{pick(T.customerStatus, lang)}</div>
                   <div className="mt-1.5"><StatusPill label={pick(custStatus.label, lang)} tone={custStatus.tone} /></div>
@@ -567,8 +593,12 @@ export default function CostStatementWorkspace({
                 ))}
               </div>
             )}
-            <div className={`mt-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
-              <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
+            <div className={`mt-3 space-y-3 ${approvalOpen ? "block" : "hidden"} lg:block`}>
+              <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} hasActiveInvoice={hasIssuedInvoice} onChanged={onRefresh} />
+              {/* Phase 6 — Financial Closing (final accounting completion). */}
+              <FinancialClosingCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
+              {/* Phase 7 — read-only per-currency Order Financial Summary. */}
+              <OrderFinancialSummaryCard lang={lang} statement={statement} />
             </div>
           </section>
       </div>

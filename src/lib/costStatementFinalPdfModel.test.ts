@@ -20,8 +20,8 @@ const history: ApprovalHistoryEntry[] = [
 ];
 
 describe("final PDF model — built from the authoritative snapshot only", () => {
-  it("carries the exact revision, FINAL label, internal notice, items, and totals", () => {
-    const m = buildFinalPdfModel({ statement: statement(), approvalHistory: history, cycleNumber: 1, finalizedAt: "2026-07-19T10:00:00Z", finalStatementRevision: 4 });
+  it("carries the exact revision, FINAL label, internal notice, items, totals, and INVOICE-based customer figures", () => {
+    const m = buildFinalPdfModel({ statement: statement(), approvalHistory: history, cycleNumber: 1, finalizedAt: "2026-07-19T10:00:00Z", finalStatementRevision: 4, issuedInvoiceTotal: 500, issuedInvoiceCurrency: "USD" });
     expect(m.finalLabel).toContain("FINAL");
     expect(m.internalNotice).toContain("INTERNAL");
     expect(m.finalStatementRevision).toBe(4);
@@ -30,16 +30,29 @@ describe("final PDF model — built from the authoritative snapshot only", () =>
     expect(m.totalCost).toBe(300);
     expect(m.expenseRemaining).toBe(100);
     expect(m.customerReceived).toBe(400);
-    expect(m.customerReceivable).toBe(100); // 500 agreed - 400 received
+    expect(m.customerReceivable).toBe(100); // 500 INVOICE − 400 received (agreedAmount ignored)
+    expect(m.invoiceCurrency).toBe("USD");
+    // agreedAmount is carried only as a reference value, never as a customer/profit input.
+    expect(m.agreedAmount).toBe(500);
   });
 
-  it("shows gross profit ONLY when currencies match — never converted", () => {
-    const same = buildFinalPdfModel({ statement: statement(), approvalHistory: history, cycleNumber: 1, finalizedAt: "t", finalStatementRevision: 4 });
-    expect(same.grossProfit).toBe(200); // 500 - 300, both USD
-    expect(same.grossProfitNote).toBe("");
-    const mixed = buildFinalPdfModel({ statement: statement({ agreedCurrency: "EUR" }), approvalHistory: history, cycleNumber: 1, finalizedAt: "t", finalStatementRevision: 4 });
-    expect(mixed.grossProfit).toBeNull();
-    expect(mixed.grossProfitNote).toContain("differ");
+  it("profit = issued invoice − approved cost; agreedAmount is ignored", () => {
+    const m = buildFinalPdfModel({ statement: statement({ agreedAmount: 9999 }), approvalHistory: history, cycleNumber: 1, finalizedAt: "t", finalStatementRevision: 4, issuedInvoiceTotal: 500, issuedInvoiceCurrency: "USD" });
+    expect(m.grossProfit).toBe(200); // 500 invoice − 300 cost (NOT 9999 agreed)
+    expect(m.grossProfitNote).toBe("");
+  });
+
+  it("shows Profit Pending — No Issued Customer Invoice when uninvoiced", () => {
+    const m = buildFinalPdfModel({ statement: statement(), approvalHistory: history, cycleNumber: 1, finalizedAt: "t", finalStatementRevision: 4, issuedInvoiceTotal: null });
+    expect(m.grossProfit).toBeNull();
+    expect(m.grossProfitNote).toContain("Profit Pending");
+    expect(m.customerReceivable).toBe(0); // no invoice → no customer balance from agreedAmount
+  });
+
+  it("profit is unavailable (never converted) when invoice and cost currencies differ", () => {
+    const m = buildFinalPdfModel({ statement: statement(), approvalHistory: history, cycleNumber: 1, finalizedAt: "t", finalStatementRevision: 4, issuedInvoiceTotal: 500, issuedInvoiceCurrency: "EUR" });
+    expect(m.grossProfit).toBeNull();
+    expect(m.grossProfitNote).toContain("differ");
   });
 
   it("renders the three-stage approval record with approver names and times", () => {

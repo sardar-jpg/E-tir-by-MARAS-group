@@ -214,18 +214,21 @@ function drawTable(doc: any, columns: PdfColumn[], rows: Record<string, string>[
     acc += (rtl ? -1 : 1) * widths[i];
   }
   let y = startY;
-  // Header row.
-  doc.setFillColor(241, 245, 249); doc.rect(M, y - 4.5, usable, 7, "F");
-  doc.setFont(FONT, "bold"); doc.setFontSize(8); doc.setTextColor(51, 65, 85);
-  columns.forEach((c, i) => {
-    const align = c.align === "right" ? (rtl ? "left" : "right") : (rtl ? "right" : "left");
-    const x = c.align === "right" ? xs[i] + (rtl ? -widths[i] + 2 : widths[i] - 2) : xs[i] + (rtl ? -2 : 2);
-    doc.text(sanitize(c.label), x, y, { align });
-  });
-  y += 5;
-  doc.setFont(FONT, "normal"); doc.setTextColor(15, 23, 42);
+  // Header row — repeated at the top of every page a long table spills onto.
+  const drawHeader = () => {
+    doc.setFillColor(241, 245, 249); doc.rect(M, y - 4.5, usable, 7, "F");
+    doc.setFont(FONT, "bold"); doc.setFontSize(8); doc.setTextColor(51, 65, 85);
+    columns.forEach((c, i) => {
+      const align = c.align === "right" ? (rtl ? "left" : "right") : (rtl ? "right" : "left");
+      const x = c.align === "right" ? xs[i] + (rtl ? -widths[i] + 2 : widths[i] - 2) : xs[i] + (rtl ? -2 : 2);
+      doc.text(sanitize(c.label), x, y, { align });
+    });
+    y += 5;
+    doc.setFont(FONT, "normal"); doc.setTextColor(15, 23, 42);
+  };
+  drawHeader();
   for (const row of rows) {
-    if (y > 265) { doc.addPage(); y = 20; }
+    if (y > 265) { doc.addPage(); y = 20; drawHeader(); }
     columns.forEach((c, i) => {
       const align = c.align === "right" ? (rtl ? "left" : "right") : (rtl ? "right" : "left");
       const x = c.align === "right" ? xs[i] + (rtl ? -widths[i] + 2 : widths[i] - 2) : xs[i] + (rtl ? -2 : 2);

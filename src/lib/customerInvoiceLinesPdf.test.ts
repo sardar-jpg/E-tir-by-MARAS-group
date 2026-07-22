@@ -81,12 +81,16 @@ describe("server wiring — line-based invoice is server-authoritative", () => {
     expect(server).toContain("sellingAmount: totals.grandTotal");
     expect(server).toContain("grandTotal: totals.grandTotal");
   });
-  it("requires a price-difference reason when the total differs from the agreed price", () => {
-    expect(server).toContain("price_difference_reason_required");
-    expect(server).toContain("agreedPriceDifference");
+  it("Accounting Phase 1: no agreed-price comparison gates invoice creation", () => {
+    // The driver agreedAmount is not a customer price; creation never requires
+    // a price-difference reason.
+    expect(server).not.toContain("price_difference_reason_required");
   });
-  it("audits the draft + the price difference", () => {
+  it("audits the draft (legacy price-difference audit retained for old invoices only)", () => {
     expect(server).toContain("AUDIT_ACTIONS.invoiceDraftCreated");
+    // The invoicePriceDifferenceRecorded audit block is kept but only fires for
+    // legacy invoices that already carry an agreedPriceDifference value; new
+    // invoices never set it.
     expect(server).toContain("AUDIT_ACTIONS.invoicePriceDifferenceRecorded");
   });
 });

@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
-import { FileText, Plus, Send, Ban, Loader2, Eye, Download, Printer, X, ChevronDown, Check, Search, AlertTriangle, CheckCircle2, Trash2, Copy, CreditCard, History, Receipt } from "lucide-react";
+import { FileText, Plus, Send, Ban, Loader2, Eye, Download, Printer, X, ChevronDown, Check, Search, CheckCircle2, Trash2, Copy, CreditCard, History, Receipt } from "lucide-react";
 import type { Language, BankAccount, CustomerInvoice, CustomerInvoiceStatus, Currency } from "../../types";
 import { apiFetch } from "../../lib/api";
 import { openAccountingPdf } from "../../lib/openAccountingPdf";
 import {
-  INVOICE_SERVICE_TYPES, PAYMENT_TERMS, PRICE_DIFFERENCE_REASONS,
+  INVOICE_SERVICE_TYPES, PAYMENT_TERMS,
   isOtherServiceType, isCustomPaymentTerm, paymentTermDays, type CatalogOption, type L3,
 } from "../../lib/invoiceLineCatalog";
 import { computeLineAmount, computeInvoiceTotals } from "../../lib/customerInvoiceLines";
 import {
   emptyLineDraft, addLineDraft, duplicateLineDraft, deleteLineDraft, lineDraftHasData, type LineDraft,
 } from "../../lib/invoiceLineEditor";
+import type { InvoiceReceivableSummary } from "../../lib/customerPayments";
 
 /**
  * Customer Invoice panel — build a real customer-facing logistics invoice with
@@ -109,7 +110,7 @@ const num = (s: string): number => { const n = Number(s); return Number.isFinite
 /** Mask an account number, keeping only the last four digits. */
 const maskAccount = (acc?: string): string => { const s = (acc || "").replace(/\s+/g, ""); return s.length > 4 ? `••••${s.slice(-4)}` : s ? `••••${s}` : ""; };
 
-export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, companyName, agreedAmount, customerHasPayments, onInvoicesChange, onLinkCustomer, onReceivePayment, onViewPayments }: {
+export default function CustomerInvoicePanel({ shipmentId, currency, bankAccounts, canWrite, lang, clientId, companyName, customerHasPayments, onInvoicesChange, onLinkCustomer, onReceivePayment, onViewPayments }: {
   shipmentId: string;
   currency: Currency;
   bankAccounts: BankAccount[];
@@ -118,8 +119,6 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   clientId?: string;
   /** Read-only customer name from the shipment/order. */
   companyName?: string;
-  /** Read-only agreed shipment selling price, for the price-difference comparison. */
-  agreedAmount?: number;
   /** True when the customer already has payments/receipts (drives quick-access actions). */
   customerHasPayments?: boolean;
   onInvoicesChange?: (invoices: CustomerInvoice[]) => void;
@@ -135,7 +134,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
-  const [hdr, setHdr] = useState({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" });
+  const [hdr, setHdr] = useState({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "" });
   const [lines, setLines] = useState<LineDraft[]>([emptyLineDraft()]);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   // Focus handoff: when a row is added/duplicated, focus its Service Type control.
@@ -160,7 +159,7 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     setFocusLineId(null);
   }, [focusLineId, lines]);
 
-  const resetForm = () => { setHdr({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "", priceDifferenceReason: "" }); setLines([emptyLineDraft()]); setConfirmDeleteId(null); };
+  const resetForm = () => { setHdr({ invoiceDate: today, dueDate: "", paymentTerms: "", customTerm: "", bankAccountId: "", customerNotes: "", discountAmount: "", taxAmount: "", additionalCharges: "" }); setLines([emptyLineDraft()]); setConfirmDeleteId(null); };
 
   // Auto-fill due date from a controlled payment term (Custom leaves it manual).
   const chooseTerm = (term: string) => {
@@ -176,17 +175,15 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
   // Client-side preview (SERVER RECOMPUTES on save — never trusted here).
   const previewLines = useMemo(() => lines.map((l) => ({ ...l, amount: computeLineAmount(num(l.quantity), num(l.unitPrice)) })), [lines]);
   const totals = useMemo(() => computeInvoiceTotals(previewLines.map((l) => ({ id: l.id, serviceType: l.serviceType, quantity: num(l.quantity), unit: l.unit, unitPrice: num(l.unitPrice), amount: l.amount })), { discountAmount: num(hdr.discountAmount), taxAmount: num(hdr.taxAmount), additionalCharges: num(hdr.additionalCharges) }), [previewLines, hdr.discountAmount, hdr.taxAmount, hdr.additionalCharges]);
-  const agreed = Number.isFinite(agreedAmount) ? Number(agreedAmount) : 0;
-  const priceDiff = Math.round((totals.grandTotal - agreed + Number.EPSILON) * 100) / 100;
-  const hasAgreed = agreed > 0;
-  const hasDiff = hasAgreed && Math.abs(priceDiff) > 0.001;
+  // Accounting Phase 1: the invoice amount is entered manually and independently.
+  // The driver's agreedAmount is NOT a customer price, so there is no agreed-price
+  // comparison, no price-difference warning, and no price-difference reason here.
 
   // Unit is no longer part of the line UI (item 3); it is not required to save a line.
   const lineValid = (l: LineDraft) => !!l.serviceType && (!isOtherServiceType(l.serviceType) || l.customServiceType.trim().length > 0) && num(l.quantity) > 0 && num(l.unitPrice) >= 0;
   const allLinesValid = lines.length > 0 && lines.every(lineValid);
   const headerValid = !!hdr.invoiceDate && !!hdr.dueDate && !!hdr.bankAccountId;
-  const reasonOk = !hasDiff || hdr.priceDifferenceReason.trim().length > 0;
-  const canSave = canWrite && !!clientId && allLinesValid && headerValid && reasonOk;
+  const canSave = canWrite && !!clientId && allLinesValid && headerValid;
 
   const buildPayload = () => ({
     clientId,
@@ -199,7 +196,6 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     discountAmount: num(hdr.discountAmount),
     taxAmount: num(hdr.taxAmount),
     additionalCharges: num(hdr.additionalCharges),
-    priceDifferenceReason: hasDiff ? hdr.priceDifferenceReason.trim() : undefined,
     invoiceLines: lines.map((l) => ({
       serviceType: l.serviceType,
       customServiceType: isOtherServiceType(l.serviceType) ? l.customServiceType.trim() : undefined,
@@ -217,13 +213,13 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
     const b = await res.json().catch(() => ({})); setErr(b.error || "Save failed."); return null;
   };
   const onSaveDraft = async () => {
-    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
+    if (!canSave) { setErr(tr("needFields", lang)); return; }
     setErr(null); setBusy(true);
     try { const inv = await createDraft(); if (inv) { setCreating(false); resetForm(); await load(); } }
     catch { setErr("Save failed."); } finally { setBusy(false); }
   };
   const onIssue = async () => {
-    if (!canSave) { setErr(hasDiff && !reasonOk ? tr("needReason", lang) : tr("needFields", lang)); return; }
+    if (!canSave) { setErr(tr("needFields", lang)); return; }
     setErr(null); setBusy(true);
     try {
       const inv = await createDraft();
@@ -314,6 +310,9 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
               {canWrite && inv.status === "draft" && <button onClick={() => issueExisting(inv)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0 flex items-center gap-1.5"><Send className="w-3.5 h-3.5" />{tr("issue", lang)}</button>}
               {canWrite && issued && <button onClick={() => cancelInvoice(inv)} className="px-3 py-1.5 bg-white border border-red-200 hover:bg-red-50 text-red-600 text-[11px] font-bold rounded-lg cursor-pointer flex items-center gap-1.5"><Ban className="w-3.5 h-3.5" />{tr("cancelInv", lang)}</button>}
             </div>
+            {/* Accounting Phase 5 — per-invoice payments: total / paid / remaining /
+                derived status + append-only history + manual Record Payment. */}
+            {issued && <InvoicePaymentsBlock invoiceId={inv.id} canWrite={canWrite} lang={lang} onInvoiceChanged={() => void load()} />}
             {/* Payment quick access — reuses the existing Customer Account / receipts flow (no duplicate payment logic). */}
             {issued && (onReceivePayment || onViewPayments) && (
               <div className="flex items-center gap-2 flex-wrap mt-2.5 pt-2.5 border-t border-slate-100">
@@ -424,45 +423,9 @@ export default function CustomerInvoicePanel({ shipmentId, currency, bankAccount
             )}
           </div>
 
-          {/* Totals + agreed price */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              {/* Agreed price reference (read only) */}
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3">
-                <div className="text-[10px] font-black uppercase tracking-wide text-emerald-700">{tr("agreedPrice", lang)}</div>
-                <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-xl font-black font-mono text-emerald-700 tabular-nums">{money(agreed)}</span>
-                  <span className="text-[11px] font-bold text-emerald-500">{currency}</span>
-                  <span className="text-[9px] font-bold uppercase text-emerald-400 ml-auto">{tr("readOnly", lang)}</span>
-                </div>
-              </div>
-              {/* Comparison state: green match vs orange difference */}
-              {hasAgreed && !hasDiff && (
-                <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">
-                  <p className="text-[12px] font-black text-emerald-700 flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4 shrink-0" />{tr("matchTitle", lang)}</p>
-                  <div className="flex items-center justify-between mt-1.5">
-                    <span className="text-[10px] font-black uppercase tracking-wide text-emerald-600">{tr("difference", lang)}</span>
-                    <span className="text-[13px] font-black font-mono text-emerald-700 tabular-nums">{money(0)} {currency}</span>
-                  </div>
-                </div>
-              )}
-              {hasDiff && (
-                <div className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[12px] font-black text-orange-700 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4 shrink-0" />{tr("diffTitle", lang)}</p>
-                    <span className="text-[9px] font-black uppercase tracking-wide text-orange-700 bg-orange-200/70 rounded px-1.5 py-0.5 shrink-0">{tr("reasonRequired", lang)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-black uppercase tracking-wide text-orange-600">{tr("difference", lang)}</span>
-                    <span className="text-[15px] font-black font-mono text-orange-700 tabular-nums">{money(Math.abs(priceDiff))} {currency}</span>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase tracking-wide text-orange-700 mb-1">{tr("diffReason", lang)} *</label>
-                    <CatalogSelect options={PRICE_DIFFERENCE_REASONS} value={hdr.priceDifferenceReason} lang={lang} placeholder={tr("diffReasonPick", lang)} onChange={(v) => setHdr({ ...hdr, priceDifferenceReason: v })} invalid={!hdr.priceDifferenceReason} />
-                  </div>
-                </div>
-              )}
-            </div>
+          {/* Totals (Accounting Phase 1: no agreed-price comparison — the
+              customer invoice amount is entered manually and independently). */}
+          <div className="grid grid-cols-1 gap-4">
             <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
               <TotRow label={tr("subtotal", lang)} value={`${money(totals.subtotal)} ${currency}`} />
               <TotAdj label={tr("discount", lang)} v={hdr.discountAmount} onChange={(v) => setHdr({ ...hdr, discountAmount: v })} />
@@ -505,6 +468,140 @@ function InvField({ label, value, strong }: { label: string; value: string; stro
 }
 function TotRow({ label, value }: { label: string; value: string }) {
   return <div className="flex items-center justify-between text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><span className="font-mono font-bold text-slate-700 tabular-nums">{value}</span></div>;
+}
+
+/**
+ * Accounting Phase 5 — per-invoice Accounts Receivable block. Shows invoice
+ * total / paid / remaining / derived payment status + the append-only payment
+ * history, and records a MANUAL payment against exactly THIS invoice via
+ * POST /api/customer-invoices/:invoiceId/payments. Amount is never prefilled
+ * (remaining is shown as reference only); Record is hidden once fully paid.
+ * All figures are server-authoritative — this block re-fetches after writes.
+ */
+const PAY_T = {
+  title: { en: "Payments (this invoice)", tr: "Ödemeler (bu fatura)", ar: "الدفعات (هذه الفاتورة)" },
+  total: { en: "Invoice Total", tr: "Fatura Toplamı", ar: "إجمالي الفاتورة" },
+  paid: { en: "Paid", tr: "Ödenen", ar: "المدفوع" },
+  remaining: { en: "Remaining", tr: "Kalan", ar: "المتبقي" },
+  record: { en: "Record Payment", tr: "Ödeme Kaydet", ar: "تسجيل دفعة" },
+  amount: { en: "Amount", tr: "Tutar", ar: "المبلغ" },
+  date: { en: "Date", tr: "Tarih", ar: "التاريخ" },
+  method: { en: "Method", tr: "Yöntem", ar: "الطريقة" },
+  reference: { en: "Reference", tr: "Referans", ar: "المرجع" },
+  note: { en: "Note (optional)", tr: "Not (isteğe bağlı)", ar: "ملاحظة (اختياري)" },
+  save: { en: "Save", tr: "Kaydet", ar: "حفظ" },
+  cancel: { en: "Cancel", tr: "İptal", ar: "إلغاء" },
+  none: { en: "No payments yet.", tr: "Henüz ödeme yok.", ar: "لا توجد دفعات بعد." },
+  reversed: { en: "Reversed", tr: "Geri alındı", ar: "معكوسة" },
+  reverse: { en: "Reverse", tr: "Geri al", ar: "عكس" },
+  reverseReason: { en: "Reason for reversing this payment:", tr: "Bu ödemeyi geri alma nedeni:", ar: "سبب عكس هذه الدفعة:" },
+  fullyPaid: { en: "This invoice is fully paid.", tr: "Bu fatura tamamen ödendi.", ar: "هذه الفاتورة مدفوعة بالكامل." },
+};
+const payTr = (k: keyof typeof PAY_T, lang: Language) => PAY_T[k][lang] || PAY_T[k].en;
+const PAY_STATUS_STYLE: Record<string, string> = { Unpaid: "bg-slate-100 text-slate-600", "Partially Paid": "bg-amber-100 text-amber-700", Paid: "bg-blue-100 text-blue-700" };
+type InvoicePaymentRow = { id: string; allocatedAmount: number; currency: string; paymentDate: string; paymentMethod?: string; reference?: string; notes?: string; status: string; createdBy?: string; createdAt?: string; reversalReason?: string };
+
+function InvoicePaymentsBlock({ invoiceId, canWrite, lang, onInvoiceChanged }: { invoiceId: string; canWrite: boolean; lang: Language; onInvoiceChanged: () => void }) {
+  const [summary, setSummary] = useState<InvoiceReceivableSummary | null>(null);
+  const [history, setHistory] = useState<InvoicePaymentRow[]>([]);
+  const [recording, setRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [form, setForm] = useState({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "bank_transfer", reference: "", note: "" });
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments`);
+      if (res.ok) { const b = await res.json(); setSummary(b.summary || null); setHistory(b.payments || []); }
+    } catch { /* block-isolated */ }
+  }, [invoiceId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: Number(form.amount), currency: summary?.currency, paymentDate: form.paymentDate, paymentMethod: form.paymentMethod, reference: form.reference || undefined, note: form.note || undefined }),
+      });
+      const b = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setRecording(false);
+        setForm({ amount: "", paymentDate: new Date().toISOString().slice(0, 10), paymentMethod: "bank_transfer", reference: "", note: "" });
+        await load();
+        onInvoiceChanged(); // invoice status may have advanced (partially_paid/paid)
+      } else setErr(b.error || "Save failed.");
+    } catch { setErr("Save failed."); } finally { setBusy(false); }
+  };
+
+  const reverse = async (paymentId: string) => {
+    const reason = window.prompt(payTr("reverseReason", lang));
+    if (!reason || !reason.trim()) return;
+    try {
+      const res = await apiFetch(`/api/customer-invoices/${invoiceId}/payments/${paymentId}/reverse`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) });
+      if (res.ok) { await load(); onInvoiceChanged(); }
+      else { const b = await res.json().catch(() => ({})); setErr(b.error || "Reversal failed."); }
+    } catch { setErr("Reversal failed."); }
+  };
+
+  if (!summary) return null;
+  const fullyPaid = summary.remainingAmount <= 0;
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="text-[11px] font-black text-slate-700">{payTr("title", lang)}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${PAY_STATUS_STYLE[summary.paymentStatus] || "bg-slate-100 text-slate-600"}`}>{summary.paymentStatus}</span>
+        <span className="text-[11px] text-slate-500">{payTr("total", lang)}: <strong className="font-mono">{money(summary.invoiceTotal)} {summary.currency}</strong></span>
+        <span className="text-[11px] text-slate-500">{payTr("paid", lang)}: <strong className="font-mono">{money(summary.paidAmount)}</strong></span>
+        <span className="text-[11px] text-slate-500">{payTr("remaining", lang)}: <strong className="font-mono">{money(summary.remainingAmount)}</strong></span>
+        {canWrite && !fullyPaid && !recording && (
+          <button onClick={() => { setRecording(true); setErr(null); }} className="ml-auto px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold rounded-md cursor-pointer border-0 flex items-center gap-1"><CreditCard className="w-3 h-3" />{payTr("record", lang)}</button>
+        )}
+        {fullyPaid && <span className="ml-auto text-[10px] font-bold text-blue-600">{payTr("fullyPaid", lang)}</span>}
+      </div>
+
+      {history.length === 0 && <p className="text-[10.5px] text-slate-400 italic">{payTr("none", lang)}</p>}
+      {history.map((p) => (
+        <div key={p.id} className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] rounded px-2 py-1 ${p.status === "reversed" ? "bg-slate-50 text-slate-400 line-through" : "bg-slate-50 text-slate-600"}`}>
+          <span className="font-mono font-bold">{money(p.allocatedAmount)} {p.currency}</span>
+          <span>{p.paymentDate}</span>
+          {p.paymentMethod && <span>· {p.paymentMethod}</span>}
+          {p.reference && <span>· {p.reference}</span>}
+          {p.notes && <span className="italic">· {p.notes}</span>}
+          {p.createdBy && <span className="text-slate-400">· {p.createdBy}{p.createdAt ? ` · ${new Date(p.createdAt).toLocaleString()}` : ""}</span>}
+          <span className="ml-auto">
+            {p.status === "reversed" ? (
+              <span className="text-[10px] font-bold">{payTr("reversed", lang)}{p.reversalReason ? ` — ${p.reversalReason}` : ""}</span>
+            ) : canWrite ? (
+              <button onClick={() => reverse(p.id)} className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer bg-transparent border-0 p-0">{payTr("reverse", lang)}</button>
+            ) : null}
+          </span>
+        </div>
+      ))}
+
+      {recording && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-2 space-y-2">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            <input type="number" min="0" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder={`${payTr("amount", lang)} (${summary.currency})`} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <input type="date" value={form.paymentDate} onChange={(e) => setForm({ ...form, paymentDate: e.target.value })} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white cursor-pointer">
+              <option value="cash">Cash</option>
+              <option value="bank_transfer">Bank Transfer</option>
+              <option value="cheque">Cheque</option>
+              <option value="other">Other</option>
+            </select>
+            <input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} placeholder={payTr("reference", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+            <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder={payTr("note", lang)} className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white col-span-2" />
+          </div>
+          {err && <p className="text-[11px] font-bold text-red-600">{err}</p>}
+          <div className="flex items-center gap-2">
+            <button onClick={save} disabled={busy || !form.amount} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-lg cursor-pointer border-0">{payTr("save", lang)}</button>
+            <button onClick={() => { setRecording(false); setErr(null); }} className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[11px] font-bold rounded-lg cursor-pointer">{payTr("cancel", lang)}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 function TotAdj({ label, v, onChange }: { label: string; v: string; onChange: (v: string) => void }) {
   return <div className="flex items-center justify-between gap-2 text-[12px]"><span className="text-slate-500 font-semibold">{label}</span><input type="number" min="0" step="0.01" value={v} onChange={(e) => onChange(e.target.value)} placeholder="0.00" className="w-28 text-[12px] text-right tabular-nums border border-slate-200 rounded-md px-2 py-1 bg-white outline-none focus:border-blue-300" /></div>;

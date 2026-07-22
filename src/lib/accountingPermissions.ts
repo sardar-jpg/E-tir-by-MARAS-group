@@ -14,12 +14,15 @@
 // ── Canonical permission keys (never duplicated as string literals elsewhere) ──
 export const ACCOUNTING_PERMISSION_KEYS = [
   "accounting.view",
-  "costs.view", "costs.create", "costs.edit", "costs.deleteDraft", "costs.approve", "costs.reopen",
+  "costs.view", "costs.create", "costs.edit", "costs.deleteDraft", "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
+  "accounting.financialClose", "accounting.financialReopen",
   "vendorPayments.view", "vendorPayments.create", "vendorPayments.reverse", "vendorPayments.printVoucher",
   "invoices.view", "invoices.create", "invoices.editDraft", "invoices.issue", "invoices.cancel", "invoices.print",
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate", "customerPayments.reverse",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "reports.view", "reports.export", "profitReports.view", "cashReports.view",
+  "accounting.notifications.view", "accounting.notifications.configure",
   "costStatements.print",
   "bankAccounts.view", "bankAccounts.manage",
   "accountingTemplates.view", "accountingTemplates.manage", "accountingTemplates.publish", "accountingTemplates.restore",
@@ -62,6 +65,9 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
       p("costs.deleteDraft", "Delete draft cost line", "حذف بند تكلفة مسودة", "Taslak maliyet satırını sil"),
       p("costs.approve", "Approve costs", "اعتماد التكاليف", "Maliyetleri onayla"),
       p("costs.reopen", "Reopen closed costs", "إعادة فتح التكاليف المغلقة", "Kapalı maliyetleri yeniden aç"),
+      p("costs.manageApprovalWorkflow", "Manage cost approval workflow", "إدارة سير عمل اعتماد التكلفة", "Maliyet onay iş akışını yönet"),
+      p("accounting.financialClose", "Financially close a shipment", "الإغلاق المالي للشحنة", "Sevkiyatı mali olarak kapat"),
+      p("accounting.financialReopen", "Request/decide Financial Reopen", "طلب/إقرار إعادة الفتح المالي", "Mali yeniden açmayı iste/karara bağla"),
       p("costStatements.print", "Print cost statement", "طباعة كشف التكاليف", "Maliyet tablosunu yazdır"),
     ],
   },
@@ -107,6 +113,17 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
     permissions: [
       p("customerStatements.view", "View customer statements", "عرض كشوف الحسابات", "Müşteri ekstrelerini görüntüle"),
       p("customerStatements.export", "Export customer statements", "تصدير كشوف الحسابات", "Müşteri ekstrelerini dışa aktar"),
+    ],
+  },
+  {
+    id: "reports", label: { en: "Financial Reports", ar: "التقارير المالية", tr: "Mali Raporlar" },
+    permissions: [
+      p("reports.view", "View financial reports", "عرض التقارير المالية", "Mali raporları görüntüle"),
+      p("reports.export", "Export financial reports", "تصدير التقارير المالية", "Mali raporları dışa aktar"),
+      p("profitReports.view", "View Official Profit reports", "عرض تقارير الربح الرسمي", "Resmî kâr raporlarını görüntüle"),
+      p("cashReports.view", "View cash movement reports", "عرض تقارير الحركة النقدية", "Nakit hareket raporlarını görüntüle"),
+      p("accounting.notifications.view", "View accounting action center", "عرض مركز إجراءات المحاسبة", "Muhasebe eylem merkezini görüntüle"),
+      p("accounting.notifications.configure", "Configure accounting reminders", "إعداد تذكيرات المحاسبة", "Muhasebe hatırlatıcılarını yapılandır"),
     ],
   },
   {
@@ -173,6 +190,8 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "reports.view",
+  "accounting.notifications.view",
   "costStatements.print",
   "bankAccounts.view",
   "accountingTemplates.view",
@@ -185,7 +204,10 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
 // Sensitive permissions NEVER granted by the legacy default (documented +
 // asserted): they require explicit Super Admin approval.
 export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] = [
-  "costs.approve", "costs.reopen",
+  "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
+  "accounting.financialClose", "accounting.financialReopen",
+  "profitReports.view", "cashReports.view", "reports.export",
+  "accounting.notifications.configure",
   "vendorPayments.reverse",
   "customerPayments.reverse",
   "invoices.cancel",

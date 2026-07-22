@@ -6,6 +6,7 @@ import {
   ChatChannel,
   ActivityLog,
   AppNotification,
+  AccountingNotification,
   ShipmentStatus,
   Currency,
   Language,
@@ -14,11 +15,14 @@ import {
   Vendor,
   CostStatement,
   CostItem,
-  BankAccount
+  BankAccount,
+  CustomerInvoice
 } from "../types";
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { buildUnifiedList, combinedUnreadCount, type UnifiedNotification, type UnifiedIconKey } from "../lib/unifiedNotifications";
+import { Truck as TruckIcon2, Wallet as WalletIcon2, Megaphone as MegaphoneIcon2 } from "lucide-react";
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { createToastTimer, type ToastTimer } from "../lib/toastTimer";
@@ -41,7 +45,7 @@ import { computeBusyDriverIds, resolveDriverAvailability } from "../lib/driverAl
 import DriverAllianceOffers from "./admin/DriverAllianceOffers";
 import DriverRouteEditor from "./admin/DriverRouteEditor";
 import { resolveExportItems, resolveExportNotes, resolveExportHeaderStatus } from "../lib/costStatementExportView";
-import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount, computeGrossProfit } from "../lib/costStatementMath";
+import { deriveCustomerSummary, deriveExpenseSummary, resolveCustomerReceivedAmount } from "../lib/costStatementMath";
 import { resolveStatementShipmentContext } from "../lib/costStatementRegistryView";
 import { resolveDefaultBankAccountForCurrency } from "../lib/accountingTemplateSettings";
 import { containsRawPrivateDocumentUrl } from "../lib/emailSafety";
@@ -57,12 +61,13 @@ import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
 import CostStatementWorkspace from "./admin/CostStatementWorkspace";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import AccountingDashboard from "./admin/accounting/AccountingDashboard";
+import AccountingActionCenter from "./admin/accounting/AccountingActionCenter";
 import CustomerStatementsPage from "./admin/accounting/CustomerStatementsPage";
 import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
 import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
 import PaymentsPage from "./admin/accounting/PaymentsPage";
 import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage";
-import MonthlyReportPage from "./admin/accounting/MonthlyReportPage";
+import FinancialReportsPage from "./admin/accounting/FinancialReportsPage";
 import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
@@ -377,6 +382,11 @@ export default function AdminPanel({
   const [selectedPerformanceDriver, setSelectedPerformanceDriver] = useState<Driver | null>(null);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  // Accounting Phase 9.1: the accounting notifications (a separate store) are
+  // merged into the ONE main bell/center via the unified presentation adapter.
+  const [acctNotifications, setAcctNotifications] = useState<Array<AccountingNotification & { read?: boolean }>>([]);
+  const [acctUnread, setAcctUnread] = useState(0);
+  const acctNotifEvaluatedRef = React.useRef(false);
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   // fix/admin-mobile-chat-correctness: every server-CONFIRMED seen scope
   // this session applied locally, with when it was confirmed
@@ -558,7 +568,7 @@ export default function AdminPanel({
       setIsMarasAiSending(false);
     }
   };
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_action_center' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
   // Accounting cross-page navigation: Receivables/Payables + AI Assistant link
@@ -878,6 +888,11 @@ export default function AdminPanel({
   // Template Settings: configured bank accounts for customer-document payment details.
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [selectedCostStatement, setSelectedCostStatement] = useState<CostStatement | null>(null);
+  // Accounting Phase 1: the ISSUED customer invoice for the statement being
+  // previewed/exported. Customer-facing figures (invoice / client-statement
+  // modes) come from this — never the driver's agreedAmount. null = none
+  // issued yet, so the export shows a "No Issued Customer Invoice" notice.
+  const [previewIssuedInvoice, setPreviewIssuedInvoice] = useState<CustomerInvoice | null>(null);
 
   // Real coordinate-based progress calculator helper
   const getShipmentProgressPercentage = (s: Shipment): number => {
@@ -1628,6 +1643,54 @@ MARAS Group etir Center`;
     }
   };
 
+  // Accounting Phase 9.1: accounting notification actions go through the Phase 9
+  // accounting APIs (never legacy handlers, never a financial mutation). A
+  // failed call is not reflected optimistically; the combined unread badge
+  // refreshes only from the server-confirmed local state change.
+  const acctNotifActing = React.useRef<Set<string>>(new Set());
+  const handleAcctNotifAction = async (id: string, action: "read" | "dismiss") => {
+    if (acctNotifActing.current.has(id)) return;
+    acctNotifActing.current.add(id);
+    try {
+      const res = await apiFetch(`/api/accounting/notifications/${id}/${action}`, { method: "POST" });
+      if (!res.ok) { console.error(`Accounting notification ${action} failed for ${id}: ${res.status}`); return; }
+      if (action === "read") {
+        setAcctNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true, status: n.status === "unread" ? "read" : n.status } : n));
+        setAcctUnread(prev => Math.max(0, prev - 1));
+      } else {
+        setAcctNotifications(prev => prev.filter(n => n.id !== id));
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      acctNotifActing.current.delete(id);
+    }
+  };
+
+  // Accounting Phase 9.1: ONE unified, newest-first list for the single main
+  // bell/center, plus the combined unread badge (legacy + accounting, both
+  // already visible-scoped by their servers).
+  const unifiedNotifications = React.useMemo(
+    () => buildUnifiedList({ legacy: notifications, accounting: acctNotifications, lang, isLegacyRead: (n) => isNotificationReadForUser(n, ownAdminId) }),
+    [notifications, acctNotifications, lang, ownAdminId]
+  );
+  const legacyUnreadCount = notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length;
+  const combinedUnreadCountValue = combinedUnreadCount(legacyUnreadCount, acctUnread);
+  const CATEGORY_ICON_CMP: Record<UnifiedIconKey, React.ComponentType<{ className?: string }>> = {
+    truck: TruckIcon2, finance: WalletIcon2, user: User, warning: ShieldAlert, megaphone: MegaphoneIcon2,
+  };
+  const categoryAriaLabel = (u: UnifiedNotification): string => {
+    const map: Record<string, { en: string; tr: string; ar: string }> = {
+      operational: { en: "Operational", tr: "Operasyonel", ar: "تشغيلي" },
+      accounting: { en: "Accounting", tr: "Muhasebe", ar: "محاسبة" },
+      users: { en: "User", tr: "Kullanıcı", ar: "مستخدم" },
+      system: { en: "System", tr: "Sistem", ar: "نظام" },
+      broadcast: { en: "Announcement", tr: "Duyuru", ar: "إعلان" },
+    };
+    const l = map[u.category] || map.operational;
+    return lang === 'tr' ? l.tr : lang === 'ar' ? l.ar : l.en;
+  };
+
   // Load backend statistics
   const lastFetchedAtRef = React.useRef<number>(0);
   const fetchData = async (force = true) => {
@@ -1760,7 +1823,27 @@ MARAS Group etir Center`;
       if (resCostStatements && resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
       if (resBankAccounts && resBankAccounts.ok) { try { setBankAccounts((await safeJson(resBankAccounts)).accounts || []); } catch { /* keep prior */ } }
       if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
-      
+
+      // Accounting Phase 9.1: pull the caller's visible accounting notifications
+      // + summary so the ONE main bell/center can show them alongside legacy
+      // ones. Independent of the legacy notifications fetch — a failure here
+      // leaves legacy notifications intact (partial-load tolerance). The server
+      // enforces recipient/permission visibility; a 403 simply yields none.
+      if (canViewCostStatements(resolvedAdminTypeForSWR)) {
+        if (!acctNotifEvaluatedRef.current) {
+          acctNotifEvaluatedRef.current = true;
+          void apiFetch("/api/accounting/notifications/evaluate", { method: "POST" }).catch(() => { /* non-fatal */ });
+        }
+        try {
+          const [resAcct, resAcctSum] = await Promise.all([
+            apiFetch("/api/accounting/notifications?status=active&pageSize=50"),
+            apiFetch("/api/accounting/notifications/summary"),
+          ]);
+          if (resAcct.ok) { const d = await safeJson(resAcct); setAcctNotifications(Array.isArray(d.rows) ? d.rows : []); }
+          if (resAcctSum.ok) { const s = await safeJson(resAcctSum); setAcctUnread(Number.isFinite(s.unread) ? s.unread : 0); }
+        } catch { /* keep prior accounting notifications on transient failure */ }
+      }
+
       if (resUnreadChat.ok) {
         const fetchedUnread: ChatMessage[] = await safeJson(resUnreadChat);
         setUnreadChatMessages(
@@ -2362,6 +2445,32 @@ MARAS Group etir Center`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shipments.length]);
 
+  // Accounting Phase 1: load the ISSUED customer invoice for the selected
+  // statement so the invoice / client-statement export & preview show the
+  // invoiced amount (never agreedAmount). Reads the existing per-shipment
+  // invoices endpoint; picks the first issued/partially_paid/paid invoice.
+  useEffect(() => {
+    const shipmentId = selectedCostStatement?.shipmentId;
+    if (!shipmentId) { setPreviewIssuedInvoice(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/cost-statements/${encodeURIComponent(shipmentId)}/invoices`);
+        if (!res.ok) { if (!cancelled) setPreviewIssuedInvoice(null); return; }
+        const body = await res.json();
+        const list = (body.invoices || []) as CustomerInvoice[];
+        const issued = list.find((i) => i.status === "issued" || i.status === "partially_paid" || i.status === "paid") || null;
+        if (!cancelled) setPreviewIssuedInvoice(issued);
+      } catch { if (!cancelled) setPreviewIssuedInvoice(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCostStatement?.shipmentId]);
+
+  // The issued-invoice figures the customer-facing export/preview consume.
+  const previewIssuedInvoiceForExport = previewIssuedInvoice
+    ? { total: Number(previewIssuedInvoice.sellingAmount || 0), currency: previewIssuedInvoice.currency }
+    : null;
+
   const handleReloadLatestStatement = async () => {
     if (!selectedCostStatement) return;
     try {
@@ -2581,7 +2690,9 @@ MARAS Group etir Center`;
     // admins (shipments is always [] for that role — see
     // costStatementRegistryView.ts).
     const matchingShipment = resolveStatementShipmentContext(stmt, shipments);
-    const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement);
+    // Accounting Phase 1: customer-facing amounts come from the ISSUED invoice.
+    const issuedInvoice = previewIssuedInvoiceForExport;
+    const items = resolveExportItems(statementPreviewMode, stmt, matchingShipment, selectedVendorForStatement, issuedInvoice);
     items.forEach(item => {
       const row = [
         item.costType,
@@ -2595,19 +2706,24 @@ MARAS Group etir Center`;
       ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(",");
       csvContent += row + "\n";
     });
-    // Accounting Phase B: mode-aware summary rows through the SAME shared
+    // Accounting Phase B/1: mode-aware summary rows through the SAME shared
     // rules the preview and PDF use — customer documents get customer-side
-    // money and status only; the internal expense status never appears on
-    // an invoice/client CSV.
-    const headerStatus = resolveExportHeaderStatus(statementPreviewMode, stmt, matchingShipment);
+    // money and status only, sourced from the ISSUED invoice (never
+    // agreedAmount); the internal expense status never appears on an
+    // invoice/client CSV.
+    const headerStatus = resolveExportHeaderStatus(statementPreviewMode, stmt, issuedInvoice);
     csvContent += "\n";
     if (statementPreviewMode === 'invoice' || statementPreviewMode === 'client_statement') {
-      const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(stmt));
-      const custCur = stmt.agreedCurrency || stmt.currency;
-      csvContent += `"Agreed Amount","${cust.agreedAmount}","${custCur}"\n`;
-      csvContent += `"Customer Payment Received","${cust.customerReceivedAmount}","${custCur}"\n`;
-      csvContent += `"Customer Receivable","${cust.customerReceivable}","${custCur}"\n`;
-      if (cust.customerCredit > 0) csvContent += `"Customer Credit","${cust.customerCredit}","${custCur}"\n`;
+      if (!issuedInvoice) {
+        csvContent += `"Customer Invoice","No Issued Customer Invoice"\n`;
+      } else {
+        const cust = deriveCustomerSummary(issuedInvoice.total, resolveCustomerReceivedAmount(stmt));
+        const custCur = issuedInvoice.currency;
+        csvContent += `"Invoiced Amount","${cust.customerInvoiceTotal}","${custCur}"\n`;
+        csvContent += `"Customer Payment Received","${cust.customerReceivedAmount}","${custCur}"\n`;
+        csvContent += `"Customer Receivable","${cust.customerReceivable}","${custCur}"\n`;
+        if (cust.customerCredit > 0) csvContent += `"Customer Credit","${cust.customerCredit}","${custCur}"\n`;
+      }
       if (headerStatus) csvContent += `"Customer Payment Status","${headerStatus.value}"\n`;
     } else if (statementPreviewMode === 'statement') {
       const exp = deriveExpenseSummary(Number(stmt.totalCost) || 0, Number(stmt.paidAmount) || 0);
@@ -2677,7 +2793,7 @@ MARAS Group etir Center`;
 
       // Filter items to render based on selection — customer-facing modes
       // never get raw internal cost items (see costStatementExportView.ts).
-      const itemsToRender = resolveExportItems(statementPreviewMode, selectedCostStatement, matchingShipment, selectedVendorForStatement);
+      const itemsToRender = resolveExportItems(statementPreviewMode, selectedCostStatement, matchingShipment, selectedVendorForStatement, previewIssuedInvoiceForExport);
 
       // Dynamic sub-titles and party details
       let docSubtitle = "OFFICIAL COST DECLARATION LEDGER";
@@ -2878,27 +2994,50 @@ MARAS Group etir Center`;
       let balanceVal = Number(selectedCostStatement.remainingBalance || 0);
 
       if (statementPreviewMode === 'invoice') {
-        // Accounting Phase B: customer documents show ONLY customer-side
-        // money — received-from-customer, never the expense paidAmount.
-        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
-        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
-        val1Label = lang === 'tr' ? "Matrah / Toplam Paket:" : "Base Transport Fee:";
-        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
-        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ ALACAĞI (KREDİ):" : "CUSTOMER CREDIT:") : (lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:");
-        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
-        val2Text = `- ${cust.customerReceivedAmount.toLocaleString()} ${custCur}`;
-        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
-        balanceVal = cust.customerReceivable;
+        // Accounting Phase 1: customer documents show ONLY customer-side money,
+        // sourced from the ISSUED customer invoice (never agreedAmount). With
+        // no issued invoice there is no customer figure — show a pending notice.
+        const invoice = previewIssuedInvoiceForExport;
+        if (!invoice) {
+          val1Label = lang === 'tr' ? "Fatura Durumu:" : "Invoice Status:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
+          val3Label = lang === 'tr' ? "Bakiye:" : "Balance:";
+          val1Text = lang === 'tr' ? "Fatura Düzenlenmedi" : "No Issued Customer Invoice";
+          val2Text = "—";
+          val3Text = "—";
+          balanceVal = 0;
+        } else {
+          const cust = deriveCustomerSummary(invoice.total, resolveCustomerReceivedAmount(selectedCostStatement));
+          const custCur = invoice.currency;
+          val1Label = lang === 'tr' ? "Fatura Tutarı:" : "Invoiced Amount:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Payment Received:";
+          val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ ALACAĞI (KREDİ):" : "CUSTOMER CREDIT:") : (lang === 'tr' ? "GENEL TOPLAM BORÇ:" : "NET TOTAL PAYABLE:");
+          val1Text = `${cust.customerInvoiceTotal.toLocaleString()} ${custCur}`;
+          val2Text = `- ${cust.customerReceivedAmount.toLocaleString()} ${custCur}`;
+          val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+          balanceVal = cust.customerReceivable;
+        }
       } else if (statementPreviewMode === 'client_statement') {
-        const cust = deriveCustomerSummary(matchingShipment?.agreedAmount || 0, resolveCustomerReceivedAmount(selectedCostStatement));
-        const custCur = selectedCostStatement.agreedCurrency || selectedCostStatement.currency;
-        val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
-        val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
-        val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ KREDİSİ:" : "Customer Credit Balance:") : (lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:");
-        val1Text = `${cust.agreedAmount.toLocaleString()} ${custCur}`;
-        val2Text = `(${cust.customerReceivedAmount.toLocaleString()}) ${custCur}`;
-        val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
-        balanceVal = cust.customerReceivable;
+        const invoice = previewIssuedInvoiceForExport;
+        if (!invoice) {
+          val1Label = lang === 'tr' ? "Fatura Durumu:" : "Invoice Status:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
+          val3Label = lang === 'tr' ? "Cari Bakiye:" : "Statement Outstanding:";
+          val1Text = lang === 'tr' ? "Fatura Düzenlenmedi" : "No Issued Customer Invoice";
+          val2Text = "—";
+          val3Text = "—";
+          balanceVal = 0;
+        } else {
+          const cust = deriveCustomerSummary(invoice.total, resolveCustomerReceivedAmount(selectedCostStatement));
+          const custCur = invoice.currency;
+          val1Label = lang === 'tr' ? "Toplam Dekont Cari:" : "Total Debited Value:";
+          val2Label = lang === 'tr' ? "Müşteriden Alınan:" : "Customer Payment Received:";
+          val3Label = cust.customerCredit > 0 ? (lang === 'tr' ? "MÜŞTERİ KREDİSİ:" : "Customer Credit Balance:") : (lang === 'tr' ? "Cari Bakiye (Borç):" : "Statement Outstanding:");
+          val1Text = `${cust.customerInvoiceTotal.toLocaleString()} ${custCur}`;
+          val2Text = `(${cust.customerReceivedAmount.toLocaleString()}) ${custCur}`;
+          val3Text = `${(cust.customerCredit > 0 ? cust.customerCredit : cust.customerReceivable).toLocaleString()} ${custCur}`;
+          balanceVal = cust.customerReceivable;
+        }
       } else if (statementPreviewMode === 'vendor_statement') {
         const vendorTotal = itemsToRender.reduce((acc, it) => acc + (Number(it.totalAmount) || 0), 0);
         val1Label = lang === 'tr' ? "Alt Toplam Alacak:" : "Subtotal Credit Accrued:";
@@ -3978,7 +4117,7 @@ MARAS Group etir Center`;
   // Resolves the accountingNav registry's lucide icon NAMES to components for
   // the admin nav (the registry itself stays pure/React-free).
   const ACCT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-    LayoutDashboard, FileBarChart, Users, Building2, FileText, CreditCard, Scale, PieChart, Sparkles,
+    LayoutDashboard, FileBarChart, Users, Building2, FileText, CreditCard, Scale, PieChart, Sparkles, BellRing,
   };
 
   // Admin navigation tabs, filtered by admin role/type — shared by the
@@ -4128,7 +4267,7 @@ MARAS Group etir Center`;
         isRtl={isRtl}
         title={filteredAdminTabs.find((tab) => tab.id === activeTab)?.label ?? ''}
         TitleIcon={filteredAdminTabs.find((tab) => tab.id === activeTab)?.icon}
-        unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+        unreadNotifications={combinedUnreadCountValue}
         onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
         onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
         // feature/mobile-maras-ai-access: the SAME role gate as the desktop
@@ -4332,14 +4471,14 @@ MARAS Group etir Center`;
               className="p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg relative transition-all cursor-pointer flex items-center justify-center border-0 focus:outline-none"
               title="Notifications"
             >
-              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 ? (
+              {combinedUnreadCountValue > 0 ? (
                 <BellRing className="w-5 h-5 text-orange-500 animate-bounce" />
               ) : (
                 <Bell className="w-5 h-5 text-slate-500" />
               )}
-              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+              {combinedUnreadCountValue > 0 && (
                 <span className="absolute -top-1 -end-1 bg-orange-500 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
-                  {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+                  {combinedUnreadCountValue}
                 </span>
               )}
             </button>
@@ -4350,14 +4489,14 @@ MARAS Group etir Center`;
                   <div className="flex items-center gap-1.5 font-bold text-sm text-slate-800">
                     <Bell className="w-4 h-4 text-slate-600" />
                     <span>{lang === 'tr' ? 'Bildirimler' : lang === 'ar' ? 'الإشعارات' : 'Notifications'}</span>
-                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+                    {combinedUnreadCountValue > 0 && (
                       <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full">
-                        {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
+                        {combinedUnreadCountValue} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+                    {combinedUnreadCountValue > 0 && (
                       <button
                         onClick={handleMarkAllNotifsRead}
                         className="text-xs text-orange-500 hover:text-orange-600 font-semibold cursor-pointer border-0 bg-transparent"
@@ -4377,52 +4516,49 @@ MARAS Group etir Center`;
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1.5 scrollbar-thin">
-                  {notifications.length === 0 ? (
+                  {unifiedNotifications.length === 0 ? (
                     <div className="py-8 text-center text-slate-400 text-xs">
                       {lang === 'tr' ? 'Henüz bildirim yok.' : lang === 'ar' ? 'لا توجد إشعارات حالياً.' : 'No recent notifications.'}
                     </div>
                   ) : (
-                    notifications.map((notif) => {
-                      const shipment = shipments.find(s => s.id === notif.shipmentId);
-                      const isUnread = !isNotificationReadForUser(notif, ownAdminId);
+                    unifiedNotifications.map((u) => {
+                      const isUnread = !u.isRead;
+                      const CatIcon = CATEGORY_ICON_CMP[u.iconKey];
+                      const legacyOrig = u.source === 'legacy' ? (u.original as AppNotification) : null;
+                      const shipment = legacyOrig ? shipments.find(s => s.id === legacyOrig.shipmentId) : null;
                       return (
                         <div
-                          key={notif.id}
+                          key={u.key}
                           className={`p-2.5 rounded-lg border text-xs transition-all relative ${
-                            isUnread 
-                              ? 'bg-orange-50/40 border-orange-100' 
+                            isUnread
+                              ? 'bg-orange-50/40 border-orange-100'
                               : 'bg-slate-50/50 border-slate-100'
                           }`}
                         >
                           <div className="flex gap-2">
-                            <span className="mt-0.5 shrink-0">
-                              {notif.type === 'chat' && <MessageSquare className="w-4 h-4 text-orange-500" />}
-                              {notif.type === 'doc_upload' && <FileText className="w-4 h-4 text-orange-500" />}
-                              {notif.type === 'assignment' && <ClipboardList className="w-4 h-4 text-green-500" />}
-                              {notif.type === 'status_update' && <RefreshCw className="w-4 h-4 text-purple-500" />}
-                              {notif.type !== 'chat' && notif.type !== 'doc_upload' && notif.type !== 'assignment' && notif.type !== 'status_update' && (
-                                <Bell className="w-4 h-4 text-slate-400" />
-                              )}
+                            <span className="mt-0.5 shrink-0" title={categoryAriaLabel(u)} aria-label={categoryAriaLabel(u)}>
+                              <CatIcon className={`w-4 h-4 ${u.source === 'accounting' ? 'text-emerald-600' : u.category === 'system' ? 'text-red-500' : u.category === 'users' ? 'text-blue-500' : 'text-orange-500'}`} />
                             </span>
-                            <div className="flex-1 space-y-1">
+                            <div className="flex-1 space-y-1 min-w-0">
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-slate-800">
-                                  {lang === 'tr' ? notif.titleTr : lang === 'ar' ? notif.titleAr : notif.titleEn}
+                                <span className="font-bold text-slate-800 flex items-center gap-1.5 min-w-0">
+                                  <span className="truncate">{u.title}</span>
+                                  {u.source === 'accounting' && u.priority && (u.priority === 'critical' || u.priority === 'high') && (
+                                    <span className={`shrink-0 px-1 py-0.5 rounded text-[8.5px] font-black ${u.priority === 'critical' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{u.priority === 'critical' ? (lang === 'tr' ? 'KRİTİK' : lang === 'ar' ? 'حرج' : 'CRITICAL') : (lang === 'tr' ? 'YÜKSEK' : lang === 'ar' ? 'مرتفع' : 'HIGH')}</span>
+                                  )}
                                 </span>
-                                <span className="text-[10px] text-slate-400">
-                                  {new Date(notif.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                <span className="text-[10px] text-slate-400 shrink-0">
+                                  {u.createdAtMs ? new Date(u.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : ''}
                                 </span>
                               </div>
-                              <p className="text-slate-600 font-medium leading-normal">
-                                {lang === 'tr' ? notif.messageTr : lang === 'ar' ? notif.messageAr : notif.messageEn}
-                              </p>
-                              <div className="flex items-center gap-2 pt-1 border-t border-slate-100/50 mt-1">
+                              {u.message && <p className="text-slate-600 font-medium leading-normal break-words">{u.message}</p>}
+                              <div className="flex items-center gap-2 pt-1 border-t border-slate-100/50 mt-1 flex-wrap">
                                 {shipment && (
                                   <button
                                     onClick={() => {
-                                      openShipmentChatForChannel(shipment, notif.channel);
+                                      openShipmentChatForChannel(shipment, legacyOrig!.channel);
                                       setIsNotifOpen(false);
-                                      if (isUnread) handleMarkNotifRead(notif.id);
+                                      if (isUnread) handleMarkNotifRead(u.id);
                                     }}
                                     className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
                                   >
@@ -4430,12 +4566,33 @@ MARAS Group etir Center`;
                                     <span>{lang === 'tr' ? 'Sohbeti Aç' : lang === 'ar' ? 'فتح المحادثة' : 'Open Chat'}</span>
                                   </button>
                                 )}
+                                {u.source === 'accounting' && u.actionTab && (
+                                  <button
+                                    onClick={() => {
+                                      setActiveTab(u.actionTab as typeof activeTab);
+                                      setIsNotifOpen(false);
+                                      if (isUnread) handleAcctNotifAction(u.id, 'read');
+                                    }}
+                                    className="text-[10px] text-emerald-600 hover:text-emerald-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                    <span>{lang === 'tr' ? 'Aç' : lang === 'ar' ? 'فتح' : 'Open'}</span>
+                                  </button>
+                                )}
                                 {isUnread && (
                                   <button
-                                    onClick={() => handleMarkNotifRead(notif.id)}
+                                    onClick={() => u.source === 'accounting' ? handleAcctNotifAction(u.id, 'read') : handleMarkNotifRead(u.id)}
                                     className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer bg-transparent border-0"
                                   >
-                                    {lang === 'tr' ? 'Okundu' : lang === 'ar' ? 'مقروء' : 'Dismiss'}
+                                    {lang === 'tr' ? 'Okundu' : lang === 'ar' ? 'مقروء' : 'Mark read'}
+                                  </button>
+                                )}
+                                {u.source === 'accounting' && u.canDismiss && (
+                                  <button
+                                    onClick={() => handleAcctNotifAction(u.id, 'dismiss')}
+                                    className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer bg-transparent border-0"
+                                  >
+                                    {lang === 'tr' ? 'Kapat' : lang === 'ar' ? 'إخفاء' : 'Dismiss'}
                                   </button>
                                 )}
                               </div>
@@ -6738,7 +6895,10 @@ MARAS Group etir Center`;
           real UI; roadmap pages render the professional "coming soon"
           placeholder that keeps the full information architecture visible. */}
       {activeTab === 'acct_dashboard' && canViewCostStatements(resolvedAdminType) && (
-        <AccountingDashboard lang={lang} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
+        <AccountingDashboard lang={lang} clients={clients} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
+      )}
+      {activeTab === 'acct_action_center' && canViewCostStatements(resolvedAdminType) && (
+        <AccountingActionCenter lang={lang} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
       )}
       {activeTab === 'acct_customer_statements' && canViewCostStatements(resolvedAdminType) && (
         <CustomerStatementsPage lang={lang} clients={clients} initialEntity={acctFocusRef} />
@@ -6756,7 +6916,7 @@ MARAS Group etir Center`;
         <ReceivablesPayablesPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
       )}
       {activeTab === 'acct_reports' && canViewCostStatements(resolvedAdminType) && (
-        <MonthlyReportPage lang={lang} clients={clients} costStatements={costStatements} />
+        <FinancialReportsPage lang={lang} clients={clients} costStatements={costStatements} />
       )}
       {activeTab === 'acct_ai' && canViewCostStatements(resolvedAdminType) && (
         <AIFinancialAssistantPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
@@ -10162,7 +10322,7 @@ MARAS Group etir Center`;
             isRtl={isRtl}
             tabs={mobileMoreMenuTabs}
             onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
-            unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+            unreadNotifications={combinedUnreadCountValue}
             onOpenNotifications={() => { setIsNotifOpen(true); setIsMoreMenuOpen(false); }}
             onLangChange={onLangChange}
             onLogout={onLogout}

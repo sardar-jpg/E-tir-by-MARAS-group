@@ -461,6 +461,103 @@ export interface AppNotification {
 // internal notes, costs, or file URLs).
 export const AI_ALERT_NOTIFICATION_TYPE = 'ai_alert' as const;
 
+// ── Accounting Phase 9 — Accounting Notifications & Action Center ──────────
+/** The canonical accounting notification types (informational + navigational only). */
+export type AccountingNotificationType =
+  | 'cost_statement_approval_required'
+  | 'cost_statement_approval_rejected'
+  | 'cost_statement_fully_approved'
+  | 'cost_statement_reopen_approval_required'
+  | 'cost_statement_reopen_rejected'
+  | 'financial_reopen_approval_required'
+  | 'financial_reopen_rejected'
+  | 'financial_reopen_completed'
+  | 'customer_invoice_overdue'
+  | 'customer_balance_outstanding'
+  | 'vendor_balance_outstanding'
+  | 'order_ready_for_financial_close'
+  | 'order_blocked_from_financial_close'
+  | 'financial_close_completed'
+  | 'accounting_integrity_warning';
+
+export type AccountingNotificationPriority = 'info' | 'normal' | 'high' | 'critical';
+export type AccountingNotificationCategory =
+  | 'my_approvals' | 'customer_collections' | 'vendor_payments' | 'financial_closing' | 'warnings' | 'completed';
+export type AccountingNotificationStatus = 'unread' | 'read' | 'acknowledged' | 'dismissed' | 'resolved';
+
+/**
+ * Safe, minimal display/navigation params — NEVER a copy of a financial
+ * record. Amounts are single-currency (no FX, no mixed totals). The UI
+ * localizes the title/message from `type` + these params.
+ */
+export interface AccountingNotificationParams {
+  orderRef?: string;
+  customerName?: string;
+  vendorName?: string;
+  invoiceNumber?: string;
+  description?: string;
+  amount?: number;
+  currency?: Currency;
+  dueDate?: string;
+  daysOverdue?: number;
+  agingBucket?: string;
+  reason?: string;
+  submittedBy?: string;
+  requestedBy?: string;
+  approvalStep?: number;
+  blockers?: string[];
+  warningCode?: string;
+}
+
+export interface AccountingNotification {
+  id: string;
+  type: AccountingNotificationType;
+  category: AccountingNotificationCategory;
+  priority: AccountingNotificationPriority;
+  /** Recipient scoping: a specific user id and/or a shared accounting permission key. */
+  recipientUserId?: string;
+  permissionScope?: string;
+  shipmentId?: string;
+  orderRef?: string;
+  invoiceId?: string;
+  costLineId?: string;
+  params: AccountingNotificationParams;
+  /** Where the card links to inside the app (existing routes only). */
+  actionTab?: string;
+  status: AccountingNotificationStatus;
+  /** Deterministic key preventing duplicates for the same condition. */
+  deduplicationKey: string;
+  /** Bumped when the underlying condition's metadata changes (aging etc.). */
+  sourceVersion?: string;
+  createdAt: string;
+  updatedAt?: string;
+  readByUserIds?: string[];
+  acknowledgedAt?: string;
+  acknowledgedBy?: string;
+  dismissedAt?: string;
+  dismissedBy?: string;
+  resolvedAt?: string;
+  /** Last time this still-active reminder was (re)surfaced — drives the repeat interval. */
+  lastRemindedAt?: string;
+}
+
+export interface AccountingNotificationSettings {
+  overdueRemindersEnabled: boolean;
+  customerBalanceRemindersEnabled: boolean;
+  vendorBalanceRemindersEnabled: boolean;
+  financialCloseReadinessEnabled: boolean;
+  financialCloseBlockersEnabled: boolean;
+  integrityWarningsEnabled: boolean;
+  /** Days before an overdue invoice becomes CRITICAL. */
+  severeOverdueThresholdDays: number;
+  /** Reminder repeat interval in days (informational; dedup already prevents spam). */
+  reminderRepeatIntervalDays: number;
+  /** External delivery is PERMANENTLY disabled in Phase 9 (in-app only). */
+  externalDeliveryEnabled: false;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
 export interface CostItem {
   id: string;
   costType: string;
@@ -839,6 +936,11 @@ export interface CostStatement {
   accountingStatus?: string;
   approvalCycle?: number;
   approvalHistory?: unknown[];
+  // Phase 2 (user-based approval chains): the ordered approver user ids
+  // captured for the current approval cycle at submit time. approve/reject
+  // read this snapshot, never the live settings, so changing Accounting
+  // Settings never alters an in-progress cycle.
+  cycleApproverUserIds?: string[];
   submittedAt?: string;
   submittedBy?: string;
   submittedRevision?: number;
@@ -860,6 +962,25 @@ export interface CostStatement {
   reopenRequestedBy?: string;
   reopenRequestedAt?: string;
   reopenReason?: string;
+  // Accounting Phase 3: sequential, user-based reopen approval cycles (each
+  // carrying its own captured ordered approver snapshot + decision history).
+  // Append-only; the active cycle is the last with status "pending". Full
+  // shape is ReopenCycle in costApprovalWorkflow.ts.
+  reopenCycles?: unknown[];
+  // Accounting Phase 6: official Financial Closing state — a top-level
+  // accounting freeze layered ABOVE the approval/payment locks. Absent ⇒
+  // "financial_open". financial_closed makes ALL accounting mutations
+  // read-only until an approved Financial Reopen. Full logic in
+  // financialClosing.ts.
+  financialStatus?: string;
+  financialClosedAt?: string;
+  financialClosedBy?: string;
+  financialCloseReason?: string;
+  financialReopenedAt?: string;
+  financialReopenedBy?: string;
+  // Sequential Financial Reopen approval cycles (same ReopenCycle shape as
+  // Phase 3, stored separately). Append-only.
+  financialReopenCycles?: unknown[];
 }
 
 

@@ -31,13 +31,30 @@ describe("UI action derivation (mirror of server rules)", () => {
     expect(a.canRequestReopen).toBe(true);
     expect(a.canViewFinalPdf).toBe(true);
   });
-  it("reopen_requested: only a Super Admin who is NOT the requester may decide", () => {
-    const state = { accountingStatus: "reopen_requested" as const, reopenRequestedBy: "acc1" };
-    expect(deriveCostApprovalUiActions(state, CONFIG, superAdmin).canDecideReopen).toBe(true);
-    // The requester (even if they were super) cannot decide their own.
-    expect(deriveCostApprovalUiActions(state, CONFIG, { sessionId: "acc1", isSuperAdmin: true, canWriteCostStatements: true }).canDecideReopen).toBe(false);
-    // A non-super cannot decide.
+  it("reopen_requested (Phase 3): only the captured pending reopen approver may decide — not super-admin-by-role", () => {
+    // A pending reopen cycle captured [ops1, acc1]; position 0 (ops1) pends.
+    const reopenCycle = {
+      reopenCycleNumber: 1, approverUserIds: ["ops1", "acc1"], currentPosition: 0, status: "pending" as const,
+      requestedBy: "author", requestedAt: "t", reason: "fix", decisions: [],
+    };
+    const state = { accountingStatus: "reopen_requested" as const, reopenCycles: [reopenCycle] };
+    // The pending captured approver (ops1) may decide — regardless of super/role.
+    expect(deriveCostApprovalUiActions(state, CONFIG, { sessionId: "ops1", isSuperAdmin: false, canWriteCostStatements: true }).canDecideReopen).toBe(true);
+    // A Super Admin who is NOT the pending approver may NOT decide (no more super-only bypass).
+    expect(deriveCostApprovalUiActions(state, CONFIG, superAdmin).canDecideReopen).toBe(false);
+    // The NEXT approver cannot decide before their turn.
     expect(deriveCostApprovalUiActions(state, CONFIG, accountant).canDecideReopen).toBe(false);
+  });
+  it("Phase 3: an active invoice locks editing + hides the reopen request", () => {
+    const closed = { accountingStatus: "final_closed" as const };
+    // Without an active invoice a writer may request reopen.
+    expect(deriveCostApprovalUiActions(closed, CONFIG, accountant, false).canRequestReopen).toBe(true);
+    // With an active invoice: locked, no reopen request.
+    const locked = deriveCostApprovalUiActions(closed, CONFIG, accountant, true);
+    expect(locked.canRequestReopen).toBe(false);
+    expect(locked.isLockedByInvoice).toBe(true);
+    // A reopened statement with an active invoice is still not editable.
+    expect(deriveCostApprovalUiActions({ accountingStatus: "reopened" }, CONFIG, accountant, true).canEditFinancials).toBe(false);
   });
   it("legacy statement (no accountingStatus) is treated as editable draft", () => {
     const a = deriveCostApprovalUiActions({}, CONFIG, accountant);

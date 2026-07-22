@@ -4,6 +4,8 @@ import {
   computeInvoiceGrossProfit,
   isInvoiceEditable,
   isReceivableInvoiceStatus,
+  isActiveInvoiceStatus,
+  hasActiveCustomerInvoice,
   isAllocatableInvoiceStatus,
   canIssueInvoice,
   canCancelInvoice,
@@ -87,14 +89,35 @@ describe("lifecycle guards", () => {
     expect(isAllocatableInvoiceStatus("partially_paid")).toBe(true);
     expect(isAllocatableInvoiceStatus("paid")).toBe(false);
   });
-  it("issuing requires draft + positive amount; cost_plus needs a closed cost statement", () => {
-    expect(canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: "draft", sellingAmount: 500 }).ok).toBe(true);
+
+  it("Phase 3 active-invoice lock: issued/partially_paid/paid lock; draft/cancelled never do", () => {
+    for (const s of ["issued", "partially_paid", "paid"] as const) expect(isActiveInvoiceStatus(s)).toBe(true);
+    expect(isActiveInvoiceStatus("draft")).toBe(false);
+    expect(isActiveInvoiceStatus("cancelled")).toBe(false);
+    // hasActiveCustomerInvoice across a related set (multiple invoices allowed).
+    expect(hasActiveCustomerInvoice([{ status: "draft" }, { status: "cancelled" }])).toBe(false);
+    expect(hasActiveCustomerInvoice([{ status: "cancelled" }, { status: "issued" }])).toBe(true);
+    expect(hasActiveCustomerInvoice([{ status: "partially_paid" }])).toBe(true);
+    expect(hasActiveCustomerInvoice([])).toBe(false);
+  });
+  it("issuing requires draft + positive amount + an APPROVED (final_closed) cost statement (Phase 3, all modes)", () => {
+    // Phase 3: an invoice may be issued ONLY after the cost statement is
+    // approved and closed — for manual AND cost_plus. A draft/pending/reopened
+    // statement blocks issuance (so a new invoice can only follow re-approval).
+    const manualUnapproved = canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: "draft", sellingAmount: 500 });
+    expect(manualUnapproved.ok).toBe(false);
+    if (!manualUnapproved.ok) expect(manualUnapproved.code).toBe("cost_not_approved");
+    // Reopened (editing) also blocks issuance until the new normal chain closes.
+    expect(canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: "reopened", sellingAmount: 500 }).ok).toBe(false);
     const blocked = canIssueInvoice({ status: "draft", pricingMode: "cost_plus", costStatementStatus: "pending_operations_approval", sellingAmount: 500 });
     expect(blocked.ok).toBe(false);
     if (!blocked.ok) expect(blocked.code).toBe("cost_not_approved");
+    // Approved → issuable, in both modes.
     expect(canIssueInvoice({ status: "draft", pricingMode: "cost_plus", costStatementStatus: "final_closed", sellingAmount: 500 }).ok).toBe(true);
-    expect(canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: undefined, sellingAmount: 0 }).ok).toBe(false);
-    expect(canIssueInvoice({ status: "issued", pricingMode: "manual", costStatementStatus: undefined, sellingAmount: 500 }).ok).toBe(false);
+    expect(canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: "final_closed", sellingAmount: 500 }).ok).toBe(true);
+    // Zero amount and non-draft invoice still rejected.
+    expect(canIssueInvoice({ status: "draft", pricingMode: "manual", costStatementStatus: "final_closed", sellingAmount: 0 }).ok).toBe(false);
+    expect(canIssueInvoice({ status: "issued", pricingMode: "manual", costStatementStatus: "final_closed", sellingAmount: 500 }).ok).toBe(false);
   });
   it("cancel requires an issued-and-live invoice + reason (draft/cancelled rejected)", () => {
     expect(canCancelInvoice("issued", "duplicate").ok).toBe(true);

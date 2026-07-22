@@ -1,14 +1,18 @@
-import type { CostStatement, Currency } from "../types";
-import { computeGrossProfit } from "./costStatementMath";
+import type { CostStatement, CustomerInvoice, Currency } from "../types";
+import { computeShipmentProfit } from "./costStatementMath";
+import { resolveAccountingStatus } from "./costApprovalWorkflow";
 
 /**
  * Pure view helpers for the Accounting Dashboard charts. KPI figures come from
  * the SERVER (GET /api/admin/dashboard/financial — authoritative, currency-safe);
- * these helpers only shape the cost-statement records the accounting user
- * already loads into the trend + expense visualizations. Everything is real
- * data — a statement missing an agreed amount contributes 0 revenue (honest
- * undercount, never a fabricated figure) and profit is only recognized when
- * revenue and cost currencies match (computeGrossProfit decides).
+ * these helpers only shape the records the accounting user already loads into
+ * the trend + expense visualizations.
+ *
+ * Accounting Phase 1: monthly revenue and profit come ONLY from ISSUED customer
+ * invoices (never the driver agreedAmount). Revenue = issued invoice total;
+ * profit = issued invoice total − APPROVED cost. A shipment with no issued
+ * invoice contributes nothing (honest, never fabricated), and profit is
+ * recognized only when the invoice and cost currencies match.
  */
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -16,7 +20,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export interface MonthlyPoint { key: string; label: string; revenue: number; profit: number }
 
 /** Revenue vs profit for the trailing `months` calendar months (ending at nowIso). */
-export function monthlyRevenueProfit(statements: CostStatement[], currency: Currency, nowIso: string, months = 6): MonthlyPoint[] {
+export function monthlyRevenueProfit(statements: CostStatement[], invoices: CustomerInvoice[], currency: Currency, nowIso: string, months = 6): MonthlyPoint[] {
   const now = new Date((nowIso || new Date().toISOString()).slice(0, 10) + "T00:00:00Z");
   const keys: string[] = [];
   for (let i = months - 1; i >= 0; i--) {
@@ -24,16 +28,31 @@ export function monthlyRevenueProfit(statements: CostStatement[], currency: Curr
     keys.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
   }
   const byKey = new Map<string, MonthlyPoint>(keys.map((k) => [k, { key: k, label: MONTHS[Number(k.slice(5, 7)) - 1], revenue: 0, profit: 0 }]));
+
+  // Issued invoice total per shipmentNumber, in THIS currency only.
+  const issuedTotal = new Map<string, number>();
+  for (const inv of invoices) {
+    if (inv.status !== "issued" && inv.status !== "partially_paid" && inv.status !== "paid") continue;
+    if (inv.currency !== currency) continue;
+    issuedTotal.set(inv.shipmentNumber, round2((issuedTotal.get(inv.shipmentNumber) || 0) + Number(inv.sellingAmount || 0)));
+  }
+
   for (const st of statements) {
-    const agreedCurrency = (st.agreedCurrency || st.currency) as Currency;
-    if (agreedCurrency !== currency) continue;
     const key = (st.date || "").slice(0, 7);
     const point = byKey.get(key);
     if (!point) continue;
-    const agreed = Number(st.agreedAmount ?? 0);
-    point.revenue = round2(point.revenue + agreed);
-    const profit = computeGrossProfit(agreed, agreedCurrency, st.totalCost || 0, st.currency);
-    if (profit !== null) point.profit = round2(point.profit + profit);
+    const invoiceTotal = issuedTotal.get(st.shipmentNumber);
+    if (invoiceTotal === undefined) continue; // no issued invoice in this currency → nothing
+    point.revenue = round2(point.revenue + invoiceTotal);
+    const approved = resolveAccountingStatus(st as any) === "final_closed";
+    const result = computeShipmentProfit({
+      issuedInvoiceTotal: invoiceTotal,
+      invoiceCurrency: currency,
+      costsApproved: approved,
+      approvedCostTotal: st.totalCost || 0,
+      costCurrency: st.currency,
+    });
+    if (result.status === "available" && result.profit !== null) point.profit = round2(point.profit + result.profit);
   }
   return keys.map((k) => byKey.get(k)!);
 }

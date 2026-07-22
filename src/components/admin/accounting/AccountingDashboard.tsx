@@ -6,10 +6,11 @@ import {
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell,
 } from "recharts";
-import type { Language, CostStatement } from "../../../types";
+import type { Language, Client, CostStatement } from "../../../types";
 import type { CurrencyFinanceOverview, ExecutiveFinanceOverview } from "../../../lib/executiveFinance";
 import { apiFetch } from "../../../lib/api";
 import { monthlyRevenueProfit, expenseByCategory, recentStatements, totalExpenses } from "../../../lib/accountingDashboard";
+import { useAccountingDataset } from "./useAccountingDataset";
 import { PageHeader, KpiCard, Panel, StatusPill, money, EmptyState, btnGhost } from "./AccountingUI";
 
 const T = {
@@ -47,11 +48,14 @@ const tr = (k: keyof typeof T, lang: Language) => (T[k] as any)[lang] || (T[k] a
 const DONUT = ["#2563eb", "#16a34a", "#f59e0b", "#8b5cf6", "#ef4444", "#0ea5e9", "#64748b"];
 const paymentKind = (s: string) => (s === "Paid" ? "paid" : s === "Partial" ? "partial" : "unpaid");
 
-export default function AccountingDashboard({ lang, costStatements, onNavigate }: {
+export default function AccountingDashboard({ lang, clients, costStatements, onNavigate }: {
   lang: Language;
+  clients: Client[];
   costStatements: CostStatement[];
   onNavigate?: (tabId: string) => void;
 }) {
+  // Accounting Phase 1: the monthly revenue/profit trend is invoice-based.
+  const ds = useAccountingDataset(clients, costStatements);
   const [overview, setOverview] = useState<ExecutiveFinanceOverview | null>(null);
   const [alerts, setAlerts] = useState<{ title: string; detail?: string; tone: "red" | "amber" }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +94,7 @@ export default function AccountingDashboard({ lang, costStatements, onNavigate }
   );
   const cur = (active?.currency || "USD") as any;
 
-  const series = useMemo(() => monthlyRevenueProfit(costStatements, cur, new Date().toISOString(), 6), [costStatements, cur]);
+  const series = useMemo(() => monthlyRevenueProfit(costStatements, ds.invoices, cur, new Date().toISOString(), 6), [costStatements, ds.invoices, cur]);
   const slices = useMemo(() => expenseByCategory(costStatements, cur), [costStatements, cur]);
   const donutTotal = useMemo(() => totalExpenses(costStatements, cur), [costStatements, cur]);
   const recent = useMemo(() => recentStatements(costStatements, 6), [costStatements]);

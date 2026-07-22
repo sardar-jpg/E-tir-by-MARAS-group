@@ -16,33 +16,74 @@ const region = (needle: string, length: number): string => {
 };
 
 describe("route permissions", () => {
-  it("settings: view = costs.view; workflow config write = Super Admin only", () => {
+  it("settings: view = costs.view; workflow config write = costs.manageApprovalWorkflow permission (NOT Super Admin only)", () => {
     expect(SERVER).toContain('app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view")');
-    expect(SERVER).toContain('app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin');
-    expect(region('app.put("/api/admin/accounting/approval-workflow"', 900)).toContain("validateWorkflowConfig(");
+    // Phase 2: approval-settings editing is the granular permission, never requireSuperAdmin.
+    expect(SERVER).toContain('app.put("/api/admin/accounting/approval-workflow", requirePermission("costs.manageApprovalWorkflow")');
+    expect(SERVER).not.toContain('app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin');
+    expect(region('app.put("/api/admin/accounting/approval-workflow"', 900)).toContain("validateApproverList(");
   });
   it("submit requires costs.edit; approve/reject require costs.approve (assigned-approver still enforced in the pure logic)", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/submit", requirePermission("costs.edit")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/approve", requirePermission("costs.approve")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve")');
   });
-  it("reopen request = accounting write; reopen decision = Super Admin only", () => {
+  it("reopen request + decision = costs.reopen permission (Phase 3 chain decides by captured approver, not Super Admin)", () => {
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen")');
     expect(SERVER).toContain('app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen")');
   });
 });
 
+describe("Phase 3 — active-invoice lock + reopen approval chain wiring", () => {
+  it("financial mutation routes reject edits while an active customer invoice exists", () => {
+    // Full-statement edit route.
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 6500);
+    expect(EDIT).toContain("loadInvoicesForShipment(shipmentId)");
+    expect(EDIT).toContain("hasActiveCustomerInvoice(relatedInvoices)");
+    expect(EDIT).toContain("active_invoice_lock");
+    // Vendor cost add route.
+    const ITEMS = region('app.post("/api/cost-statements/:shipmentId/items"', 1600);
+    expect(ITEMS).toContain("hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))");
+    expect(ITEMS).toContain("active_invoice_lock");
+  });
+  it("reopen request is blocked by an active invoice and captures its own approver snapshot", () => {
+    const REQ = region('app.post("/api/cost-statements/:shipmentId/reopen-request"', 2600);
+    expect(REQ).toContain("hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))");
+    expect(REQ).toContain("canRequestReopenChain(");
+    expect(REQ).toContain("validateApproverList(");
+    expect(REQ).toContain("buildReopenCycle(");
+  });
+  it("reopen decision routes through the captured cycle by position (never live settings), and finalizes to reopened", () => {
+    const DEC = region('app.post("/api/cost-statements/:shipmentId/reopen-decision"', 8000);
+    expect(DEC).toContain("activeReopenCycle(stmt");
+    expect(DEC).toContain("canDecideReopenPosition({ cycle, actorId: req.session!.id");
+    expect(DEC).toContain("applyReopenApproval(");
+    expect(DEC).toContain("applyReopenRejection(");
+    expect(DEC).toContain('accountingStatus: "reopened"');
+    // Legacy in-flight reopen captures the config once, else a controlled error.
+    expect(DEC).toContain("reopen_config_unavailable");
+  });
+  it("issuing an invoice requires the cost statement to be approved (final_closed) — enforced via canIssueInvoice", () => {
+    const ISSUE = region('app.post("/api/cost-statements/:shipmentId/invoices/:invoiceId/issue"', 3000);
+    expect(ISSUE).toContain("canIssueInvoice(");
+    expect(ISSUE).toContain("costStatementStatus: resolveAccountingStatus(stmt");
+  });
+});
+
 describe("actor identity is server-derived, decisions go through the pure module", () => {
   it("submit/approve/reject/reopen use pure guards and the session id, never body identity", () => {
-    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 2600);
+    const SUBMIT = region('app.post("/api/cost-statements/:shipmentId/submit"', 3200);
     expect(SUBMIT).toContain("canSubmitForApproval(status)");
-    expect(SUBMIT).toContain("isWorkflowConfigUsable(config");
+    // Phase 2: submit validates the ordered approver list and CAPTURES it onto the cycle.
+    expect(SUBMIT).toContain("validateApproverList(");
+    expect(SUBMIT).toContain("cycleApproverUserIds:");
     expect(SUBMIT).toContain("resolveWorkflowActorName(req.session!)");
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
-    expect(APPROVE).toContain("canApproveStage({ status, config, actorId: req.session!.id");
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
+    // Phase 2: approval decides against the captured cycle approver list, not live config.
+    expect(APPROVE).toContain("canApproveCyclePosition({ status, cycleApprovers, actorId: req.session!.id");
     expect(APPROVE).not.toContain("req.body.actorId");
-    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 2400);
-    expect(REJECT).toContain("canRejectStage({ status, config, actorId: req.session!.id");
+    const REJECT = region('app.post("/api/cost-statements/:shipmentId/reject"', 3200);
+    expect(REJECT).toContain("canRejectCyclePosition({ status, cycleApprovers, actorId: req.session!.id");
   });
   it("every workflow transition re-reads + re-decides INSIDE an atomic mutation (BLOCKER 2)", () => {
     // All five simple routes and the finalization route funnel their state
@@ -60,7 +101,7 @@ describe("actor identity is server-derived, decisions go through the pure module
     expect(HELPER).toContain("getMemoryStore().costStatements");
   });
   it("edit route is locked while pending/finalizing/closed — enforced inside the atomic section", () => {
-    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 4200);
+    const EDIT = region('app.post("/api/cost-statements/:shipmentId", requirePermission("costs.edit")', 5200);
     expect(EDIT).toContain("assertEditableInAtomicSection");
     expect(EDIT).toContain("isFinancialEditingAllowed(currentStatus)");
     expect(EDIT).toContain('code: lockErr.code');
@@ -73,9 +114,9 @@ describe("actor identity is server-derived, decisions go through the pure module
 
 describe("final closure integrity + idempotent, crash-recoverable finalization", () => {
   it("finalization reserves a 'finalizing' state, then stores the PDF BEFORE closing; failure returns 502 and does not close", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
-    // A deterministic finalization decision drives begin/resume/close.
-    expect(APPROVE).toContain("decideFinalization({");
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
+    // A deterministic finalization decision (cycle-snapshot based) drives begin/resume/close.
+    expect(APPROVE).toContain("decideCycleFinalization({");
     expect(APPROVE).toContain('accountingStatus: "finalizing"');
     const finalizeAt = APPROVE.indexOf("finalizeCostStatementPdf(");
     const closedAt = APPROVE.indexOf('accountingStatus: "final_closed"');
@@ -85,12 +126,12 @@ describe("final closure integrity + idempotent, crash-recoverable finalization",
     expect(APPROVE).toContain('code: "final_pdf_failed"');
     expect(APPROVE).toContain("502");
     // finalize throws on failure (no silent close).
-    const FINALIZE = region("async function finalizeCostStatementPdf", 1800);
+    const FINALIZE = region("async function finalizeCostStatementPdf", 2800);
     expect(FINALIZE).toContain("renderFinalCostStatementPdf(model)");
     expect(FINALIZE).toContain("buildFinalPdfModel(");
   });
   it("the closure commit is idempotent — it dedupes on the key and appends versions, never overwrites", () => {
-    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 9000);
+    const APPROVE = region('app.post("/api/cost-statements/:shipmentId/approve"', 11000);
     expect(APPROVE).toContain("hasFinalVersionFor(");
     expect(APPROVE).toContain("[...((stmt.finalVersions");
   });

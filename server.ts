@@ -73,12 +73,19 @@ import {
 } from "./src/lib/accountDeletion";
 import { validateCostStatementInput, deriveExpenseSummary, decideStatementRevision, applyCostStatementRevisionedWriteMemory, CostStatementRevisionConflictError, CostStatementAccountingLockedError } from "./src/lib/costStatementMath";
 import {
-  validateWorkflowConfig, isWorkflowConfigUsable, resolveAccountingStatus, resolveApprovalCycle,
-  isFinancialEditingAllowed, canSubmitForApproval, canApproveStage, canRejectStage,
-  canRequestReopen, canDecideReopen, pendingStageForStatus, assigneeForStage,
-  nextStatusAfterApproval, nextStageAfterApproval, appendHistory, approvalsForCycle,
-  buildFinalPdfFileName, APPROVAL_STAGES, decideFinalization, hasFinalVersionFor,
-  type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion,
+  resolveAccountingStatus, resolveApprovalCycle,
+  isFinancialEditingAllowed, canSubmitForApproval,
+  appendHistory, approvalsForCycle,
+  buildFinalPdfFileName, hasFinalVersionFor,
+  // Phase 2 — user-based, ordered approver chains + per-cycle snapshot.
+  validateApproverList, isApproverConfigUsable, resolveConfiguredApprovers,
+  resolveCycleApprovers, hasCycleApproverSnapshot, approverPositionForStatus,
+  statusForApproverPosition, stageLabelForPosition, nextStatusAfterPosition,
+  nextPositionToNotify, canApproveCyclePosition, canRejectCyclePosition, decideCycleFinalization,
+  // Phase 3 — issued-invoice lock + sequential reopen approval chain.
+  ACTIVE_INVOICE_LOCK_MESSAGE, activeReopenCycle, hasPendingReopen, canRequestReopenChain,
+  buildReopenCycle, canDecideReopenPosition, applyReopenApproval, applyReopenRejection, nextReopenPositionToNotify,
+  type CostApprovalWorkflowConfig, type ApprovalStage, type ApprovalHistoryEntry, type FinalPdfVersion, type ReopenCycle,
 } from "./src/lib/costApprovalWorkflow";
 import { buildFinalPdfModel } from "./src/lib/costStatementFinalPdfModel";
 import { buildDraftCostStatement } from "./src/lib/costStatementDraft";
@@ -88,15 +95,25 @@ import {
 } from "./src/lib/accountingTemplateSettings";
 import {
   summarizeVendorPayable, validateVendorPayment, canReverseVendorPayment, isDuplicateVendorPayment,
+  canRecordVendorPaymentForStatus, hasActiveVendorPayment,
 } from "./src/lib/vendorPayments";
 import {
   computeInvoicePricing, computeInvoiceGrossProfit, isInvoiceEditable, canIssueInvoice,
   canCancelInvoice, buildInvoiceNumber, isInvoicePricingMode, isAllocatableInvoiceStatus,
+  hasActiveCustomerInvoice,
 } from "./src/lib/customerInvoice";
-import { sanitizeInvoiceLines, computeInvoiceTotals, priceDifference } from "./src/lib/customerInvoiceLines";
+import {
+  resolveFinancialStatus, isFinanciallyClosed, FINANCIAL_CLOSED_LOCK_MESSAGE,
+  evaluateFinancialCloseReadiness, activeFinancialReopenCycle, hasPendingFinancialReopen,
+  canRequestFinancialReopen,
+} from "./src/lib/financialClosing";
+import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerInvoiceLines";
+import * as Reports from "./src/lib/accountingReports";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
+  // Phase 5 — per-invoice Accounts Receivable.
+  canRecordInvoicePayment, summarizeInvoiceReceivable, paymentsForInvoice,
 } from "./src/lib/customerPayments";
 import { canIssueReceipt, findActiveReceiptForPayment } from "./src/lib/paymentReceipt";
 import { requireClientId } from "./src/lib/customerIdentity";
@@ -133,6 +150,8 @@ import {
   applyTemplateToModel, buildSamplePreviewModel,
 } from "./src/lib/accountingPdfModel";
 import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
+import * as ReportExport from "./src/lib/accountingReportExportModel";
+import * as AcctNotify from "./src/lib/accountingNotificationRules";
 import {
   validateTemplateConfig, defaultTemplateConfig, TEMPLATE_DOC_TYPES, type TemplateDocType, type TemplateConfig,
 } from "./src/lib/accountingTemplateConfig";
@@ -2192,6 +2211,8 @@ import {
   CustomerPayment,
   PaymentAllocation,
   PaymentReceipt,
+  AccountingNotification,
+  AccountingNotificationSettings,
   Language
 } from "./src/types";
 import {
@@ -10381,6 +10402,19 @@ async function startServer() {
       }
       const shipment = sDoc.data() as Shipment;
 
+      // Accounting Phase 3 — Active Invoice Lock: a Cost Statement is
+      // financially locked while ANY related customer invoice is active
+      // (issued / partially_paid / paid). The lock is based ONLY on real
+      // related invoices — never agreedAmount, draft, or cancelled invoices.
+      // The invoice must be cancelled before the statement can be edited (via
+      // the reopen flow). Enforced on the backend regardless of the frontend.
+      {
+        const relatedInvoices = await loadInvoicesForShipment(shipmentId);
+        if (hasActiveCustomerInvoice(relatedInvoices)) {
+          return res.status(409).json({ code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE });
+        }
+      }
+
       // Accounting Phase B — server-authoritative money: every submitted
       // number is validated (finite, non-negative), item totals are
       // RECOMPUTED as quantity × unitPrice (a client-sent totalAmount is
@@ -10417,6 +10451,11 @@ async function startServer() {
       };
       const existingForEdit = await getDoc(doc(db, "costStatements", shipmentId));
       if (existingForEdit.exists()) {
+        // Phase 6 — Financial Closing freeze: a financially closed statement is
+        // fully read-only until an approved Financial Reopen.
+        if (isFinanciallyClosed(existingForEdit.data() as CostStatement)) {
+          return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+        }
         try {
           assertEditableInAtomicSection(existingForEdit.data() as CostStatement);
         } catch (lockErr) {
@@ -10576,7 +10615,7 @@ async function startServer() {
    * always active. This same filtered set drives both the Settings
    * selectors and workflow-config validation, so a disabled/defective or
    * deleted employee cannot be assigned, fails validation if saved, and
-   * (via isWorkflowConfigUsable at submit time) blocks submission if it
+   * (via isApproverConfigUsable at submit time) blocks submission if it
    * was assigned before becoming unavailable.
    */
   async function loadActiveAdminIds(): Promise<string[]> {
@@ -10810,11 +10849,9 @@ async function startServer() {
     }
   }
 
-  /** Super + Accounts admins to notify when a statement is finalized. */
-  function assigneeIdsToNotifyOnFinal(config: CostApprovalWorkflowConfig): string[] {
-    const ids = new Set<string>();
-    for (const stage of APPROVAL_STAGES) { const id = assigneeForStage(config, stage); if (id) ids.add(id); }
-    return [...ids];
+  /** The cycle's approvers to notify when a statement is finalized. */
+  function approverIdsToNotifyOnFinal(cycleApprovers: string[]): string[] {
+    return [...new Set(cycleApprovers.filter((id) => typeof id === "string" && id.length > 0))];
   }
 
   /**
@@ -10835,7 +10872,24 @@ async function startServer() {
   ): Promise<{ url: string; path: string; fileName: string }> {
     const company = await loadCompanyProfile().catch(() => ({} as CompanyProfile));
     const tpl = await loadTemplateConfig("cost_statement").catch(() => null);
-    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage });
+    // Accounting Phase 1: the final PDF's profit + customer figures come from the
+    // issued customer invoice for this shipment (never agreedAmount). No issued
+    // invoice → the PDF shows "Profit Pending — No Issued Customer Invoice".
+    let issuedInvoiceTotal: number | null = null;
+    let issuedInvoiceCurrency: string | null = null;
+    try {
+      const invSnap = await getDocs(collection(db, "customerInvoices"));
+      for (const d of invSnap.docs) {
+        const inv = d.data() as CustomerInvoice;
+        if (inv.shipmentNumber !== stmt.shipmentNumber) continue;
+        if (inv.status !== "issued" && inv.status !== "partially_paid" && inv.status !== "paid") continue;
+        const amt = Number(inv.sellingAmount || 0);
+        if (issuedInvoiceTotal === null) { issuedInvoiceTotal = amt; issuedInvoiceCurrency = inv.currency; }
+        else if (issuedInvoiceCurrency === inv.currency) { issuedInvoiceTotal += amt; }
+        else { issuedInvoiceTotal = NaN; } // mixed currencies → profit unavailable
+      }
+    } catch { /* invoice lookup failure → profit pending in the PDF, never fabricated */ }
+    const model = buildFinalPdfModel({ statement: stmt, approvalHistory, cycleNumber, finalizedAt, finalStatementRevision: finalRevision, company, language: tpl?.defaultLanguage, issuedInvoiceTotal, issuedInvoiceCurrency });
     const buffer = await renderFinalCostStatementPdf(model);
     const fileName = buildFinalPdfFileName(stmt.shipmentNumber, finalRevision);
     const path = `cost-statements/${stmt.shipmentId}/final/${Date.now()}-${fileName}`;
@@ -10858,35 +10912,39 @@ async function startServer() {
     return { url: `/api/uploads/${fileId}`, path, fileName };
   }
 
-  // GET workflow settings (any accounting viewer); PUT (Super Admin only).
+  // GET workflow settings (any accounting viewer). PUT is Phase 2: a user-based
+  // ORDERED approver list (2 required, 3rd optional), gated by the granular
+  // costs.manageApprovalWorkflow permission — NOT hardcoded to Super Admin.
   app.get("/api/admin/accounting/approval-workflow", requirePermission("costs.view"), async (req, res) => {
     try {
       const config = await loadWorkflowConfig();
-      const usable = isWorkflowConfigUsable(config, await loadActiveAdminIds());
-      res.json({ config, usable });
+      const usable = isApproverConfigUsable(config, await loadActiveAdminIds());
+      // Always surface the resolved ordered list so the client is user-based
+      // even when reading a legacy fixed-title config.
+      res.json({ config, usable, approverUserIds: resolveConfiguredApprovers(config) });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to load approval workflow settings." });
     }
   });
-  app.put("/api/admin/accounting/approval-workflow", requireSuperAdmin, async (req, res) => {
+  app.put("/api/admin/accounting/approval-workflow", requirePermission("costs.manageApprovalWorkflow"), async (req, res) => {
     try {
       const body = req.body || {};
-      const result = validateWorkflowConfig({
-        operations_manager: body.operations_manager,
-        accounts_manager: body.accounts_manager,
-        managing_director: body.managing_director,
-        activeAdminIds: await loadActiveAdminIds(),
-      });
+      // Accept the new ordered list; fall back to the legacy three named fields
+      // so an older client payload still validates into an ordered list.
+      const submitted = Array.isArray(body.approverUserIds)
+        ? body.approverUserIds
+        : [body.operations_manager, body.accounts_manager, body.managing_director].filter((x) => typeof x === "string" && x.trim().length > 0);
+      const result = validateApproverList({ approverUserIds: submitted, activeAdminIds: await loadActiveAdminIds() });
       if (!result.ok) return res.status(400).json({ error: result.error });
       const config: CostApprovalWorkflowConfig = {
-        ...result.config,
+        approverUserIds: result.approverUserIds,
         updatedAt: new Date().toISOString(),
         updatedBy: req.session!.id,
       };
       await setDoc(doc(db, "accountingSettings", COST_WORKFLOW_SETTINGS_ID), config);
-      await logActivity("", "Accounting", req.session!.id, "Cost approval workflow assignments updated", "Maliyet onay iş akışı atamaları güncellendi", "تم تحديث تعيينات سير عمل اعتماد التكلفة");
-      res.json({ config });
+      await logActivity("", "Accounting", req.session!.id, "Cost approval workflow approvers updated", "Maliyet onay iş akışı onaycıları güncellendi", "تم تحديث معتمدي سير عمل اعتماد التكلفة");
+      res.json({ config, approverUserIds: result.approverUserIds });
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to save approval workflow settings." });
@@ -10915,30 +10973,37 @@ async function startServer() {
         if (!decision.ok) return { httpStatus: 409, body: { code: decision.code, error: decision.error } };
         const validated = validateCostStatementInput(stmt as any);
         if (!validated.ok) return { httpStatus: 400, body: { error: `Cannot submit an incomplete statement: ${validated.error}` } };
-        if (!isWorkflowConfigUsable(config, activeAdminIds)) {
-          return { httpStatus: 409, body: { code: "workflow_not_configured", error: "The cost approval workflow is not fully configured with active employees. A Super Admin must set it in Settings first." } };
+        // Phase 2: validate the current ORDERED approver configuration (2–3
+        // distinct active users) and CAPTURE it onto this cycle. Approve/reject
+        // read this snapshot only, so later settings changes never touch it.
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) {
+          return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The cost approval workflow is not configured with at least two active approvers. ${approverCheck.error}` } };
         }
+        const cycleApprovers = approverCheck.approverUserIds;
         const cycleNumber = status === "draft" ? 1 : resolveApprovalCycle(stmt as any);
         const revision = stmt.revision || 1;
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: "operations_manager", action: "submitted",
+          cycleNumber, stage: stageLabelForPosition(0), action: "submitted",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: revision, comment: "",
         }, now, "submit");
         const next: CostStatement = {
           ...stmt,
-          accountingStatus: "pending_operations_approval",
+          accountingStatus: statusForApproverPosition(0),
           approvalCycle: cycleNumber,
+          cycleApproverUserIds: cycleApprovers,
           approvalHistory: history,
           submittedAt: now, submittedBy: req.session!.id, submittedRevision: revision,
         };
-        notifyTarget = assigneeForStage(config, "operations_manager");
+        notifyTarget = cycleApprovers[0];
         shipmentNumber = stmt.shipmentNumber;
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
       if (result.httpStatus === 200) {
-        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting Operations Manager approval.`);
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} submitted for approval`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -10951,14 +11016,15 @@ async function startServer() {
   // Approve the current stage.
   //
   // BLOCKER 2 (atomic transitions) + FINAL PDF IDEMPOTENCY. Non-final
-  // stages are a single atomic transition: the statement is re-read inside
-  // the transaction and canApproveStage re-checks stage/approver/revision
-  // against that fresh value, so two simultaneous approvals serialize (one
-  // winner). The Managing-Director stage cannot store its PDF inside a
-  // Firestore transaction, so it runs as three steps around a deterministic
-  // finalization identity (shipmentId:cycle:revision):
-  //   1. atomic RESERVE — decideFinalization moves the doc to "finalizing"
-  //      and records the MD approval + finalizationKey (begin), or resumes
+  // positions are a single atomic transition: the statement is re-read inside
+  // the transaction and canApproveCyclePosition re-checks position/approver/
+  // revision against that fresh value (using the cycle's captured approver
+  // snapshot), so two simultaneous approvals serialize (one winner). The final
+  // approver cannot store its PDF inside a Firestore transaction, so it runs as
+  // three steps around a deterministic finalization identity
+  // (shipmentId:cycle:revision):
+  //   1. atomic RESERVE — decideCycleFinalization moves the doc to "finalizing"
+  //      and records the final approval + finalizationKey (begin), or resumes
   //      an interrupted one (resume), or is an idempotent no-op if already
   //      closed. A second MD approval loses the race and is rejected.
   //   2. generate + store the PDF OUTSIDE the transaction.
@@ -10976,7 +11042,7 @@ async function startServer() {
       let completedStage: ApprovalStage | null = null;
       let notifyTarget: string | undefined;
       let idempotentClosed = false;
-      let finalizeCtx: { cycle: number; revision: number; key: string } | null = null;
+      let finalizeCtx: { cycle: number; revision: number; key: string; approvers: string[] } | null = null;
 
       // ── Phase 1: atomic stage decision / finalization reservation.
       const phase1 = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
@@ -10985,50 +11051,59 @@ async function startServer() {
         const storedRevision = stmt.revision || 1;
         const actingRevision = actingRevisionInput ?? storedRevision;
         const cycleNumber = resolveApprovalCycle(stmt as any);
-        const stage = pendingStageForStatus(status);
         shipmentNumber = stmt.shipmentNumber;
 
-        // Final stage, or an in-progress/finished finalization.
-        if (status === "finalizing" || status === "final_closed" || stage === "managing_director") {
-          const fin = decideFinalization({
-            status, config, actorId: req.session!.id,
+        // Phase 2: the approver list for this cycle comes from the captured
+        // snapshot; a legacy in-flight cycle with none falls back to the
+        // current config ONCE and is captured onto every saved transition
+        // below (never re-reading changed settings afterwards).
+        const cycleApprovers = resolveCycleApprovers(stmt as any, config);
+        const captureSnapshot = !hasCycleApproverSnapshot(stmt as any);
+        const snapshotPatch = captureSnapshot ? { cycleApproverUserIds: cycleApprovers } : {};
+        const position = approverPositionForStatus(status);
+        const lastPosition = cycleApprovers.length - 1;
+
+        // Final position, or an in-progress/finished finalization.
+        if (status === "finalizing" || status === "final_closed" || position === lastPosition) {
+          const fin = decideCycleFinalization({
+            status, cycleApprovers, actorId: req.session!.id,
             actingRevision, storedRevision, cycle: cycleNumber,
             existingKey: stmt.finalizationKey, shipmentId: stmt.shipmentId,
           });
           if (fin.action === "already_closed") { idempotentClosed = true; return { httpStatus: 200, body: { statement: stmt } }; }
           if (fin.action === "reject") return { httpStatus: fin.code === "wrong_approver" ? 403 : 409, body: { code: fin.code, error: fin.error } };
           if (fin.action === "resume") {
-            // The MD approval + reservation were already committed; resume
+            // The final approval + reservation were already committed; resume
             // straight to PDF + commit without re-appending history.
-            finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+            finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key, approvers: cycleApprovers };
             return { httpStatus: 202, body: { resume: true } };
           }
-          // begin: record the MD approval and reserve finalization atomically.
+          // begin: record the final approval and reserve finalization atomically.
           const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-            cycleNumber, stage: "managing_director", action: "approved",
+            cycleNumber, stage: stageLabelForPosition(lastPosition), action: "approved",
             actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
             statementRevision: storedRevision, comment,
-          }, now, "approve-managing_director");
+          }, now, `approve-position-${lastPosition}`);
           const reserved: CostStatement = {
-            ...stmt, accountingStatus: "finalizing", approvalHistory: history,
+            ...stmt, ...snapshotPatch, accountingStatus: "finalizing", approvalHistory: history,
             finalizationKey: fin.key, finalizingAt: now, finalizingBy: req.session!.id,
           };
-          finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key };
+          finalizeCtx = { cycle: fin.cycle, revision: fin.revision, key: fin.key, approvers: cycleApprovers };
           return { httpStatus: 202, body: { reserved: true }, save: reserved };
         }
 
-        // Non-final stage: one atomic transition.
-        const decision = canApproveStage({ status, config, actorId: req.session!.id, actingRevision, storedRevision });
+        // Non-final position: one atomic transition.
+        const decision = canApproveCyclePosition({ status, cycleApprovers, actorId: req.session!.id, actingRevision, storedRevision });
         if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : 409, body: { code: decision.code, error: decision.error } };
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: stage!, action: "approved",
+          cycleNumber, stage: stageLabelForPosition(position!), action: "approved",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: storedRevision, comment,
-        }, now, `approve-${stage}`);
-        const next: CostStatement = { ...stmt, accountingStatus: nextStatusAfterApproval(stage!), approvalHistory: history };
-        completedStage = stage!;
-        const nextStage = nextStageAfterApproval(stage!);
-        notifyTarget = nextStage ? assigneeForStage(config, nextStage) : undefined;
+        }, now, `approve-position-${position}`);
+        const next: CostStatement = { ...stmt, ...snapshotPatch, accountingStatus: nextStatusAfterPosition(position!, cycleApprovers.length), approvalHistory: history };
+        completedStage = stageLabelForPosition(position!);
+        const notifyPosition = nextPositionToNotify(position!, cycleApprovers.length);
+        notifyTarget = notifyPosition !== null ? cycleApprovers[notifyPosition] : undefined;
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
 
@@ -11037,6 +11112,7 @@ async function startServer() {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval.`);
           await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} approved at ${completedStage}`, "", "");
         }
+        fireNotifRefresh();
         return res.json(phase1.body);
       }
       if (phase1.httpStatus !== 202 || !finalizeCtx) return res.status(phase1.httpStatus).json(phase1.body);
@@ -11047,10 +11123,10 @@ async function startServer() {
       // without a stored PDF.
       const reservedStmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!reservedStmt) return;
-      const ctx = finalizeCtx as { cycle: number; revision: number; key: string };
+      const ctx = finalizeCtx as { cycle: number; revision: number; key: string; approvers: string[] };
       const closedAt = reservedStmt.finalizingAt || now;
       const closingHistory = appendHistory(reservedStmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-        cycleNumber: ctx.cycle, stage: "managing_director", action: "closed",
+        cycleNumber: ctx.cycle, stage: stageLabelForPosition(ctx.approvers.length - 1), action: "closed",
         actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
         statementRevision: ctx.revision, comment: "",
       }, closedAt, "closed");
@@ -11093,10 +11169,11 @@ async function startServer() {
         return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
       });
       if (phase3.httpStatus === 200 && !idempotentClosed) {
-        for (const id of assigneeIdsToNotifyOnFinal(config)) {
+        for (const id of approverIdsToNotifyOnFinal(ctx.approvers)) {
           await notifyAccountingRecipient(id, shipmentNumber, "Cost statement finalized", `Statement for ${shipmentNumber} is now final and closed.`);
         }
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} finalized and closed`, "", "");
+        fireNotifRefresh();
       }
       res.status(phase3.httpStatus).json(phase3.body);
     } catch (err) {
@@ -11106,8 +11183,8 @@ async function startServer() {
     }
   });
 
-  // Reject for correction. Atomic: canRejectStage re-checks the stage and
-  // assigned approver inside the transaction, so an approve-vs-reject race
+  // Reject for correction. Atomic: canRejectCyclePosition re-checks the position
+  // and captured approver inside the transaction, so an approve-vs-reject race
   // resolves to exactly one winner (the loser re-reads a no-longer-pending
   // status and is rejected).
   app.post("/api/cost-statements/:shipmentId/reject", requirePermission("costs.approve"), async (req, res) => {
@@ -11122,27 +11199,37 @@ async function startServer() {
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canRejectStage({ status, config, actorId: req.session!.id, reason });
+        // Phase 2: reject against this cycle's captured approver snapshot (legacy
+        // cycles fall back to the current config once).
+        const cycleApprovers = resolveCycleApprovers(stmt as any, config);
+        const decision = canRejectCyclePosition({ status, cycleApprovers, actorId: req.session!.id, reason });
         if (!decision.ok) return { httpStatus: decision.code === "wrong_approver" ? 403 : decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        const stage = pendingStageForStatus(status)!;
+        const position = approverPositionForStatus(status)!;
+        const stage = stageLabelForPosition(position);
         const cycleNumber = resolveApprovalCycle(stmt as any);
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
           cycleNumber, stage, action: "rejected",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
-        }, now, `reject-${stage}`);
+        }, now, `reject-position-${position}`);
         // Correction opens a NEW cycle on the next submission; bump the cycle
         // now so a fresh submit starts its history under a new number and old
-        // approvals are retained but never reused.
-        const next: CostStatement = { ...stmt, accountingStatus: "rejected_for_correction", approvalCycle: cycleNumber + 1, approvalHistory: history };
+        // approvals are retained but never reused. Clear the cycle snapshot so
+        // the next submission recaptures the (possibly changed) approver list.
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "rejected_for_correction", approvalCycle: cycleNumber + 1, approvalHistory: history,
+          cycleApproverUserIds: undefined,
+        };
         shipmentNumber = stmt.shipmentNumber;
         notifyTarget = stmt.submittedBy;
         rejectedStage = stage;
-        return { httpStatus: 200, body: { statement: next }, save: next };
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
       });
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement returned for correction", `Statement for ${shipmentNumber} was returned for correction.`);
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} rejected for correction at ${rejectedStage}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11152,32 +11239,78 @@ async function startServer() {
     }
   });
 
-  // Request reopening of a finalized statement. Atomic: canRequestReopen
-  // re-checks final_closed inside the transaction, so only one request can
-  // move the doc to reopen_requested.
+  /** Replace (or append) a reopen cycle in the append-only reopenCycles array. */
+  function upsertReopenCycle(existing: ReopenCycle[] | undefined, updated: ReopenCycle): ReopenCycle[] {
+    const arr = Array.isArray(existing) ? [...existing] : [];
+    const idx = arr.findIndex((c) => c.reopenCycleNumber === updated.reopenCycleNumber);
+    if (idx >= 0) arr[idx] = updated; else arr.push(updated);
+    return arr;
+  }
+
+  // Phase 3 — Request reopening of a finalized statement. Blocked while any
+  // related customer invoice is ACTIVE (issued/partially_paid/paid) — the
+  // invoice must be cancelled first. Captures the current ordered approver
+  // list onto a new REOPEN cycle (its own per-cycle snapshot), then routes
+  // through the sequential reopen approval chain. Atomic: eligibility is
+  // re-checked against the transaction-fresh statement.
   app.post("/api/cost-statements/:shipmentId/reopen-request", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
+      // Loaded outside the contended cost-statement doc: the current approver
+      // config (to capture) and the two financial locks — an active customer
+      // invoice (Phase 3) and any active vendor payment (Phase 4). Both must
+      // be clear before a reopen may be requested; neither weakens the other.
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
+      const invoiceActive = hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId));
+      const vendorPaymentActive = hasActiveVendorPayment(await loadVendorPaymentsForShipment(req.params.shipmentId));
       let shipmentNumber = "";
+      let notifyTarget: string | undefined;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        // Phase 6 — a financially closed statement must be financially reopened
+        // first (accounting reopen is blocked under the financial freeze).
+        if (isFinanciallyClosed(stmt as any)) {
+          return { httpStatus: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+        }
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canRequestReopen(status, reason);
+        const decision = canRequestReopenChain({ status, hasActiveInvoice: invoiceActive, hasActiveVendorPayment: vendorPaymentActive, hasPendingReopen: hasPendingReopen(stmt as any), reason });
         if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        // Capture the current ordered approver list for THIS reopen cycle.
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) {
+          return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The reopen approval chain is not configured with at least two active approvers. ${approverCheck.error}` } };
+        }
+        const existingCycles = (stmt.reopenCycles as ReopenCycle[] | undefined) || [];
+        const reopenCycle = buildReopenCycle({
+          approverUserIds: approverCheck.approverUserIds,
+          requestedBy: req.session!.id, requestedAt: now, reason: reason.slice(0, 1000),
+          reopenCycleNumber: existingCycles.length + 1,
+        });
         const cycleNumber = resolveApprovalCycle(stmt as any);
         const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
           cycleNumber, stage: "reopen", action: "reopen_requested",
           actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
           statementRevision: stmt.revision || 1, comment: reason.slice(0, 1000),
         }, now, "reopen-req");
-        const next: CostStatement = { ...stmt, accountingStatus: "reopen_requested", approvalHistory: history, reopenRequestedBy: req.session!.id, reopenRequestedAt: now, reopenReason: reason.slice(0, 1000) };
+        const next: CostStatement = {
+          ...stmt,
+          accountingStatus: "reopen_requested",
+          approvalHistory: history,
+          reopenCycles: upsertReopenCycle(existingCycles, reopenCycle),
+          // Legacy mirror fields kept for backward-compatible reads/notifications.
+          reopenRequestedBy: req.session!.id, reopenRequestedAt: now, reopenReason: reason.slice(0, 1000),
+        };
         shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = reopenCycle.approverUserIds[0];
         return { httpStatus: 200, body: { statement: next }, save: next };
       });
       if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Reopening requested for cost statement ${shipmentNumber}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11187,50 +11320,319 @@ async function startServer() {
     }
   });
 
-  // Decide a reopening request (Super Admin only; requester cannot
-  // self-approve). Atomic: canDecideReopen re-checks the reopen_requested
-  // status and requester separation inside the transaction, so two
-  // simultaneous decisions resolve to exactly one winner (the loser
-  // re-reads a no-longer-reopen_requested status and is rejected).
+  // Phase 3 — Decide the current position of the sequential REOPEN approval
+  // chain. Only the captured approver at the pending position may approve or
+  // reject (regardless of how broad their permission is). Uses the reopen
+  // cycle's captured snapshot — never live settings. A legacy in-flight reopen
+  // (status reopen_requested with no snapshot) captures the current config
+  // ONCE on the first decision; if that config is unusable the request is left
+  // untouched and a controlled error is returned. Atomic: two simultaneous
+  // decisions serialize to exactly one winner.
   app.post("/api/cost-statements/:shipmentId/reopen-decision", requirePermission("costs.reopen"), async (req, res) => {
     try {
       const actorName = await resolveWorkflowActorName(req.session!);
       const approve = req.body?.approve === true;
       const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 1000) : "";
       const now = new Date().toISOString();
+      // Only used to CAPTURE a legacy reopen with no snapshot (once).
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
       let shipmentNumber = "";
       let notifyTarget: string | undefined;
+      let finalized = false;
+      let rejected = false;
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
         const status = resolveAccountingStatus(stmt as any);
-        const decision = canDecideReopen({ status, requesterId: stmt.reopenRequestedBy, deciderId: req.session!.id });
-        if (!decision.ok) return { httpStatus: decision.code === "self_decision" ? 403 : 409, body: { code: decision.code, error: decision.error } };
+        if (status !== "reopen_requested") return { httpStatus: 409, body: { code: "not_reopen_requested", error: "There is no pending reopening request." } };
+
+        // Resolve the active reopen cycle; legacy in-flight reopens capture the
+        // current config ONCE here (and are persisted below).
+        let cycle = activeReopenCycle(stmt as any);
+        let existingCycles = (stmt.reopenCycles as ReopenCycle[] | undefined) || [];
+        if (!cycle) {
+          const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+          if (!approverCheck.ok) {
+            return { httpStatus: 409, body: { code: "reopen_config_unavailable", error: `This legacy reopening cannot continue because the approval chain is not configured with active approvers. ${approverCheck.error}` } };
+          }
+          cycle = buildReopenCycle({
+            approverUserIds: approverCheck.approverUserIds,
+            requestedBy: stmt.reopenRequestedBy || req.session!.id,
+            requestedAt: stmt.reopenRequestedAt || now,
+            reason: stmt.reopenReason || "",
+            reopenCycleNumber: existingCycles.length + 1,
+          });
+          existingCycles = upsertReopenCycle(existingCycles, cycle);
+        }
+
+        const guard = canDecideReopenPosition({ cycle, actorId: req.session!.id });
+        if (!guard.ok) return { httpStatus: guard.code === "wrong_approver" ? 403 : 409, body: { code: guard.code, error: guard.error } };
+
+        const actor = { id: req.session!.id, name: actorName, role: req.session!.adminType || "admin" };
         const cycleNumber = resolveApprovalCycle(stmt as any);
-        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
-          cycleNumber, stage: "reopen", action: approve ? "reopen_approved" : "reopen_rejected",
-          actorId: req.session!.id, actorName, actorRole: req.session!.adminType || "admin",
-          statementRevision: stmt.revision || 1, comment: note,
-        }, now, approve ? "reopen-ok" : "reopen-no");
-        // On approval: reopen editing under a NEW cycle; the previous final
-        // PDF and all approvals are preserved (finalVersions untouched). On
-        // rejection: stays final_closed.
-        const next: CostStatement = approve
-          ? { ...stmt, accountingStatus: "reopened", approvalCycle: cycleNumber + 1, approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined }
-          : { ...stmt, accountingStatus: "final_closed", approvalHistory: history, reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined };
         shipmentNumber = stmt.shipmentNumber;
-        notifyTarget = stmt.reopenRequestedBy;
+
+        if (approve) {
+          const applied = applyReopenApproval(cycle, actor, note, now);
+          finalized = applied.finalized;
+          const nextPos = nextReopenPositionToNotify(cycle);
+          const cycles = upsertReopenCycle(existingCycles, applied.cycle);
+          if (finalized) {
+            // Final reopen approval → editing enabled under a NEW approval cycle.
+            // Previous final PDF + all prior approvals + cancelled invoices are
+            // preserved (untouched). No invoice is restored or created.
+            const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+              cycleNumber, stage: "reopen", action: "reopen_approved",
+              actorId: req.session!.id, actorName, actorRole: actor.role,
+              statementRevision: stmt.revision || 1, comment: note,
+            }, now, "reopen-ok");
+            const next: CostStatement = {
+              ...stmt, accountingStatus: "reopened", approvalCycle: cycleNumber + 1, approvalHistory: history,
+              reopenCycles: cycles,
+              reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined,
+            };
+            notifyTarget = applied.cycle.requestedBy;
+            const cleaned = cleanUndefined(next) as CostStatement;
+            return { httpStatus: 200, body: { statement: cleaned }, save: cleaned };
+          }
+          // Intermediate approval — advance to the next captured approver.
+          const next: CostStatement = { ...stmt, reopenCycles: cycles };
+          notifyTarget = nextPos !== null ? applied.cycle.approverUserIds[nextPos] : undefined;
+          return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+        }
+
+        // Rejection — the cycle ends rejected; earlier decisions are preserved
+        // and the statement stays closed/locked. A new reopen request is needed.
+        rejected = true;
+        const rejectedCycle = applyReopenRejection(cycle, actor, note, now);
+        const cycles = upsertReopenCycle(existingCycles, rejectedCycle);
+        const history = appendHistory(stmt.approvalHistory as ApprovalHistoryEntry[] | undefined, {
+          cycleNumber, stage: "reopen", action: "reopen_rejected",
+          actorId: req.session!.id, actorName, actorRole: actor.role,
+          statementRevision: stmt.revision || 1, comment: note,
+        }, now, "reopen-no");
+        const next: CostStatement = {
+          ...stmt, accountingStatus: "final_closed", approvalHistory: history, reopenCycles: cycles,
+          reopenRequestedBy: undefined, reopenRequestedAt: undefined, reopenReason: undefined,
+        };
+        notifyTarget = rejectedCycle.requestedBy;
         const cleaned = cleanUndefined(next) as CostStatement;
         return { httpStatus: 200, body: { statement: cleaned }, save: cleaned };
       });
       if (result.httpStatus === 200) {
-        await notifyAccountingRecipient(notifyTarget, shipmentNumber, approve ? "Reopening approved" : "Reopening rejected", `Reopening for ${shipmentNumber} was ${approve ? "approved" : "rejected"}.`);
-        await logActivity("", "Accounting", req.session!.id, `Reopening ${approve ? "approved" : "rejected"} for cost statement ${shipmentNumber}`, "", "");
+        if (finalized) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening approved — editing enabled", `Reopening for ${shipmentNumber} was fully approved. The cost statement can now be edited.`);
+        } else if (rejected) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening rejected", `Reopening for ${shipmentNumber} was rejected. The cost statement remains closed.`);
+        } else {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval.`);
+        }
+        await logActivity("", "Accounting", req.session!.id, `Reopening ${finalized ? "approved" : rejected ? "rejected" : "advanced"} for cost statement ${shipmentNumber}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
       console.error("[accounting] reopen-decision failed:", err);
       res.status(500).json({ error: "Failed to decide reopening." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Phase 6 — Financial Closing workflow. The official final
+  // accounting completion of a shipment: a top-level freeze layered ABOVE
+  // the Phase 1–5 locks. Close requires the cost statement final_closed,
+  // every vendor line paid, every issued invoice paid, no draft invoice,
+  // and no active (accounting or financial) reopen. Once closed, every
+  // accounting mutation is read-only until an approved Financial Reopen
+  // (a sequential, user-based approval chain reusing the Phase 3 model).
+  // Financial Closing NEVER recalculates profit.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadFinancialCloseInputs(shipmentId: string, stmt: CostStatement): Promise<{ vendorRemaining: number[]; invoiceRemaining: number[]; hasDraftInvoice: boolean }> {
+    const items = (stmt.items as CostItem[]) || [];
+    const vendorPayments = await loadVendorPaymentsForShipment(shipmentId);
+    const vendorRemaining = items.map((it) => summarizeVendorPayable(it, vendorPayments).remaining);
+    const invoices = await loadInvoicesForShipment(shipmentId);
+    const custPayments = await loadCustomerPaymentsAll();
+    const invoiceRemaining = invoices
+      .filter((i) => i.status === "issued" || i.status === "partially_paid" || i.status === "paid")
+      .map((inv) => summarizeInvoiceReceivable(inv, custPayments).remainingAmount);
+    const hasDraftInvoice = invoices.some((i) => i.status === "draft");
+    return { vendorRemaining, invoiceRemaining, hasDraftInvoice };
+  }
+
+  // Financial status + close readiness + reopen cycle snapshot (reporting).
+  app.get("/api/cost-statements/:shipmentId/financial-status", requirePermission("costs.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const financialStatus = resolveFinancialStatus(stmt as any);
+      const inputs = await loadFinancialCloseInputs(req.params.shipmentId, stmt);
+      const readiness = evaluateFinancialCloseReadiness({
+        accountingStatus: resolveAccountingStatus(stmt as any), financialStatus,
+        vendorRemaining: inputs.vendorRemaining, invoiceRemaining: inputs.invoiceRemaining, hasDraftInvoice: inputs.hasDraftInvoice,
+        hasPendingReopen: hasPendingReopen(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any),
+      });
+      res.json({
+        financialStatus,
+        canClose: readiness.ok,
+        closeBlockedReason: readiness.ok ? null : { code: (readiness as any).code, error: (readiness as any).error },
+        financialClosedAt: stmt.financialClosedAt, financialClosedBy: stmt.financialClosedBy, financialCloseReason: stmt.financialCloseReason,
+        financialReopenedAt: stmt.financialReopenedAt, financialReopenedBy: stmt.financialReopenedBy,
+        financialReopenCycles: (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [],
+      });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load financial status." });
+    }
+  });
+
+  // Financially close a shipment. Readiness is loaded outside the contended
+  // doc; the core invariants (status, pending reopens) are re-checked inside
+  // the atomic mutation. Never recalculates profit.
+  app.post("/api/cost-statements/:shipmentId/financial-close", requirePermission("accounting.financialClose"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 1000) : "";
+      const preStmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!preStmt) return;
+      const inputs = await loadFinancialCloseInputs(req.params.shipmentId, preStmt);
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const readiness = evaluateFinancialCloseReadiness({
+          accountingStatus: resolveAccountingStatus(stmt as any), financialStatus: resolveFinancialStatus(stmt as any),
+          vendorRemaining: inputs.vendorRemaining, invoiceRemaining: inputs.invoiceRemaining, hasDraftInvoice: inputs.hasDraftInvoice,
+          hasPendingReopen: hasPendingReopen(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any),
+        });
+        if (!readiness.ok) return { httpStatus: 409, body: { code: readiness.code, error: readiness.error } };
+        const next: CostStatement = {
+          ...stmt, financialStatus: "financial_closed",
+          financialClosedAt: now, financialClosedBy: req.session!.id, financialCloseReason: reason || undefined,
+          financialReopenedAt: undefined, financialReopenedBy: undefined,
+        };
+        shipmentNumber = stmt.shipmentNumber;
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        await recordAudit(req, {
+          action: AUDIT_ACTIONS.financialClosed, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success",
+          orderId: shipmentNumber, reason: reason || undefined, afterSnapshot: { financialStatus: "financial_closed" },
+        });
+        await logActivity("", "Accounting", req.session!.id, `Shipment ${shipmentNumber} financially closed`, "", "");
+        fireNotifRefresh(); // Phase 9.1: refresh derived notifications after a committed close.
+      } else if (result.httpStatus === 409) {
+        await recordAudit(req, { action: AUDIT_ACTIONS.financialCloseRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "rejected", errorCode: result.body?.code });
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-close failed:", err);
+      res.status(500).json({ error: "Failed to financially close the shipment." });
+    }
+  });
+
+  // Request a Financial Reopen — captures the current ordered approver list
+  // onto a NEW financial-reopen cycle (its own snapshot), then routes through
+  // the sequential approval chain (same model as the Phase 3 accounting reopen).
+  app.post("/api/cost-statements/:shipmentId/financial-reopen-request", requirePermission("accounting.financialReopen"), async (req, res) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const config = await loadWorkflowConfig();
+      const activeAdminIds = await loadActiveAdminIds();
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const decision = canRequestFinancialReopen({ financialStatus: resolveFinancialStatus(stmt as any), hasPendingFinancialReopen: hasPendingFinancialReopen(stmt as any), reason });
+        if (!decision.ok) return { httpStatus: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+        const approverCheck = validateApproverList({ approverUserIds: resolveConfiguredApprovers(config), activeAdminIds });
+        if (!approverCheck.ok) return { httpStatus: 409, body: { code: "workflow_not_configured", error: `The Financial Reopen approval chain is not configured with at least two active approvers. ${approverCheck.error}` } };
+        const existing = (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [];
+        const cycle = buildReopenCycle({ approverUserIds: approverCheck.approverUserIds, requestedBy: req.session!.id, requestedAt: now, reason: reason.slice(0, 1000), reopenCycleNumber: existing.length + 1 });
+        const next: CostStatement = { ...stmt, financialReopenCycles: [...existing, cycle] };
+        shipmentNumber = stmt.shipmentNumber;
+        notifyTarget = cycle.approverUserIds[0];
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
+        await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRequested, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: reason.slice(0, 1000) });
+        fireNotifRefresh();
+        await logActivity("", "Accounting", req.session!.id, `Financial Reopen requested for ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-reopen-request failed:", err);
+      res.status(500).json({ error: "Failed to request Financial Reopen." });
+    }
+  });
+
+  // Decide the pending position of the Financial Reopen chain. Only the
+  // captured approver at the pending position may approve or reject. On final
+  // approval the shipment moves to financial_reopened (accounting unfrozen —
+  // Phase 1–5 behavior resumes); a rejection keeps it financial_closed.
+  app.post("/api/cost-statements/:shipmentId/financial-reopen-decision", requirePermission("accounting.financialReopen"), async (req, res) => {
+    try {
+      const approve = req.body?.approve === true;
+      const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 1000) : "";
+      const actorName = await resolveWorkflowActorName(req.session!);
+      const now = new Date().toISOString();
+      let shipmentNumber = "";
+      let notifyTarget: string | undefined;
+      let finalized = false;
+      let rejected = false;
+      const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
+        if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        const cycle = activeFinancialReopenCycle(stmt as any);
+        if (!cycle) return { httpStatus: 409, body: { code: "no_pending_financial_reopen", error: "There is no pending Financial Reopen request." } };
+        const guard = canDecideReopenPosition({ cycle, actorId: req.session!.id });
+        if (!guard.ok) return { httpStatus: guard.code === "wrong_approver" ? 403 : 409, body: { code: guard.code, error: guard.error } };
+        const actor = { id: req.session!.id, name: actorName, role: req.session!.adminType || "admin" };
+        const cycles = (stmt.financialReopenCycles as ReopenCycle[] | undefined) || [];
+        shipmentNumber = stmt.shipmentNumber;
+        if (approve) {
+          const applied = applyReopenApproval(cycle, actor, note, now);
+          finalized = applied.finalized;
+          const nextCycles = upsertReopenCycle(cycles, applied.cycle);
+          if (finalized) {
+            const next: CostStatement = { ...stmt, financialStatus: "financial_reopened", financialReopenedAt: now, financialReopenedBy: req.session!.id, financialReopenCycles: nextCycles };
+            notifyTarget = applied.cycle.requestedBy;
+            return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+          }
+          const next: CostStatement = { ...stmt, financialReopenCycles: nextCycles };
+          const nextPos = nextReopenPositionToNotify(cycle);
+          notifyTarget = nextPos !== null ? applied.cycle.approverUserIds[nextPos] : undefined;
+          return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+        }
+        rejected = true;
+        const rejectedCycle = applyReopenRejection(cycle, actor, note, now);
+        const next: CostStatement = { ...stmt, financialReopenCycles: upsertReopenCycle(cycles, rejectedCycle) };
+        notifyTarget = rejectedCycle.requestedBy;
+        return { httpStatus: 200, body: { statement: cleanUndefined(next) }, save: cleanUndefined(next) as CostStatement };
+      });
+      if (result.httpStatus === 200) {
+        if (finalized) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen approved", `The Financial Reopen for ${shipmentNumber} was fully approved. Accounting changes are unlocked.`);
+          await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenApproved, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, afterSnapshot: { financialStatus: "financial_reopened" } });
+          fireNotifRefresh();
+        } else if (rejected) {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen rejected", `The Financial Reopen for ${shipmentNumber} was rejected. It remains financially closed.`);
+          await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: note || undefined });
+          fireNotifRefresh();
+        } else {
+          await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval.`);
+        }
+        await logActivity("", "Accounting", req.session!.id, `Financial Reopen ${finalized ? "approved" : rejected ? "rejected" : "advanced"} for ${shipmentNumber}`, "", "");
+      }
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] financial-reopen-decision failed:", err);
+      res.status(500).json({ error: "Failed to decide the Financial Reopen." });
     }
   });
 
@@ -11621,8 +12023,16 @@ async function startServer() {
       const scopedKey = idemKey ? scopeIdempotencyKey("cost-item", idemKey) : undefined;
       const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
       const now = new Date().toISOString();
+      // Phase 3 — Active Invoice Lock: no vendor cost may be added while a
+      // related customer invoice is active (issued/partially_paid/paid).
+      if (hasActiveCustomerInvoice(await loadInvoicesForShipment(req.params.shipmentId))) {
+        return res.status(409).json({ code: "active_invoice_lock", error: ACTIVE_INVOICE_LOCK_MESSAGE });
+      }
       const result = await mutateCostStatementAtomic(req.params.shipmentId, (stmt) => {
         if (!stmt) return { httpStatus: 404, body: { error: "Cost statement not found." } };
+        if (isFinanciallyClosed(stmt as any)) {
+          return { httpStatus: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+        }
         const status = resolveAccountingStatus(stmt as any);
         if (!isFinancialEditingAllowed(status)) {
           return { httpStatus: 409, body: { code: "accounting_locked", error: "This statement is in the approval workflow or finalized and cannot be edited." } };
@@ -11694,6 +12104,14 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      // Phase 6 — financially closed statements are fully read-only.
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      // Accounting Phase 4 — eligibility: vendor payments may be recorded ONLY
+      // against an approved-and-closed statement (final_closed). Draft, pending,
+      // rejected, finalizing, reopen_requested, and reopened all block — the
+      // vendor cost amounts are not authoritative until approval completes.
+      const eligibility = canRecordVendorPaymentForStatus(resolveAccountingStatus(stmt as any));
+      if (!eligibility.ok) return res.status(409).json({ code: eligibility.code, error: eligibility.error });
       const body = req.body || {};
       const item = ((stmt.items as CostItem[]) || []).find((i) => i.id === body.costItemId);
       if (!item) return res.status(404).json({ code: "item_not_found", error: "Cost item not found." });
@@ -11748,7 +12166,7 @@ async function startServer() {
         });
         return { http: 201, body: { payment: cleanUndefined(payment), summary: summarizeVendorPayable(item, [...existing, payment]) } };
       });
-      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", "");
+      if (result.http === 201) { await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11766,6 +12184,11 @@ async function startServer() {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const now = new Date().toISOString();
       const actor = req.session!.id;
+      // Phase 6 — a financially closed statement is fully read-only.
+      const stmtSnap = await getDoc(doc(db, "costStatements", req.params.shipmentId));
+      if (stmtSnap.exists() && isFinanciallyClosed(stmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      }
       let didReverse = false;
       const result = await runAccountingTransaction(async (tx) => {
         const payment = await tx.get<VendorPaymentTransaction>("vendorPayments", req.params.paymentId);
@@ -11788,7 +12211,7 @@ async function startServer() {
         didReverse = true;
         return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
-      if (result.http === 200 && didReverse) await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
+      if (result.http === 200 && didReverse) { await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -11833,15 +12256,12 @@ async function startServer() {
         taxAmount: typeof body.taxAmount === "number" ? body.taxAmount : 0,
         additionalCharges: typeof body.additionalCharges === "number" ? body.additionalCharges : 0,
       });
-      const agreedAmount = Number.isFinite(shipment?.agreedAmount) ? Number(shipment!.agreedAmount)
-        : Number.isFinite((stmt as any).agreedAmount) ? Number((stmt as any).agreedAmount) : 0;
-      const agreedPriceDifference = priceDifference(totals.grandTotal, agreedAmount);
-      const reason = typeof body.priceDifferenceReason === "string" ? body.priceDifferenceReason.trim() : "";
-      // A non-zero difference vs the agreed selling price must carry a reason
-      // (stored for the audit trail). Creation is never auto-blocked otherwise.
-      if (Math.abs(agreedPriceDifference) > 0.001 && !reason) {
-        return { ok: false, code: "price_difference_reason_required", error: "The invoice total differs from the agreed shipment selling price. A price-difference reason is required." };
-      }
+      // Accounting Phase 1: the customer invoice amount is entered manually and
+      // independently. The driver's agreedAmount is NOT a customer selling price,
+      // so it is no longer compared here — no agreed-price difference, and no
+      // price-difference reason is ever required. (Legacy invoices may still
+      // carry an agreedPriceDifference/priceDifferenceReason from before this
+      // change; new invoices simply do not set them.)
       const grossProfit = computeInvoiceGrossProfit({ sellingAmount: totals.grandTotal, costBasis, invoiceCurrency, costCurrency: stmt.currency });
       return {
         ok: true,
@@ -11862,8 +12282,6 @@ async function startServer() {
           taxAmount: totals.taxAmount,
           additionalCharges: totals.additionalCharges,
           grandTotal: totals.grandTotal,
-          agreedPriceDifference,
-          priceDifferenceReason: reason || undefined,
           invoiceDate: typeof body.invoiceDate === "string" ? body.invoiceDate.slice(0, 10) : new Date().toISOString().slice(0, 10),
           dueDate: typeof body.dueDate === "string" ? body.dueDate.slice(0, 10) : undefined,
           paymentTerms: typeof body.paymentTerms === "string" ? body.paymentTerms.slice(0, 120) : undefined,
@@ -11939,6 +12357,7 @@ async function startServer() {
     try {
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, req.body || {});
@@ -11993,6 +12412,7 @@ async function startServer() {
       if (!isInvoiceEditable(existing.status)) return res.status(409).json({ code: "not_draft", error: "Only a draft invoice can be edited." });
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const sDoc = await getDoc(doc(db, "shipments", req.params.shipmentId));
       const shipment = sDoc.exists() ? (sDoc.data() as Shipment) : null;
       const built = buildInvoiceFromBody(stmt, shipment, { ...existing, ...(req.body || {}) });
@@ -12040,6 +12460,7 @@ async function startServer() {
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
       const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
       if (!stmt) return;
+      if (isFinanciallyClosed(stmt as any)) return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       const idemKey = normalizeIdempotencyKey(req.body?.idempotencyKey);
       const scopedKey = idemKey ? scopeIdempotencyKey("invoice-issue", idemKey) : undefined;
       // Idempotent replay: a repeat with the same key returns the ALREADY issued
@@ -12105,6 +12526,7 @@ async function startServer() {
       });
       if (result.http === 200 && !(result.body as any).idempotent) {
         await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.http).json(result.body);
     } catch (err) {
@@ -12121,6 +12543,11 @@ async function startServer() {
       if (!snap.exists()) return res.status(404).json({ error: "Invoice not found." });
       const invoice = snap.data() as CustomerInvoice;
       if (invoice.shipmentId !== req.params.shipmentId) return res.status(404).json({ error: "Invoice not found for this shipment." });
+      // Phase 6 — a financially closed statement is fully read-only.
+      const cancelStmtSnap = await getDoc(doc(db, "costStatements", req.params.shipmentId));
+      if (cancelStmtSnap.exists() && isFinanciallyClosed(cancelStmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
+      }
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
       const decision = canCancelInvoice(invoice.status, reason);
       if (!decision.ok) {
@@ -12149,7 +12576,7 @@ async function startServer() {
       if (result.http === 409) {
         await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: "invoice_has_allocations" });
       }
-      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", "");
+      if (result.http === 200) { await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12316,7 +12743,7 @@ async function startServer() {
         });
         return { http: 201, body: { payment: cleanUndefined(payment) } };
       });
-      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
+      if (result.http === 201) { await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12410,53 +12837,213 @@ async function startServer() {
   // allocations from the referenced invoice ledgers happen in ONE Firestore
   // transaction, so ledger and payment can never diverge. A repeat on an
   // already-reversed payment replays 200. Original allocations are preserved.
+  /**
+   * Shared reversal core for a customer payment (used by the account-level
+   * route and the Phase 5 per-invoice route — identical behavior). One
+   * transaction restores the payment's allocations to the invoice ledgers,
+   * marks the payment reversed (never deleted), restages invoice statuses,
+   * and audits; afterwards any issued receipt is voided idempotently.
+   */
+  async function performCustomerPaymentReversal(req: express.Request, paymentId: string, reason: string): Promise<{ http: number; body: any }> {
+    const now = new Date().toISOString();
+    const actor = req.session!.id;
+    // Phase 6 — a reversal touches invoice ledgers, so it is blocked while any
+    // affected shipment is financially closed (both the account-level and the
+    // per-invoice reverse routes funnel through here).
+    {
+      const preSnap = await getDoc(doc(db, "customerPayments", paymentId));
+      if (preSnap.exists()) {
+        const prePayment = preSnap.data() as CustomerPayment;
+        const shipmentIds = new Set<string>();
+        for (const a of prePayment.allocations || []) {
+          const invSnap = await getDoc(doc(db, "customerInvoices", a.invoiceId));
+          if (invSnap.exists()) { const sid = (invSnap.data() as CustomerInvoice).shipmentId; if (sid) shipmentIds.add(sid); }
+        }
+        for (const sid of shipmentIds) {
+          const cs = await getDoc(doc(db, "costStatements", sid));
+          if (cs.exists() && isFinanciallyClosed(cs.data() as CostStatement)) {
+            return { http: 409, body: { code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE } };
+          }
+        }
+      }
+    }
+    let didReverse = false;
+    const result = await runAccountingTransaction(async (tx) => {
+      const payment = await tx.get<CustomerPayment>("customerPayments", paymentId);
+      if (!payment) return { http: 404, body: { error: "Payment not found." } };
+      if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
+      const decision = canReversePayment(payment, reason);
+      if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
+      // Subtract this payment's active allocations from each invoice ledger.
+      const ledgersById = new Map<string, InvoiceAccountingLedger>();
+      const invoicesTxById = new Map<string, CustomerInvoice>();
+      for (const a of payment.allocations || []) {
+        const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
+        if (l) ledgersById.set(a.invoiceId, l);
+        const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
+        if (inv) invoicesTxById.set(a.invoiceId, inv);
+      }
+      const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
+      if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
+      const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
+      tx.set("customerPayments", payment.id, reversed);
+      for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+      stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
+      stageAudit(tx, auditActorFromReq(req), now, {
+        action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
+        paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
+        beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
+      });
+      didReverse = true;
+      return { http: 200, body: { payment: cleanUndefined(reversed) } };
+    });
+    if (result.http === 200 && didReverse) {
+      // Void any issued receipt for this payment (never delete). Different
+      // collection than the reversed payment; safe + idempotent (voiding an
+      // already-void receipt is a no-op) so a retry can't corrupt state.
+      const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
+      for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
+        if (r.paymentId === paymentId && r.status === "issued") {
+          await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
+        }
+      }
+      await logActivity("", "Accounting", actor, `Customer payment reversed (${paymentId})`, "", "");
+      fireNotifRefresh();
+    }
+    return result;
+  }
+
   app.post("/api/customer-accounts/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
     try {
       const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
-      const now = new Date().toISOString();
-      const actor = req.session!.id;
-      let didReverse = false;
-      const result = await runAccountingTransaction(async (tx) => {
-        const payment = await tx.get<CustomerPayment>("customerPayments", req.params.paymentId);
-        if (!payment) return { http: 404, body: { error: "Payment not found." } };
-        if (payment.status === "reversed") return { http: 200, body: { payment: cleanUndefined(payment), idempotent: true } };
-        const decision = canReversePayment(payment, reason);
-        if (!decision.ok) return { http: decision.code === "reason_required" ? 400 : 409, body: { code: decision.code, error: decision.error } };
-        // Subtract this payment's active allocations from each invoice ledger.
-        const ledgersById = new Map<string, InvoiceAccountingLedger>();
-        const invoicesTxById = new Map<string, CustomerInvoice>();
-        for (const a of payment.allocations || []) {
-          const l = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", a.invoiceId);
-          if (l) ledgersById.set(a.invoiceId, l);
-          const inv = await tx.get<CustomerInvoice>("customerInvoices", a.invoiceId);
-          if (inv) invoicesTxById.set(a.invoiceId, inv);
-        }
-        const restored = applyAllocationDeltas({ payerClientId: payment.clientId || "", currency: payment.currency, ledgersById, deltas: (payment.allocations || []).map((a) => ({ invoiceId: a.invoiceId, delta: -a.amount })), nowIso: now });
-        if (!restored.ok) return { http: 409, body: { code: restored.code, error: restored.error } };
-        const reversed: CustomerPayment = { ...payment, status: "reversed", reversedBy: actor, reversedAt: now, reversalReason: reason.slice(0, 1000) };
-        tx.set("customerPayments", payment.id, reversed);
-        for (const l of restored.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
-        stageInvoiceStatusUpdates(tx, invoicesTxById, restored.ledgers, now);
-        stageAudit(tx, auditActorFromReq(req), now, {
-          action: AUDIT_ACTIONS.customerPaymentReversed, entityType: "customer_payment", entityId: payment.id, result: "success",
-          paymentId: payment.id, clientId: payment.clientId, currency: payment.currency, reason,
-          beforeSnapshot: { status: "active" }, afterSnapshot: { status: "reversed", amount: payment.amount },
-        });
-        didReverse = true;
-        return { http: 200, body: { payment: cleanUndefined(reversed) } };
-      });
-      if (result.http === 200 && didReverse) {
-        // Void any issued receipt for this payment (never delete). Different
-        // collection than the reversed payment; safe + idempotent (voiding an
-        // already-void receipt is a no-op) so a retry can't corrupt state.
-        const rcptSnap = await getDocs(collection(db, "paymentReceipts"));
-        for (const r of rcptSnap.docs.map((d) => d.data() as PaymentReceipt)) {
-          if (r.paymentId === req.params.paymentId && r.status === "issued") {
-            await setDoc(doc(db, "paymentReceipts", r.id), cleanUndefined({ ...r, status: "void", voidedBy: actor, voidedAt: now, voidReason: `Payment reversed: ${reason.slice(0, 500)}` }));
-          }
-        }
-        await logActivity("", "Accounting", actor, `Customer payment reversed (${req.params.paymentId})`, "", "");
+      const result = await performCustomerPaymentReversal(req, req.params.paymentId, reason);
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to reverse customer payment." });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Accounting Phase 5 — per-invoice Customer Payments (Accounts
+  // Receivable). Each payment belongs to EXACTLY ONE issued customer
+  // invoice: it is stored as a CustomerPayment with a single allocation
+  // covering the full amount, so the existing ledgers, derived invoice
+  // statuses (issued → partially_paid → paid), reversal, receipts,
+  // statements, and audit all keep working unchanged. Completely
+  // independent from Vendor Payments. Manual entry only — no gateway,
+  // no bank integration, no FX, no credit notes.
+  // ══════════════════════════════════════════════════════════════════
+  async function loadCustomerPaymentsAll(): Promise<CustomerPayment[]> {
+    const snap = await getDocs(collection(db, "customerPayments"));
+    return snap.docs.map((d) => d.data() as CustomerPayment);
+  }
+
+  // Per-invoice receivable summary + full payment history (active + reversed).
+  app.get("/api/customer-invoices/:invoiceId/payments", requirePermission("customerPayments.view"), async (req, res) => {
+    try {
+      const invSnap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!invSnap.exists()) return res.status(404).json({ code: "invoice_not_found", error: "Invoice not found." });
+      const invoice = invSnap.data() as CustomerInvoice;
+      const all = await loadCustomerPaymentsAll();
+      const history = paymentsForInvoice(invoice.id, all).map((r) => ({ ...cleanUndefined(r.payment), allocatedAmount: r.allocatedAmount }));
+      res.json({ summary: summarizeInvoiceReceivable(invoice, all), payments: history });
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      res.status(500).json({ error: "Failed to load invoice payments." });
+    }
+  });
+
+  // Record a manual payment against exactly ONE invoice. Eligibility
+  // (issued/partially_paid only), currency match, and overpayment are
+  // validated by the pure module, then RE-ENFORCED atomically by the ledger
+  // transaction (applyAllocationDeltas), so two competing payments can never
+  // both exceed the invoice total. Amount is never prefilled or derived.
+  app.post("/api/customer-invoices/:invoiceId/payments", requirePermission("customerPayments.create"), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const invSnap = await getDoc(doc(db, "customerInvoices", req.params.invoiceId));
+      if (!invSnap.exists()) return res.status(404).json({ code: "invoice_not_found", error: "Invoice not found." });
+      const invoice = invSnap.data() as CustomerInvoice;
+      // Phase 6 — payments are frozen while the shipment is financially closed.
+      const payStmtSnap = invoice.shipmentId ? await getDoc(doc(db, "costStatements", invoice.shipmentId)) : null;
+      if (payStmtSnap?.exists() && isFinanciallyClosed(payStmtSnap.data() as CostStatement)) {
+        return res.status(409).json({ code: "financial_closed_lock", error: FINANCIAL_CLOSED_LOCK_MESSAGE });
       }
+      const allPayments = await loadCustomerPaymentsAll();
+      const check = canRecordInvoicePayment({ invoice, amount: body.amount, currency: body.currency, payments: allPayments });
+      if (!check.ok) {
+        return res.status(check.code === "invalid_amount" || check.code === "currency_mismatch" ? 400 : 409).json({ code: check.code, error: check.error });
+      }
+      const amount = check.amount;
+      // Identity comes from the invoice (immutable clientId), never the client.
+      const payerClientId = typeof invoice.clientId === "string" ? invoice.clientId.trim() : "";
+      if (!payerClientId) return res.status(400).json({ code: "unresolved_identity", error: "This invoice carries no customer identity; record the payment from the Customer Account page." });
+      const paymentDate = typeof body.paymentDate === "string" && body.paymentDate ? body.paymentDate : new Date().toISOString().slice(0, 10);
+      const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : "";
+      if (isDuplicatePayment(allPayments, { companyName: invoice.companyName, amount, paymentDate, reference, currency: invoice.currency })) {
+        return res.status(409).json({ code: "duplicate_payment", error: "An identical payment was already recorded. Reload to see it." });
+      }
+      const now = new Date().toISOString();
+      const paymentId = `cpay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const result = await runAccountingTransaction(async (tx) => {
+        // Transaction-fresh invoice + ledger; the CONTENDED overpayment math
+        // happens here, never on the pre-read.
+        const invTx = (await tx.get<CustomerInvoice>("customerInvoices", invoice.id)) || invoice;
+        let ledger = await tx.get<InvoiceAccountingLedger>("invoiceAccountingLedgers", invoice.id);
+        if (!ledger) ledger = initInvoiceLedgerFromInvoice(invTx, now);
+        const ledgersById = new Map<string, InvoiceAccountingLedger>([[invoice.id, ledger]]);
+        const applied = applyAllocationDeltas({ payerClientId, currency: invoice.currency, ledgersById, deltas: [{ invoiceId: invoice.id, delta: amount }], nowIso: now });
+        if (!applied.ok) return { http: applied.code === "over_invoice" || applied.code === "customer_mismatch" ? 409 : 400, body: { code: applied.code, error: applied.error } };
+        const payment: CustomerPayment = {
+          id: paymentId, companyName: invoice.companyName, clientId: payerClientId,
+          amount, currency: invoice.currency, paymentDate,
+          paymentMethod: sanitizePaymentMethod(body.paymentMethod),
+          reference: reference || undefined,
+          notes: typeof body.note === "string" ? body.note.slice(0, 1000) : typeof body.notes === "string" ? body.notes.slice(0, 1000) : undefined,
+          allocations: [{ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, amount }],
+          status: "active", createdBy: req.session!.id, createdAt: now,
+        };
+        const invoicesTxById = new Map<string, CustomerInvoice>([[invoice.id, invTx]]);
+        tx.set("customerPayments", payment.id, payment);
+        for (const l of applied.ledgers) tx.set("invoiceAccountingLedgers", l.id, l);
+        stageInvoiceStatusUpdates(tx, invoicesTxById, applied.ledgers, now);
+        stageAudit(tx, auditActorFromReq(req), now, {
+          action: AUDIT_ACTIONS.customerPaymentCreated, entityType: "customer_payment", entityId: payment.id, result: "success",
+          paymentId: payment.id, invoiceId: invoice.id, clientId: payerClientId, currency: invoice.currency,
+          afterSnapshot: { amount, currency: invoice.currency, method: payment.paymentMethod, reference: payment.reference, invoiceNumber: invoice.invoiceNumber, singleInvoice: true },
+        });
+        return { http: 201, body: { payment: cleanUndefined(payment) } };
+      });
+      if (result.http === 201) {
+        await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for invoice ${invoice.invoiceNumber} (${amount} ${invoice.currency})`, "", "");
+        fireNotifRefresh();
+        // Fresh summary/history for the response (post-commit read).
+        const after = await loadCustomerPaymentsAll();
+        const invAfter = await getDoc(doc(db, "customerInvoices", invoice.id));
+        (result.body as any).summary = summarizeInvoiceReceivable(invAfter.exists() ? (invAfter.data() as CustomerInvoice) : invoice, after);
+        (result.body as any).payments = paymentsForInvoice(invoice.id, after).map((r) => ({ ...cleanUndefined(r.payment), allocatedAmount: r.allocatedAmount }));
+      }
+      res.status(result.http).json(result.body);
+    } catch (err) {
+      if (respondIfServiceUnavailable(err, res)) return;
+      console.error("[accounting] invoice payment failed:", err);
+      res.status(500).json({ error: "Failed to record customer payment." });
+    }
+  });
+
+  // Reverse a payment from the invoice context — verifies the payment actually
+  // belongs to this invoice, then runs the SAME shared reversal core.
+  app.post("/api/customer-invoices/:invoiceId/payments/:paymentId/reverse", requirePermission("customerPayments.reverse"), async (req, res) => {
+    try {
+      const paySnap = await getDoc(doc(db, "customerPayments", req.params.paymentId));
+      if (!paySnap.exists()) return res.status(404).json({ error: "Payment not found." });
+      const payment = paySnap.data() as CustomerPayment;
+      if (!(payment.allocations || []).some((a) => a.invoiceId === req.params.invoiceId)) {
+        return res.status(404).json({ code: "payment_not_for_invoice", error: "Payment not found for this invoice." });
+      }
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      const result = await performCustomerPaymentReversal(req, req.params.paymentId, reason);
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12534,6 +13121,746 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to build vendor statement." });
     }
+  });
+
+  // ── Accounting Phase 7 — Financial Reports (READ-ONLY) ────────────
+  // Every route here is a GET that derives per-currency totals from the
+  // authoritative Phase 1–6 records via the pure src/lib/accountingReports.ts
+  // builders. No route mutates anything; currencies are never combined and
+  // there is no FX. Official Profit is invoice−approved-cost (payment-timing
+  // independent) and is kept strictly separate from Operational Cash Movement.
+  const REPORT_ASOF = (req: express.Request): string =>
+    (typeof req.query.asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asOf) ? req.query.asOf : new Date().toISOString().slice(0, 10));
+  const reportStr = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const sessionHasReportPermission = async (req: express.Request, key: AccountingPermission): Promise<boolean> => {
+    const cache = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+    const perms = cache ?? (req.session ? await loadEffectivePermissionsForSession(req.session) : new Set<AccountingPermission>());
+    (req as any)._effectiveAccountingPerms = perms;
+    return perms.has(key);
+  };
+  // Load the four reporting collections ONCE and index them per request so no
+  // report does N+1 loads (a file-backed persistence-safe optimization).
+  async function loadReportingDataset(): Promise<{
+    statements: CostStatement[]; invoices: CustomerInvoice[]; customerPayments: CustomerPayment[]; vendorPayments: VendorPaymentTransaction[];
+    invoicesByShipment: (s: string) => CustomerInvoice[]; vendorPaymentsByShipment: (s: string) => VendorPaymentTransaction[];
+    invoicesById: (id: string) => CustomerInvoice | undefined; financialStatusByShipment: (s: string) => Reports.OrderFinancialSummary["financialStatus"];
+  }> {
+    const [sSnap, iSnap, cpSnap, vpSnap] = await Promise.all([
+      getDocs(collection(db, "costStatements")), getDocs(collection(db, "customerInvoices")),
+      getDocs(collection(db, "customerPayments")), getDocs(collection(db, "vendorPayments")),
+    ]);
+    const statements = sSnap.docs.map((d) => d.data() as CostStatement);
+    const invoices = iSnap.docs.map((d) => d.data() as CustomerInvoice);
+    const customerPayments = cpSnap.docs.map((d) => d.data() as CustomerPayment);
+    const vendorPayments = vpSnap.docs.map((d) => d.data() as VendorPaymentTransaction).map(normalizeExpensePriority);
+    const invByShip = new Map<string, CustomerInvoice[]>();
+    const invById = new Map<string, CustomerInvoice>();
+    for (const inv of invoices) { (invByShip.get(inv.shipmentId) || invByShip.set(inv.shipmentId, []).get(inv.shipmentId)!).push(inv); invById.set(inv.id, inv); }
+    const vpByShip = new Map<string, VendorPaymentTransaction[]>();
+    for (const vp of vendorPayments) (vpByShip.get(vp.shipmentId) || vpByShip.set(vp.shipmentId, []).get(vp.shipmentId)!).push(vp);
+    const finByShip = new Map<string, Reports.OrderFinancialSummary["financialStatus"]>();
+    for (const st of statements) finByShip.set(st.shipmentId, resolveFinancialStatus(st as any));
+    return {
+      statements, invoices, customerPayments, vendorPayments,
+      invoicesByShipment: (s) => invByShip.get(s) || [], vendorPaymentsByShipment: (s) => vpByShip.get(s) || [],
+      invoicesById: (id) => invById.get(id), financialStatusByShipment: (s) => finByShip.get(s) || "financial_open",
+    };
+  }
+  // Shared list-report responder: validates the date range, sorts (whitelist),
+  // paginates, and returns either JSON {rows,totals,paging} or a CSV download
+  // (which additionally requires reports.export + writes a report.exported audit).
+  async function respondReportList<T>(
+    req: express.Request, res: express.Response,
+    opts: { reportType: string; rows: T[]; totals: unknown; allowedSort: readonly string[]; csvColumns: Reports.CsvColumn<T>[]; dateFrom: string; dateTo: string },
+  ): Promise<void> {
+    const dir: Reports.SortDirection = req.query.sortDirection === "asc" ? "asc" : "desc";
+    const sorted = Reports.applySort(opts.rows, reportStr(req.query.sortBy) || undefined, dir, opts.allowedSort);
+    if (sorted === null) { res.status(400).json({ code: "invalid_sort", error: "Unsupported sort field." }); return; }
+    if (reportStr(req.query.format).toLowerCase() === "csv") {
+      if (!(await sessionHasReportPermission(req, "reports.export"))) {
+        res.status(403).json({ code: "permission_denied", error: "You do not have permission to export reports.", requiredPermission: "reports.export" });
+        return;
+      }
+      const csv = Reports.toCsv(opts.csvColumns, sorted);
+      await recordAudit(req, { action: AUDIT_ACTIONS.reportExported, entityType: "report", entityId: opts.reportType, result: "success", metadata: { format: "csv", rowCount: sorted.length, dateFrom: opts.dateFrom || undefined, dateTo: opts.dateTo || undefined } });
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${opts.reportType}-${new Date().toISOString().slice(0, 10)}.csv"`);
+      res.send(csv);
+      return;
+    }
+    const { page, pageSize } = Reports.normalizePaging(req.query.page, req.query.pageSize);
+    const paged = Reports.paginate(sorted, page, pageSize);
+    res.json({ ...paged, totals: opts.totals });
+  }
+
+  // 1) Order financial summary (per Order Number).
+  app.get("/api/accounting/reports/orders/:shipmentId/financial-summary", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const ds = await loadReportingDataset();
+      res.json(Reports.buildOrderFinancialSummary({
+        statement: stmt, invoices: ds.invoicesByShipment(req.params.shipmentId),
+        customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(req.params.shipmentId), asOfDate: REPORT_ASOF(req),
+      }));
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build order financial summary." }); }
+  });
+
+  // 2) Accounts Receivable.
+  app.get("/api/accounting/reports/receivables", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), aging = reportStr(req.query.agingBucket);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (aging) rows = rows.filter((r) => r.agingBucket === aging);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable");
+      if (reportStr(req.query.includePaid) !== "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "receivables", rows, totals: Reports.summarizeReceivables(rows),
+        allowedSort: ["issueDate", "dueDate", "invoiceAmount", "remainingAmount", "daysOverdue", "customer", "currency", "invoiceNumber"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "invoiceNumber", value: (r) => r.invoiceNumber }, { header: "orderRef", value: (r) => r.orderRef },
+          { header: "customer", value: (r) => r.customer }, { header: "issueDate", value: (r) => r.issueDate },
+          { header: "dueDate", value: (r) => r.dueDate }, { header: "invoiceAmount", value: (r) => r.invoiceAmount },
+          { header: "receivedAmount", value: (r) => r.receivedAmount }, { header: "remainingAmount", value: (r) => r.remainingAmount },
+          { header: "currency", value: (r) => r.currency }, { header: "invoiceStatus", value: (r) => r.invoiceStatus },
+          { header: "daysOverdue", value: (r) => r.daysOverdue }, { header: "agingBucket", value: (r) => r.agingBucket },
+          { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build receivables report." }); }
+  });
+
+  // 3) Accounts Payable.
+  app.get("/api/accounting/reports/payables", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), paymentStatus = reportStr(req.query.paymentStatus);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.approvedDate || undefined, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "payables", rows, totals: Reports.summarizePayables(rows),
+        allowedSort: ["approvedDate", "dueDate", "approvedAmount", "remainingAmount", "vendor", "currency", "orderRef"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "vendor", value: (r) => r.vendor }, { header: "orderRef", value: (r) => r.orderRef },
+          { header: "description", value: (r) => r.description }, { header: "approvedAmount", value: (r) => r.approvedAmount },
+          { header: "paidAmount", value: (r) => r.paidAmount }, { header: "remainingAmount", value: (r) => r.remainingAmount },
+          { header: "currency", value: (r) => r.currency }, { header: "paymentStatus", value: (r) => r.paymentStatus },
+          { header: "approvedDate", value: (r) => r.approvedDate }, { header: "dueDate", value: (r) => r.dueDate },
+          { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build payables report." }); }
+  });
+
+  // 4) Official Profit (SENSITIVE — profitReports.view).
+  app.get("/api/accounting/reports/profit", requirePermission("profitReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.latestInvoiceDate || undefined, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "profit", rows, totals: Reports.summarizeProfit(rows),
+        allowedSort: ["orderRef", "customer", "issuedInvoiceTotal", "approvedVendorCost", "officialProfit", "currency", "latestInvoiceDate"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "customer", value: (r) => r.customer },
+          { header: "transportMode", value: (r) => r.transportMode }, { header: "issuedInvoiceTotal", value: (r) => r.issuedInvoiceTotal },
+          { header: "approvedVendorCost", value: (r) => r.approvedVendorCost }, { header: "officialProfit", value: (r) => r.officialProfit },
+          { header: "currency", value: (r) => r.currency }, { header: "profitStatus", value: (r) => r.profitStatus },
+          { header: "costStatementStatus", value: (r) => r.costStatementStatus }, { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build profit report." }); }
+  });
+
+  // 5) Customer Receipts.
+  app.get("/api/accounting/reports/customer-receipts", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildCustomerReceiptRows({ payments: ds.customerPayments, invoicesById: ds.invoicesById, includeReversed: reportStr(req.query.includeReversed) === "true" });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (orderRef) rows = rows.filter((r) => r.orderRefs.includes(orderRef));
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "customer-receipts", rows, totals: Reports.summarizeReceipts(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))),
+        allowedSort: ["paymentDate", "customer", "amount", "currency", "paymentMethod"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "paymentDate", value: (r) => r.paymentDate }, { header: "customer", value: (r) => r.customer },
+          { header: "amount", value: (r) => r.amount }, { header: "currency", value: (r) => r.currency },
+          { header: "paymentMethod", value: (r) => r.paymentMethod }, { header: "reference", value: (r) => r.reference },
+          { header: "status", value: (r) => r.status }, { header: "invoiceNumbers", value: (r) => r.invoiceNumbers.join("; ") },
+          { header: "orderRefs", value: (r) => r.orderRefs.join("; ") },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build customer receipts report." }); }
+  });
+
+  // 6) Vendor Payments.
+  app.get("/api/accounting/reports/vendor-payments", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildVendorPaymentRows({ payments: ds.vendorPayments, includeReversed: reportStr(req.query.includeCancelledOrReversed) === "true" });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod), orderRef = reportStr(req.query.orderRef);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "vendor-payments", rows, totals: Reports.summarizeVendorPaymentRows(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))),
+        allowedSort: ["paymentDate", "vendor", "amount", "currency", "orderRef", "paymentMethod"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "paymentDate", value: (r) => r.paymentDate }, { header: "vendor", value: (r) => r.vendor },
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "amount", value: (r) => r.amount },
+          { header: "currency", value: (r) => r.currency }, { header: "paymentMethod", value: (r) => r.paymentMethod },
+          { header: "reference", value: (r) => r.reference }, { header: "status", value: (r) => r.status },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build vendor payments report." }); }
+  });
+
+  // 7) Operational Cash Movement (SENSITIVE — cashReports.view). NOT profit.
+  app.get("/api/accounting/reports/cash-movement", requirePermission("cashReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const currency = reportStr(req.query.currency);
+      const cp = ds.customerPayments.filter((p) => (!range.from && !range.to || Reports.withinRange((p.paymentDate || p.createdAt || "").slice(0, 10), range.from, range.to)) && (!currency || p.currency === currency));
+      const vp = ds.vendorPayments.filter((p) => (!range.from && !range.to || Reports.withinRange((p.paymentDate || p.createdAt || "").slice(0, 10), range.from, range.to)) && (!currency || p.currency === currency));
+      res.json({
+        note: "This is a cash movement report and is not the Official Profit calculation.",
+        currencies: Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp }),
+        dateFrom: range.from || null, dateTo: range.to || null,
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build cash movement report." }); }
+  });
+
+  // 8) Financial Closing.
+  app.get("/api/accounting/reports/financial-closing", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildFinancialClosingRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const financialStatus = reportStr(req.query.financialStatus), customer = reportStr(req.query.customer), closedBy = reportStr(req.query.closedBy);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (closedBy) rows = rows.filter((r) => r.closedBy === closedBy);
+      await respondReportList(req, res, {
+        reportType: "financial-closing", rows, totals: { total: rows.length, closed: rows.filter((r) => r.financialStatus === "financial_closed").length, open: rows.filter((r) => r.financialStatus === "financial_open").length, reopened: rows.filter((r) => r.financialStatus === "financial_reopened").length },
+        allowedSort: ["orderRef", "customer", "financialStatus", "closedAt"], dateFrom: "", dateTo: "",
+        csvColumns: [
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "customer", value: (r) => r.customer },
+          { header: "financialStatus", value: (r) => r.financialStatus }, { header: "costStatementStatus", value: (r) => r.costStatementStatus },
+          { header: "draftInvoiceCount", value: (r) => r.draftInvoiceCount }, { header: "closedAt", value: (r) => r.closedAt },
+          { header: "closedBy", value: (r) => r.closedBy }, { header: "reopenedAt", value: (r) => r.reopenedAt },
+          { header: "reopenCycleCount", value: (r) => r.reopenCycleCount },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build financial closing report." }); }
+  });
+
+  // 9) Financial Overview (dashboard aggregate — per currency, read-only).
+  app.get("/api/accounting/reports/overview", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const asOf = REPORT_ASOF(req);
+      const receivableRows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: asOf });
+      const payableRows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: asOf });
+      const profitRows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const inRange = (d: string | undefined) => (!range.from && !range.to) ? true : Reports.withinRange(d, range.from, range.to);
+      const cp = ds.customerPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)));
+      const vp = ds.vendorPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)));
+      const canProfit = await sessionHasReportPermission(req, "profitReports.view");
+      const canCash = await sessionHasReportPermission(req, "cashReports.view");
+      res.json({
+        receivables: Reports.summarizeReceivables(receivableRows),
+        payables: Reports.summarizePayables(payableRows),
+        customerReceipts: Reports.summarizeReceipts(cp.filter((p) => p.status === "active").map((p) => ({ currency: p.currency, amount: p.amount, status: "active" as const }))),
+        vendorPayments: Reports.summarizeVendorPaymentRows(vp.filter((p) => p.status === "active").map((p) => ({ currency: p.currency, amount: p.amount, status: "active" as const }))),
+        profit: canProfit ? Reports.summarizeProfit(profitRows) : null,
+        cashMovement: canCash ? Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp }) : null,
+        counts: {
+          financiallyClosedOrders: ds.statements.filter((s) => resolveFinancialStatus(s as any) === "financial_closed").length,
+          financiallyOpenOrders: ds.statements.filter((s) => resolveFinancialStatus(s as any) !== "financial_closed").length,
+          overdueInvoices: receivableRows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable").length,
+          ordersWithUnresolvedBalance: ds.statements.filter((s) => {
+            const sum = Reports.buildOrderFinancialSummary({ statement: s, invoices: ds.invoicesByShipment(s.shipmentId), customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(s.shipmentId), asOfDate: asOf });
+            return Object.values(sum.currencies).some((f) => f.customerRemaining > 0.001 || f.vendorRemaining > 0.001);
+          }).length,
+        },
+        asOf, dateFrom: range.from || null, dateTo: range.to || null,
+        note: "Official Profit is issued customer invoices minus approved vendor costs; it is separate from Operational Cash Movement and payment timing never changes it.",
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build financial overview." }); }
+  });
+
+  // The caller's own effective report permissions (for the UI to show/hide the
+  // export controls). Reveals only the session's own permissions — no listing.
+  app.get("/api/accounting/my-permissions", async (req, res) => {
+    if (respondIfSessionVerificationUnavailable(req, res)) return;
+    if (!req.session || req.session.role !== "admin") return res.status(403).json({ error: "Admin session required." });
+    try {
+      const perms = (req as any)._effectiveAccountingPerms ?? (await loadEffectivePermissionsForSession(req.session));
+      const relevant = ["reports.view", "reports.export", "profitReports.view", "cashReports.view", "accounting.notifications.view", "accounting.notifications.configure", "customerPayments.view", "vendorPayments.view", "accounting.financialClose", "accountingAudit.view"] as const;
+      res.json({ permissions: relevant.filter((k) => perms.has(k)) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load permissions." }); }
+  });
+
+  // ── Accounting Phase 9 — Notifications & Action Center (READ-ONLY) ──
+  // Notifications are derived from the authoritative Phase 1–8 state by the
+  // pure evaluator, reconciled into the accountingNotifications collection
+  // (dedup + auto-resolve), and read back per-recipient/permission. State
+  // routes mutate ONLY the notification (read/ack/dismiss) — never any
+  // accounting record. No external delivery (in-app only).
+  let acctNotifSeq = 0;
+  const nextAcctNotifId = (): string => `acn-${Date.now()}-${(acctNotifSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  async function loadAllAcctNotifications(): Promise<AccountingNotification[]> {
+    const snap = await getDocs(collection(db, "accountingNotifications"));
+    return snap.docs.map((d) => d.data() as AccountingNotification);
+  }
+  async function loadAcctNotificationSettings(): Promise<AccountingNotificationSettings> {
+    const s = await getDoc(doc(db, "accountingNotificationSettings", "default"));
+    return AcctNotify.resolveNotificationSettings(s.exists() ? (s.data() as Partial<AccountingNotificationSettings>) : null);
+  }
+  // Derive + reconcile the accounting notifications from live state. Idempotent:
+  // running it repeatedly keeps ONE active notification per condition and
+  // resolves conditions that have gone away. Reused by the evaluate route.
+  async function reconcileAcctNotifications(): Promise<void> {
+    const ds = await loadReportingDataset();
+    const settings = await loadAcctNotificationSettings();
+    const activeUserIds = await loadActiveAdminIds();
+    const desired = AcctNotify.evaluateAccountingNotifications({
+      asOfDate: new Date().toISOString().slice(0, 10),
+      statements: ds.statements, invoices: ds.invoices, customerPayments: ds.customerPayments, vendorPayments: ds.vendorPayments,
+      activeUserIds, settings,
+    });
+    const existing = await loadAllAcctNotifications();
+    const now = Date.now();
+    const { toCreate, toUpdate, toResolve, toRemind } = AcctNotify.reconcileNotifications(existing, desired, { nowMs: now, reminderIntervalDays: settings.reminderRepeatIntervalDays });
+    const nowIso = new Date(now).toISOString();
+    for (const d of toCreate) {
+      const rec: AccountingNotification = {
+        id: nextAcctNotifId(), type: d.type, category: d.category, priority: d.priority,
+        recipientUserId: d.recipientUserId, permissionScope: d.permissionScope, shipmentId: d.shipmentId, orderRef: d.orderRef,
+        invoiceId: d.invoiceId, costLineId: d.costLineId, params: d.params, actionTab: d.actionTab,
+        status: "unread", deduplicationKey: d.deduplicationKey, sourceVersion: d.sourceVersion, createdAt: nowIso, lastRemindedAt: nowIso, readByUserIds: [],
+      };
+      await setDoc(doc(db, "accountingNotifications", rec.id), cleanUndefined(rec));
+      // Lifecycle audit (metadata only — never the underlying financial record).
+      await recordAudit(anonymousSystemReq(), { action: AUDIT_ACTIONS.notificationCreated, entityType: "accounting_notification", entityId: rec.id, result: "success", metadata: { type: rec.type, orderRef: rec.orderRef, priority: rec.priority, newStatus: "unread", trigger: "evaluate" } });
+    }
+    for (const { existing: ex, desired: d } of toUpdate) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, priority: d.priority, params: d.params, sourceVersion: d.sourceVersion, updatedAt: nowIso }));
+    }
+    // Repeat reminder: resurface a READ, still-active reminder once the interval
+    // elapsed (one record — no duplicate; dismissed reminders are left alone).
+    for (const ex of toRemind) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, status: "unread", readByUserIds: [], lastRemindedAt: nowIso, updatedAt: nowIso }));
+    }
+    for (const ex of toResolve) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, status: "resolved", resolvedAt: nowIso }));
+      await recordAudit(anonymousSystemReq(), { action: AUDIT_ACTIONS.notificationResolved, entityType: "accounting_notification", entityId: ex.id, result: "success", metadata: { type: ex.type, orderRef: ex.orderRef, oldStatus: ex.status, newStatus: "resolved", trigger: "evaluate" } });
+    }
+  }
+  // A minimal request-like object so the shared recordAudit can log system-derived
+  // notification lifecycle events (created/resolved) that have no interactive actor.
+  const anonymousSystemReq = (): express.Request => ({ session: { id: "system", role: "admin", adminType: "system" }, headers: {} } as unknown as express.Request);
+  // Fire-and-forget notification refresh after a successful accounting workflow
+  // change. Runs AFTER the accounting transaction has already committed; any
+  // failure is logged and NEVER rolls back the completed accounting action, and
+  // Phase 9 dedup/reconciliation prevents duplicate notifications.
+  const fireNotifRefresh = (): void => {
+    void reconcileAcctNotifications().catch((e) => console.error("[acct-notify] auto-refresh failed:", e instanceof Error ? e.message : e));
+  };
+  // A notification is visible to the caller if they are its recipient OR hold
+  // its scope permission — the notification.view permission NEVER bypasses the
+  // underlying scope permission.
+  const acctNotifVisibleTo = (n: AccountingNotification, session: any, perms: Set<AccountingPermission>): boolean =>
+    AcctNotify.isNotificationVisible(n, session?.id || "", (k) => perms.has(k as AccountingPermission));
+
+  // Manual/internal evaluator (protected). Refreshes the derived notifications.
+  app.post("/api/accounting/notifications/evaluate", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      await reconcileAcctNotifications();
+      res.json({ ok: true });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to evaluate accounting notifications." }); }
+  });
+
+  // List the caller's visible notifications with filters + backend pagination.
+  app.get("/api/accounting/notifications", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+      const all = (await loadAllAcctNotifications()).filter((n) => acctNotifVisibleTo(n, req.session, perms));
+      const statusFilter = reportStr(req.query.status) || "active";
+      const category = reportStr(req.query.category), priority = reportStr(req.query.priority), orderRef = reportStr(req.query.orderRef), customer = reportStr(req.query.customer), vendor = reportStr(req.query.vendor);
+      const allowedStatus = ["active", "unread", "read", "acknowledged", "dismissed", "resolved", "all"];
+      if (!allowedStatus.includes(statusFilter)) return res.status(400).json({ code: "invalid_status", error: "Unsupported status filter." });
+      const me = req.session?.id || "";
+      let rows = all.filter((n) => {
+        if (statusFilter === "all") return true;
+        if (statusFilter === "active") return n.status !== "resolved" && n.status !== "dismissed";
+        if (statusFilter === "unread") return n.status === "unread" && !(n.readByUserIds || []).includes(me);
+        return n.status === statusFilter;
+      });
+      if (category) rows = rows.filter((n) => n.category === category);
+      if (priority) rows = rows.filter((n) => n.priority === priority);
+      if (orderRef) rows = rows.filter((n) => (n.orderRef || "") === orderRef);
+      if (customer) rows = rows.filter((n) => (n.params.customerName || "").toLowerCase().includes(customer.toLowerCase()));
+      if (vendor) rows = rows.filter((n) => (n.params.vendorName || "").toLowerCase().includes(vendor.toLowerCase()));
+      if (range.from || range.to) rows = rows.filter((n) => Reports.withinRange((n.createdAt || "").slice(0, 10), range.from, range.to));
+      rows.sort((a, b) => (AcctNotify.PRIORITY_RANK[a.priority] - AcctNotify.PRIORITY_RANK[b.priority]) || (b.createdAt || "").localeCompare(a.createdAt || ""));
+      const { page, pageSize } = Reports.normalizePaging(req.query.page, req.query.pageSize);
+      const paged = Reports.paginate(rows.map((n) => ({ ...n, read: (n.readByUserIds || []).includes(me) })), page, pageSize);
+      res.json(paged);
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load accounting notifications." }); }
+  });
+
+  // Counts for the dashboard cards + global badge (visible-to-caller only).
+  app.get("/api/accounting/notifications/summary", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+      const me = req.session?.id || "";
+      const active = (await loadAllAcctNotifications()).filter((n) => acctNotifVisibleTo(n, req.session, perms) && n.status !== "resolved" && n.status !== "dismissed");
+      const byCategory: Record<string, number> = {};
+      for (const n of active) byCategory[n.category] = (byCategory[n.category] || 0) + 1;
+      res.json({
+        unread: active.filter((n) => !(n.readByUserIds || []).includes(me)).length,
+        high: active.filter((n) => n.priority === "high").length,
+        critical: active.filter((n) => n.priority === "critical").length,
+        total: active.length,
+        byCategory,
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load notification summary." }); }
+  });
+
+  // Load + authorize a single notification for a state change (mutates the
+  // notification ONLY). 404 for unknown OR not-visible (no id enumeration).
+  async function loadVisibleNotifOr404(req: express.Request, res: express.Response): Promise<AccountingNotification | null> {
+    const snap = await getDoc(doc(db, "accountingNotifications", req.params.id));
+    const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+    if (!snap.exists()) { res.status(404).json({ error: "Notification not found." }); return null; }
+    const n = snap.data() as AccountingNotification;
+    if (!acctNotifVisibleTo(n, req.session, perms)) { res.status(404).json({ error: "Notification not found." }); return null; }
+    return n;
+  }
+
+  app.post("/api/accounting/notifications/:id/read", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      const me = req.session?.id || "";
+      const readers = [...new Set([...(n.readByUserIds || []), me])];
+      const next: AccountingNotification = { ...n, readByUserIds: readers, status: n.status === "unread" ? "read" : n.status, updatedAt: new Date().toISOString() };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationRead, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: next.status } });
+      res.json({ notification: { ...next, read: true } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to mark read." }); }
+  });
+
+  app.post("/api/accounting/notifications/:id/acknowledge", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      if (n.status === "resolved") return res.status(409).json({ code: "already_resolved", error: "A resolved notification cannot be acknowledged." });
+      const me = req.session?.id || "";
+      const next: AccountingNotification = { ...n, status: "acknowledged", acknowledgedAt: new Date().toISOString(), acknowledgedBy: me, readByUserIds: [...new Set([...(n.readByUserIds || []), me])] };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationAcknowledged, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: "acknowledged" } });
+      res.json({ notification: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to acknowledge." }); }
+  });
+
+  app.post("/api/accounting/notifications/:id/dismiss", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      if (!AcctNotify.isDismissable(n.type)) return res.status(409).json({ code: "not_dismissable", error: "Action-required approval notifications cannot be dismissed." });
+      if (n.status === "resolved") return res.status(409).json({ code: "already_resolved", error: "A resolved notification cannot be dismissed." });
+      const me = req.session?.id || "";
+      const next: AccountingNotification = { ...n, status: "dismissed", dismissedAt: new Date().toISOString(), dismissedBy: me };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationDismissed, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: "dismissed" } });
+      res.json({ notification: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to dismiss." }); }
+  });
+
+  // Notification settings (view for GET; configure for PUT). External delivery
+  // stays permanently disabled; approval-type reminders are always enabled.
+  app.get("/api/accounting/notifications/settings", requirePermission("accounting.notifications.view"), async (_req, res) => {
+    try { res.json({ settings: await loadAcctNotificationSettings() }); }
+    catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load settings." }); }
+  });
+  app.put("/api/accounting/notifications/settings", requirePermission("accounting.notifications.configure"), async (req, res) => {
+    try {
+      const body = (req.body || {}) as Partial<AccountingNotificationSettings>;
+      const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
+      const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
+      const cur = await loadAcctNotificationSettings();
+      const next: AccountingNotificationSettings = {
+        overdueRemindersEnabled: bool(body.overdueRemindersEnabled, cur.overdueRemindersEnabled),
+        customerBalanceRemindersEnabled: bool(body.customerBalanceRemindersEnabled, cur.customerBalanceRemindersEnabled),
+        vendorBalanceRemindersEnabled: bool(body.vendorBalanceRemindersEnabled, cur.vendorBalanceRemindersEnabled),
+        financialCloseReadinessEnabled: bool(body.financialCloseReadinessEnabled, cur.financialCloseReadinessEnabled),
+        financialCloseBlockersEnabled: bool(body.financialCloseBlockersEnabled, cur.financialCloseBlockersEnabled),
+        integrityWarningsEnabled: bool(body.integrityWarningsEnabled, cur.integrityWarningsEnabled),
+        severeOverdueThresholdDays: num(body.severeOverdueThresholdDays, cur.severeOverdueThresholdDays),
+        reminderRepeatIntervalDays: num(body.reminderRepeatIntervalDays, cur.reminderRepeatIntervalDays),
+        externalDeliveryEnabled: false,
+        updatedAt: new Date().toISOString(), updatedBy: req.session?.id,
+      };
+      await setDoc(doc(db, "accountingNotificationSettings", "default"), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationSettingsUpdated, entityType: "accounting_notification_settings", entityId: "default", result: "success", metadata: { severeOverdueThresholdDays: next.severeOverdueThresholdDays, reminderRepeatIntervalDays: next.reminderRepeatIntervalDays } });
+      res.json({ settings: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to update settings." }); }
+  });
+
+  // ── Accounting Phase 8 — Professional report exports (PDF + CSV) ──
+  // Every export route is a read-only GET that: requires the report's VIEW
+  // permission (route middleware) AND reports.export (checked here, so export
+  // can never bypass a sensitive profit/cash view); builds the SAME Phase 7
+  // report result the UI/CSV use; normalizes it into ONE shared export model;
+  // and renders PDF (shared renderAccountingPdf) or CSV (shared toCsv) from it.
+  // The only write is a single report.exported audit event.
+  const reportGeneratedBy = (req: express.Request) => ({ userId: req.session?.id || "unknown", name: (req.session as any)?.name || req.session?.id || "unknown" });
+  // Sanitized, human-labelled filters for the export header + audit (only the
+  // filters actually applied; empty ones are dropped).
+  const FILTER_LABELS: Record<string, string> = {
+    customer: "Customer", vendor: "Vendor", currency: "Currency", financialStatus: "Financial Status",
+    paymentStatus: "Payment Status", aging: "Aging Bucket", method: "Payment Method", orderRef: "Order Number",
+  };
+  const buildFilterLabels = (f: Record<string, string | undefined>): Array<{ label: string; value: string }> =>
+    Object.entries(f).filter(([, v]) => v && String(v).trim()).map(([k, v]) => ({ label: FILTER_LABELS[k] || k, value: String(v) }));
+  async function sendReportExport(
+    req: express.Request, res: express.Response,
+    build: (ctx: ReportExport.ExportContext) => ReportExport.AccountingReportExportModel,
+    opts: { period?: { dateFrom?: string; dateTo?: string; asOfDate?: string }; filters: Array<{ label: string; value: string }>; entityScope?: Record<string, unknown> },
+  ): Promise<void> {
+    const format = reportStr(req.query.format).toLowerCase() || "pdf";
+    if (format !== "pdf" && format !== "csv") { res.status(400).json({ code: "invalid_format", error: "Unsupported export format. Use pdf or csv." }); return; }
+    if (!(await sessionHasReportPermission(req, "reports.export"))) {
+      res.status(403).json({ code: "permission_denied", error: "You do not have permission to export reports.", requiredPermission: "reports.export" });
+      return;
+    }
+    const exportId = ReportExport.makeExportId(`${req.session?.id || ""}|${format}`);
+    const model = build({ generatedBy: reportGeneratedBy(req), generatedAt: new Date().toISOString(), exportId, filters: opts.filters, period: opts.period });
+    if (model.rows.length > ReportExport.MAX_EXPORT_ROWS) {
+      res.status(413).json({ code: "report_export_too_large", error: "The filtered report is too large to export. Narrow the date range or filters." });
+      return;
+    }
+    // Generate the output FIRST — a render failure must not write a "success"
+    // audit or a partial response. Only after the bytes exist do we audit + send.
+    const day = new Date().toISOString().slice(0, 10);
+    let contentType: string, filename: string, payload: Buffer | string;
+    if (format === "csv") {
+      contentType = "text/csv; charset=utf-8";
+      filename = ReportExport.sanitizeExportFilename("MARAS_" + model.title + "_" + day, "csv");
+      payload = ReportExport.reportExportModelToCsv(model);
+    } else {
+      const pdfModel = ReportExport.reportExportModelToPdfModel(model, await loadCompanyProfile(), pdfLang(req));
+      contentType = "application/pdf";
+      filename = ReportExport.sanitizeExportFilename("MARAS_" + model.title + "_" + day, "pdf");
+      payload = await renderAccountingPdf(pdfModel);
+    }
+    await recordAudit(req, {
+      action: AUDIT_ACTIONS.reportExported, entityType: "report", entityId: model.reportType, result: "success",
+      metadata: {
+        exportId, format, rowCount: model.rows.length, currencyGroups: model.currencySummaries.map((c) => c.currency),
+        dateFrom: opts.period?.dateFrom || undefined, dateTo: opts.period?.dateTo || undefined,
+        filters: model.filters, entityScope: opts.entityScope,
+      },
+    });
+    res.setHeader("X-Export-Id", exportId);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(payload);
+  }
+
+  // 1) Order Financial Summary export.
+  app.get("/api/accounting/reports/orders/:shipmentId/financial-summary/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const ds = await loadReportingDataset();
+      const summary = Reports.buildOrderFinancialSummary({ statement: stmt, invoices: ds.invoicesByShipment(req.params.shipmentId), customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(req.params.shipmentId), asOfDate: REPORT_ASOF(req) });
+      await sendReportExport(req, res, (ctx) => ReportExport.orderSummaryExportModel(summary, ctx), { filters: [], entityScope: { type: "order", shipmentId: req.params.shipmentId, orderRef: summary.orderRef } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export order financial summary." }); }
+  });
+
+  // 2) Accounts Receivable export.
+  app.get("/api/accounting/reports/receivables/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), aging = reportStr(req.query.agingBucket);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (aging) rows = rows.filter((r) => r.agingBucket === aging);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable");
+      if (reportStr(req.query.includePaid) !== "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.receivablesExportModel(rows, Reports.summarizeReceivables(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, financialStatus, aging }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export receivables report." }); }
+  });
+
+  // 3) Accounts Payable export.
+  app.get("/api/accounting/reports/payables/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), paymentStatus = reportStr(req.query.paymentStatus);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.approvedDate || undefined, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.payablesExportModel(rows, Reports.summarizePayables(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ vendor, currency, financialStatus, paymentStatus }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export payables report." }); }
+  });
+
+  // 4) Official Profit export (SENSITIVE view + export).
+  app.get("/api/accounting/reports/profit/export", requirePermission("profitReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.latestInvoiceDate || undefined, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.profitExportModel(rows, Reports.summarizeProfit(rows), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, financialStatus, orderRef }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export profit report." }); }
+  });
+
+  // 5) Operational Cash Movement export (SENSITIVE view + export).
+  app.get("/api/accounting/reports/cash-movement/export", requirePermission("cashReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const currency = reportStr(req.query.currency);
+      const inRange = (d: string) => (!range.from && !range.to) || Reports.withinRange(d, range.from, range.to);
+      const cp = ds.customerPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)) && (!currency || p.currency === currency));
+      const vp = ds.vendorPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)) && (!currency || p.currency === currency));
+      const totals = Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp });
+      await sendReportExport(req, res, (ctx) => ReportExport.cashMovementExportModel(totals, ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ currency }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export cash movement report." }); }
+  });
+
+  // 6) Customer Receipts export.
+  app.get("/api/accounting/reports/customer-receipts/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildCustomerReceiptRows({ payments: ds.customerPayments, invoicesById: ds.invoicesById, includeReversed: reportStr(req.query.includeReversed) === "true" });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.customerReceiptsExportModel(rows, Reports.summarizeReceipts(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ customer, currency, method }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export customer receipts report." }); }
+  });
+
+  // 7) Vendor Payments export.
+  app.get("/api/accounting/reports/vendor-payments/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildVendorPaymentRows({ payments: ds.vendorPayments, includeReversed: reportStr(req.query.includeCancelledOrReversed) === "true" });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.vendorPaymentsExportModel(rows, Reports.summarizeVendorPaymentRows(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))), ctx), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ vendor, currency, method }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export vendor payments report." }); }
+  });
+
+  // 8) Financial Closing export.
+  app.get("/api/accounting/reports/financial-closing/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildFinancialClosingRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const financialStatus = reportStr(req.query.financialStatus), customer = reportStr(req.query.customer);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      await sendReportExport(req, res, (ctx) => ReportExport.financialClosingExportModel(rows, ctx), { filters: buildFilterLabels({ financialStatus, customer }) });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export financial closing report." }); }
+  });
+
+  // 9) Customer Account Statement export (a customer-scoped receivable statement).
+  app.get("/api/accounting/reports/customers/:customerId/statement/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const customerName = decodeURIComponent(req.params.customerId);
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices.filter((i) => (i.companyName || "") === customerName), customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const currency = reportStr(req.query.currency);
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (reportStr(req.query.includePaid) === "false") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await sendReportExport(req, res, (ctx) => ReportExport.receivablesExportModel(rows, Reports.summarizeReceivables(rows), ctx, { type: "customer", name: customerName }), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined, asOfDate: REPORT_ASOF(req) }, filters: buildFilterLabels({ currency }), entityScope: { type: "customer", name: customerName } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export customer statement." }); }
+  });
+
+  // 10) Vendor Account Statement export (a vendor-scoped payable statement).
+  app.get("/api/accounting/reports/vendors/:vendorId/statement/export", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const vendorName = decodeURIComponent(req.params.vendorId);
+      const ds = await loadReportingDataset();
+      // Match by Phase 7 vendor display name; keep only this vendor's lines.
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) }).filter((r) => r.vendor === vendorName);
+      const currency = reportStr(req.query.currency), paymentStatus = reportStr(req.query.paymentStatus);
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      await sendReportExport(req, res, (ctx) => ReportExport.payablesExportModel(rows, Reports.summarizePayables(rows), ctx, { type: "vendor", name: vendorName }), { period: { dateFrom: range.from || undefined, dateTo: range.to || undefined }, filters: buildFilterLabels({ currency, paymentStatus }), entityScope: { type: "vendor", name: vendorName } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; if (!res.headersSent) res.status(500).json({ code: "pdf_generation_failed", error: "Failed to export vendor statement." }); }
   });
 
   // ── Payment Receipts ──────────────────────────────────────────────
@@ -13714,13 +15041,15 @@ async function startServer() {
       if (!canViewCostStatements(req.session!.adminType as any)) {
         return res.status(403).json({ error: "Financial overview requires accounting access." });
       }
-      const [statementsSnap, shipmentsSnap] = await Promise.all([
+      const [statementsSnap, shipmentsSnap, invoicesSnap] = await Promise.all([
         getDocs(collection(db, "costStatements")),
         getDocs(collection(db, "shipments")),
+        getDocs(collection(db, "customerInvoices")),
       ]);
       const financial = buildExecutiveFinanceOverview(
         statementsSnap.docs.map((d) => d.data() as CostStatement),
         shipmentsSnap.docs.map((d) => d.data() as Shipment),
+        invoicesSnap.docs.map((d) => d.data() as CustomerInvoice),
         new Date().toISOString()
       );
       res.json({ financial });

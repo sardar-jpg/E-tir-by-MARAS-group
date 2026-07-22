@@ -4,7 +4,7 @@ import { join } from "path";
 import {
   deriveExpenseSummary,
   deriveCustomerSummary,
-  computeGrossProfit,
+  computeShipmentProfit,
 } from "../../lib/costStatementMath";
 
 /**
@@ -120,7 +120,10 @@ describe("6. derived totals come from the pure math library (server-consistent)"
     expect(workspaceSrc).toContain("deriveExpenseSummary");
     expect(workspaceSrc).toContain("deriveCustomerSummary");
     expect(workspaceSrc).toContain("resolveCustomerReceivedAmount");
-    expect(workspaceSrc).toContain("computeGrossProfit");
+    // Accounting Phase 1: profit comes from computeShipmentProfit (issued
+    // invoice − approved cost), never from the driver agreedAmount.
+    expect(workspaceSrc).toContain("computeShipmentProfit");
+    expect(workspaceSrc).not.toContain("computeGrossProfit");
   });
   it("deriveExpenseSummary computes remaining/credit/status without a manual field", () => {
     const s = deriveExpenseSummary(1000, 400);
@@ -132,20 +135,27 @@ describe("6. derived totals come from the pure math library (server-consistent)"
     const over = deriveExpenseSummary(1000, 1200);
     expect(over.expenseCredit).toBe(200);
   });
-  it("deriveCustomerSummary computes receivable/credit from agreed vs received", () => {
+  it("deriveCustomerSummary computes receivable/credit from the customer invoice total vs received", () => {
     const c = deriveCustomerSummary(1000, 250);
     expect(c.customerReceivable).toBe(750);
     expect(c.customerReceivedAmount).toBe(250);
   });
 });
 
-describe("7. multi-currency figures are never aggregated", () => {
-  it("gross profit is null (shown as —) when agreed and statement currencies differ", () => {
-    expect(computeGrossProfit(1000, "USD", 600, "EUR")).toBeNull();
-    expect(computeGrossProfit(1000, "USD", 600, "USD")).toBe(400);
+describe("7. profit = issued invoice − approved cost; never aggregates currencies", () => {
+  it("profit is available only when invoice + approval + matching currency are all present", () => {
+    expect(computeShipmentProfit({ issuedInvoiceTotal: 1000, invoiceCurrency: "USD", costsApproved: true, approvedCostTotal: 600, costCurrency: "USD" }))
+      .toEqual({ status: "available", profit: 400, currency: "USD" });
+    // Different currencies never aggregate.
+    expect(computeShipmentProfit({ issuedInvoiceTotal: 1000, invoiceCurrency: "USD", costsApproved: true, approvedCostTotal: 600, costCurrency: "EUR" }).profit).toBeNull();
+    // No invoice / not approved → pending, not a number.
+    expect(computeShipmentProfit({ issuedInvoiceTotal: null, invoiceCurrency: "USD", costsApproved: true, approvedCostTotal: 600, costCurrency: "USD" }).status).toBe("pending_no_invoice");
+    expect(computeShipmentProfit({ issuedInvoiceTotal: 1000, invoiceCurrency: "USD", costsApproved: false, approvedCostTotal: 600, costCurrency: "USD" }).status).toBe("pending_not_approved");
   });
-  it("the workspace renders an em-dash + non-aggregation note when profit is null", () => {
-    expect(workspaceSrc).toContain("grossProfit === null");
+  it("the workspace shows a profit-pending state and a currency-mismatch note (no agreedAmount profit)", () => {
+    expect(workspaceSrc).toContain('profit.status === "available"');
+    expect(workspaceSrc).toContain("profitPendingInvoice");
+    expect(workspaceSrc).toContain("profitPendingApproval");
     expect(workspaceSrc).toContain("not aggregated");
   });
 });

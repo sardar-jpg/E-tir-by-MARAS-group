@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildInsights, countByPriority } from "./accountingInsights";
 import type { ReceivableRow, PayableRow } from "./receivablesPayables";
 import { EMPTY_AGING } from "./receivablesPayables";
-import type { CostStatement } from "../types";
+import type { CostStatement, CustomerInvoice } from "../types";
 
 const rec = (o: Partial<ReceivableRow>): ReceivableRow => ({
   customer: "ABC", currency: "USD", totalInvoiced: 1000, totalReceived: 0, outstanding: 1000,
@@ -15,8 +15,16 @@ const pay = (o: Partial<PayableRow>): PayableRow => ({
 const cs = (o: Partial<CostStatement>): CostStatement => ({
   shipmentId: "s", shipmentNumber: "MAR-2026-001", companyName: "ABC", date: "2026-06-01",
   currency: "USD", totalCost: 500, paidAmount: 0, paymentStatus: "Unpaid", items: [{ id: "1", costType: "X", description: "", quantity: 1, unitPrice: 500, totalAmount: 500, currency: "USD", supplierName: "V" }],
-  agreedAmount: 1000, agreedCurrency: "USD", createdAt: "2026-06-01", ...o,
+  // agreedAmount is deliberately present in fixtures to prove insights IGNORE it.
+  agreedAmount: 1000, agreedCurrency: "USD", accountingStatus: "final_closed", createdAt: "2026-06-01", ...o,
 } as CostStatement);
+
+// Issued customer invoice fixture (Accounting Phase 1 — the profit revenue source).
+const inv = (o: Partial<CustomerInvoice>): CustomerInvoice => ({
+  id: "inv", invoiceNumber: "MAR-2026-001", shipmentId: "s", shipmentNumber: "MAR-2026-001",
+  companyName: "ABC", currency: "USD", pricingMode: "manual", costBasis: 0,
+  sellingAmount: 1000, status: "issued", createdAt: "2026-06-10", ...o,
+} as CustomerInvoice);
 
 describe("buildInsights", () => {
   it("produces an executive summary per currency and never mixes currencies", () => {
@@ -36,20 +44,48 @@ describe("buildInsights", () => {
     expect(alert.link?.tab).toBe("acct_customer_statements");
   });
 
-  it("flags negative-profit orders as critical and missing costs as medium", () => {
+  it("flags negative-profit (issued invoice − approved cost) as critical and invoiced-without-costs as medium", () => {
     const ins = buildInsights({
       receivables: [], payables: [],
       costStatements: [
-        cs({ shipmentNumber: "MAR-2026-010", totalCost: 1500, agreedAmount: 1000 }),          // negative
-        cs({ shipmentNumber: "MAR-2026-011", items: [], totalCost: 0, agreedAmount: 900 }),    // missing costs
+        cs({ shipmentNumber: "MAR-2026-010", totalCost: 1500, agreedAmount: 9999 }),        // approved, cost 1500
+        cs({ shipmentNumber: "MAR-2026-011", items: [], totalCost: 0, agreedAmount: 9999 }), // approved, no costs
+      ],
+      customerInvoices: [
+        inv({ shipmentNumber: "MAR-2026-010", sellingAmount: 1000 }),  // 1000 − 1500 = -500 negative
+        inv({ shipmentNumber: "MAR-2026-011", sellingAmount: 800 }),   // invoiced but no costs
       ],
     });
     const neg = ins.find((i) => i.category === "Negative Profit")!;
     expect(neg.priority).toBe("critical");
     expect(neg.link?.ref).toBe("MAR-2026-010");
+    expect(neg.impact).toEqual({ amount: -500, currency: "USD" }); // agreedAmount (9999) is ignored
     const miss = ins.find((i) => i.category === "Missing Cost")!;
     expect(miss.priority).toBe("medium");
     expect(miss.link?.ref).toBe("MAR-2026-011");
+  });
+
+  it("does NOT flag negative/low profit when there is no issued invoice (profit is pending)", () => {
+    const ins = buildInsights({
+      receivables: [], payables: [],
+      // High cost, big agreedAmount — but no issued invoice, so profit is pending.
+      costStatements: [cs({ shipmentNumber: "MAR-2026-020", totalCost: 5000, agreedAmount: 100 })],
+      customerInvoices: [],
+    });
+    expect(ins.find((i) => i.category === "Negative Profit")).toBeUndefined();
+    expect(ins.find((i) => i.category === "Low Profit")).toBeUndefined();
+    expect(ins.find((i) => i.category === "Missing Cost")).toBeUndefined();
+  });
+
+  it("ignores agreedAmount entirely — profit comes only from the issued invoice and approved cost", () => {
+    const ins = buildInsights({
+      receivables: [], payables: [],
+      costStatements: [cs({ shipmentNumber: "MAR-2026-030", totalCost: 700, agreedAmount: 50 })],
+      customerInvoices: [inv({ shipmentNumber: "MAR-2026-030", sellingAmount: 1000 })], // 1000 − 700 = +300, healthy
+    });
+    // agreedAmount 50 would have implied a huge loss under the old logic; new logic sees a healthy margin → no alert.
+    expect(ins.find((i) => i.category === "Negative Profit")).toBeUndefined();
+    expect(ins.find((i) => i.category === "Low Profit")).toBeUndefined();
   });
 
   it("raises a vendor due-soon action and sorts critical before info", () => {

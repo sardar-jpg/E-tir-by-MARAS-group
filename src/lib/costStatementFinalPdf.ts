@@ -123,12 +123,12 @@ export async function renderFinalCostStatementPdf(model: FinalPdfModel): Promise
     ["Total Cost", `${money(model.totalCost)} ${model.currency}`],
     ["Expense Paid", `${money(model.paidAmount)} ${model.currency}`],
     ["Expense Remaining", `${money(model.expenseRemaining)} ${model.currency}`],
-    ["Customer Agreed", model.agreedAmount === null ? "—" : `${money(model.agreedAmount)} ${model.agreedCurrency || ""}`],
-    ["Customer Received", `${money(model.customerReceived)} ${model.agreedCurrency || ""}`],
-    ["Customer Receivable", `${money(model.customerReceivable)} ${model.agreedCurrency || ""}`],
+    ["Driver Agreed Amount (Reference Only)", model.agreedAmount === null ? "—" : `${money(model.agreedAmount)} ${model.agreedCurrency || ""}`],
+    ["Customer Received", `${money(model.customerReceived)} ${model.invoiceCurrency || ""}`],
+    ["Customer Receivable", `${money(model.customerReceivable)} ${model.invoiceCurrency || ""}`],
   ];
-  if (model.customerCredit > 0) totals.push(["Customer Credit", `${money(model.customerCredit)} ${model.agreedCurrency || ""}`]);
-  totals.push(["Gross Profit", model.grossProfit === null ? "N/A" : `${money(model.grossProfit)} ${model.currency}`]);
+  if (model.customerCredit > 0) totals.push(["Customer Credit", `${money(model.customerCredit)} ${model.invoiceCurrency || ""}`]);
+  totals.push(["Gross Profit", model.grossProfit === null ? (model.grossProfitNote || "Pending") : `${money(model.grossProfit)} ${model.invoiceCurrency || model.currency}`]);
   doc.setFontSize(9);
   for (const [label, val] of totals) {
     doc.setFont(FONT, "bold");
