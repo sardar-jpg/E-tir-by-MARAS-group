@@ -27,6 +27,7 @@ export interface AccountingPage {
 
 export const ACCOUNTING_PAGES: AccountingPage[] = [
   { id: "acct_dashboard", icon: "LayoutDashboard", live: true, label: { en: "Accounting Dashboard", tr: "Muhasebe Panosu", ar: "لوحة المحاسبة" } },
+  { id: "acct_action_center", icon: "BellRing", live: true, label: { en: "Action Center", tr: "Eylem Merkezi", ar: "مركز الإجراءات" } },
   { id: "costs", icon: "FileBarChart", live: true, label: { en: "Cost Statements", tr: "Maliyet Tabloları", ar: "بيانات التكلفة" } },
   { id: "acct_customer_statements", icon: "Users", live: true, label: { en: "Customer Statements", tr: "Müşteri Ekstreleri", ar: "كشوف العملاء" } },
   { id: "acct_vendor_statements", icon: "Building2", live: true, label: { en: "Vendor Statements", tr: "Tedarikçi Ekstreleri", ar: "كشوف الموردين" } },

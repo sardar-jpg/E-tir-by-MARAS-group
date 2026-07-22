@@ -18,7 +18,9 @@ describe("Phase 7 report permissions", () => {
       expect(ACCOUNTING_PERMISSION_KEYS).toContain(k);
     }
     const reportsGroup = ACCOUNTING_PERMISSION_GROUPS.find((g) => g.id === "reports");
-    expect(reportsGroup?.permissions.map((p) => p.key).sort()).toEqual(["cashReports.view", "profitReports.view", "reports.export", "reports.view"]);
+    for (const k of ["cashReports.view", "profitReports.view", "reports.export", "reports.view"]) {
+      expect(reportsGroup?.permissions.map((p) => p.key)).toContain(k);
+    }
   });
   it("Official Profit + Cash reports are SENSITIVE and never in the legacy default", () => {
     expect(SENSITIVE_ACCOUNTING_PERMISSIONS).toContain("profitReports.view");

@@ -58,6 +58,7 @@ import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
 import CostStatementWorkspace from "./admin/CostStatementWorkspace";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import AccountingDashboard from "./admin/accounting/AccountingDashboard";
+import AccountingActionCenter from "./admin/accounting/AccountingActionCenter";
 import CustomerStatementsPage from "./admin/accounting/CustomerStatementsPage";
 import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
 import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
@@ -559,7 +560,7 @@ export default function AdminPanel({
       setIsMarasAiSending(false);
     }
   };
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'shipments' | 'drivers' | 'reports' | 'audit' | 'gmail' | 'tracking_map' | 'clients' | 'vendors' | 'costs' | 'team' | 'my_account' | 'chat_center' | 'settings' | 'acct_dashboard' | 'acct_action_center' | 'acct_customer_statements' | 'acct_vendor_statements' | 'acct_invoices' | 'acct_payments' | 'acct_receivables' | 'acct_reports' | 'acct_ai'>(
     isAccountsAdminType ? 'costs' : 'dashboard'
   );
   // Accounting cross-page navigation: Receivables/Payables + AI Assistant link
@@ -4040,7 +4041,7 @@ MARAS Group etir Center`;
   // Resolves the accountingNav registry's lucide icon NAMES to components for
   // the admin nav (the registry itself stays pure/React-free).
   const ACCT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-    LayoutDashboard, FileBarChart, Users, Building2, FileText, CreditCard, Scale, PieChart, Sparkles,
+    LayoutDashboard, FileBarChart, Users, Building2, FileText, CreditCard, Scale, PieChart, Sparkles, BellRing,
   };
 
   // Admin navigation tabs, filtered by admin role/type — shared by the
@@ -6801,6 +6802,9 @@ MARAS Group etir Center`;
           placeholder that keeps the full information architecture visible. */}
       {activeTab === 'acct_dashboard' && canViewCostStatements(resolvedAdminType) && (
         <AccountingDashboard lang={lang} clients={clients} costStatements={costStatements} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
+      )}
+      {activeTab === 'acct_action_center' && canViewCostStatements(resolvedAdminType) && (
+        <AccountingActionCenter lang={lang} onNavigate={(id) => setActiveTab(id as typeof activeTab)} />
       )}
       {activeTab === 'acct_customer_statements' && canViewCostStatements(resolvedAdminType) && (
         <CustomerStatementsPage lang={lang} clients={clients} initialEntity={acctFocusRef} />

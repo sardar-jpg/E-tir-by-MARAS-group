@@ -51,6 +51,11 @@ export const AUDIT_ACTIONS = {
 
   reportExported: "report.exported",
 
+  notificationRead: "accounting.notification_read",
+  notificationAcknowledged: "accounting.notification_acknowledged",
+  notificationDismissed: "accounting.notification_dismissed",
+  notificationSettingsUpdated: "accounting.notification_settings_updated",
+
   bankAccountCreated: "bank_account.created",
   bankAccountUpdated: "bank_account.updated",
   bankAccountDeactivated: "bank_account.deactivated",

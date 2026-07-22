@@ -151,6 +151,7 @@ import {
 } from "./src/lib/accountingPdfModel";
 import { renderAccountingPdf } from "./src/lib/accountingPdfRender";
 import * as ReportExport from "./src/lib/accountingReportExportModel";
+import * as AcctNotify from "./src/lib/accountingNotificationRules";
 import {
   validateTemplateConfig, defaultTemplateConfig, TEMPLATE_DOC_TYPES, type TemplateDocType, type TemplateConfig,
 } from "./src/lib/accountingTemplateConfig";
@@ -2210,6 +2211,8 @@ import {
   CustomerPayment,
   PaymentAllocation,
   PaymentReceipt,
+  AccountingNotification,
+  AccountingNotificationSettings,
   Language
 } from "./src/types";
 import {
@@ -13419,9 +13422,197 @@ async function startServer() {
     if (!req.session || req.session.role !== "admin") return res.status(403).json({ error: "Admin session required." });
     try {
       const perms = (req as any)._effectiveAccountingPerms ?? (await loadEffectivePermissionsForSession(req.session));
-      const relevant = ["reports.view", "reports.export", "profitReports.view", "cashReports.view"] as const;
+      const relevant = ["reports.view", "reports.export", "profitReports.view", "cashReports.view", "accounting.notifications.view", "accounting.notifications.configure", "customerPayments.view", "vendorPayments.view", "accounting.financialClose", "accountingAudit.view"] as const;
       res.json({ permissions: relevant.filter((k) => perms.has(k)) });
     } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load permissions." }); }
+  });
+
+  // ── Accounting Phase 9 — Notifications & Action Center (READ-ONLY) ──
+  // Notifications are derived from the authoritative Phase 1–8 state by the
+  // pure evaluator, reconciled into the accountingNotifications collection
+  // (dedup + auto-resolve), and read back per-recipient/permission. State
+  // routes mutate ONLY the notification (read/ack/dismiss) — never any
+  // accounting record. No external delivery (in-app only).
+  let acctNotifSeq = 0;
+  const nextAcctNotifId = (): string => `acn-${Date.now()}-${(acctNotifSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  async function loadAllAcctNotifications(): Promise<AccountingNotification[]> {
+    const snap = await getDocs(collection(db, "accountingNotifications"));
+    return snap.docs.map((d) => d.data() as AccountingNotification);
+  }
+  async function loadAcctNotificationSettings(): Promise<AccountingNotificationSettings> {
+    const s = await getDoc(doc(db, "accountingNotificationSettings", "default"));
+    return AcctNotify.resolveNotificationSettings(s.exists() ? (s.data() as Partial<AccountingNotificationSettings>) : null);
+  }
+  // Derive + reconcile the accounting notifications from live state. Idempotent:
+  // running it repeatedly keeps ONE active notification per condition and
+  // resolves conditions that have gone away. Reused by the evaluate route.
+  async function reconcileAcctNotifications(): Promise<void> {
+    const ds = await loadReportingDataset();
+    const settings = await loadAcctNotificationSettings();
+    const activeUserIds = await loadActiveAdminIds();
+    const desired = AcctNotify.evaluateAccountingNotifications({
+      asOfDate: new Date().toISOString().slice(0, 10),
+      statements: ds.statements, invoices: ds.invoices, customerPayments: ds.customerPayments, vendorPayments: ds.vendorPayments,
+      activeUserIds, settings,
+    });
+    const existing = await loadAllAcctNotifications();
+    const { toCreate, toUpdate, toResolve } = AcctNotify.reconcileNotifications(existing, desired);
+    const nowIso = new Date().toISOString();
+    for (const d of toCreate) {
+      const rec: AccountingNotification = {
+        id: nextAcctNotifId(), type: d.type, category: d.category, priority: d.priority,
+        recipientUserId: d.recipientUserId, permissionScope: d.permissionScope, shipmentId: d.shipmentId, orderRef: d.orderRef,
+        invoiceId: d.invoiceId, costLineId: d.costLineId, params: d.params, actionTab: d.actionTab,
+        status: "unread", deduplicationKey: d.deduplicationKey, sourceVersion: d.sourceVersion, createdAt: nowIso, readByUserIds: [],
+      };
+      await setDoc(doc(db, "accountingNotifications", rec.id), cleanUndefined(rec));
+    }
+    for (const { existing: ex, desired: d } of toUpdate) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, priority: d.priority, params: d.params, sourceVersion: d.sourceVersion, updatedAt: nowIso }));
+    }
+    for (const ex of toResolve) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, status: "resolved", resolvedAt: nowIso }));
+    }
+  }
+  // A notification is visible to the caller if they are its recipient OR hold
+  // its scope permission — the notification.view permission NEVER bypasses the
+  // underlying scope permission.
+  const acctNotifVisibleTo = (n: AccountingNotification, session: any, perms: Set<AccountingPermission>): boolean =>
+    AcctNotify.isNotificationVisible(n, session?.id || "", (k) => perms.has(k as AccountingPermission));
+
+  // Manual/internal evaluator (protected). Refreshes the derived notifications.
+  app.post("/api/accounting/notifications/evaluate", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      await reconcileAcctNotifications();
+      res.json({ ok: true });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to evaluate accounting notifications." }); }
+  });
+
+  // List the caller's visible notifications with filters + backend pagination.
+  app.get("/api/accounting/notifications", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+      const all = (await loadAllAcctNotifications()).filter((n) => acctNotifVisibleTo(n, req.session, perms));
+      const statusFilter = reportStr(req.query.status) || "active";
+      const category = reportStr(req.query.category), priority = reportStr(req.query.priority), orderRef = reportStr(req.query.orderRef), customer = reportStr(req.query.customer), vendor = reportStr(req.query.vendor);
+      const allowedStatus = ["active", "unread", "read", "acknowledged", "dismissed", "resolved", "all"];
+      if (!allowedStatus.includes(statusFilter)) return res.status(400).json({ code: "invalid_status", error: "Unsupported status filter." });
+      const me = req.session?.id || "";
+      let rows = all.filter((n) => {
+        if (statusFilter === "all") return true;
+        if (statusFilter === "active") return n.status !== "resolved" && n.status !== "dismissed";
+        if (statusFilter === "unread") return n.status === "unread" && !(n.readByUserIds || []).includes(me);
+        return n.status === statusFilter;
+      });
+      if (category) rows = rows.filter((n) => n.category === category);
+      if (priority) rows = rows.filter((n) => n.priority === priority);
+      if (orderRef) rows = rows.filter((n) => (n.orderRef || "") === orderRef);
+      if (customer) rows = rows.filter((n) => (n.params.customerName || "").toLowerCase().includes(customer.toLowerCase()));
+      if (vendor) rows = rows.filter((n) => (n.params.vendorName || "").toLowerCase().includes(vendor.toLowerCase()));
+      if (range.from || range.to) rows = rows.filter((n) => Reports.withinRange((n.createdAt || "").slice(0, 10), range.from, range.to));
+      rows.sort((a, b) => (AcctNotify.PRIORITY_RANK[a.priority] - AcctNotify.PRIORITY_RANK[b.priority]) || (b.createdAt || "").localeCompare(a.createdAt || ""));
+      const { page, pageSize } = Reports.normalizePaging(req.query.page, req.query.pageSize);
+      const paged = Reports.paginate(rows.map((n) => ({ ...n, read: (n.readByUserIds || []).includes(me) })), page, pageSize);
+      res.json(paged);
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load accounting notifications." }); }
+  });
+
+  // Counts for the dashboard cards + global badge (visible-to-caller only).
+  app.get("/api/accounting/notifications/summary", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+      const me = req.session?.id || "";
+      const active = (await loadAllAcctNotifications()).filter((n) => acctNotifVisibleTo(n, req.session, perms) && n.status !== "resolved" && n.status !== "dismissed");
+      const byCategory: Record<string, number> = {};
+      for (const n of active) byCategory[n.category] = (byCategory[n.category] || 0) + 1;
+      res.json({
+        unread: active.filter((n) => !(n.readByUserIds || []).includes(me)).length,
+        high: active.filter((n) => n.priority === "high").length,
+        critical: active.filter((n) => n.priority === "critical").length,
+        total: active.length,
+        byCategory,
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load notification summary." }); }
+  });
+
+  // Load + authorize a single notification for a state change (mutates the
+  // notification ONLY). 404 for unknown OR not-visible (no id enumeration).
+  async function loadVisibleNotifOr404(req: express.Request, res: express.Response): Promise<AccountingNotification | null> {
+    const snap = await getDoc(doc(db, "accountingNotifications", req.params.id));
+    const perms = (req as any)._effectiveAccountingPerms as Set<AccountingPermission>;
+    if (!snap.exists()) { res.status(404).json({ error: "Notification not found." }); return null; }
+    const n = snap.data() as AccountingNotification;
+    if (!acctNotifVisibleTo(n, req.session, perms)) { res.status(404).json({ error: "Notification not found." }); return null; }
+    return n;
+  }
+
+  app.post("/api/accounting/notifications/:id/read", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      const me = req.session?.id || "";
+      const readers = [...new Set([...(n.readByUserIds || []), me])];
+      const next: AccountingNotification = { ...n, readByUserIds: readers, status: n.status === "unread" ? "read" : n.status, updatedAt: new Date().toISOString() };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationRead, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: next.status } });
+      res.json({ notification: { ...next, read: true } });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to mark read." }); }
+  });
+
+  app.post("/api/accounting/notifications/:id/acknowledge", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      if (n.status === "resolved") return res.status(409).json({ code: "already_resolved", error: "A resolved notification cannot be acknowledged." });
+      const me = req.session?.id || "";
+      const next: AccountingNotification = { ...n, status: "acknowledged", acknowledgedAt: new Date().toISOString(), acknowledgedBy: me, readByUserIds: [...new Set([...(n.readByUserIds || []), me])] };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationAcknowledged, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: "acknowledged" } });
+      res.json({ notification: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to acknowledge." }); }
+  });
+
+  app.post("/api/accounting/notifications/:id/dismiss", requirePermission("accounting.notifications.view"), async (req, res) => {
+    try {
+      const n = await loadVisibleNotifOr404(req, res); if (!n) return;
+      if (!AcctNotify.isDismissable(n.type)) return res.status(409).json({ code: "not_dismissable", error: "Action-required approval notifications cannot be dismissed." });
+      if (n.status === "resolved") return res.status(409).json({ code: "already_resolved", error: "A resolved notification cannot be dismissed." });
+      const me = req.session?.id || "";
+      const next: AccountingNotification = { ...n, status: "dismissed", dismissedAt: new Date().toISOString(), dismissedBy: me };
+      await setDoc(doc(db, "accountingNotifications", n.id), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationDismissed, entityType: "accounting_notification", entityId: n.id, result: "success", metadata: { type: n.type, orderRef: n.orderRef, oldStatus: n.status, newStatus: "dismissed" } });
+      res.json({ notification: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to dismiss." }); }
+  });
+
+  // Notification settings (view for GET; configure for PUT). External delivery
+  // stays permanently disabled; approval-type reminders are always enabled.
+  app.get("/api/accounting/notifications/settings", requirePermission("accounting.notifications.view"), async (_req, res) => {
+    try { res.json({ settings: await loadAcctNotificationSettings() }); }
+    catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to load settings." }); }
+  });
+  app.put("/api/accounting/notifications/settings", requirePermission("accounting.notifications.configure"), async (req, res) => {
+    try {
+      const body = (req.body || {}) as Partial<AccountingNotificationSettings>;
+      const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
+      const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
+      const cur = await loadAcctNotificationSettings();
+      const next: AccountingNotificationSettings = {
+        overdueRemindersEnabled: bool(body.overdueRemindersEnabled, cur.overdueRemindersEnabled),
+        customerBalanceRemindersEnabled: bool(body.customerBalanceRemindersEnabled, cur.customerBalanceRemindersEnabled),
+        vendorBalanceRemindersEnabled: bool(body.vendorBalanceRemindersEnabled, cur.vendorBalanceRemindersEnabled),
+        financialCloseReadinessEnabled: bool(body.financialCloseReadinessEnabled, cur.financialCloseReadinessEnabled),
+        financialCloseBlockersEnabled: bool(body.financialCloseBlockersEnabled, cur.financialCloseBlockersEnabled),
+        integrityWarningsEnabled: bool(body.integrityWarningsEnabled, cur.integrityWarningsEnabled),
+        severeOverdueThresholdDays: num(body.severeOverdueThresholdDays, cur.severeOverdueThresholdDays),
+        reminderRepeatIntervalDays: num(body.reminderRepeatIntervalDays, cur.reminderRepeatIntervalDays),
+        externalDeliveryEnabled: false,
+        updatedAt: new Date().toISOString(), updatedBy: req.session?.id,
+      };
+      await setDoc(doc(db, "accountingNotificationSettings", "default"), cleanUndefined(next));
+      await recordAudit(req, { action: AUDIT_ACTIONS.notificationSettingsUpdated, entityType: "accounting_notification_settings", entityId: "default", result: "success", metadata: { severeOverdueThresholdDays: next.severeOverdueThresholdDays, reminderRepeatIntervalDays: next.reminderRepeatIntervalDays } });
+      res.json({ settings: next });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to update settings." }); }
   });
 
   // ── Accounting Phase 8 — Professional report exports (PDF + CSV) ──

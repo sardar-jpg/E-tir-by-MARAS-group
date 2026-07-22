@@ -461,6 +461,101 @@ export interface AppNotification {
 // internal notes, costs, or file URLs).
 export const AI_ALERT_NOTIFICATION_TYPE = 'ai_alert' as const;
 
+// ── Accounting Phase 9 — Accounting Notifications & Action Center ──────────
+/** The canonical accounting notification types (informational + navigational only). */
+export type AccountingNotificationType =
+  | 'cost_statement_approval_required'
+  | 'cost_statement_approval_rejected'
+  | 'cost_statement_fully_approved'
+  | 'cost_statement_reopen_approval_required'
+  | 'cost_statement_reopen_rejected'
+  | 'financial_reopen_approval_required'
+  | 'financial_reopen_rejected'
+  | 'financial_reopen_completed'
+  | 'customer_invoice_overdue'
+  | 'customer_balance_outstanding'
+  | 'vendor_balance_outstanding'
+  | 'order_ready_for_financial_close'
+  | 'order_blocked_from_financial_close'
+  | 'financial_close_completed'
+  | 'accounting_integrity_warning';
+
+export type AccountingNotificationPriority = 'info' | 'normal' | 'high' | 'critical';
+export type AccountingNotificationCategory =
+  | 'my_approvals' | 'customer_collections' | 'vendor_payments' | 'financial_closing' | 'warnings' | 'completed';
+export type AccountingNotificationStatus = 'unread' | 'read' | 'acknowledged' | 'dismissed' | 'resolved';
+
+/**
+ * Safe, minimal display/navigation params — NEVER a copy of a financial
+ * record. Amounts are single-currency (no FX, no mixed totals). The UI
+ * localizes the title/message from `type` + these params.
+ */
+export interface AccountingNotificationParams {
+  orderRef?: string;
+  customerName?: string;
+  vendorName?: string;
+  invoiceNumber?: string;
+  description?: string;
+  amount?: number;
+  currency?: Currency;
+  dueDate?: string;
+  daysOverdue?: number;
+  agingBucket?: string;
+  reason?: string;
+  submittedBy?: string;
+  requestedBy?: string;
+  approvalStep?: number;
+  blockers?: string[];
+  warningCode?: string;
+}
+
+export interface AccountingNotification {
+  id: string;
+  type: AccountingNotificationType;
+  category: AccountingNotificationCategory;
+  priority: AccountingNotificationPriority;
+  /** Recipient scoping: a specific user id and/or a shared accounting permission key. */
+  recipientUserId?: string;
+  permissionScope?: string;
+  shipmentId?: string;
+  orderRef?: string;
+  invoiceId?: string;
+  costLineId?: string;
+  params: AccountingNotificationParams;
+  /** Where the card links to inside the app (existing routes only). */
+  actionTab?: string;
+  status: AccountingNotificationStatus;
+  /** Deterministic key preventing duplicates for the same condition. */
+  deduplicationKey: string;
+  /** Bumped when the underlying condition's metadata changes (aging etc.). */
+  sourceVersion?: string;
+  createdAt: string;
+  updatedAt?: string;
+  readByUserIds?: string[];
+  acknowledgedAt?: string;
+  acknowledgedBy?: string;
+  dismissedAt?: string;
+  dismissedBy?: string;
+  resolvedAt?: string;
+}
+
+export interface AccountingNotificationSettings {
+  overdueRemindersEnabled: boolean;
+  customerBalanceRemindersEnabled: boolean;
+  vendorBalanceRemindersEnabled: boolean;
+  financialCloseReadinessEnabled: boolean;
+  financialCloseBlockersEnabled: boolean;
+  integrityWarningsEnabled: boolean;
+  /** Days before an overdue invoice becomes CRITICAL. */
+  severeOverdueThresholdDays: number;
+  /** Reminder repeat interval in days (informational; dedup already prevents spam). */
+  reminderRepeatIntervalDays: number;
+  /** External delivery is PERMANENTLY disabled in Phase 9 (in-app only). */
+  externalDeliveryEnabled: false;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
 export interface CostItem {
   id: string;
   costType: string;
