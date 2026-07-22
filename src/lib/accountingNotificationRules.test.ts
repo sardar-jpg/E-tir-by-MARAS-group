@@ -207,6 +207,24 @@ describe("deduplication + resolution", () => {
     expect(r.toUpdate.map((u) => u.existing.id)).toEqual(["keep"]);
     expect(r.toResolve.map((x) => x.id)).toEqual(["gone"]);
   });
+  it("repeat interval resurfaces a READ still-active reminder once the interval elapses (one record, no duplicate)", () => {
+    const NOW = Date.parse("2026-03-20T00:00:00Z");
+    const desired: DesiredNotification[] = [{ type: "vendor_balance_outstanding", category: "vendor_payments", priority: "normal", params: { amount: 350 }, deduplicationKey: "k", sourceVersion: "350" }];
+    // Read 10 days ago, interval 7 → resurfaces (toRemind), never a new create.
+    const stale = existing({ id: "s", status: "read", deduplicationKey: "k", sourceVersion: "350", params: { amount: 350 }, lastRemindedAt: "2026-03-10T00:00:00Z" });
+    const r = reconcileNotifications([stale], desired, { nowMs: NOW, reminderIntervalDays: 7 });
+    expect(r.toRemind.map((x) => x.id)).toEqual(["s"]);
+    expect(r.toCreate).toHaveLength(0);
+    // Read 2 days ago → NOT yet due.
+    const fresh = existing({ id: "f", status: "read", deduplicationKey: "k", sourceVersion: "350", params: { amount: 350 }, lastRemindedAt: "2026-03-18T00:00:00Z" });
+    expect(reconcileNotifications([fresh], desired, { nowMs: NOW, reminderIntervalDays: 7 }).toRemind).toHaveLength(0);
+  });
+  it("a DISMISSED reminder is never resurfaced by the interval (respects the user's dismissal)", () => {
+    const NOW = Date.parse("2026-03-20T00:00:00Z");
+    const desired: DesiredNotification[] = [{ type: "vendor_balance_outstanding", category: "vendor_payments", priority: "normal", params: { amount: 350 }, deduplicationKey: "k", sourceVersion: "350" }];
+    const dismissed = existing({ id: "d", status: "dismissed", deduplicationKey: "k", sourceVersion: "350", params: { amount: 350 }, lastRemindedAt: "2026-01-01T00:00:00Z" });
+    expect(reconcileNotifications([dismissed], desired, { nowMs: NOW, reminderIntervalDays: 7 }).toRemind).toHaveLength(0);
+  });
   it("a dismissed notification is kept (not recreated) while its condition holds, and resolvable when gone", () => {
     const dismissed = existing({ id: "d1", status: "dismissed", deduplicationKey: "vendor_balance_outstanding:S1:c1:partially_paid", sourceVersion: "350", params: { amount: 350 } });
     // Same condition, same version → neither created nor updated (stays dismissed).

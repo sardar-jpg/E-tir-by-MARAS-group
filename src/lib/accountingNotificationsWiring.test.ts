@@ -49,7 +49,7 @@ describe("Phase 9 routes are permissioned and mutate notifications only", () => 
     expect(LOAD).toContain('res.status(404)'); // not-visible → 404 (no id enumeration)
   });
   it("state routes write ONLY the notification doc + an audit event — no accounting mutation", () => {
-    const BLOCK = region("Accounting Phase 9 — Notifications & Action Center", 12000);
+    const BLOCK = region("Accounting Phase 9 — Notifications & Action Center", 15000);
     expect(BLOCK).not.toContain("mutateCostStatementAtomic");
     expect(BLOCK).not.toContain("runAccountingTransaction");
     expect(BLOCK).toContain('setDoc(doc(db, "accountingNotifications"');
@@ -79,7 +79,7 @@ describe("Phase 9 routes are permissioned and mutate notifications only", () => 
     expect(AUDIT_ACTIONS.notificationSettingsUpdated).toBe("accounting.notification_settings_updated");
   });
   it("no external delivery channel is wired (in-app only)", () => {
-    const BLOCK = region("Accounting Phase 9 — Notifications & Action Center", 12000);
+    const BLOCK = region("Accounting Phase 9 — Notifications & Action Center", 15000);
     for (const bad of ["sendEmail", "nodemailer", "twilio", "sendSms", "whatsapp", "fcm.send", "pushNotification"]) {
       expect(BLOCK.toLowerCase()).not.toContain(bad.toLowerCase());
     }

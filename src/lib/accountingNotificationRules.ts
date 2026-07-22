@@ -349,14 +349,27 @@ export interface ReconcileResult {
   toCreate: DesiredNotification[];
   toUpdate: Array<{ existing: AccountingNotification; desired: DesiredNotification }>;
   toResolve: AccountingNotification[];
+  /** Still-active READ reminders whose repeat interval has elapsed → resurface. */
+  toRemind: AccountingNotification[];
 }
+export interface ReconcileOptions {
+  /** Current time in ms (injected for deterministic tests). */
+  nowMs: number;
+  /** Repeat-reminder interval in days (0 disables re-surfacing). */
+  reminderIntervalDays: number;
+}
+const DAY_MS = 86_400_000;
 /**
  * Diff the desired set against the currently NON-resolved stored notifications
  * by deduplication key: unmatched desired → create; matched → update metadata
  * (never revert a dismissed one to unread); stored-but-no-longer-desired →
- * resolve. Deterministic and pure; the server persists the result.
+ * resolve. When `opts` is given, a still-active reminder that the user has READ
+ * (not dismissed/acknowledged) and whose lastRemindedAt is older than the
+ * configured interval is surfaced again in `toRemind` — one record per
+ * condition, never a duplicate, and a user-dismissed reminder is left alone.
+ * Deterministic and pure; the server persists the result.
  */
-export function reconcileNotifications(existingActive: AccountingNotification[], desired: DesiredNotification[]): ReconcileResult {
+export function reconcileNotifications(existingActive: AccountingNotification[], desired: DesiredNotification[], opts?: ReconcileOptions): ReconcileResult {
   const existingByKey = new Map<string, AccountingNotification>();
   for (const n of existingActive) if (n.status !== "resolved") existingByKey.set(n.deduplicationKey, n);
   const desiredByKey = new Map<string, DesiredNotification>();
@@ -364,14 +377,21 @@ export function reconcileNotifications(existingActive: AccountingNotification[],
 
   const toCreate: DesiredNotification[] = [];
   const toUpdate: Array<{ existing: AccountingNotification; desired: DesiredNotification }> = [];
+  const toRemind: AccountingNotification[] = [];
+  const intervalMs = opts && opts.reminderIntervalDays > 0 ? opts.reminderIntervalDays * DAY_MS : 0;
   for (const [key, d] of desiredByKey) {
     const ex = existingByKey.get(key);
-    if (!ex) toCreate.push(d);
-    else if (ex.sourceVersion !== d.sourceVersion || JSON.stringify(ex.params) !== JSON.stringify(d.params) || ex.priority !== d.priority) toUpdate.push({ existing: ex, desired: d });
+    if (!ex) { toCreate.push(d); continue; }
+    if (ex.sourceVersion !== d.sourceVersion || JSON.stringify(ex.params) !== JSON.stringify(d.params) || ex.priority !== d.priority) toUpdate.push({ existing: ex, desired: d });
+    // Repeat reminder: only a READ (seen, not acted-on/dismissed) reminder resurfaces.
+    if (intervalMs > 0 && ex.status === "read") {
+      const last = new Date(ex.lastRemindedAt || ex.createdAt || 0).getTime();
+      if (Number.isFinite(last) && opts!.nowMs - last >= intervalMs) toRemind.push(ex);
+    }
   }
   const toResolve: AccountingNotification[] = [];
   for (const [key, ex] of existingByKey) if (!desiredByKey.has(key)) toResolve.push(ex);
-  return { toCreate, toUpdate, toResolve };
+  return { toCreate, toUpdate, toResolve, toRemind };
 }
 
 // ── Visibility + dismissal rules ────────────────────────────────────────────

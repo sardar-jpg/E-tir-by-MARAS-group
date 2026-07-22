@@ -537,6 +537,8 @@ export interface AccountingNotification {
   dismissedAt?: string;
   dismissedBy?: string;
   resolvedAt?: string;
+  /** Last time this still-active reminder was (re)surfaced — drives the repeat interval. */
+  lastRemindedAt?: string;
 }
 
 export interface AccountingNotificationSettings {

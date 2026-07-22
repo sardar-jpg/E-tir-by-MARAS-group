@@ -11003,6 +11003,7 @@ async function startServer() {
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} submitted for approval`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11111,6 +11112,7 @@ async function startServer() {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement awaiting your approval", `Statement for ${shipmentNumber} is awaiting your approval.`);
           await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} approved at ${completedStage}`, "", "");
         }
+        fireNotifRefresh();
         return res.json(phase1.body);
       }
       if (phase1.httpStatus !== 202 || !finalizeCtx) return res.status(phase1.httpStatus).json(phase1.body);
@@ -11171,6 +11173,7 @@ async function startServer() {
           await notifyAccountingRecipient(id, shipmentNumber, "Cost statement finalized", `Statement for ${shipmentNumber} is now final and closed.`);
         }
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} finalized and closed`, "", "");
+        fireNotifRefresh();
       }
       res.status(phase3.httpStatus).json(phase3.body);
     } catch (err) {
@@ -11226,6 +11229,7 @@ async function startServer() {
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Cost statement returned for correction", `Statement for ${shipmentNumber} was returned for correction.`);
         await logActivity("", "Accounting", req.session!.id, `Cost statement ${shipmentNumber} rejected for correction at ${rejectedStage}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11306,6 +11310,7 @@ async function startServer() {
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await logActivity("", "Accounting", req.session!.id, `Reopening requested for cost statement ${shipmentNumber}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11423,6 +11428,7 @@ async function startServer() {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Reopening awaiting your approval", `A reopening request for ${shipmentNumber} is awaiting your approval.`);
         }
         await logActivity("", "Accounting", req.session!.id, `Reopening ${finalized ? "approved" : rejected ? "rejected" : "advanced"} for cost statement ${shipmentNumber}`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
@@ -11514,6 +11520,7 @@ async function startServer() {
           orderId: shipmentNumber, reason: reason || undefined, afterSnapshot: { financialStatus: "financial_closed" },
         });
         await logActivity("", "Accounting", req.session!.id, `Shipment ${shipmentNumber} financially closed`, "", "");
+        fireNotifRefresh(); // Phase 9.1: refresh derived notifications after a committed close.
       } else if (result.httpStatus === 409) {
         await recordAudit(req, { action: AUDIT_ACTIONS.financialCloseRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "rejected", errorCode: result.body?.code });
       }
@@ -11553,6 +11560,7 @@ async function startServer() {
       if (result.httpStatus === 200) {
         await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval (Approver 1).`);
         await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRequested, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: reason.slice(0, 1000) });
+        fireNotifRefresh();
         await logActivity("", "Accounting", req.session!.id, `Financial Reopen requested for ${shipmentNumber}`, "", "");
       }
       res.status(result.httpStatus).json(result.body);
@@ -11610,9 +11618,11 @@ async function startServer() {
         if (finalized) {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen approved", `The Financial Reopen for ${shipmentNumber} was fully approved. Accounting changes are unlocked.`);
           await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenApproved, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, afterSnapshot: { financialStatus: "financial_reopened" } });
+          fireNotifRefresh();
         } else if (rejected) {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen rejected", `The Financial Reopen for ${shipmentNumber} was rejected. It remains financially closed.`);
           await recordAudit(req, { action: AUDIT_ACTIONS.financialReopenRejected, entityType: "cost_statement", entityId: req.params.shipmentId, result: "success", orderId: shipmentNumber, reason: note || undefined });
+          fireNotifRefresh();
         } else {
           await notifyAccountingRecipient(notifyTarget, shipmentNumber, "Financial Reopen awaiting your approval", `A Financial Reopen request for ${shipmentNumber} is awaiting your approval.`);
         }
@@ -12156,7 +12166,7 @@ async function startServer() {
         });
         return { http: 201, body: { payment: cleanUndefined(payment), summary: summarizeVendorPayable(item, [...existing, payment]) } };
       });
-      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", "");
+      if (result.http === 201) { await logActivity("", "Accounting", req.session!.id, `Vendor payment recorded for ${stmt.shipmentNumber} (${Number(body.amount)} ${item.currency})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12201,7 +12211,7 @@ async function startServer() {
         didReverse = true;
         return { http: 200, body: { payment: cleanUndefined(reversed) } };
       });
-      if (result.http === 200 && didReverse) await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", "");
+      if (result.http === 200 && didReverse) { await logActivity("", "Accounting", actor, `Vendor payment reversed (${req.params.paymentId})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12516,6 +12526,7 @@ async function startServer() {
       });
       if (result.http === 200 && !(result.body as any).idempotent) {
         await logActivity("", "Accounting", req.session!.id, `Invoice ${issued.invoiceNumber} issued (${issued.sellingAmount} ${issued.currency})`, "", "");
+        fireNotifRefresh();
       }
       res.status(result.http).json(result.body);
     } catch (err) {
@@ -12565,7 +12576,7 @@ async function startServer() {
       if (result.http === 409) {
         await recordAudit(req, { action: AUDIT_ACTIONS.invoiceIssueRejected, entityType: "customer_invoice", entityId: invoice.id, result: "rejected", invoiceId: invoice.id, errorCode: "invoice_has_allocations" });
       }
-      if (result.http === 200) await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", "");
+      if (result.http === 200) { await logActivity("", "Accounting", req.session!.id, `Invoice ${invoice.invoiceNumber} cancelled`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12732,7 +12743,7 @@ async function startServer() {
         });
         return { http: 201, body: { payment: cleanUndefined(payment) } };
       });
-      if (result.http === 201) await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", "");
+      if (result.http === 201) { await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for ${company} (${amount} ${currency})`, "", ""); fireNotifRefresh(); }
       res.status(result.http).json(result.body);
     } catch (err) {
       if (respondIfServiceUnavailable(err, res)) return;
@@ -12897,6 +12908,7 @@ async function startServer() {
         }
       }
       await logActivity("", "Accounting", actor, `Customer payment reversed (${paymentId})`, "", "");
+      fireNotifRefresh();
     }
     return result;
   }
@@ -13005,6 +13017,7 @@ async function startServer() {
       });
       if (result.http === 201) {
         await logActivity("", "Accounting", req.session!.id, `Customer payment recorded for invoice ${invoice.invoiceNumber} (${amount} ${invoice.currency})`, "", "");
+        fireNotifRefresh();
         // Fresh summary/history for the response (post-commit read).
         const after = await loadCustomerPaymentsAll();
         const invAfter = await getDoc(doc(db, "customerInvoices", invoice.id));
@@ -13456,24 +13469,43 @@ async function startServer() {
       activeUserIds, settings,
     });
     const existing = await loadAllAcctNotifications();
-    const { toCreate, toUpdate, toResolve } = AcctNotify.reconcileNotifications(existing, desired);
-    const nowIso = new Date().toISOString();
+    const now = Date.now();
+    const { toCreate, toUpdate, toResolve, toRemind } = AcctNotify.reconcileNotifications(existing, desired, { nowMs: now, reminderIntervalDays: settings.reminderRepeatIntervalDays });
+    const nowIso = new Date(now).toISOString();
     for (const d of toCreate) {
       const rec: AccountingNotification = {
         id: nextAcctNotifId(), type: d.type, category: d.category, priority: d.priority,
         recipientUserId: d.recipientUserId, permissionScope: d.permissionScope, shipmentId: d.shipmentId, orderRef: d.orderRef,
         invoiceId: d.invoiceId, costLineId: d.costLineId, params: d.params, actionTab: d.actionTab,
-        status: "unread", deduplicationKey: d.deduplicationKey, sourceVersion: d.sourceVersion, createdAt: nowIso, readByUserIds: [],
+        status: "unread", deduplicationKey: d.deduplicationKey, sourceVersion: d.sourceVersion, createdAt: nowIso, lastRemindedAt: nowIso, readByUserIds: [],
       };
       await setDoc(doc(db, "accountingNotifications", rec.id), cleanUndefined(rec));
+      // Lifecycle audit (metadata only — never the underlying financial record).
+      await recordAudit(anonymousSystemReq(), { action: AUDIT_ACTIONS.notificationCreated, entityType: "accounting_notification", entityId: rec.id, result: "success", metadata: { type: rec.type, orderRef: rec.orderRef, priority: rec.priority, newStatus: "unread", trigger: "evaluate" } });
     }
     for (const { existing: ex, desired: d } of toUpdate) {
       await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, priority: d.priority, params: d.params, sourceVersion: d.sourceVersion, updatedAt: nowIso }));
     }
+    // Repeat reminder: resurface a READ, still-active reminder once the interval
+    // elapsed (one record — no duplicate; dismissed reminders are left alone).
+    for (const ex of toRemind) {
+      await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, status: "unread", readByUserIds: [], lastRemindedAt: nowIso, updatedAt: nowIso }));
+    }
     for (const ex of toResolve) {
       await setDoc(doc(db, "accountingNotifications", ex.id), cleanUndefined({ ...ex, status: "resolved", resolvedAt: nowIso }));
+      await recordAudit(anonymousSystemReq(), { action: AUDIT_ACTIONS.notificationResolved, entityType: "accounting_notification", entityId: ex.id, result: "success", metadata: { type: ex.type, orderRef: ex.orderRef, oldStatus: ex.status, newStatus: "resolved", trigger: "evaluate" } });
     }
   }
+  // A minimal request-like object so the shared recordAudit can log system-derived
+  // notification lifecycle events (created/resolved) that have no interactive actor.
+  const anonymousSystemReq = (): express.Request => ({ session: { id: "system", role: "admin", adminType: "system" }, headers: {} } as unknown as express.Request);
+  // Fire-and-forget notification refresh after a successful accounting workflow
+  // change. Runs AFTER the accounting transaction has already committed; any
+  // failure is logged and NEVER rolls back the completed accounting action, and
+  // Phase 9 dedup/reconciliation prevents duplicate notifications.
+  const fireNotifRefresh = (): void => {
+    void reconcileAcctNotifications().catch((e) => console.error("[acct-notify] auto-refresh failed:", e instanceof Error ? e.message : e));
+  };
   // A notification is visible to the caller if they are its recipient OR hold
   // its scope permission — the notification.view permission NEVER bypasses the
   // underlying scope permission.

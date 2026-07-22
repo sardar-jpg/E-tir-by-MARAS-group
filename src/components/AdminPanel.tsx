@@ -6,6 +6,7 @@ import {
   ChatChannel,
   ActivityLog,
   AppNotification,
+  AccountingNotification,
   ShipmentStatus,
   Currency,
   Language,
@@ -20,6 +21,8 @@ import {
 import { TRANSLATIONS } from "../translations";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
+import { buildUnifiedList, combinedUnreadCount, type UnifiedNotification, type UnifiedIconKey } from "../lib/unifiedNotifications";
+import { Truck as TruckIcon2, Wallet as WalletIcon2, Megaphone as MegaphoneIcon2 } from "lucide-react";
 import { encodePageCursor } from "../lib/pagination";
 import { mergeShipmentsSince, shouldResetShipmentPagination } from "../lib/shipmentPagination";
 import { createToastTimer, type ToastTimer } from "../lib/toastTimer";
@@ -379,6 +382,11 @@ export default function AdminPanel({
   const [selectedPerformanceDriver, setSelectedPerformanceDriver] = useState<Driver | null>(null);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  // Accounting Phase 9.1: the accounting notifications (a separate store) are
+  // merged into the ONE main bell/center via the unified presentation adapter.
+  const [acctNotifications, setAcctNotifications] = useState<Array<AccountingNotification & { read?: boolean }>>([]);
+  const [acctUnread, setAcctUnread] = useState(0);
+  const acctNotifEvaluatedRef = React.useRef(false);
   const [unreadChatMessages, setUnreadChatMessages] = useState<ChatMessage[]>([]);
   // fix/admin-mobile-chat-correctness: every server-CONFIRMED seen scope
   // this session applied locally, with when it was confirmed
@@ -1635,6 +1643,54 @@ MARAS Group etir Center`;
     }
   };
 
+  // Accounting Phase 9.1: accounting notification actions go through the Phase 9
+  // accounting APIs (never legacy handlers, never a financial mutation). A
+  // failed call is not reflected optimistically; the combined unread badge
+  // refreshes only from the server-confirmed local state change.
+  const acctNotifActing = React.useRef<Set<string>>(new Set());
+  const handleAcctNotifAction = async (id: string, action: "read" | "dismiss") => {
+    if (acctNotifActing.current.has(id)) return;
+    acctNotifActing.current.add(id);
+    try {
+      const res = await apiFetch(`/api/accounting/notifications/${id}/${action}`, { method: "POST" });
+      if (!res.ok) { console.error(`Accounting notification ${action} failed for ${id}: ${res.status}`); return; }
+      if (action === "read") {
+        setAcctNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true, status: n.status === "unread" ? "read" : n.status } : n));
+        setAcctUnread(prev => Math.max(0, prev - 1));
+      } else {
+        setAcctNotifications(prev => prev.filter(n => n.id !== id));
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      acctNotifActing.current.delete(id);
+    }
+  };
+
+  // Accounting Phase 9.1: ONE unified, newest-first list for the single main
+  // bell/center, plus the combined unread badge (legacy + accounting, both
+  // already visible-scoped by their servers).
+  const unifiedNotifications = React.useMemo(
+    () => buildUnifiedList({ legacy: notifications, accounting: acctNotifications, lang, isLegacyRead: (n) => isNotificationReadForUser(n, ownAdminId) }),
+    [notifications, acctNotifications, lang, ownAdminId]
+  );
+  const legacyUnreadCount = notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length;
+  const combinedUnreadCountValue = combinedUnreadCount(legacyUnreadCount, acctUnread);
+  const CATEGORY_ICON_CMP: Record<UnifiedIconKey, React.ComponentType<{ className?: string }>> = {
+    truck: TruckIcon2, finance: WalletIcon2, user: User, warning: ShieldAlert, megaphone: MegaphoneIcon2,
+  };
+  const categoryAriaLabel = (u: UnifiedNotification): string => {
+    const map: Record<string, { en: string; tr: string; ar: string }> = {
+      operational: { en: "Operational", tr: "Operasyonel", ar: "تشغيلي" },
+      accounting: { en: "Accounting", tr: "Muhasebe", ar: "محاسبة" },
+      users: { en: "User", tr: "Kullanıcı", ar: "مستخدم" },
+      system: { en: "System", tr: "Sistem", ar: "نظام" },
+      broadcast: { en: "Announcement", tr: "Duyuru", ar: "إعلان" },
+    };
+    const l = map[u.category] || map.operational;
+    return lang === 'tr' ? l.tr : lang === 'ar' ? l.ar : l.en;
+  };
+
   // Load backend statistics
   const lastFetchedAtRef = React.useRef<number>(0);
   const fetchData = async (force = true) => {
@@ -1767,7 +1823,27 @@ MARAS Group etir Center`;
       if (resCostStatements && resCostStatements.ok) setCostStatements(await safeJson(resCostStatements));
       if (resBankAccounts && resBankAccounts.ok) { try { setBankAccounts((await safeJson(resBankAccounts)).accounts || []); } catch { /* keep prior */ } }
       if (resAdmins && resAdmins.ok) setAdminsList(await safeJson(resAdmins));
-      
+
+      // Accounting Phase 9.1: pull the caller's visible accounting notifications
+      // + summary so the ONE main bell/center can show them alongside legacy
+      // ones. Independent of the legacy notifications fetch — a failure here
+      // leaves legacy notifications intact (partial-load tolerance). The server
+      // enforces recipient/permission visibility; a 403 simply yields none.
+      if (canViewCostStatements(resolvedAdminTypeForSWR)) {
+        if (!acctNotifEvaluatedRef.current) {
+          acctNotifEvaluatedRef.current = true;
+          void apiFetch("/api/accounting/notifications/evaluate", { method: "POST" }).catch(() => { /* non-fatal */ });
+        }
+        try {
+          const [resAcct, resAcctSum] = await Promise.all([
+            apiFetch("/api/accounting/notifications?status=active&pageSize=50"),
+            apiFetch("/api/accounting/notifications/summary"),
+          ]);
+          if (resAcct.ok) { const d = await safeJson(resAcct); setAcctNotifications(Array.isArray(d.rows) ? d.rows : []); }
+          if (resAcctSum.ok) { const s = await safeJson(resAcctSum); setAcctUnread(Number.isFinite(s.unread) ? s.unread : 0); }
+        } catch { /* keep prior accounting notifications on transient failure */ }
+      }
+
       if (resUnreadChat.ok) {
         const fetchedUnread: ChatMessage[] = await safeJson(resUnreadChat);
         setUnreadChatMessages(
@@ -4191,7 +4267,7 @@ MARAS Group etir Center`;
         isRtl={isRtl}
         title={filteredAdminTabs.find((tab) => tab.id === activeTab)?.label ?? ''}
         TitleIcon={filteredAdminTabs.find((tab) => tab.id === activeTab)?.icon}
-        unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+        unreadNotifications={combinedUnreadCountValue}
         onBellClick={() => { setIsNotifOpen(!isNotifOpen); setIsMoreMenuOpen(false); }}
         onMenuClick={() => { setIsMoreMenuOpen(true); setIsNotifOpen(false); }}
         // feature/mobile-maras-ai-access: the SAME role gate as the desktop
@@ -4395,14 +4471,14 @@ MARAS Group etir Center`;
               className="p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg relative transition-all cursor-pointer flex items-center justify-center border-0 focus:outline-none"
               title="Notifications"
             >
-              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 ? (
+              {combinedUnreadCountValue > 0 ? (
                 <BellRing className="w-5 h-5 text-orange-500 animate-bounce" />
               ) : (
                 <Bell className="w-5 h-5 text-slate-500" />
               )}
-              {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+              {combinedUnreadCountValue > 0 && (
                 <span className="absolute -top-1 -end-1 bg-orange-500 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
-                  {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+                  {combinedUnreadCountValue}
                 </span>
               )}
             </button>
@@ -4413,14 +4489,14 @@ MARAS Group etir Center`;
                   <div className="flex items-center gap-1.5 font-bold text-sm text-slate-800">
                     <Bell className="w-4 h-4 text-slate-600" />
                     <span>{lang === 'tr' ? 'Bildirimler' : lang === 'ar' ? 'الإشعارات' : 'Notifications'}</span>
-                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+                    {combinedUnreadCountValue > 0 && (
                       <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full">
-                        {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
+                        {combinedUnreadCountValue} {lang === 'tr' ? 'yeni' : lang === 'ar' ? 'جديد' : 'new'}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length > 0 && (
+                    {combinedUnreadCountValue > 0 && (
                       <button
                         onClick={handleMarkAllNotifsRead}
                         className="text-xs text-orange-500 hover:text-orange-600 font-semibold cursor-pointer border-0 bg-transparent"
@@ -4440,52 +4516,49 @@ MARAS Group etir Center`;
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1.5 scrollbar-thin">
-                  {notifications.length === 0 ? (
+                  {unifiedNotifications.length === 0 ? (
                     <div className="py-8 text-center text-slate-400 text-xs">
                       {lang === 'tr' ? 'Henüz bildirim yok.' : lang === 'ar' ? 'لا توجد إشعارات حالياً.' : 'No recent notifications.'}
                     </div>
                   ) : (
-                    notifications.map((notif) => {
-                      const shipment = shipments.find(s => s.id === notif.shipmentId);
-                      const isUnread = !isNotificationReadForUser(notif, ownAdminId);
+                    unifiedNotifications.map((u) => {
+                      const isUnread = !u.isRead;
+                      const CatIcon = CATEGORY_ICON_CMP[u.iconKey];
+                      const legacyOrig = u.source === 'legacy' ? (u.original as AppNotification) : null;
+                      const shipment = legacyOrig ? shipments.find(s => s.id === legacyOrig.shipmentId) : null;
                       return (
                         <div
-                          key={notif.id}
+                          key={u.key}
                           className={`p-2.5 rounded-lg border text-xs transition-all relative ${
-                            isUnread 
-                              ? 'bg-orange-50/40 border-orange-100' 
+                            isUnread
+                              ? 'bg-orange-50/40 border-orange-100'
                               : 'bg-slate-50/50 border-slate-100'
                           }`}
                         >
                           <div className="flex gap-2">
-                            <span className="mt-0.5 shrink-0">
-                              {notif.type === 'chat' && <MessageSquare className="w-4 h-4 text-orange-500" />}
-                              {notif.type === 'doc_upload' && <FileText className="w-4 h-4 text-orange-500" />}
-                              {notif.type === 'assignment' && <ClipboardList className="w-4 h-4 text-green-500" />}
-                              {notif.type === 'status_update' && <RefreshCw className="w-4 h-4 text-purple-500" />}
-                              {notif.type !== 'chat' && notif.type !== 'doc_upload' && notif.type !== 'assignment' && notif.type !== 'status_update' && (
-                                <Bell className="w-4 h-4 text-slate-400" />
-                              )}
+                            <span className="mt-0.5 shrink-0" title={categoryAriaLabel(u)} aria-label={categoryAriaLabel(u)}>
+                              <CatIcon className={`w-4 h-4 ${u.source === 'accounting' ? 'text-emerald-600' : u.category === 'system' ? 'text-red-500' : u.category === 'users' ? 'text-blue-500' : 'text-orange-500'}`} />
                             </span>
-                            <div className="flex-1 space-y-1">
+                            <div className="flex-1 space-y-1 min-w-0">
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-slate-800">
-                                  {lang === 'tr' ? notif.titleTr : lang === 'ar' ? notif.titleAr : notif.titleEn}
+                                <span className="font-bold text-slate-800 flex items-center gap-1.5 min-w-0">
+                                  <span className="truncate">{u.title}</span>
+                                  {u.source === 'accounting' && u.priority && (u.priority === 'critical' || u.priority === 'high') && (
+                                    <span className={`shrink-0 px-1 py-0.5 rounded text-[8.5px] font-black ${u.priority === 'critical' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{u.priority === 'critical' ? (lang === 'tr' ? 'KRİTİK' : lang === 'ar' ? 'حرج' : 'CRITICAL') : (lang === 'tr' ? 'YÜKSEK' : lang === 'ar' ? 'مرتفع' : 'HIGH')}</span>
+                                  )}
                                 </span>
-                                <span className="text-[10px] text-slate-400">
-                                  {new Date(notif.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                <span className="text-[10px] text-slate-400 shrink-0">
+                                  {u.createdAtMs ? new Date(u.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : ''}
                                 </span>
                               </div>
-                              <p className="text-slate-600 font-medium leading-normal">
-                                {lang === 'tr' ? notif.messageTr : lang === 'ar' ? notif.messageAr : notif.messageEn}
-                              </p>
-                              <div className="flex items-center gap-2 pt-1 border-t border-slate-100/50 mt-1">
+                              {u.message && <p className="text-slate-600 font-medium leading-normal break-words">{u.message}</p>}
+                              <div className="flex items-center gap-2 pt-1 border-t border-slate-100/50 mt-1 flex-wrap">
                                 {shipment && (
                                   <button
                                     onClick={() => {
-                                      openShipmentChatForChannel(shipment, notif.channel);
+                                      openShipmentChatForChannel(shipment, legacyOrig!.channel);
                                       setIsNotifOpen(false);
-                                      if (isUnread) handleMarkNotifRead(notif.id);
+                                      if (isUnread) handleMarkNotifRead(u.id);
                                     }}
                                     className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
                                   >
@@ -4493,12 +4566,33 @@ MARAS Group etir Center`;
                                     <span>{lang === 'tr' ? 'Sohbeti Aç' : lang === 'ar' ? 'فتح المحادثة' : 'Open Chat'}</span>
                                   </button>
                                 )}
+                                {u.source === 'accounting' && u.actionTab && (
+                                  <button
+                                    onClick={() => {
+                                      setActiveTab(u.actionTab as typeof activeTab);
+                                      setIsNotifOpen(false);
+                                      if (isUnread) handleAcctNotifAction(u.id, 'read');
+                                    }}
+                                    className="text-[10px] text-emerald-600 hover:text-emerald-700 hover:underline font-extrabold flex items-center gap-0.5 cursor-pointer bg-transparent border-0"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                    <span>{lang === 'tr' ? 'Aç' : lang === 'ar' ? 'فتح' : 'Open'}</span>
+                                  </button>
+                                )}
                                 {isUnread && (
                                   <button
-                                    onClick={() => handleMarkNotifRead(notif.id)}
+                                    onClick={() => u.source === 'accounting' ? handleAcctNotifAction(u.id, 'read') : handleMarkNotifRead(u.id)}
                                     className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer bg-transparent border-0"
                                   >
-                                    {lang === 'tr' ? 'Okundu' : lang === 'ar' ? 'مقروء' : 'Dismiss'}
+                                    {lang === 'tr' ? 'Okundu' : lang === 'ar' ? 'مقروء' : 'Mark read'}
+                                  </button>
+                                )}
+                                {u.source === 'accounting' && u.canDismiss && (
+                                  <button
+                                    onClick={() => handleAcctNotifAction(u.id, 'dismiss')}
+                                    className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer bg-transparent border-0"
+                                  >
+                                    {lang === 'tr' ? 'Kapat' : lang === 'ar' ? 'إخفاء' : 'Dismiss'}
                                   </button>
                                 )}
                               </div>
@@ -10228,7 +10322,7 @@ MARAS Group etir Center`;
             isRtl={isRtl}
             tabs={mobileMoreMenuTabs}
             onSelectTab={(id) => { setActiveTab(id as any); setIsMoreMenuOpen(false); }}
-            unreadNotifications={notifications.filter(n => !isNotificationReadForUser(n, ownAdminId)).length}
+            unreadNotifications={combinedUnreadCountValue}
             onOpenNotifications={() => { setIsNotifOpen(true); setIsMoreMenuOpen(false); }}
             onLangChange={onLangChange}
             onLogout={onLogout}
