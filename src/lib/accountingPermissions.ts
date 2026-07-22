@@ -21,6 +21,7 @@ export const ACCOUNTING_PERMISSION_KEYS = [
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate", "customerPayments.reverse",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "reports.view", "reports.export", "profitReports.view", "cashReports.view",
   "costStatements.print",
   "bankAccounts.view", "bankAccounts.manage",
   "accountingTemplates.view", "accountingTemplates.manage", "accountingTemplates.publish", "accountingTemplates.restore",
@@ -114,6 +115,15 @@ export const ACCOUNTING_PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    id: "reports", label: { en: "Financial Reports", ar: "التقارير المالية", tr: "Mali Raporlar" },
+    permissions: [
+      p("reports.view", "View financial reports", "عرض التقارير المالية", "Mali raporları görüntüle"),
+      p("reports.export", "Export financial reports", "تصدير التقارير المالية", "Mali raporları dışa aktar"),
+      p("profitReports.view", "View Official Profit reports", "عرض تقارير الربح الرسمي", "Resmî kâr raporlarını görüntüle"),
+      p("cashReports.view", "View cash movement reports", "عرض تقارير الحركة النقدية", "Nakit hareket raporlarını görüntüle"),
+    ],
+  },
+  {
     id: "bankAccounts", label: { en: "Bank Accounts", ar: "الحسابات البنكية", tr: "Banka Hesapları" },
     permissions: [
       p("bankAccounts.view", "View bank accounts", "عرض الحسابات البنكية", "Banka hesaplarını görüntüle"),
@@ -177,6 +187,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
   "customerPayments.view", "customerPayments.create", "customerPayments.allocate",
   "receipts.view", "receipts.create", "receipts.print",
   "customerStatements.view", "customerStatements.export",
+  "reports.view", "reports.export",
   "costStatements.print",
   "bankAccounts.view",
   "accountingTemplates.view",
@@ -191,6 +202,7 @@ export const LEGACY_ACCOUNTS_DEFAULT_PERMISSIONS: readonly AccountingPermission[
 export const SENSITIVE_ACCOUNTING_PERMISSIONS: readonly AccountingPermission[] = [
   "costs.approve", "costs.reopen", "costs.manageApprovalWorkflow",
   "accounting.financialClose", "accounting.financialReopen",
+  "profitReports.view", "cashReports.view",
   "vendorPayments.reverse",
   "customerPayments.reverse",
   "invoices.cancel",

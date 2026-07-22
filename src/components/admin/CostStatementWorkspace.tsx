@@ -14,6 +14,7 @@ import CustomerInvoicePanel from "./CustomerInvoicePanel";
 import CustomerAccountPanel from "./CustomerAccountPanel";
 import CostApprovalWorkflowCard from "./CostApprovalWorkflowCard";
 import FinancialClosingCard from "./FinancialClosingCard";
+import OrderFinancialSummaryCard from "./OrderFinancialSummaryCard";
 import ExpenseDrawer from "./ExpenseDrawer";
 
 /**
@@ -596,6 +597,8 @@ export default function CostStatementWorkspace({
               <CostApprovalWorkflowCard lang={lang} statement={statement} actor={actor} hasActiveInvoice={hasIssuedInvoice} onChanged={onRefresh} />
               {/* Phase 6 — Financial Closing (final accounting completion). */}
               <FinancialClosingCard lang={lang} statement={statement} actor={actor} onChanged={onRefresh} />
+              {/* Phase 7 — read-only per-currency Order Financial Summary. */}
+              <OrderFinancialSummaryCard lang={lang} statement={statement} />
             </div>
           </section>
       </div>

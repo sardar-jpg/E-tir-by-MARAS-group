@@ -108,6 +108,7 @@ import {
   canRequestFinancialReopen,
 } from "./src/lib/financialClosing";
 import { sanitizeInvoiceLines, computeInvoiceTotals } from "./src/lib/customerInvoiceLines";
+import * as Reports from "./src/lib/accountingReports";
 import {
   buildOutstandingList, autoAllocate, validateAllocations, canReversePayment,
   isDuplicatePayment, summarizeCustomerAccount,
@@ -13103,6 +13104,311 @@ async function startServer() {
       if (respondIfServiceUnavailable(err, res)) return;
       res.status(500).json({ error: "Failed to build vendor statement." });
     }
+  });
+
+  // ── Accounting Phase 7 — Financial Reports (READ-ONLY) ────────────
+  // Every route here is a GET that derives per-currency totals from the
+  // authoritative Phase 1–6 records via the pure src/lib/accountingReports.ts
+  // builders. No route mutates anything; currencies are never combined and
+  // there is no FX. Official Profit is invoice−approved-cost (payment-timing
+  // independent) and is kept strictly separate from Operational Cash Movement.
+  const REPORT_ASOF = (req: express.Request): string =>
+    (typeof req.query.asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asOf) ? req.query.asOf : new Date().toISOString().slice(0, 10));
+  const reportStr = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const sessionHasReportPermission = async (req: express.Request, key: AccountingPermission): Promise<boolean> => {
+    const cache = (req as any)._effectiveAccountingPerms as Set<AccountingPermission> | undefined;
+    const perms = cache ?? (req.session ? await loadEffectivePermissionsForSession(req.session) : new Set<AccountingPermission>());
+    (req as any)._effectiveAccountingPerms = perms;
+    return perms.has(key);
+  };
+  // Load the four reporting collections ONCE and index them per request so no
+  // report does N+1 loads (a file-backed persistence-safe optimization).
+  async function loadReportingDataset(): Promise<{
+    statements: CostStatement[]; invoices: CustomerInvoice[]; customerPayments: CustomerPayment[]; vendorPayments: VendorPaymentTransaction[];
+    invoicesByShipment: (s: string) => CustomerInvoice[]; vendorPaymentsByShipment: (s: string) => VendorPaymentTransaction[];
+    invoicesById: (id: string) => CustomerInvoice | undefined; financialStatusByShipment: (s: string) => Reports.OrderFinancialSummary["financialStatus"];
+  }> {
+    const [sSnap, iSnap, cpSnap, vpSnap] = await Promise.all([
+      getDocs(collection(db, "costStatements")), getDocs(collection(db, "customerInvoices")),
+      getDocs(collection(db, "customerPayments")), getDocs(collection(db, "vendorPayments")),
+    ]);
+    const statements = sSnap.docs.map((d) => d.data() as CostStatement);
+    const invoices = iSnap.docs.map((d) => d.data() as CustomerInvoice);
+    const customerPayments = cpSnap.docs.map((d) => d.data() as CustomerPayment);
+    const vendorPayments = vpSnap.docs.map((d) => d.data() as VendorPaymentTransaction).map(normalizeExpensePriority);
+    const invByShip = new Map<string, CustomerInvoice[]>();
+    const invById = new Map<string, CustomerInvoice>();
+    for (const inv of invoices) { (invByShip.get(inv.shipmentId) || invByShip.set(inv.shipmentId, []).get(inv.shipmentId)!).push(inv); invById.set(inv.id, inv); }
+    const vpByShip = new Map<string, VendorPaymentTransaction[]>();
+    for (const vp of vendorPayments) (vpByShip.get(vp.shipmentId) || vpByShip.set(vp.shipmentId, []).get(vp.shipmentId)!).push(vp);
+    const finByShip = new Map<string, Reports.OrderFinancialSummary["financialStatus"]>();
+    for (const st of statements) finByShip.set(st.shipmentId, resolveFinancialStatus(st as any));
+    return {
+      statements, invoices, customerPayments, vendorPayments,
+      invoicesByShipment: (s) => invByShip.get(s) || [], vendorPaymentsByShipment: (s) => vpByShip.get(s) || [],
+      invoicesById: (id) => invById.get(id), financialStatusByShipment: (s) => finByShip.get(s) || "financial_open",
+    };
+  }
+  // Shared list-report responder: validates the date range, sorts (whitelist),
+  // paginates, and returns either JSON {rows,totals,paging} or a CSV download
+  // (which additionally requires reports.export + writes a report.exported audit).
+  async function respondReportList<T>(
+    req: express.Request, res: express.Response,
+    opts: { reportType: string; rows: T[]; totals: unknown; allowedSort: readonly string[]; csvColumns: Reports.CsvColumn<T>[]; dateFrom: string; dateTo: string },
+  ): Promise<void> {
+    const dir: Reports.SortDirection = req.query.sortDirection === "asc" ? "asc" : "desc";
+    const sorted = Reports.applySort(opts.rows, reportStr(req.query.sortBy) || undefined, dir, opts.allowedSort);
+    if (sorted === null) { res.status(400).json({ code: "invalid_sort", error: "Unsupported sort field." }); return; }
+    if (reportStr(req.query.format).toLowerCase() === "csv") {
+      if (!(await sessionHasReportPermission(req, "reports.export"))) {
+        res.status(403).json({ code: "permission_denied", error: "You do not have permission to export reports.", requiredPermission: "reports.export" });
+        return;
+      }
+      const csv = Reports.toCsv(opts.csvColumns, sorted);
+      await recordAudit(req, { action: AUDIT_ACTIONS.reportExported, entityType: "report", entityId: opts.reportType, result: "success", metadata: { format: "csv", rowCount: sorted.length, dateFrom: opts.dateFrom || undefined, dateTo: opts.dateTo || undefined } });
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${opts.reportType}-${new Date().toISOString().slice(0, 10)}.csv"`);
+      res.send(csv);
+      return;
+    }
+    const { page, pageSize } = Reports.normalizePaging(req.query.page, req.query.pageSize);
+    const paged = Reports.paginate(sorted, page, pageSize);
+    res.json({ ...paged, totals: opts.totals });
+  }
+
+  // 1) Order financial summary (per Order Number).
+  app.get("/api/accounting/reports/orders/:shipmentId/financial-summary", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const stmt = await loadCostStatementOr404(req.params.shipmentId, res);
+      if (!stmt) return;
+      const ds = await loadReportingDataset();
+      res.json(Reports.buildOrderFinancialSummary({
+        statement: stmt, invoices: ds.invoicesByShipment(req.params.shipmentId),
+        customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(req.params.shipmentId), asOfDate: REPORT_ASOF(req),
+      }));
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build order financial summary." }); }
+  });
+
+  // 2) Accounts Receivable.
+  app.get("/api/accounting/reports/receivables", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: REPORT_ASOF(req) });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), aging = reportStr(req.query.agingBucket);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (aging) rows = rows.filter((r) => r.agingBucket === aging);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable");
+      if (reportStr(req.query.includePaid) !== "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.issueDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "receivables", rows, totals: Reports.summarizeReceivables(rows),
+        allowedSort: ["issueDate", "dueDate", "invoiceAmount", "remainingAmount", "daysOverdue", "customer", "currency", "invoiceNumber"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "invoiceNumber", value: (r) => r.invoiceNumber }, { header: "orderRef", value: (r) => r.orderRef },
+          { header: "customer", value: (r) => r.customer }, { header: "issueDate", value: (r) => r.issueDate },
+          { header: "dueDate", value: (r) => r.dueDate }, { header: "invoiceAmount", value: (r) => r.invoiceAmount },
+          { header: "receivedAmount", value: (r) => r.receivedAmount }, { header: "remainingAmount", value: (r) => r.remainingAmount },
+          { header: "currency", value: (r) => r.currency }, { header: "invoiceStatus", value: (r) => r.invoiceStatus },
+          { header: "daysOverdue", value: (r) => r.daysOverdue }, { header: "agingBucket", value: (r) => r.agingBucket },
+          { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build receivables report." }); }
+  });
+
+  // 3) Accounts Payable.
+  app.get("/api/accounting/reports/payables", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: REPORT_ASOF(req) });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), paymentStatus = reportStr(req.query.paymentStatus);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (paymentStatus) rows = rows.filter((r) => r.paymentStatus === paymentStatus);
+      if (reportStr(req.query.overdueOnly) === "true") rows = rows.filter((r) => r.remainingAmount > 0.001);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.approvedDate || undefined, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "payables", rows, totals: Reports.summarizePayables(rows),
+        allowedSort: ["approvedDate", "dueDate", "approvedAmount", "remainingAmount", "vendor", "currency", "orderRef"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "vendor", value: (r) => r.vendor }, { header: "orderRef", value: (r) => r.orderRef },
+          { header: "description", value: (r) => r.description }, { header: "approvedAmount", value: (r) => r.approvedAmount },
+          { header: "paidAmount", value: (r) => r.paidAmount }, { header: "remainingAmount", value: (r) => r.remainingAmount },
+          { header: "currency", value: (r) => r.currency }, { header: "paymentStatus", value: (r) => r.paymentStatus },
+          { header: "approvedDate", value: (r) => r.approvedDate }, { header: "dueDate", value: (r) => r.dueDate },
+          { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build payables report." }); }
+  });
+
+  // 4) Official Profit (SENSITIVE — profitReports.view).
+  app.get("/api/accounting/reports/profit", requirePermission("profitReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), financialStatus = reportStr(req.query.financialStatus), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.latestInvoiceDate || undefined, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "profit", rows, totals: Reports.summarizeProfit(rows),
+        allowedSort: ["orderRef", "customer", "issuedInvoiceTotal", "approvedVendorCost", "officialProfit", "currency", "latestInvoiceDate"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "customer", value: (r) => r.customer },
+          { header: "transportMode", value: (r) => r.transportMode }, { header: "issuedInvoiceTotal", value: (r) => r.issuedInvoiceTotal },
+          { header: "approvedVendorCost", value: (r) => r.approvedVendorCost }, { header: "officialProfit", value: (r) => r.officialProfit },
+          { header: "currency", value: (r) => r.currency }, { header: "profitStatus", value: (r) => r.profitStatus },
+          { header: "costStatementStatus", value: (r) => r.costStatementStatus }, { header: "financialStatus", value: (r) => r.financialStatus },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build profit report." }); }
+  });
+
+  // 5) Customer Receipts.
+  app.get("/api/accounting/reports/customer-receipts", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildCustomerReceiptRows({ payments: ds.customerPayments, invoicesById: ds.invoicesById, includeReversed: reportStr(req.query.includeReversed) === "true" });
+      const customer = reportStr(req.query.customer), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod), orderRef = reportStr(req.query.orderRef);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (orderRef) rows = rows.filter((r) => r.orderRefs.includes(orderRef));
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "customer-receipts", rows, totals: Reports.summarizeReceipts(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))),
+        allowedSort: ["paymentDate", "customer", "amount", "currency", "paymentMethod"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "paymentDate", value: (r) => r.paymentDate }, { header: "customer", value: (r) => r.customer },
+          { header: "amount", value: (r) => r.amount }, { header: "currency", value: (r) => r.currency },
+          { header: "paymentMethod", value: (r) => r.paymentMethod }, { header: "reference", value: (r) => r.reference },
+          { header: "status", value: (r) => r.status }, { header: "invoiceNumbers", value: (r) => r.invoiceNumbers.join("; ") },
+          { header: "orderRefs", value: (r) => r.orderRefs.join("; ") },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build customer receipts report." }); }
+  });
+
+  // 6) Vendor Payments.
+  app.get("/api/accounting/reports/vendor-payments", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildVendorPaymentRows({ payments: ds.vendorPayments, includeReversed: reportStr(req.query.includeCancelledOrReversed) === "true" });
+      const vendor = reportStr(req.query.vendor), currency = reportStr(req.query.currency), method = reportStr(req.query.paymentMethod), orderRef = reportStr(req.query.orderRef);
+      if (vendor) rows = rows.filter((r) => r.vendor.toLowerCase().includes(vendor.toLowerCase()));
+      if (currency) rows = rows.filter((r) => r.currency === currency);
+      if (method) rows = rows.filter((r) => r.paymentMethod === method);
+      if (orderRef) rows = rows.filter((r) => r.orderRef === orderRef);
+      if (range.from || range.to) rows = rows.filter((r) => Reports.withinRange(r.paymentDate, range.from, range.to));
+      await respondReportList(req, res, {
+        reportType: "vendor-payments", rows, totals: Reports.summarizeVendorPaymentRows(rows.map((r) => ({ currency: r.currency, amount: r.amount, status: r.status }))),
+        allowedSort: ["paymentDate", "vendor", "amount", "currency", "orderRef", "paymentMethod"],
+        dateFrom: range.from, dateTo: range.to,
+        csvColumns: [
+          { header: "paymentDate", value: (r) => r.paymentDate }, { header: "vendor", value: (r) => r.vendor },
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "amount", value: (r) => r.amount },
+          { header: "currency", value: (r) => r.currency }, { header: "paymentMethod", value: (r) => r.paymentMethod },
+          { header: "reference", value: (r) => r.reference }, { header: "status", value: (r) => r.status },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build vendor payments report." }); }
+  });
+
+  // 7) Operational Cash Movement (SENSITIVE — cashReports.view). NOT profit.
+  app.get("/api/accounting/reports/cash-movement", requirePermission("cashReports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const currency = reportStr(req.query.currency);
+      const cp = ds.customerPayments.filter((p) => (!range.from && !range.to || Reports.withinRange((p.paymentDate || p.createdAt || "").slice(0, 10), range.from, range.to)) && (!currency || p.currency === currency));
+      const vp = ds.vendorPayments.filter((p) => (!range.from && !range.to || Reports.withinRange((p.paymentDate || p.createdAt || "").slice(0, 10), range.from, range.to)) && (!currency || p.currency === currency));
+      res.json({
+        note: "This is a cash movement report and is not the Official Profit calculation.",
+        currencies: Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp }),
+        dateFrom: range.from || null, dateTo: range.to || null,
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build cash movement report." }); }
+  });
+
+  // 8) Financial Closing.
+  app.get("/api/accounting/reports/financial-closing", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const ds = await loadReportingDataset();
+      let rows = Reports.buildFinancialClosingRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const financialStatus = reportStr(req.query.financialStatus), customer = reportStr(req.query.customer), closedBy = reportStr(req.query.closedBy);
+      if (financialStatus) rows = rows.filter((r) => r.financialStatus === financialStatus);
+      if (customer) rows = rows.filter((r) => r.customer.toLowerCase().includes(customer.toLowerCase()));
+      if (closedBy) rows = rows.filter((r) => r.closedBy === closedBy);
+      await respondReportList(req, res, {
+        reportType: "financial-closing", rows, totals: { total: rows.length, closed: rows.filter((r) => r.financialStatus === "financial_closed").length, open: rows.filter((r) => r.financialStatus === "financial_open").length, reopened: rows.filter((r) => r.financialStatus === "financial_reopened").length },
+        allowedSort: ["orderRef", "customer", "financialStatus", "closedAt"], dateFrom: "", dateTo: "",
+        csvColumns: [
+          { header: "orderRef", value: (r) => r.orderRef }, { header: "customer", value: (r) => r.customer },
+          { header: "financialStatus", value: (r) => r.financialStatus }, { header: "costStatementStatus", value: (r) => r.costStatementStatus },
+          { header: "draftInvoiceCount", value: (r) => r.draftInvoiceCount }, { header: "closedAt", value: (r) => r.closedAt },
+          { header: "closedBy", value: (r) => r.closedBy }, { header: "reopenedAt", value: (r) => r.reopenedAt },
+          { header: "reopenCycleCount", value: (r) => r.reopenCycleCount },
+        ],
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build financial closing report." }); }
+  });
+
+  // 9) Financial Overview (dashboard aggregate — per currency, read-only).
+  app.get("/api/accounting/reports/overview", requirePermission("reports.view"), async (req, res) => {
+    try {
+      const range = Reports.validateDateRange(req.query.dateFrom, req.query.dateTo);
+      if (!range.ok) return res.status(400).json({ code: range.code, error: range.error });
+      const ds = await loadReportingDataset();
+      const asOf = REPORT_ASOF(req);
+      const receivableRows = Reports.buildReceivableRows({ invoices: ds.invoices, customerPayments: ds.customerPayments, financialStatusByShipment: ds.financialStatusByShipment, asOfDate: asOf });
+      const payableRows = Reports.buildPayableRows({ statements: ds.statements, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, asOfDate: asOf });
+      const profitRows = Reports.buildProfitRows({ statements: ds.statements, invoicesByShipment: ds.invoicesByShipment, vendorPaymentsByShipment: ds.vendorPaymentsByShipment, customerPayments: ds.customerPayments });
+      const inRange = (d: string | undefined) => (!range.from && !range.to) ? true : Reports.withinRange(d, range.from, range.to);
+      const cp = ds.customerPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)));
+      const vp = ds.vendorPayments.filter((p) => inRange((p.paymentDate || p.createdAt || "").slice(0, 10)));
+      const canProfit = await sessionHasReportPermission(req, "profitReports.view");
+      const canCash = await sessionHasReportPermission(req, "cashReports.view");
+      res.json({
+        receivables: Reports.summarizeReceivables(receivableRows),
+        payables: Reports.summarizePayables(payableRows),
+        customerReceipts: Reports.summarizeReceipts(cp.filter((p) => p.status === "active").map((p) => ({ currency: p.currency, amount: p.amount, status: "active" as const }))),
+        vendorPayments: Reports.summarizeVendorPaymentRows(vp.filter((p) => p.status === "active").map((p) => ({ currency: p.currency, amount: p.amount, status: "active" as const }))),
+        profit: canProfit ? Reports.summarizeProfit(profitRows) : null,
+        cashMovement: canCash ? Reports.buildCashMovement({ customerPayments: cp, vendorPayments: vp }) : null,
+        counts: {
+          financiallyClosedOrders: ds.statements.filter((s) => resolveFinancialStatus(s as any) === "financial_closed").length,
+          financiallyOpenOrders: ds.statements.filter((s) => resolveFinancialStatus(s as any) !== "financial_closed").length,
+          overdueInvoices: receivableRows.filter((r) => r.agingBucket !== "current_not_due" && r.agingBucket !== "due_date_unavailable").length,
+          ordersWithUnresolvedBalance: ds.statements.filter((s) => {
+            const sum = Reports.buildOrderFinancialSummary({ statement: s, invoices: ds.invoicesByShipment(s.shipmentId), customerPayments: ds.customerPayments, vendorPayments: ds.vendorPaymentsByShipment(s.shipmentId), asOfDate: asOf });
+            return Object.values(sum.currencies).some((f) => f.customerRemaining > 0.001 || f.vendorRemaining > 0.001);
+          }).length,
+        },
+        asOf, dateFrom: range.from || null, dateTo: range.to || null,
+        note: "Official Profit is issued customer invoices minus approved vendor costs; it is separate from Operational Cash Movement and payment timing never changes it.",
+      });
+    } catch (err) { if (respondIfServiceUnavailable(err, res)) return; res.status(500).json({ error: "Failed to build financial overview." }); }
   });
 
   // ── Payment Receipts ──────────────────────────────────────────────

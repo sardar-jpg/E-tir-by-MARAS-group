@@ -49,6 +49,8 @@ export const AUDIT_ACTIONS = {
   financialReopenApproved: "financial.reopen_approved",
   financialReopenRejected: "financial.reopen_rejected",
 
+  reportExported: "report.exported",
+
   bankAccountCreated: "bank_account.created",
   bankAccountUpdated: "bank_account.updated",
   bankAccountDeactivated: "bank_account.deactivated",

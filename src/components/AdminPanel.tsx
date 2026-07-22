@@ -63,7 +63,7 @@ import VendorStatementsPage from "./admin/accounting/VendorStatementsPage";
 import CustomerInvoicesPage from "./admin/accounting/CustomerInvoicesPage";
 import PaymentsPage from "./admin/accounting/PaymentsPage";
 import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage";
-import MonthlyReportPage from "./admin/accounting/MonthlyReportPage";
+import FinancialReportsPage from "./admin/accounting/FinancialReportsPage";
 import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
 import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
@@ -6818,7 +6818,7 @@ MARAS Group etir Center`;
         <ReceivablesPayablesPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
       )}
       {activeTab === 'acct_reports' && canViewCostStatements(resolvedAdminType) && (
-        <MonthlyReportPage lang={lang} clients={clients} costStatements={costStatements} />
+        <FinancialReportsPage lang={lang} clients={clients} costStatements={costStatements} />
       )}
       {activeTab === 'acct_ai' && canViewCostStatements(resolvedAdminType) && (
         <AIFinancialAssistantPage lang={lang} clients={clients} costStatements={costStatements} onNavigate={openAccounting} />
