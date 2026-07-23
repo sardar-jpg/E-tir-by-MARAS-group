@@ -391,6 +391,8 @@ const LABELS = {
     estimatedNote: "Estimated from route — no GPS fix",
     noFix: "No location",
     loadedCapNotice: "Showing the first 50 loaded shipments.",
+    emptyTitle: "No active shipments are currently being tracked",
+    emptyBody: "Tracking information will appear here automatically when shipments enter transit.",
     operationalStats: "Transit Stats Overview",
     totalShipments: "Active Transits",
     totalDistance: "Estimated Route Completion",
@@ -432,6 +434,8 @@ const LABELS = {
     estimatedNote: "Rotadan tahmin edildi — GPS yok",
     noFix: "Konum yok",
     loadedCapNotice: "İlk 50 yüklenen sevkiyat gösteriliyor.",
+    emptyTitle: "Şu anda takip edilen aktif sevkiyat yok",
+    emptyBody: "Sevkiyatlar yola çıktığında takip bilgileri burada otomatik olarak görünecektir.",
     operationalStats: "Operasyonel İstatistikler",
     totalShipments: "Aktif Araç",
     totalDistance: "Tahmini Rota Durumu",
@@ -473,6 +477,8 @@ const LABELS = {
     estimatedNote: "تقديري حسب المسار — لا يوجد GPS",
     noFix: "لا يوجد موقع",
     loadedCapNotice: "يتم عرض أول 50 شحنة محمّلة.",
+    emptyTitle: "لا توجد شحنات نشطة قيد التتبع حالياً",
+    emptyBody: "ستظهر معلومات التتبع هنا تلقائياً عند دخول الشحنات مرحلة النقل.",
     operationalStats: "ملخص النقل النشط",
     totalShipments: "الشاحنات في الطريق",
     totalDistance: "مؤشر إكمال الرحلات",
@@ -535,11 +541,10 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   const [currentDriverId, setCurrentDriverId] = useState<string | null>(null);
   const [currentDriverName, setCurrentDriverName] = useState<string | null>(null);
   const [locationStatusMessage, setLocationStatusMessage] = useState<string | null>(null);
-  // feature/admin-mobile-ui correction pass: the legend used to always
-  // default open, covering a large share of a phone's map area. Closed
-  // by default under the same 1024px breakpoint AdminPanel's own mobile
-  // mode uses; desktop is unaffected (defaults open, same as before).
-  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(() => (typeof window === "undefined" ? true : window.innerWidth >= 1024));
+  // Operations Center UX pass: the legend is collapsed by default on ALL
+  // viewports (low visual weight — one small "Show Legend" pill). It expands
+  // only when the operator asks for it.
+  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(false);
   const [mapViewMode, setMapViewMode] = useState<'vector' | 'google_map'>('google_map');
   const [googleMapLoading, setGoogleMapLoading] = useState<boolean>(true);
   const [mapsAuthError, setMapsAuthError] = useState<boolean>(() => {
@@ -987,8 +992,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   return (
     <div className={isFullscreen
-      ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-4 p-4"
-      : "space-y-4"
+      ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-2 p-3"
+      : "space-y-2"
     }>
       {/* feature/admin-mobile-ui correction pass: compact mobile-only
           header — icon, honest runtime-derived status text (same
@@ -1028,123 +1033,102 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </button>
       </div>
 
-      {/* ⚠️ HIGH-DENSITY RADAR OVERVIEW DECK — desktop only, see the
-          compact mobile replacement immediately above. */}
-      <div className="hidden lg:flex bg-slate-900 border border-slate-800 text-white p-4 rounded-2xl shadow-md flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-orange-500/10 text-orange-500 rounded-xl border border-orange-500/20 shrink-0">
-            <Compass className="w-5 h-5 animate-spin" style={{ animationDuration: '10s' }} />
-          </div>
-          <div>
-            <h3 className="text-xs font-black uppercase tracking-wider text-slate-100">{t.engineSelector}</h3>
-            {/* feature/admin-mobile-ui correction pass: this used to say
-                "Live Google Maps GIS Tracking Active" any time google_map
-                mode was selected, even with no configured key or an auth
-                failure — directly contradicting the "Key Required"/error
-                fallback panel shown in the same view. Wording is now
-                derived from isGoogleMapsLive (mapViewMode === 'google_map'
-                && hasValidMapsKey && !mapsAuthError), the single runtime
-                source of truth for whether this is actually connected. */}
-            <p className={`text-[11px] font-medium flex items-center gap-1.5 mt-0.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
-              <span className={`inline-block w-2 h-2 rounded-full ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`}></span>
-              {mapViewMode === 'vector'
-                ? t.engineVector
-                : isGoogleMapsLive
-                  ? (lang === 'tr' ? "Canlı Google Harita Modu Aktif" : lang === 'ar' ? "تتبع غوغل ماب المباشر نشط" : "Live Google Maps GIS Tracking Active")
-                  : !hasValidMapsKey
-                    ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
-                    : (lang === 'tr' ? "Demo / Manuel Takip Modu" : lang === 'ar' ? "وضع التتبع التجريبي / اليدوي" : "Demo / Manual Tracking Mode")}
+      {/* Operations command bar — desktop only. ONE compact row replacing the
+          former stacked "overview deck" + "status strip": identity + honest
+          engine status on the left, the four real-data state chips in the
+          middle, and the primary actions (view-mode toggle, Reset, Panel,
+          Fullscreen) on the right. Wording for the engine status is still
+          derived from isGoogleMapsLive — the single runtime source of truth
+          (never an unconditional "Live" claim). */}
+      <div className="hidden lg:flex items-center gap-3 bg-slate-900 border border-slate-800 text-white rounded-xl px-3 py-2 shadow-sm">
+        <div className="flex items-center gap-2 min-w-0">
+          <Compass className="w-4 h-4 text-orange-500 shrink-0 animate-spin" style={{ animationDuration: '10s' }} />
+          <div className="min-w-0">
+            <h3 className="text-[11px] font-black uppercase tracking-wider text-slate-100 leading-tight truncate">
+              {lang === 'tr' ? "Operasyon Takip Merkezi" : lang === 'ar' ? "مركز عمليات التتبع" : "Tracking Operations Center"}
+            </h3>
+            <p className={`text-[10px] font-medium flex items-center gap-1 leading-tight truncate ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
+              <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500' : 'bg-slate-600'}`}></span>
+              <span className="truncate">
+                {mapViewMode === 'vector'
+                  ? (lang === 'tr' ? "Vektör Radar (Akıllı Takip)" : lang === 'ar' ? "رادار متجه (تتبع ذكي)" : "Vector Radar (Smart Tracking)")
+                  : isGoogleMapsLive
+                    ? (lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "خرائط غوغل مباشرة" : "Live Google Maps")
+                    : !hasValidMapsKey
+                      ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
+                      : (lang === 'tr' ? "Demo / Manuel Takip" : lang === 'ar' ? "وضع تجريبي / يدوي" : "Demo / Manual Mode")}
+              </span>
             </p>
           </div>
         </div>
 
-        {/* Telemetry Indicator Tags */}
-        <div className="flex flex-wrap items-center gap-2 self-stretch md:self-auto">
-          {/* Segmented control for toggling between Vector and Google Map views */}
-          <div className="bg-slate-950 p-1 rounded-xl border border-slate-800 flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setMapViewMode('vector')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border-0 ${
-                mapViewMode === 'vector'
-                  ? 'bg-orange-600 text-white shadow-xs font-black'
-                  : 'text-slate-400 hover:text-slate-200 bg-transparent'
-              }`}
-            >
-              🗺️ {lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setMapViewMode('google_map')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border-0 ${
-                mapViewMode === 'google_map'
-                  ? 'bg-orange-600 text-white shadow-xs font-black'
-                  : 'text-slate-400 hover:text-slate-200 bg-transparent'
-              }`}
-            >
-              📍 {lang === 'tr' ? "Google Harita" : lang === 'ar' ? "خرائط غوغل" : "Google Map"}
-            </button>
-          </div>
-
-          <div className="bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-[10px] font-mono text-slate-400 flex items-center gap-2">
-            <Activity className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
-            <span>{t.lastUpdated}</span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setIsFullscreen(f => !f)}
-            title={isFullscreen
-              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Fullscreen")
-              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
-            className="w-8 h-8 bg-slate-950 border border-slate-800 hover:border-slate-600 rounded-xl flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0"
-          >
-            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-          </button>
-        </div>
-      </div>
-
-      {/* Operations Center status strip — desktop only. Replaces the tall
-          amber "action drawer" (pure vertical space that restated the header)
-          with a compact, real-data strip: honest live counts of the four
-          tracking states, plus Reset View and a panel collapse toggle. */}
-      <div className="hidden lg:flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl px-4 py-2 shadow-sm">
-        <div className="flex items-center gap-2 flex-wrap">
+        {/* Real-data tracking-state chips (honest counts, no fabrication) */}
+        <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-center min-w-0">
           {([
-            { key: "live_gps" as const, label: t.trackLive, dot: "bg-emerald-500", text: "text-emerald-700" },
-            { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-700" },
-            { key: "estimated" as const, label: t.trackEstimated, dot: "bg-orange-500", text: "text-orange-700" },
-            { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-400", text: "text-slate-500" },
+            { key: "live_gps" as const, label: t.trackLive, dot: "bg-emerald-500", text: "text-emerald-400" },
+            { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-400" },
+            { key: "estimated" as const, label: t.trackEstimated, dot: "bg-orange-500", text: "text-orange-400" },
+            { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-500", text: "text-slate-400" },
           ]).map(item => (
             <span
               key={item.key}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-bold"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-2 py-1 text-[10px] font-semibold"
               title={item.label}
             >
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${item.dot}`}></span>
-              <span className="text-slate-500 uppercase tracking-wide">{item.label}</span>
+              <span className="text-slate-400 tracking-wide hidden xl:inline">{item.label}</span>
               <span className={`tabular-nums font-black ${item.text}`}>{trackingCounts[item.key]}</span>
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+
+        {/* Primary actions only */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="bg-slate-950 p-0.5 rounded-lg border border-slate-800 flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => setMapViewMode('vector')}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-bold transition-all cursor-pointer border-0 ${
+                mapViewMode === 'vector' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
+              }`}
+            >
+              {lang === 'tr' ? "Radar" : lang === 'ar' ? "رادار" : "Radar"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapViewMode('google_map')}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-bold transition-all cursor-pointer border-0 ${
+                mapViewMode === 'google_map' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
+              }`}
+            >
+              {lang === 'tr' ? "Harita" : lang === 'ar' ? "خريطة" : "Map"}
+            </button>
+          </div>
           <button
             onClick={handleShowAll}
-            className="inline-flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-xl font-black tracking-tight text-[11px] shadow-sm transition-all uppercase cursor-pointer"
+            title={t.viewAllTransit}
+            className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-950 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-600 transition-all cursor-pointer"
           >
-            <span>{t.viewAllTransit}</span>
+            {t.viewAllTransit}
           </button>
           <button
             onClick={() => setPanelCollapsed(c => !c)}
             title={panelCollapsed
               ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
               : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
-            className="inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold text-[11px] transition-all cursor-pointer"
+            className="w-7 h-7 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
             {panelCollapsed ? <Expand className="w-3.5 h-3.5" /> : <Minimize className="w-3.5 h-3.5" />}
-            <span>{panelCollapsed
-              ? (lang === "ar" ? "اللوحة" : lang === "tr" ? "Panel" : "Panel")
-              : (lang === "ar" ? "طي" : lang === "tr" ? "Daralt" : "Collapse")}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsFullscreen(f => !f)}
+            title={isFullscreen
+              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Fullscreen")
+              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
+            className="w-7 h-7 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
+          >
+            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
@@ -1170,27 +1154,27 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </button>
       </div>
 
-      {/* MAIN CONTAINER LAYOUT */}
-      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
+      {/* MAIN CONTAINER LAYOUT — map-dominant. The shipment panel takes a
+          fixed ~19% column (clamped so it stays usable at small lg widths)
+          and the map takes the rest; collapsed => the map spans everything.
+          Height is viewport-driven so the map owns ~80-85% of the page. */}
+      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${panelCollapsed ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${isFullscreen ? "flex-1 min-h-0" : "lg:h-[calc(100vh-150px)] lg:min-h-[540px]"}`}>
 
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className={`${mobileListOpen ? "flex" : "hidden"} ${panelCollapsed ? "lg:hidden" : "lg:flex lg:col-span-3"} border-r border-slate-200 flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
+        <div className={`${mobileListOpen ? "flex" : "hidden"} ${panelCollapsed ? "lg:hidden" : "lg:flex"} border-r border-slate-200 flex-col bg-slate-50/50 lg:min-h-0 lg:overflow-hidden ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
-          {/* Sidebar Header */}
-          <div className="p-4 border-b border-slate-100 bg-white space-y-3">
+          {/* Sidebar Header — compact: title + count + search + filters only
+              (the former descriptive paragraph was competing label noise). */}
+          <div className="p-3 border-b border-slate-100 bg-white space-y-2.5 shrink-0">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Compass className="w-5 h-5 text-orange-500 shrink-0" />
+              <div className="flex items-center gap-1.5">
+                <Compass className="w-4 h-4 text-orange-500 shrink-0" />
                 <h2 className="font-black text-slate-900 tracking-tight text-[11px] uppercase">{t.activeTracking}</h2>
               </div>
               <span className="bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
                 {inTransitShipments.length}
               </span>
             </div>
-            
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              {t.subTitle}
-            </p>
 
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
@@ -1394,17 +1378,20 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
-          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "min-h-0" : "h-[65vh] lg:h-[480px]"}`}>
+          <div className={`flex-1 overflow-y-auto p-2 space-y-2 min-h-0 ${isFullscreen ? "" : "h-[65vh] lg:h-auto"}`}>
             {inTransitShipments.length === 0 ? (
-              <div className="p-6 text-center space-y-2">
-                <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto" />
-                <p className="text-[11px] text-slate-400 font-semibold italic">
-                  {t.noInTransit}
-                </p>
+              /* Compact operational empty state — no alarm icon, no giant
+                 reserved block; a calm, professional message. */
+              <div className="px-4 py-6 text-center space-y-1.5">
+                <span className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                  <Truck className="w-4 h-4" />
+                </span>
+                <p className="text-[11px] font-bold text-slate-600">{t.emptyTitle}</p>
+                <p className="text-[10px] text-slate-400 leading-relaxed">{t.emptyBody}</p>
               </div>
             ) : filteredTransit.length === 0 ? (
-              <div className="p-6 text-center text-slate-400 text-xs italic">
-                No matches found
+              <div className="px-4 py-6 text-center text-slate-400 text-[11px] font-medium">
+                {lang === "ar" ? "لا توجد نتائج مطابقة للبحث أو الفلاتر." : lang === "tr" ? "Arama veya filtrelerle eşleşen sonuç yok." : "No shipments match the current search or filters."}
               </div>
             ) : (
               filteredTransit.map(s => {
@@ -1499,17 +1486,30 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex ${panelCollapsed ? "lg:col-span-12" : "lg:col-span-9"} relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-[620px]"}`}>
+        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-full"}`}>
           
-          {/* Radar Ambient Weather Overlay */}
-          <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2.5 py-1 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-            <span className="text-slate-300">{t.lastUpdated}</span>
+          {/* Floating map overlays — low-weight professional chrome. */}
+          <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2 py-1 rounded-md shadow-md text-[9px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800/80 z-10">
+            <span className={`w-1.5 h-1.5 rounded-full inline-block ${anyLiveGps ? "bg-emerald-500 animate-ping" : "bg-slate-600"}`}></span>
+            <span className="text-slate-300">{anyLiveGps ? t.gpsAcquired : t.simulatedGps}</span>
           </div>
 
-          <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-slate-300 px-2 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
-            <span>Grid Scale: {viewScale.toFixed(1)}x</span>
+          <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-slate-400 px-2 py-1 rounded-md shadow-md text-[9px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800/80 z-10">
+            <span>{viewScale.toFixed(1)}x</span>
           </div>
+
+          {/* Operational empty state — floating over the corridor grid, so the
+              map never reads as a dead black rectangle. The radar's cities,
+              corridor and border-crossing render behind it as the living
+              background. */}
+          {filteredTransit.length === 0 && (
+            <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 z-10 flex justify-center pointer-events-none px-6">
+              <div className="bg-slate-900/85 backdrop-blur-sm border border-slate-800 rounded-xl px-5 py-3.5 text-center shadow-2xl max-w-sm">
+                <p className="text-[12px] font-bold text-slate-200">{t.emptyTitle}</p>
+                <p className="text-[10.5px] text-slate-400 mt-1 leading-relaxed">{t.emptyBody}</p>
+              </div>
+            </div>
+          )}
 
           {/* Graphical Interactive Map Grid with zoom navigation and smooth translation transitions */}
           <div className="relative w-full h-full flex flex-col justify-between p-4 select-none">
@@ -2227,17 +2227,10 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
               )}
             </div>
 
-            {/* In-map footer stats — real counts, honest live-signal label. */}
-            <div className="text-[10px] text-slate-400 font-mono flex flex-col sm:flex-row items-center justify-between shrink-0 bg-slate-900/60 p-3 rounded-xl border border-slate-900 gap-1 mt-1">
-              <span>{t.operationalStats}: <strong>{inTransitShipments.length} {t.totalShipments}</strong></span>
-              <span className="flex items-center gap-2">
-                <span className="text-emerald-400">{t.trackLive}: <strong className="tabular-nums">{trackingCounts.live_gps}</strong></span>
-                <span className={`flex items-center gap-1 ${anyLiveGps ? "text-emerald-400" : "text-slate-500"}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full inline-block ${anyLiveGps ? "bg-emerald-500 animate-ping" : "bg-slate-600"}`}></span>
-                  {anyLiveGps ? t.gpsAcquired : t.simulatedGps}
-                </span>
-              </span>
-            </div>
+            {/* The former in-map footer stats bar was removed: it duplicated
+                the command-bar state chips and cost the map ~50px of height.
+                The honest live-signal indicator now lives as a compact
+                floating overlay at the bottom-right of the map itself. */}
           </div>
         </div>
 

@@ -4271,14 +4271,24 @@ MARAS Group etir Center`;
           MobileTopAppBar above covers this role on mobile instead of
           squeezing the same wide, multi-badge header into a narrow
           viewport. */}
-      <div className="hidden lg:flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6 border-b border-slate-200 pb-5 lg:mt-4 lg:mx-4 md:mx-6">
-        <div>
-          <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
-            <span className="p-2 bg-slate-900 text-white rounded-lg"><Ship className="w-6 h-6 shrink-0" /></span>
+      <div className={`hidden lg:flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-slate-200 lg:mx-4 md:mx-6 ${activeTab === 'tracking_map' ? 'mb-2 pb-2 lg:mt-2' : 'mb-6 pb-5 lg:mt-4'}`}>
+        {/* GPS Tracking is a map-dominant Operations Center screen: the page
+            header collapses to a slim one-liner there so the map starts as
+            high as possible. Every other tab keeps the full-size header. */}
+        {activeTab === 'tracking_map' ? (
+          <h1 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <span className="p-1.5 bg-slate-900 text-white rounded-lg"><Ship className="w-4 h-4 shrink-0" /></span>
             {t('brand')} — {t('roleAdmin')}
           </h1>
-          <p className="text-slate-500 text-sm mt-1">{t('tagline')}</p>
-        </div>
+        ) : (
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
+              <span className="p-2 bg-slate-900 text-white rounded-lg"><Ship className="w-6 h-6 shrink-0" /></span>
+              {t('brand')} — {t('roleAdmin')}
+            </h1>
+            <p className="text-slate-500 text-sm mt-1">{t('tagline')}</p>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-3">
           {/* Global SWR Synchronization badge */}
