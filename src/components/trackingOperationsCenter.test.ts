@@ -81,3 +81,44 @@ describe("Invariant 4 — both map view modes remain available", () => {
     expect(TRACKING_MAP).toContain("resolveTrackingStatus");
   });
 });
+
+describe("Phase 1 — tracking honesty applied in TrackingMap", () => {
+  it("drives shipment placement through the pure resolveTrackingPosition lib", () => {
+    expect(TRACKING_MAP).toContain("resolveTrackingPosition");
+    expect(TRACKING_MAP).toContain("trackingById");
+  });
+
+  it("removes the 4-second simulated 'crawl' ticker and its interval", () => {
+    expect(TRACKING_MAP).not.toMatch(/setInterval\(\s*\(\)\s*=>\s*\{\s*setTicker/);
+    expect(TRACKING_MAP).not.toContain("setTicker");
+    expect(TRACKING_MAP).not.toMatch(/\bticker\s*\+/); // no drift arithmetic on a ticker
+  });
+
+  it("removes the silent Istanbul/Baghdad fallback from shipment position resolution", () => {
+    // The position helper must no longer default an unknown city to a real
+    // coordinate. (CITY_COORDINATES["istanbul"|"baghdad"] may still appear
+    // ONLY for framing the Google map bounds / route endpoints, never as a
+    // shipment's asserted position — that now comes from resolveTrackingPosition.)
+    const posHelper = TRACKING_MAP.slice(
+      TRACKING_MAP.indexOf("const getShipmentVectorLocation"),
+      TRACKING_MAP.indexOf("const stateColors")
+    );
+    expect(posHelper.length).toBeGreaterThan(0);
+    expect(posHelper).not.toContain('CITY_COORDINATES["istanbul"]');
+    expect(posHelper).not.toContain('CITY_COORDINATES["baghdad"]');
+    expect(posHelper).not.toContain("hash");
+  });
+
+  it("skips rendering a marker for shipments whose position is unavailable", () => {
+    // Both the Vector Radar and Google Map marker loops must bail out when
+    // the resolved position is not placeable.
+    expect(TRACKING_MAP).toMatch(/if \(!activeLoc\.available\) return null;/);
+    expect(TRACKING_MAP).toMatch(/if \(!activeLoc\.available \|\| activeLoc\.lat == null/);
+  });
+
+  it("exposes the four honesty states via localized labels", () => {
+    for (const key of ["trackLive", "trackReported", "trackEstimated", "trackUnavailable"]) {
+      expect(TRACKING_MAP).toContain(key);
+    }
+  });
+});

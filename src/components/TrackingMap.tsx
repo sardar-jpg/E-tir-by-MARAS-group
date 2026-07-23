@@ -28,6 +28,12 @@ import {
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
 import { resolveTrackingStatus } from "../lib/trackingMapStatus";
+import {
+  resolveTrackingPosition,
+  projectGeoToVector,
+  type TrackingState,
+  type TrackingPosition,
+} from "../lib/trackingPositions";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
@@ -208,7 +214,7 @@ interface MapCustomControlsProps {
   selectedShipment: Shipment | null;
   lang: Language;
   shipments: Shipment[];
-  getShipmentLocation: (s: Shipment) => { lat: number; lng: number };
+  getShipmentLocation: (s: Shipment) => { lat: number | null; lng: number | null };
 }
 
 function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocation }: MapCustomControlsProps) {
@@ -284,7 +290,10 @@ function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocat
       bounds.extend(endLoc);
 
       const loc = getShipmentLocation(s);
-      bounds.extend({ lat: loc.lat, lng: loc.lng });
+      // Skip shipments with no resolvable position (Location Unavailable).
+      if (loc.lat != null && loc.lng != null) {
+        bounds.extend({ lat: loc.lat, lng: loc.lng });
+      }
     });
 
     map.fitBounds(bounds, 60);
@@ -358,7 +367,7 @@ const LABELS = {
     activeTracking: "Active Tracing",
     viewAllTransit: "Reset View",
     searchPlaceholder: "Filter by customer, number or city...",
-    currentGeoPos: "Simulated position",
+    currentGeoPos: "Estimated position",
     viewOnMap: "Locate on Grid",
     engineSelector: "Operational Tracking Interface",
     engineVector: "ETIR Interactive Vector Radar Grid (Smart Tracking)",
@@ -370,7 +379,13 @@ const LABELS = {
     bestFitZoom: "Auto-Center Focus",
     lastUpdated: "Last Reported Shipment Status",
     gpsAcquired: "GPS Signal Acquired",
-    simulatedGps: "Simulated Dead-Reckoning",
+    simulatedGps: "No live GPS signal",
+    trackLive: "Live GPS",
+    trackReported: "Last Reported",
+    trackEstimated: "Estimated Position",
+    trackUnavailable: "Location Unavailable",
+    estimatedNote: "Estimated from route — no GPS fix",
+    noFix: "No location",
     operationalStats: "Transit Stats Overview",
     totalShipments: "Active Transits",
     totalDistance: "Estimated Route Completion",
@@ -392,7 +407,7 @@ const LABELS = {
     activeTracking: "Aktif Takip",
     viewAllTransit: "Görünümü Sıfırla",
     searchPlaceholder: "Müşteri adı, no veya şehre göre filtrele...",
-    currentGeoPos: "Simüle edilen konum",
+    currentGeoPos: "Tahmini konum",
     viewOnMap: "Izgarada Göster",
     engineSelector: "Operasyonel Takip Arayüzü",
     engineVector: "ETIR Etkileşimli Vektör Radar Izgarası (Akıllı Takip)",
@@ -404,7 +419,13 @@ const LABELS = {
     bestFitZoom: "Hızlı Odaklan",
     lastUpdated: "Son Bildirilen Gönderi Durumu",
     gpsAcquired: "GPS Sinyali Alındı",
-    simulatedGps: "Simüle Edilmiş Rota Verisi",
+    simulatedGps: "Canlı GPS sinyali yok",
+    trackLive: "Canlı GPS",
+    trackReported: "Son Bildirilen",
+    trackEstimated: "Tahmini Konum",
+    trackUnavailable: "Konum Yok",
+    estimatedNote: "Rotadan tahmin edildi — GPS yok",
+    noFix: "Konum yok",
     operationalStats: "Operasyonel İstatistikler",
     totalShipments: "Aktif Araç",
     totalDistance: "Tahmini Rota Durumu",
@@ -426,7 +447,7 @@ const LABELS = {
     activeTracking: "تتبع نشط",
     viewAllTransit: "إعادة ضبط",
     searchPlaceholder: "البحث بالعميل، الرقم أو المدينة...",
-    currentGeoPos: "موقع تقديري محاكى",
+    currentGeoPos: "موقع تقديري",
     viewOnMap: "تحديد على الشبكة",
     engineSelector: "واجهة التتبع والعمليات",
     engineVector: "شبكة رادار رصد ومراقبة ETIR التفاعلية (تتبع ذكي)",
@@ -438,7 +459,13 @@ const LABELS = {
     bestFitZoom: "أوتو-فوكس للشبكة",
     lastUpdated: "آخر حالة مسجلة للشحنة",
     gpsAcquired: "إشارة الـ GPS نشطة",
-    simulatedGps: "عبر نظام الملاحة التقديري",
+    simulatedGps: "لا توجد إشارة GPS مباشرة",
+    trackLive: "تتبع مباشر",
+    trackReported: "آخر موقع مُبلَّغ",
+    trackEstimated: "موقع تقديري",
+    trackUnavailable: "الموقع غير متوفّر",
+    estimatedNote: "تقديري حسب المسار — لا يوجد GPS",
+    noFix: "لا يوجد موقع",
     operationalStats: "ملخص النقل النشط",
     totalShipments: "الشاحنات في الطريق",
     totalDistance: "مؤشر إكمال الرحلات",
@@ -667,10 +694,10 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     }
   }, [drivers]);
 
-  // Perf Phase 2: O(1) driver lookups. This component re-renders every 4s
-  // (the animation ticker) and on every search keystroke / filter toggle;
-  // the map/filter passes below used to run `localDrivers.find(...)` per
-  // shipment (O(shipments × drivers)) on each of those renders. A driver-by-id
+  // Perf Phase 2: O(1) driver lookups. This component re-renders on every
+  // search keystroke / filter toggle and whenever driver/shipment data is
+  // refetched; the map/filter passes below used to run `localDrivers.find(...)`
+  // per shipment (O(shipments × drivers)) on each of those renders. A driver-by-id
   // index makes every lookup O(1) and only rebuilds when the drivers change.
   // NB: `Map` here would resolve to the @vis.gl/react-google-maps <Map>
   // component (imported above), so we use a plain Record as the O(1) index.
@@ -681,8 +708,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   }, [localDrivers]);
 
   // Dynamically filter shipments based on state.
-  // Perf Phase 2: memoized so the status filter isn't re-run on every 4s
-  // animation tick (only when the shipment list or the status filter change).
+  // Perf Phase 2: memoized so the status filter only re-runs when the
+  // shipment list or the status filter change.
   const inTransitShipments = useMemo(() => shipments.filter(s => {
     if (mapStatusFilter === "in_transit") {
       return s.status === "In Transit";
@@ -694,20 +721,9 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     return true; // "all" shows all statuses
   }), [shipments, mapStatusFilter]);
 
-  // Simple state count for a ticking timer that slightly alters the position of transit trucks
-  const [ticker, setTicker] = useState<number>(0);
-
-  // Auto-ticks every 4 seconds to animate simulated truck crawling
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTicker(prev => prev + 1);
-    }, 4000);
-    return () => clearInterval(interval);
-  }, []);
-
   // Filter by dynamic search query AND active truck filter selections.
-  // Perf Phase 2: memoized (was recomputed on every 4s ticker tick and every
-  // unrelated re-render) and driver lookups are now O(1) via driversById.
+  // Perf Phase 2: memoized (was recomputed on every unrelated re-render) and
+  // driver lookups are now O(1) via driversById.
   const filteredTransit = useMemo(() => inTransitShipments.filter(s => {
     // 1. Truck Type Filter
     const driver = driversById[s.assignedDriverId || ""];
@@ -741,100 +757,60 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   }, [inTransitShipments, driversById]);
   const getTruckTypeCount = (typeId: string): number => truckTypeCounts[typeId] || 0;
 
-  const getShipmentGpsState = (s: Shipment): "live_gps" | "dead_reckoning" | "static" => {
-    const driver = driversById[s.assignedDriverId || ""];
-    if (
-      driver &&
-      typeof driver.latitude === "number" &&
-      typeof driver.longitude === "number" &&
-      driver.latitude !== 0 &&
-      driver.longitude !== 0
-    ) {
-      return "live_gps";
+  /**
+   * Tracking honesty (Operations Center redesign): the single source of
+   * truth for every shipment's map placement and honesty state, computed by
+   * the pure resolveTrackingPosition lib. No more 4-second "crawl" ticker
+   * and no more silent Istanbul/Baghdad fallback — a shipment we cannot
+   * place is honestly "unavailable" (no marker) rather than a fabricated one.
+   * Recomputes only when the shipment or driver data changes (Date.now() is
+   * re-read on each real data refetch, keeping freshness reasonably current
+   * without animating fake movement).
+   */
+  const trackingById = useMemo(() => {
+    const now = Date.now();
+    const map: Record<string, TrackingPosition> = {};
+    for (const s of shipments) {
+      map[s.id] = resolveTrackingPosition(s, driversById[s.assignedDriverId || ""], now);
     }
-    return s.status === "In Transit" ? "dead_reckoning" : "static";
+    return map;
+  }, [shipments, driversById]);
+
+  const resolvePos = (s: Shipment): TrackingPosition =>
+    trackingById[s.id] ?? resolveTrackingPosition(s, driversById[s.assignedDriverId || ""], Date.now());
+
+  const getShipmentGpsState = (s: Shipment): TrackingState => resolvePos(s).state;
+
+  // Vector/geo placement for a shipment. `available` is false ONLY for the
+  // "unavailable" state (no coordinate); render code must skip those markers
+  // instead of pinning them to a default location. For every other state the
+  // coordinate is real (driver GPS) or a clearly-labeled city estimate, and
+  // is projected onto the Vector Radar grid with the shared projection.
+  const getShipmentVectorLocation = (
+    s: Shipment
+  ): { x: number; y: number; lat: number | null; lng: number | null; isActualGps: boolean; state: TrackingState; available: boolean } => {
+    const pos = resolvePos(s);
+    if (pos.lat == null || pos.lng == null) {
+      return { x: 0, y: 0, lat: null, lng: null, isActualGps: false, state: pos.state, available: false };
+    }
+    const v = projectGeoToVector(pos.lat, pos.lng);
+    return { x: v.x, y: v.y, lat: pos.lat, lng: pos.lng, isActualGps: pos.isReal, state: pos.state, available: true };
   };
 
-  // Get vector graphical SVG coordinates and real GPS coordinates
-  const getShipmentVectorLocation = (s: Shipment): { x: number; y: number; percentage: number; isActualGps?: boolean; lat: number; lng: number } => {
-    const driver = driversById[s.assignedDriverId || ""];
-    if (driver && typeof driver.latitude === 'number' && typeof driver.longitude === 'number' && driver.latitude !== 0 && driver.longitude !== 0) {
-      // Map Lat/Lng to Vector 850x550 coordinate space
-      const latMin = 30.0;
-      const latMax = 42.0;
-      const lngMin = 28.0;
-      const lngMax = 48.0;
-
-      const pctX = (driver.longitude - lngMin) / (lngMax - lngMin);
-      const x = 100 + pctX * 625;
-
-      const pctY = (driver.latitude - latMin) / (latMax - latMin);
-      const y = 465 - pctY * 335;
-
-      return {
-        x: Math.min(800, Math.max(50, x)),
-        y: Math.min(500, Math.max(50, y)),
-        percentage: 0.5,
-        isActualGps: true,
-        lat: driver.latitude,
-        lng: driver.longitude
-      };
+  // Marker colour tokens per honesty state — one source of truth shared by
+  // the Vector Radar and Google Map markers so the same state always reads
+  // the same way (green = live, amber = last reported, orange = estimated).
+  const stateColors = (state: TrackingState) => {
+    switch (state) {
+      case "live_gps":
+        return { ring: "rgba(34,197,94,0.18)", stroke: "#22c55e", bg: "bg-emerald-700 border-emerald-400", text: "text-emerald-400", chip: "● GPS" };
+      case "last_reported":
+        return { ring: "rgba(245,158,11,0.16)", stroke: "#f59e0b", bg: "bg-amber-700 border-amber-400", text: "text-amber-400", chip: "◐ LAST" };
+      case "estimated":
+        return { ring: "rgba(249,115,22,0.12)", stroke: "rgba(249,115,22,0.4)", bg: "bg-slate-900 border-orange-500", text: "text-orange-400", chip: "◌ EST" };
+      default:
+        return { ring: "rgba(100,116,139,0.12)", stroke: "#475569", bg: "bg-slate-800 border-slate-600", text: "text-slate-500", chip: "◯" };
     }
-
-    const startLoc = CITY_COORDINATES[s.loadingCity.toLowerCase().trim()] || CITY_COORDINATES["istanbul"];
-    const endLoc = CITY_COORDINATES[s.deliveryCity.toLowerCase().trim()] || CITY_COORDINATES["baghdad"];
-
-    const startVec = findVectorCity(s.loadingCity);
-    const endVec = findVectorCity(s.deliveryCity);
-
-    // If shipment is not in transit yet, it is still at loadingCity
-    if (["New", "Waiting for Driver Quotes", "Assigned", "Accepted", "Loading", "Loaded"].includes(s.status)) {
-      return { 
-        x: startVec.x, 
-        y: startVec.y, 
-        percentage: 0, 
-        isActualGps: false,
-        lat: startLoc.lat,
-        lng: startLoc.lng
-      };
-    }
-
-    // If shipment has arrived or is delivered, it is at deliveryCity
-    if (["Arrived", "Delivered", "Closed"].includes(s.status)) {
-      return { 
-        x: endVec.x, 
-        y: endVec.y, 
-        percentage: 1, 
-        isActualGps: false,
-        lat: endLoc.lat,
-        lng: endLoc.lng
-      };
-    }
-
-    // Otherwise, simulate a position on the highway
-    let hash = 0;
-    for (let i = 0; i < s.id.length; i++) {
-      hash += s.id.charCodeAt(i);
-    }
-    const basePct = 0.15 + ((hash % 60) / 100); 
-
-    const drift = ((ticker + (hash % 10)) % 100) / 1200; 
-    const percentage = Math.min(0.92, Math.max(0.08, basePct + drift));
-
-    const x = startVec.x + (endVec.x - startVec.x) * percentage;
-    const y = startVec.y + (endVec.y - startVec.y) * percentage;
-
-    const lat = startLoc.lat + (endLoc.lat - startLoc.lat) * percentage;
-    const lng = startLoc.lng + (endLoc.lng - startLoc.lng) * percentage;
-
-    return { 
-      x, 
-      y, 
-      percentage, 
-      isActualGps: false,
-      lat,
-      lng
-    };
   };
 
   const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
@@ -861,13 +837,20 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   const handleSelectShipment = (s: Shipment) => {
     setSelectedShipment(s);
     const loc = getShipmentVectorLocation(s);
-    
+    // When the shipment has no placeable position (Location Unavailable),
+    // frame the route corridor (origin/destination dots) instead of panning
+    // to (0,0).
+    const start = findVectorCity(s.loadingCity);
+    const end = findVectorCity(s.deliveryCity);
+    const cx = loc.available ? loc.x : (start.x + end.x) / 2;
+    const cy = loc.available ? loc.y : (start.y + end.y) / 2;
+
     // Zoom in on target truck
     setViewScale(1.4);
     // Center viewport (850x550) on coordinate
     setViewPan({
-      x: (425 - loc.x * 1.4),
-      y: (275 - loc.y * 1.4)
+      x: (425 - cx * 1.4),
+      y: (275 - cy * 1.4)
     });
   };
 
@@ -876,10 +859,13 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     const end = findVectorCity(s.deliveryCity);
     const loc = getShipmentVectorLocation(s);
 
-    const minX = Math.min(start.x, end.x, loc.x);
-    const maxX = Math.max(start.x, end.x, loc.x);
-    const minY = Math.min(start.y, end.y, loc.y);
-    const maxY = Math.max(start.y, end.y, loc.y);
+    // Only include the truck position in the bounding box when it is placeable.
+    const xs = loc.available ? [start.x, end.x, loc.x] : [start.x, end.x];
+    const ys = loc.available ? [start.y, end.y, loc.y] : [start.y, end.y];
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
 
     const boxWidth = Math.max(20, maxX - minX);
     const boxHeight = Math.max(20, maxY - minY);
@@ -1354,18 +1340,30 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       </div>
                     </div>
 
-                    {/* Highly interactive Dynamic Location Coordinate Badge */}
+                    {/* Honest per-shipment location badge — labels the 4-state
+                        tracking model instead of always claiming a precise fix. */}
                     {(() => {
                       const loc = getShipmentVectorLocation(s);
-                      const city = getNearestCity(loc.x, loc.y);
+                      const state = loc.state;
+                      const toneCls =
+                        state === "live_gps" ? "bg-emerald-50/80 text-emerald-800 border-emerald-100"
+                        : state === "last_reported" ? "bg-amber-50/80 text-amber-800 border-amber-100"
+                        : "bg-slate-100 text-slate-500 border-slate-200";
+                      const label =
+                        state === "live_gps" ? t.trackLive
+                        : state === "last_reported" ? t.trackReported
+                        : state === "estimated" ? t.trackEstimated
+                        : t.trackUnavailable;
                       return (
-                        <div className={`text-[10.5px] bg-emerald-50/80 text-emerald-800 font-mono rounded-xl border border-emerald-100 flex items-center justify-between gap-1.5 ${isFullscreen ? "p-1" : "p-1.5"}`}>
+                        <div className={`text-[10.5px] font-mono rounded-xl border flex items-center justify-between gap-1.5 ${toneCls} ${isFullscreen ? "p-1" : "p-1.5"}`}>
                           <span className="flex items-center gap-1 font-extrabold truncate">
-                            <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                            <span className="truncate">{city}</span>
+                            <MapPin className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{loc.available ? getNearestCity(loc.x, loc.y) : t.noFix}</span>
                           </span>
-                          <span className="text-emerald-700 text-[8.5px] font-black shrink-0">
-                            {loc.lat.toFixed(4)}°, {loc.lng.toFixed(4)}°
+                          <span className="text-[8.5px] font-black shrink-0">
+                            {loc.available && loc.isActualGps
+                              ? `${loc.lat!.toFixed(4)}°, ${loc.lng!.toFixed(4)}°`
+                              : label}
                           </span>
                         </div>
                       );
@@ -1716,35 +1714,30 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     {/* Moving Trucks on SVG Corridor Grid - Animated Smoothly using transform with CSS Transitions */}
                     {filteredTransit.map(s => {
                       const activeLoc = getShipmentVectorLocation(s);
+                      // Location Unavailable: honestly render no marker (the
+                      // shipment still appears in the list panel).
+                      if (!activeLoc.available) return null;
                       const isSelected = selectedShipment?.id === s.id;
                       const gpsState = getShipmentGpsState(s);
+                      const colors = stateColors(gpsState);
 
                       return (
                         <g
                           key={s.id}
                           className="cursor-pointer group select-none"
                           onClick={() => handleSelectShipment(s)}
-                          // Beautiful CSS coordinate transition applied directly to translation matrix
+                          // CSS coordinate transition applied directly to translation matrix.
+                          // Positions change only on real data refresh — no simulated crawl.
                           style={{
                             transform: `translate(${activeLoc.x}px, ${activeLoc.y}px)`,
                             transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)",
                           }}
                         >
-                          {/* Shimmer pulse rings on the truck – colour by GPS state */}
+                          {/* Shimmer pulse rings on the truck – colour by tracking state */}
                           <circle
                             r={isSelected ? "22" : "15"}
-                            fill={
-                              isSelected ? "rgba(249,115,22,0.28)"
-                              : gpsState === "live_gps" ? "rgba(34,197,94,0.18)"
-                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.12)"
-                              : "rgba(100,116,139,0.12)"
-                            }
-                            stroke={
-                              isSelected ? "#ea580c"
-                              : gpsState === "live_gps" ? "#22c55e"
-                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.3)"
-                              : "#475569"
-                            }
+                            fill={isSelected ? "rgba(249,115,22,0.28)" : colors.ring}
+                            stroke={isSelected ? "#ea580c" : colors.stroke}
                             strokeWidth="1.5"
                             className="animate-pulse"
                           />
@@ -1919,13 +1912,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         {/* Selected Shipment Route rendering dynamic polylines */}
                         {selectedShipment && (() => {
                           const activeLoc = getShipmentVectorLocation(selectedShipment);
+                          // No route line when the selected shipment has no placeable position.
+                          if (!activeLoc.available || activeLoc.lat == null || activeLoc.lng == null) return null;
                           const truckLoc = { lat: activeLoc.lat, lng: activeLoc.lng };
                           return (
-                            <RouteDisplay 
+                            <RouteDisplay
                               shipment={selectedShipment}
                               truckLocation={truckLoc}
-                              origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
-                              destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
+                              origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]}
+                              destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]}
                             />
                           );
                         })()}
@@ -1966,9 +1961,12 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         {/* All moving trucks markers */}
                         {filteredTransit.map(s => {
                           const activeLoc = getShipmentVectorLocation(s);
+                          // Location Unavailable: no coordinate, so no map marker.
+                          if (!activeLoc.available || activeLoc.lat == null || activeLoc.lng == null) return null;
                           const isSelected = selectedShipment?.id === s.id;
                           const truckCoords = { lat: activeLoc.lat, lng: activeLoc.lng };
                           const gpsState = getShipmentGpsState(s);
+                          const colors = stateColors(gpsState);
 
                           return (
                             <AdvancedMarker
@@ -1988,22 +1986,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                                 <div
                                   style={{ width: "36px", height: "36px" }}
                                   className={`w-9 h-9 rounded-full flex items-center justify-center border-2 shadow-lg transition-transform ${
-                                    isSelected           ? "bg-orange-600 border-white"
-                                    : gpsState === "live_gps"       ? "bg-emerald-700 border-emerald-400"
-                                    : gpsState === "dead_reckoning" ? "bg-slate-900 border-orange-500"
-                                    :                                  "bg-slate-800 border-slate-600"
+                                    isSelected ? "bg-orange-600 border-white" : colors.bg
                                   }`}
                                 >
                                   <Truck className="w-4 h-4 text-white" />
                                 </div>
 
                                 {!isSelected && (
-                                  <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${
-                                    gpsState === "live_gps"       ? "text-emerald-400"
-                                    : gpsState === "dead_reckoning" ? "text-orange-400"
-                                    :                               "text-slate-500"
-                                  }`}>
-                                    {gpsState === "live_gps" ? "● GPS" : gpsState === "dead_reckoning" ? "◌ EST" : "◯"}
+                                  <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${colors.text}`}>
+                                    {colors.chip}
                                   </span>
                                 )}
                               </div>
@@ -2082,31 +2073,43 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                     </div>
                     {(() => {
                       const loc = getShipmentVectorLocation(selectedShipment);
-                      const city = getNearestCity(loc.x, loc.y);
+                      const city = loc.available ? getNearestCity(loc.x, loc.y) : t.noFix;
                       const gpsState = getShipmentGpsState(selectedShipment);
                       const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
                       const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
+                      const stateLabel =
+                        gpsState === "live_gps" ? t.trackLive
+                        : gpsState === "last_reported" ? t.trackReported
+                        : gpsState === "estimated" ? t.trackEstimated
+                        : t.trackUnavailable;
+                      const stateTone =
+                        gpsState === "live_gps" ? "text-emerald-400"
+                        : gpsState === "last_reported" ? "text-amber-400"
+                        : gpsState === "estimated" ? "text-orange-400"
+                        : "text-slate-500";
+                      const stateChip = stateColors(gpsState).chip;
                       return (
                         <>
                           <div className="flex justify-between items-center border-t border-slate-800 pt-1 mt-1 font-extrabold">
-                            <span className="text-emerald-500 uppercase tracking-wider">CURRENT CITY:</span>
-                            <span className="text-emerald-400">{city}</span>
-                          </div>
-                          <div className="flex justify-between items-center text-[7.5px] text-slate-400">
-                            <span>COORDINATES:</span>
-                            <span>{loc.lat.toFixed(5)}°N, {loc.lng.toFixed(5)}°E</span>
-                          </div>
-                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
-                            <span className="text-slate-500 uppercase">GPS MODE:</span>
-                            <span className={
-                              gpsState === "live_gps"       ? "text-emerald-400"
-                              : gpsState === "dead_reckoning" ? "text-orange-400"
-                              :                               "text-slate-500"
-                            }>
-                              {gpsState === "live_gps"       ? "● LIVE GPS"
-                              : gpsState === "dead_reckoning" ? "◌ DEAD RECKONING"
-                              :                               "◯ STATIC"}
+                            <span className={`uppercase tracking-wider ${gpsState === "estimated" ? "text-orange-400" : "text-emerald-500"}`}>
+                              {gpsState === "estimated" ? "NEAR:" : "LOCATION:"}
                             </span>
+                            <span className={gpsState === "estimated" ? "text-orange-300" : "text-emerald-400"}>{city}</span>
+                          </div>
+                          {loc.available && loc.isActualGps && loc.lat != null && loc.lng != null ? (
+                            <div className="flex justify-between items-center text-[7.5px] text-slate-400">
+                              <span>COORDINATES:</span>
+                              <span>{loc.lat.toFixed(5)}°N, {loc.lng.toFixed(5)}°E</span>
+                            </div>
+                          ) : (
+                            <div className="flex justify-between items-center text-[7.5px] text-slate-500 italic">
+                              <span>COORDINATES:</span>
+                              <span>{gpsState === "estimated" ? t.estimatedNote : t.noFix}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
+                            <span className="text-slate-500 uppercase">TRACKING:</span>
+                            <span className={stateTone}>{stateChip} {stateLabel}</span>
                           </div>
                           <div className="flex justify-between items-center text-[7.5px] font-extrabold">
                             <span className="text-slate-500 uppercase">LAST UPDATE:</span>
