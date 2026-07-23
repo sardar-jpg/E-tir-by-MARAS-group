@@ -549,6 +549,14 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   // already shows one pane at a time via mobileListOpen.
   const [panelCollapsed, setPanelCollapsed] = useState<boolean>(false);
 
+  // On-demand ETA & Distance (details drawer). Never auto-called and never
+  // persisted client-side: the result is tied to etaForId and cleared whenever
+  // the selection changes, so a stale ETA never leaks onto another shipment.
+  const [etaData, setEtaData] = useState<any | null>(null);
+  const [etaLoading, setEtaLoading] = useState<boolean>(false);
+  const [etaError, setEtaError] = useState<string | null>(null);
+  const [etaForId, setEtaForId] = useState<string | null>(null);
+
   // feature/admin-mobile-ui correction pass: single source of truth
   // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
   // allowed to say "Live"/"Active" about Google Maps GPS tracking right
@@ -844,12 +852,40 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   const handleShowAll = () => {
     setSelectedShipment(null);
+    setEtaData(null);
+    setEtaError(null);
+    setEtaForId(null);
     setViewScale(1);
     setViewPan({ x: 0, y: 0 });
   };
 
+  // On-demand only: fetch ETA & distance for the given shipment. Called solely
+  // from the details drawer's button — never on selection, render, or refresh.
+  const handleCalculateEta = async (s: Shipment) => {
+    setEtaLoading(true);
+    setEtaError(null);
+    try {
+      const res = await fetch(`/api/shipments/${s.id}/distance-matrix`);
+      if (res.ok) {
+        const data = await res.json();
+        setEtaData(data);
+        setEtaForId(s.id);
+      } else {
+        setEtaError(lang === "ar" ? "تعذّر حساب المسافة والوقت" : lang === "tr" ? "Mesafe/süre hesaplanamadı" : "Could not calculate ETA & distance");
+      }
+    } catch {
+      setEtaError(lang === "ar" ? "تعذّر الاتصال بخدمة الحساب" : lang === "tr" ? "Hesaplama servisine ulaşılamadı" : "Could not reach the calculation service");
+    } finally {
+      setEtaLoading(false);
+    }
+  };
+
   const handleSelectShipment = (s: Shipment) => {
     setSelectedShipment(s);
+    // Clear any prior on-demand ETA so it never carries over to a new selection.
+    setEtaData(null);
+    setEtaError(null);
+    setEtaForId(null);
     const loc = getShipmentVectorLocation(s);
     // When the shipment has no placeable position (Location Unavailable),
     // frame the route corridor (origin/destination dots) instead of panning
@@ -2079,8 +2115,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-ping"></span>
                       <span className="font-mono font-black text-orange-400 text-xs selectable">#{selectedShipment.shipmentNumber}</span>
                     </div>
-                    <button 
-                      onClick={() => setSelectedShipment(null)}
+                    <button
+                      onClick={() => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); }}
                       className="text-slate-400 hover:text-white transition-all cursor-pointer p-0.5 rounded-full hover:bg-slate-800"
                     >
                       <X className="w-4 h-4" />
@@ -2161,6 +2197,77 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       <span>{selectedShipment.status}</span>
                     </div>
                   </div>
+
+                  {/* On-demand ETA & Distance — 5 states (idle / loading /
+                      error / unavailable / success). Never auto-called; the
+                      result is cleared whenever the selection changes. */}
+                  {(() => {
+                    const eta = etaForId === selectedShipment.id ? etaData : null;
+                    const calcLabel = lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance";
+                    if (etaLoading) {
+                      return (
+                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 flex items-center justify-center gap-2 text-[9px] font-mono text-slate-400">
+                          <Navigation className="w-3.5 h-3.5 animate-spin text-emerald-500" />
+                          <span className="animate-pulse">{lang === "ar" ? "جارٍ الحساب..." : lang === "tr" ? "Hesaplanıyor..." : "Calculating..."}</span>
+                        </div>
+                      );
+                    }
+                    if (etaError) {
+                      return (
+                        <div className="bg-red-500/10 border border-red-500/30 p-2.5 rounded-lg text-[9px] font-mono text-red-300 flex items-start gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <div className="space-y-1">
+                            <p>{etaError}</p>
+                            <button onClick={() => handleCalculateEta(selectedShipment)} className="underline font-bold cursor-pointer">
+                              {lang === "ar" ? "إعادة المحاولة" : lang === "tr" ? "Tekrar dene" : "Retry"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (eta && eta.status === "UNAVAILABLE") {
+                      return (
+                        <div className="bg-orange-500/10 border border-orange-500/30 p-2.5 rounded-lg text-[9px] font-mono text-orange-300 flex items-start gap-1.5">
+                          <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{lang === "ar" ? "المسافة غير متوفرة لهذا المسار" : lang === "tr" ? "Bu rota için mesafe yok" : "Route distance unavailable for this shipment."}</span>
+                        </div>
+                      );
+                    }
+                    if (eta) {
+                      return (
+                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 font-mono text-[9px]">
+                          <div className="flex justify-between items-center">
+                            <span className="text-slate-500 uppercase tracking-wider">{lang === "ar" ? "المسافة" : lang === "tr" ? "Mesafe" : "Distance"}</span>
+                            <span className="font-extrabold text-slate-100">{eta.distance?.text || "—"}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-slate-500 uppercase tracking-wider">{lang === "ar" ? "المدة" : lang === "tr" ? "Süre" : "Duration"}</span>
+                            <span className="font-extrabold text-slate-100">{eta.durationInTraffic?.text || eta.duration?.text || "—"}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-emerald-500 uppercase tracking-wider font-extrabold">ETA</span>
+                            <span className="text-emerald-400 font-extrabold">{eta.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString() : "—"}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[7.5px] pt-0.5">
+                            <span className="text-slate-600">{eta.status === "OK" ? (lang === "ar" ? "من غوغل ماب" : lang === "tr" ? "Google Haritalar" : "Google Maps") : (lang === "ar" ? "تقدير حسابي" : lang === "tr" ? "Tahmini hesap" : "Estimated")}</span>
+                            <button onClick={() => handleCalculateEta(selectedShipment)} className="text-orange-400 underline font-bold cursor-pointer">
+                              {lang === "ar" ? "تحديث" : lang === "tr" ? "Yenile" : "Recalculate"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    // idle
+                    return (
+                      <button
+                        onClick={() => handleCalculateEta(selectedShipment)}
+                        className="w-full py-1.5 px-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 font-sans text-[11px] font-bold rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Navigation className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>{calcLabel}</span>
+                      </button>
+                    );
+                  })()}
 
                   <button
                     onClick={() => handleAutoFocusRoute(selectedShipment)}

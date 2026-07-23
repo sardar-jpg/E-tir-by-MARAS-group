@@ -151,3 +151,43 @@ describe("Phase 2 — Operations Center layout", () => {
     expect(TRACKING_MAP).not.toMatch(/\{t\.viewOnMap\}\s*➔/);
   });
 });
+
+describe("Phase 3 — details drawer + on-demand ETA", () => {
+  it("provides an on-demand ETA handler that hits the distance-matrix route", () => {
+    expect(TRACKING_MAP).toContain("handleCalculateEta");
+    expect(TRACKING_MAP).toMatch(/\/api\/shipments\/\$\{s\.id\}\/distance-matrix/);
+  });
+
+  it("never auto-calls the ETA route (only wired to onClick, not an effect)", () => {
+    // handleCalculateEta must not appear inside any useEffect dependency/body.
+    const effects = TRACKING_MAP.match(/useEffect\([\s\S]*?\}\s*,\s*\[[^\]]*\]\s*\)/g) || [];
+    for (const eff of effects) {
+      expect(eff).not.toContain("handleCalculateEta");
+      expect(eff).not.toContain("distance-matrix");
+    }
+  });
+
+  it("ties the ETA result to the selected shipment and clears it on re-selection", () => {
+    expect(TRACKING_MAP).toContain("etaForId");
+    // handleSelectShipment resets the ETA state so it never leaks across shipments.
+    const selectHandler = TRACKING_MAP.slice(
+      TRACKING_MAP.indexOf("const handleSelectShipment"),
+      TRACKING_MAP.indexOf("const handleAutoFocusRoute")
+    );
+    expect(selectHandler).toContain("setEtaData(null)");
+    expect(selectHandler).toContain("setEtaForId(null)");
+  });
+
+  it("renders the five ETA states (idle / loading / error / unavailable / success)", () => {
+    expect(TRACKING_MAP).toContain("etaLoading");
+    expect(TRACKING_MAP).toContain("etaError");
+    expect(TRACKING_MAP).toMatch(/eta\.status === "UNAVAILABLE"/);
+    expect(TRACKING_MAP).toMatch(/Calculate ETA & Distance/);
+  });
+
+  it("selection stays unified: list rows and both map marker sets drive handleSelectShipment", () => {
+    const occurrences = (TRACKING_MAP.match(/handleSelectShipment\(s\)/g) || []).length;
+    // list row + vector marker + google marker = at least three call sites.
+    expect(occurrences).toBeGreaterThanOrEqual(3);
+  });
+});
