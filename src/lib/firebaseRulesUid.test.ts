@@ -174,7 +174,7 @@ describe("Maps key delivery is role-scoped and never public (H-4 repo side)", ()
     expect(SHARE_LIB).not.toContain("GOOGLE_MAPS_PLATFORM_KEY");
   });
 
-  it("only the two real map surfaces fetch the key (admin tracking map, client shipment map)", () => {
+  it("only the real map surfaces fetch the key (admin tracking map, client shipment map, dashboard live-ops map)", () => {
     const consumers: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir)) {
@@ -185,6 +185,9 @@ describe("Maps key delivery is role-scoped and never public (H-4 repo side)", ()
       }
     };
     walk(join(ROOT, "src"));
-    expect(consumers.sort()).toEqual(["ClientShipmentMap.tsx", "TrackingMap.tsx"]);
+    // The Dashboard's compact Live Operations Map (LiveOperationsMap.tsx) is
+    // an admin-only surface added in the Dashboard redesign; it reuses the
+    // same role-scoped /api/maps-key path as the other two map surfaces.
+    expect(consumers.sort()).toEqual(["ClientShipmentMap.tsx", "LiveOperationsMap.tsx", "TrackingMap.tsx"]);
   });
 });

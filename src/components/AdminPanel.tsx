@@ -55,9 +55,11 @@ import { getAllowedNextShipmentStatuses, isShipmentClosed, getStatusSequenceForF
 import { MARAS_AI_QUICK_SUGGESTIONS, MARAS_AI_SOURCE_LABELS, deriveMarasAiAttention, type MarasAiStructuredResult } from "../lib/marasAiIntents";
 import MarasAiResponseView from "./admin/MarasAiResponseView";
 import MarasAiMonitoringPanel from "./admin/MarasAiMonitoringPanel";
-import MarasAiBriefCard from "./admin/MarasAiBriefCard";
-import ExecutiveFinancialSection, { FinancialAlertsCard } from "./admin/ExecutiveFinancialSection";
-import ReceivablesOverviewCard from "./admin/ReceivablesOverviewCard";
+// NOTE: MarasAiBriefCard, ExecutiveFinancialSection/FinancialAlertsCard and
+// ReceivablesOverviewCard used to stack on the Dashboard Overview. The
+// redesigned overview no longer stacks them (that content lives on the
+// Accounting module tabs, Reports, and the MARAS AI monitoring modal); the
+// component files are kept intact and can be re-mounted anywhere.
 import CostStatementWorkspace from "./admin/CostStatementWorkspace";
 import CustomerAccountPanel from "./admin/CustomerAccountPanel";
 import AccountingDashboard from "./admin/accounting/AccountingDashboard";
@@ -70,13 +72,17 @@ import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage"
 import FinancialReportsPage from "./admin/accounting/FinancialReportsPage";
 import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
-import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
+// Dashboard section-layout personalization retired in the Dashboard Overview
+// redesign (see the retirement note in the component body). The pure
+// dashboardLayout lib + its server persistence endpoints remain for the API,
+// but AdminPanel no longer consumes them.
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
 import MobileMoreMenu from "./admin/mobile/MobileMoreMenu";
 import MobileNotificationsSheet from "./admin/mobile/MobileNotificationsSheet";
-import MobileDashboard from "./admin/mobile/MobileDashboard";
+// MobileDashboard is superseded on the dashboard tab by the responsive
+// AdminDashboardSection (kept as a component for potential reuse).
 import MobileOrdersList from "./admin/mobile/MobileOrdersList";
 
 // Heavy, tab-scoped admin sections — lazy-loaded so their code (and, for
@@ -125,14 +131,6 @@ const fetch = apiFetch;
 // Open Shipments Value KPI uses (isOpenShipmentStatus), so the KPI and the
 // list it opens can never disagree.
 const ACTIVE_FILTER_LABEL: Record<string, string> = { en: 'Active', tr: 'Aktif', ar: 'نشطة' };
-
-const DASHBOARD_SECTION_LABELS: Record<string, { en: string; tr: string; ar: string }> = {
-  executive_brief: { en: 'Executive Brief', tr: 'Yönetici Brifingi', ar: 'الموجز التنفيذي' },
-  operations: { en: 'Operations', tr: 'Operasyon', ar: 'العمليات' },
-  financial: { en: 'Executive Financial Overview', tr: 'Yönetici Finansal Genel Bakış', ar: 'النظرة المالية التنفيذية' },
-  financial_alerts: { en: 'Financial Alerts', tr: 'Finansal Uyarılar', ar: 'تنبيهات مالية' },
-  analytics: { en: 'Logistics Analytics', tr: 'Lojistik Analitiği', ar: 'تحليلات لوجستية' },
-};
 
 const MARAS_AI_SUGGESTION_ICONS: Record<string, typeof Ship> = {
   delayed_shipments: Clock,
@@ -580,48 +578,22 @@ export default function AdminPanel({
   // 'reports' tab id stays valid for backward compatibility (old quick
   // links, saved navigation state) but always redirects to Dashboard
   // with the analytics section expanded.
-  const [isDashboardAnalyticsOpen, setIsDashboardAnalyticsOpen] = useState(false);
-  // PR #133 — per-admin Executive Dashboard personalization: section
-  // visibility + order, persisted per user (adminDashboardLayouts).
-  // Rendering intersects this with the viewer's PERMITTED sections, so
-  // a saved layout can never widen access.
-  const [dashboardLayout, setDashboardLayout] = useState<DashboardLayout>(DEFAULT_DASHBOARD_LAYOUT);
-  const [isDashboardCustomizeOpen, setIsDashboardCustomizeOpen] = useState(false);
-  const [draggedDashboardSection, setDraggedDashboardSection] = useState<DashboardSectionId | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch("/api/admin/dashboard/layout");
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled && data.layout) setDashboardLayout(normalizeDashboardLayout(data.layout));
-        }
-      } catch { /* default layout is fine */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  const permittedDashboardSections = React.useMemo(() => {
-    const effectiveType = adminType || 'super'; // same fallback resolvedAdminType uses below
-    const allowed = new Set<DashboardSectionId>(['executive_brief', 'operations']);
-    if (canViewCostStatements(effectiveType)) { allowed.add('financial'); allowed.add('financial_alerts'); }
-    if (canViewLogisticsAnalytics(effectiveType)) allowed.add('analytics');
-    return allowed;
-  }, [adminType]);
-  const saveDashboardLayout = (next: DashboardLayout) => {
-    setDashboardLayout(next);
-    void apiFetch("/api/admin/dashboard/layout", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ layout: next }),
-    }).catch(() => {});
-  };
-  useEffect(() => {
-    if (activeTab === 'reports') {
-      setIsDashboardAnalyticsOpen(true);
-      setActiveTab('dashboard');
-    }
-  }, [activeTab]);
+  // Dashboard personalization retired (Dashboard Overview redesign): the
+  // Overview is now a single, fixed, concise dashboard, so the former
+  // per-admin section show/hide/reorder layout (PR #133) no longer applies
+  // and is intentionally not read on the client — a stored "operations
+  // hidden" preference must never blank the new dashboard. The
+  // adminDashboardLayouts persistence endpoints remain server-side (still
+  // covered by their own tests) but are no longer consumed here. The
+  // sections that used to stack here are relocated, not lost: Executive
+  // Financial Overview + Financial Alerts → the Accounting module
+  // (Accounting Dashboard / Action Center) and the MARAS AI monitoring
+  // modal; Logistics Analytics / Reports → the dedicated Reports tab; Audit
+  // Log → the Audit tab. See the PR description for the full relocation map.
+  //
+  // 'reports' (Logistics Analytics) is now its own dedicated tab rendering
+  // AdminReportsSection directly (see the reports tab content block below),
+  // so it no longer redirects into the Dashboard.
 
   // Set by the Shipment Details modal's chat shortcut buttons to preselect
   // a shipment + channel when navigating into the Chat Center tab.
@@ -4135,6 +4107,12 @@ MARAS Group etir Center`;
       { id: 'chat_center', label: lang === 'tr' ? 'Mesaj Merkezi' : (lang === 'ar' ? 'مركز المحادثات' : 'Chat Center'), icon: MessageSquare },
       { id: 'clients', label: lang === 'tr' ? 'Müşteriler' : (lang === 'ar' ? 'العملاء' : 'Clients'), icon: Building2 },
       { id: 'vendors', label: lang === 'tr' ? 'Tedarikçiler' : (lang === 'ar' ? 'الموردين والشركاء' : 'Vendors'), icon: Building2 },
+      // Logistics Analytics (Reports) — the operational recharts analytics
+      // (AdminReportsSection). It used to be reachable only by redirecting
+      // into the old Dashboard's analytics section; the redesigned Dashboard
+      // no longer stacks it, so it is restored here as its own dedicated
+      // Business-group tab (role-gated by canViewLogisticsAnalytics below).
+      { id: 'reports', label: t('reports'), icon: BarChart3 },
       // Accounting module pages (dedicated "Accounting" sidebar group). The
       // `costs` page keeps its own richer label; the rest come from the
       // accountingNav registry (single source of truth for order + labels).
@@ -4955,173 +4933,83 @@ MARAS Group etir Center`;
           explains. */}
       {activeTab === 'dashboard' && (
         <div className={isMobileMode ? '' : 'lg:mx-4'}>
-          <div className="flex justify-end mb-2">
-            <button
-              onClick={() => setIsDashboardCustomizeOpen(!isDashboardCustomizeOpen)}
-              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-orange-300 cursor-pointer"
-            >
-              {lang === 'tr' ? 'Özelleştir' : (lang === 'ar' ? 'تخصيص' : 'Customize')}
-            </button>
-          </div>
-          {isDashboardCustomizeOpen && (
-            <div className="mb-3 p-3 rounded-xl border border-slate-200 bg-white space-y-1.5">
-              {dashboardLayout.order.map((sectionId) => (
-                <div
-                  key={sectionId}
-                  draggable
-                  onDragStart={() => setDraggedDashboardSection(sectionId)}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => { if (draggedDashboardSection) saveDashboardLayout(reorderDashboardSection(dashboardLayout, draggedDashboardSection, sectionId)); setDraggedDashboardSection(null); }}
-                  className="flex items-center justify-between gap-2 p-2 rounded-lg border border-slate-200 bg-slate-50 cursor-grab"
-                >
-                  <label className="flex items-center gap-2 text-[11px] font-bold text-slate-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={!dashboardLayout.hidden.includes(sectionId)}
-                      onChange={() => saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))}
-                    />
-                    <span>{DASHBOARD_SECTION_LABELS[sectionId][lang]}</span>
-                  </label>
-                  <span className="flex gap-1">
-                    <button onClick={() => saveDashboardLayout(moveDashboardSection(dashboardLayout, sectionId, 'up'))} className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-black cursor-pointer">↑</button>
-                    <button onClick={() => saveDashboardLayout(moveDashboardSection(dashboardLayout, sectionId, 'down'))} className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-black cursor-pointer">↓</button>
-                  </span>
-                </div>
-              ))}
-            </div>
+          {/* Dashboard Overview redesign: the overview now renders a single,
+              concise, decision-focused dashboard (the `operations` section)
+              for every viewport. The former stacked sections (Executive
+              Brief, Executive Financial Overview, Financial Alerts, and the
+              Analytics/Reports panel) are intentionally no longer stacked
+              here — each remains fully available on its own tab/page
+              (Accounting module, Reports, and the MARAS AI monitoring
+              modal), and their components/JSX below are kept intact. Only
+              the `operations` slot is rendered, so the page is dramatically
+              shorter while nothing is deleted. */}
+          {/* The Dashboard Overview is now a single, fixed, concise dashboard
+              rendered for every admin type (its own widgets are still
+              individually permission-gated inside AdminDashboardSection). */}
+          {(
+            <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+              <AdminDashboardSection
+                lang={lang}
+                isRtl={isRtl}
+                t={t}
+                currentTime={currentTime}
+                lastSyncedAt={lastSyncedAt}
+                shipments={shipments}
+                drivers={drivers}
+                activityLogs={activityLogs}
+                activeShipmentsCount={activeShipmentsCount}
+                totalShipmentsCount={totalShipmentsCount}
+                completedShipmentsCount={completedShipmentsCount}
+                pendingDocumentsCount={pendingDocumentsCount}
+                shipmentsHasMore={shipmentsHasMore}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                statusFilter={statusFilter}
+                setStatusFilter={setStatusFilter}
+                typeFilter={typeFilter}
+                setTypeFilter={setTypeFilter}
+                filteredShipments={filteredShipments}
+                setOpenDetailsId={setOpenDetailsId}
+                analyzeShipmentTiming={analyzeShipmentTiming}
+                getShipmentProgressPercentage={getShipmentProgressPercentage}
+                getDirectLink={getDirectLink}
+                triggerToast={triggerToast}
+                onSelectShipmentChat={onSelectShipmentChat}
+                canViewFinancial={canViewCostStatements(resolvedAdminType)}
+                canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
+                canViewAudit={resolvedAdminType === 'super'}
+                onViewAllShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
+                onOpenTrackingMap={() => { if (canViewGpsTracking(resolvedAdminType)) setActiveTab('tracking_map'); }}
+                onOpenAudit={() => { if (resolvedAdminType === 'super') setActiveTab('audit'); }}
+                onOpenFinancialDetails={() => setActiveTab('acct_dashboard')}
+                onOpenActionCenter={() => setIsMarasAiMonitoringOpen(true)}
+              />
+            </React.Suspense>
           )}
-          {visibleOrderedSections(dashboardLayout, permittedDashboardSections).map((sectionId) => (
-            <div key={sectionId} className="mb-3">
-              {sectionId === 'executive_brief' && (
-                <MarasAiBriefCard
-                  lang={lang}
-                  isMobileMode={isMobileMode}
-                  isSuper={resolvedAdminType === 'super'}
-                  onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)}
-                />
-              )}
-              {sectionId === 'operations' && (isMobileMode ? (
-        <MobileDashboard
-          lang={lang}
-          isRtl={isRtl}
-          t={t}
-          shipments={shipments}
-          activeShipmentsCount={activeShipmentsCount}
-          totalShipmentsCount={totalShipmentsCount}
-          completedShipmentsCount={completedShipmentsCount}
-          pendingDocumentsCount={pendingDocumentsCount}
-          recentAlertsData={recentAlertsData}
-          setNewShipmentData={setNewShipmentData}
-          createEmptyShipmentForm={createEmptyShipmentForm}
-          setUseCustomPOL={setUseCustomPOL}
-          setUseCustomPOD={setUseCustomPOD}
-          setIsCreateOpen={setIsCreateOpen}
-          setActiveTab={(id) => setActiveTab(id as any)}
-          canViewShipmentRegistry={canViewShipmentRegistry(resolvedAdminType)}
-          canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
-          onOpenNotifications={() => setIsNotifOpen(true)}
-        />
-              ) : (
-        <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
-          <AdminDashboardSection
-            lang={lang}
-            t={t}
-            isMobileMode={isMobileMode}
-            adminEmail={adminEmail}
-            adminType={adminType}
-            gmailUser={gmailUser}
-            currentTime={currentTime}
-            shipments={shipments}
-            drivers={drivers}
-            clients={clients}
-            notifications={notifications}
-            activityLogs={activityLogs}
-            activeShipmentsCount={activeShipmentsCount}
-            totalShipmentsCount={totalShipmentsCount}
-            completedShipmentsCount={completedShipmentsCount}
-            shipmentsHasMore={shipmentsHasMore}
-            pendingDocumentsCount={pendingDocumentsCount}
-            realTimeDocsStats={realTimeDocsStats}
-            notificationCountsChartData={notificationCountsChartData}
-            recentAlertsData={recentAlertsData}
-            routeChartData={routeChartData}
-            shipmentAnalyticsData={shipmentAnalyticsData}
-            pendingCountVal={pendingCountVal}
-            activeCountVal={activeCountVal}
-            completedCountVal={completedCountVal}
-            searchQuery={searchQuery}
-            setSearchQuery={setSearchQuery}
-            setStatusFilter={setStatusFilter}
-            typeFilter={typeFilter}
-            setTypeFilter={setTypeFilter}
-            filteredShipments={filteredShipments}
-            setNewShipmentData={setNewShipmentData}
-            createEmptyShipmentForm={createEmptyShipmentForm}
-            setUseCustomPOL={setUseCustomPOL}
-            setUseCustomPOD={setUseCustomPOD}
-            setIsCreateOpen={setIsCreateOpen}
-            setOpenDetailsId={setOpenDetailsId}
-            analyzeShipmentTiming={analyzeShipmentTiming}
-            getShipmentProgressPercentage={getShipmentProgressPercentage}
-            getDirectLink={getDirectLink}
-            triggerToast={triggerToast}
-            onSelectShipmentChat={onSelectShipmentChat}
-            setActiveTab={setActiveTab}
-            isSuperAdmin={resolvedAdminType === 'super'}
-            canViewDriverRoster={canViewDriverRoster(resolvedAdminType)}
-            canViewGpsTracking={canViewGpsTracking(resolvedAdminType)}
-            canViewLogisticsAnalytics={canViewLogisticsAnalytics(resolvedAdminType)}
-          />
-        </React.Suspense>
-              ))}
-              {sectionId === 'financial' && canViewCostStatements(resolvedAdminType) && (
-                <>
-                  <ExecutiveFinancialSection
-                    lang={lang}
-                    onOpenShipments={() => { setStatusFilter('active'); setTypeFilter('all'); setActiveTab('shipments'); }}
-                  />
-                  {/* Accounts-receivable overview from real invoices + payments. */}
-                  <div className="mt-3"><ReceivablesOverviewCard lang={lang} /></div>
-                </>
-              )}
-              {sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType) && (
-                <FinancialAlertsCard lang={lang} onOpenMonitoring={() => setIsMarasAiMonitoringOpen(true)} />
-              )}
-              {sectionId === 'analytics' && canViewLogisticsAnalytics(resolvedAdminType) && (
-                <div>
-                  <button
-                    onClick={() => setIsDashboardAnalyticsOpen(!isDashboardAnalyticsOpen)}
-                    className="w-full flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer mb-3"
-                  >
-                    <span className="text-sm font-black text-slate-900 flex items-center gap-2">
-                      <BarChart3 className="w-4 h-4 text-orange-500" />
-                      <span>{t('reports')}</span>
-                    </span>
-                    <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">
-                      {(isDashboardAnalyticsOpen || !isMobileMode) ? '−' : '+'}
-                    </span>
-                  </button>
-                  {(isDashboardAnalyticsOpen || !isMobileMode) && (
-                    <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
-                      <AdminReportsSection
-                        lang={lang}
-                        t={t}
-                        isMobileMode={isMobileMode}
-                        totalShipmentsCount={totalShipmentsCount}
-                        statusData={statusData}
-                        currencyChartData={currencyChartData}
-                        totalCompleted30d={totalCompleted30d}
-                        avgDailyCompleted={avgDailyCompleted}
-                        peakFormattedDay={peakFormattedDay}
-                        performanceAnalyticsData={performanceAnalyticsData}
-                        shipmentsHasMore={shipmentsHasMore}
-                      />
-                    </React.Suspense>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
+        </div>
+      )}
+
+      {/* Logistics Analytics (Reports) — dedicated page. Restored from the
+          former Dashboard analytics section so this operational recharts
+          view stays fully accessible after the Dashboard Overview redesign
+          (same lazy component, data, and canViewLogisticsAnalytics gate). */}
+      {activeTab === 'reports' && canViewLogisticsAnalytics(resolvedAdminType) && (
+        <div className={isMobileMode ? '' : 'lg:mx-4'}>
+          <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
+            <AdminReportsSection
+              lang={lang}
+              t={t}
+              isMobileMode={isMobileMode}
+              totalShipmentsCount={totalShipmentsCount}
+              statusData={statusData}
+              currencyChartData={currencyChartData}
+              totalCompleted30d={totalCompleted30d}
+              avgDailyCompleted={avgDailyCompleted}
+              peakFormattedDay={peakFormattedDay}
+              performanceAnalyticsData={performanceAnalyticsData}
+              shipmentsHasMore={shipmentsHasMore}
+            />
+          </React.Suspense>
         </div>
       )}
 

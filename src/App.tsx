@@ -34,6 +34,7 @@ import { isShipmentClosed } from "./lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "./lib/chatDisplay";
 import { encodePageCursor } from "./lib/pagination";
 import { isValidLocalSessionFastPath } from "./lib/localSessionFastPath";
+import { applyDocumentLanguage } from "./lib/documentDirection";
 import ImageLightbox from "./components/ImageLightbox";
 import { onAuthStateChanged } from "firebase/auth";
 
@@ -70,6 +71,16 @@ const COMPOSER_MAX_HEIGHT_PX = 128;
 export default function App() {
   // 1. Language State
   const [lang, setLang] = useState<Language>("en");
+
+  // Correction pass (PR #155 QA follow-up): the QA review found
+  // document.documentElement.dir stayed empty even while Arabic was
+  // selected — component-level dir="rtl" wrappers mirrored the layout
+  // fine, but the root element (which screen readers and native browser
+  // behavior like find-in-page/context menus consult) never matched.
+  // Keep both in sync on every language change, from first paint.
+  useEffect(() => {
+    applyDocumentLanguage(lang);
+  }, [lang]);
 
   // feature/admin-mobile-ui correction pass: the Admin shell's own dark
   // header/footer (below) duplicate MobileTopAppBar/MobileBottomNav on
