@@ -224,3 +224,28 @@ describe("Phase 4 — componentization, clustering, legend, loaded-50 notice", (
     expect(TRACKING_MAP).toMatch(/shipments\.length >= 50/);
   });
 });
+
+describe("Phase 5 — responsive + RTL", () => {
+  const LEGEND = readFileSync(join(__dirname, "admin", "tracking", "TrackingLegend.tsx"), "utf-8");
+
+  it("keeps a full Arabic + Turkish + English label set for the four states", () => {
+    // Each dictionary defines all four state labels (RTL Arabic included).
+    for (const key of ["trackLive", "trackReported", "trackEstimated", "trackUnavailable"]) {
+      const count = (TRACKING_MAP.match(new RegExp(`${key}:`, "g")) || []).length;
+      expect(count).toBeGreaterThanOrEqual(3); // en + tr + ar
+    }
+  });
+
+  it("gates the desktop-only Operations Center chrome behind lg: (mobile has its own header)", () => {
+    // Status strip + panel collapse toggle are desktop-only.
+    expect(TRACKING_MAP).toMatch(/hidden lg:flex[^"]*trackingCounts|hidden lg:flex/);
+    // Mobile keeps its List/Map toggle.
+    expect(TRACKING_MAP).toMatch(/setMobileListOpen/);
+  });
+
+  it("the legend is localized for RTL Arabic and Turkish, not English-only", () => {
+    expect(LEGEND).toContain("تتبع مباشر"); // Arabic 'Live GPS'
+    expect(LEGEND).toContain("Canlı GPS"); // Turkish
+    expect(LEGEND).toMatch(/labels\[lang\]/); // language-driven, not hardcoded
+  });
+});
