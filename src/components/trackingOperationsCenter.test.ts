@@ -109,10 +109,11 @@ describe("Phase 1 — tracking honesty applied in TrackingMap", () => {
     expect(posHelper).not.toContain("hash");
   });
 
-  it("skips rendering a marker for shipments whose position is unavailable", () => {
-    // Both the Vector Radar and Google Map marker loops must bail out when
-    // the resolved position is not placeable.
-    expect(TRACKING_MAP).toMatch(/if \(!activeLoc\.available\) return null;/);
+  it("never places a marker for shipments whose position is unavailable", () => {
+    // Vector Radar: unavailable shipments are filtered out before clustering
+    // (loc.available ? {...} : null), so they never reach the grid.
+    expect(TRACKING_MAP).toMatch(/loc\.available \? \{ x: loc\.x/);
+    // Google Map: the marker loop still bails out when not placeable.
     expect(TRACKING_MAP).toMatch(/if \(!activeLoc\.available \|\| activeLoc\.lat == null/);
   });
 
@@ -189,5 +190,37 @@ describe("Phase 3 — details drawer + on-demand ETA", () => {
     const occurrences = (TRACKING_MAP.match(/handleSelectShipment\(s\)/g) || []).length;
     // list row + vector marker + google marker = at least three call sites.
     expect(occurrences).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("Phase 4 — componentization, clustering, legend, loaded-50 notice", () => {
+  const LEGEND = readFileSync(join(__dirname, "admin", "tracking", "TrackingLegend.tsx"), "utf-8");
+
+  it("extracts the map legend into admin/tracking and uses it in TrackingMap", () => {
+    expect(TRACKING_MAP).toContain('import TrackingLegend from "./admin/tracking/TrackingLegend"');
+    expect(TRACKING_MAP).toContain("<TrackingLegend");
+    // The old verbose inline legend content must be gone.
+    expect(TRACKING_MAP).not.toContain("Shipment Milestones");
+    expect(TRACKING_MAP).not.toContain("Truck Categorization");
+  });
+
+  it("the legend honestly documents the four tracking-confidence states", () => {
+    expect(LEGEND).toContain("live_gps");
+    expect(LEGEND).toContain("last_reported");
+    expect(LEGEND).toContain("estimated");
+    expect(LEGEND).toContain("unavailable");
+  });
+
+  it("wires the pure clusterMarkers lib into the Vector Radar", () => {
+    expect(TRACKING_MAP).toContain('import { clusterMarkers } from "../lib/markerClustering"');
+    expect(TRACKING_MAP).toContain("vectorClusters");
+    expect(TRACKING_MAP).toContain("clusterMarkers(");
+    // Cluster bubbles render a count when more than one marker is grouped.
+    expect(TRACKING_MAP).toMatch(/cluster\.count > 1/);
+  });
+
+  it("shows an honest loaded-50 notice without changing the backend limit", () => {
+    expect(TRACKING_MAP).toContain("loadedCapNotice");
+    expect(TRACKING_MAP).toMatch(/shipments\.length >= 50/);
   });
 });
