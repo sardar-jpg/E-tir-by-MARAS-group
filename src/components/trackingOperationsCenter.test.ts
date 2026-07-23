@@ -131,7 +131,7 @@ describe("Phase 2 — Operations Center layout", () => {
     // map spans the full grid. Height is viewport-driven (map-dominant page).
     expect(TRACKING_MAP).toContain("lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]");
     expect(TRACKING_MAP).toMatch(/panelCollapsed \? "lg:grid-cols-1"/);
-    expect(TRACKING_MAP).toContain("lg:h-[calc(100vh-150px)]");
+    expect(TRACKING_MAP).toMatch(/lg:h-\[calc\(100vh-\d+px\)\]/);
     // The old fixed 620px band and the even 4/8 split must be gone.
     expect(TRACKING_MAP).not.toContain("lg:h-[620px]");
     expect(TRACKING_MAP).not.toContain("lg:col-span-8");

@@ -6707,7 +6707,20 @@ MARAS Group etir Center`;
         // it has no coordinate data for Sea/Air routes, so mixing them in
         // just fell back to a fake Istanbul->Baghdad pin. Land-only here.
         <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
-          <TrackingMap shipments={shipments.filter(s => (s.freightType || "land") === "land")} lang={lang} drivers={drivers} />
+          <TrackingMap
+            shipments={shipments.filter(s => (s.freightType || "land") === "land")}
+            lang={lang}
+            drivers={drivers}
+            /* Drawer navigation actions — same read-only routing the MARAS AI
+               cards use: the existing details modal, and the existing Chat
+               Center shipment thread (where messages AND shipment documents
+               already live). No new surfaces, no duplicated APIs. */
+            onOpenShipmentDetails={(shipmentId) => setOpenDetailsId(shipmentId)}
+            onOpenShipmentChat={(shipmentId) => {
+              setChatCenterFocus({ shipmentId, channel: 'driver_admin' });
+              setActiveTab('chat_center');
+            }}
+          />
         </React.Suspense>
       )}
 

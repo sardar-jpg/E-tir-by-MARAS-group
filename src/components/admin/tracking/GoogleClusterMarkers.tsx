@@ -77,19 +77,18 @@ export default function GoogleClusterMarkers({
         title={`Shipment #${m.shipment.shipmentNumber}`}
         onClick={() => onSelect(m.shipment)}
       >
-        <div className={`flex flex-col items-center justify-center cursor-pointer transform transition-all hover:scale-110 active:scale-95 ${isSelected ? "scale-110 z-20" : "z-10"}`}>
-          <span className={`shadow-md font-bold font-mono text-[9px]/tight px-1.5 py-0.5 rounded text-white whitespace-nowrap ${isSelected ? "bg-orange-600 border border-white" : "bg-slate-900 border border-slate-700"}`}>
-            #{m.shipment.shipmentNumber}
+        <div className={`flex flex-col items-center justify-center gap-0.5 cursor-pointer transform transition-all hover:scale-110 active:scale-95 ${isSelected ? "scale-110 z-20" : "z-10"}`}>
+          {/* Order-number pill (light, per Operations Center design) */}
+          <span className={`shadow-md font-bold font-mono text-[10px]/tight px-2 py-0.5 rounded-md whitespace-nowrap border ${isSelected ? "bg-orange-600 border-orange-700 text-white" : "bg-white border-slate-300 text-slate-800"}`}>
+            {m.shipment.shipmentNumber}
           </span>
+          {/* State-coloured circular marker */}
           <div
-            style={{ width: "36px", height: "36px" }}
-            className={`w-9 h-9 rounded-full flex items-center justify-center border-2 shadow-lg transition-transform ${isSelected ? "bg-orange-600 border-white" : colors.bg}`}
+            style={{ width: "34px", height: "34px" }}
+            className={`w-[34px] h-[34px] rounded-full flex items-center justify-center border-[3px] shadow-lg transition-transform ${isSelected ? "bg-orange-600 border-white" : colors.bg}`}
           >
             <Truck className="w-4 h-4 text-white" />
           </div>
-          {!isSelected && (
-            <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${colors.text}`}>{colors.chip}</span>
-          )}
         </div>
       </AdvancedMarker>
     );
@@ -117,7 +116,7 @@ export default function GoogleClusterMarkers({
             <div className="flex items-center justify-center cursor-pointer transform transition-all hover:scale-110 active:scale-95 z-10">
               <div
                 style={{ width: "40px", height: "40px" }}
-                className="w-10 h-10 rounded-full flex items-center justify-center border-2 border-orange-400 bg-slate-900/95 text-white font-mono font-black text-sm shadow-lg"
+                className="w-10 h-10 rounded-full flex items-center justify-center border-[3px] border-white bg-slate-800 text-white font-mono font-black text-sm shadow-xl ring-2 ring-slate-300"
               >
                 {cluster.count}
               </div>

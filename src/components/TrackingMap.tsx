@@ -31,6 +31,7 @@ import { resolveTrackingStatus } from "../lib/trackingMapStatus";
 import {
   resolveTrackingPosition,
   projectGeoToVector,
+  PRE_DEPARTURE_STATUSES,
   type TrackingState,
   type TrackingPosition,
 } from "../lib/trackingPositions";
@@ -393,6 +394,34 @@ const LABELS = {
     loadedCapNotice: "Showing the first 50 loaded shipments.",
     emptyTitle: "No active shipments are currently being tracked",
     emptyBody: "Tracking information will appear here automatically when shipments enter transit.",
+    opsTitle: "GPS Tracking – Operations Center",
+    liveData: "Live Data",
+    lastUpdatedAt: "Last updated",
+    kpiActive: "Active",
+    kpiInTransit: "In Transit",
+    kpiGpsOnline: "GPS Online",
+    shipmentsTitle: "Shipments",
+    allTruckTypes: "All Truck Types",
+    allDrivers: "All Drivers",
+    unassigned: "Unassigned",
+    justNow: "just now",
+    minAgo: "min ago",
+    route: "Route",
+    trackingSource: "Tracking Source",
+    lastUpdateLabel: "Last Update",
+    fresh: "Fresh",
+    stale: "Stale",
+    routeProgress: "Route Progress",
+    origin: "Origin",
+    destination: "Destination",
+    departed: "Departed",
+    pending: "Pending",
+    arrived: "Arrived",
+    etaSection: "ETA & Distance",
+    estimatedTag: "Estimated",
+    remainingDistance: "Remaining distance",
+    viewDetails: "View Shipment Details",
+    openChat: "Open Shipment Chat",
     operationalStats: "Transit Stats Overview",
     totalShipments: "Active Transits",
     totalDistance: "Estimated Route Completion",
@@ -436,6 +465,34 @@ const LABELS = {
     loadedCapNotice: "İlk 50 yüklenen sevkiyat gösteriliyor.",
     emptyTitle: "Şu anda takip edilen aktif sevkiyat yok",
     emptyBody: "Sevkiyatlar yola çıktığında takip bilgileri burada otomatik olarak görünecektir.",
+    opsTitle: "GPS Takip – Operasyon Merkezi",
+    liveData: "Canlı Veri",
+    lastUpdatedAt: "Son güncelleme",
+    kpiActive: "Aktif",
+    kpiInTransit: "Yolda",
+    kpiGpsOnline: "GPS Aktif",
+    shipmentsTitle: "Sevkiyatlar",
+    allTruckTypes: "Tüm Araç Tipleri",
+    allDrivers: "Tüm Sürücüler",
+    unassigned: "Atanmadı",
+    justNow: "şimdi",
+    minAgo: "dk önce",
+    route: "Rota",
+    trackingSource: "Takip Kaynağı",
+    lastUpdateLabel: "Son Güncelleme",
+    fresh: "Güncel",
+    stale: "Eski",
+    routeProgress: "Rota Durumu",
+    origin: "Çıkış",
+    destination: "Varış",
+    departed: "Yola Çıktı",
+    pending: "Bekliyor",
+    arrived: "Vardı",
+    etaSection: "ETA ve Mesafe",
+    estimatedTag: "Tahmini",
+    remainingDistance: "Kalan mesafe",
+    viewDetails: "Sevkiyat Detayları",
+    openChat: "Sevkiyat Sohbetini Aç",
     operationalStats: "Operasyonel İstatistikler",
     totalShipments: "Aktif Araç",
     totalDistance: "Tahmini Rota Durumu",
@@ -479,6 +536,34 @@ const LABELS = {
     loadedCapNotice: "يتم عرض أول 50 شحنة محمّلة.",
     emptyTitle: "لا توجد شحنات نشطة قيد التتبع حالياً",
     emptyBody: "ستظهر معلومات التتبع هنا تلقائياً عند دخول الشحنات مرحلة النقل.",
+    opsTitle: "تتبع GPS – مركز العمليات",
+    liveData: "بيانات مباشرة",
+    lastUpdatedAt: "آخر تحديث",
+    kpiActive: "نشطة",
+    kpiInTransit: "قيد النقل",
+    kpiGpsOnline: "GPS متصل",
+    shipmentsTitle: "الشحنات",
+    allTruckTypes: "كل أنواع الشاحنات",
+    allDrivers: "كل السائقين",
+    unassigned: "غير معيّن",
+    justNow: "الآن",
+    minAgo: "دقيقة مضت",
+    route: "المسار",
+    trackingSource: "مصدر التتبع",
+    lastUpdateLabel: "آخر تحديث",
+    fresh: "حديث",
+    stale: "قديم",
+    routeProgress: "تقدم المسار",
+    origin: "الانطلاق",
+    destination: "الوجهة",
+    departed: "غادرت",
+    pending: "قيد الانتظار",
+    arrived: "وصلت",
+    etaSection: "الوقت المتوقع والمسافة",
+    estimatedTag: "تقديري",
+    remainingDistance: "المسافة المتبقية",
+    viewDetails: "تفاصيل الشحنة",
+    openChat: "فتح محادثة الشحنة",
     operationalStats: "ملخص النقل النشط",
     totalShipments: "الشاحنات في الطريق",
     totalDistance: "مؤشر إكمال الرحلات",
@@ -490,9 +575,17 @@ interface TrackingMapProps {
   shipments: Shipment[];
   lang: Language;
   drivers?: Driver[];
+  /**
+   * Optional navigation actions for the details drawer. Both route into
+   * EXISTING Admin surfaces (the shipment details modal / the Chat Center
+   * thread where messages AND shipment documents already live) — the drawer
+   * never builds its own chat or document handling.
+   */
+  onOpenShipmentDetails?: (shipmentId: string) => void;
+  onOpenShipmentChat?: (shipmentId: string) => void;
 }
 
-export default function TrackingMap({ shipments, lang, drivers }: TrackingMapProps) {
+export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDetails, onOpenShipmentChat }: TrackingMapProps) {
   const t = LABELS[lang] || LABELS.en;
 
   const filterTabsLabels = {
@@ -560,6 +653,16 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   // so the map can go full-width (map-dominant). Ignored on mobile, which
   // already shows one pane at a time via mobileListOpen.
   const [panelCollapsed, setPanelCollapsed] = useState<boolean>(false);
+
+  // Operations Center: optional driver filter (client-side, honest — filters
+  // the already-loaded list by assignedDriverId, no new data fetching).
+  const [driverFilter, setDriverFilter] = useState<string>("all");
+
+  // Honest "last updated" clock for the top bar: stamped whenever the
+  // shipments/drivers props actually change (AdminPanel's SWR poll), never a
+  // fake ticking "live" claim.
+  const [lastDataAt, setLastDataAt] = useState<Date>(() => new Date());
+  useEffect(() => { setLastDataAt(new Date()); }, [shipments, drivers]);
 
   // On-demand ETA & Distance (details drawer). Never auto-called and never
   // persisted client-side: the result is tied to etaForId and cleared whenever
@@ -756,7 +859,13 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       return false;
     }
 
-    // 2. Search Text Query Filter
+    // 2. Driver Filter (Operations Center): plain client-side match on the
+    // already-loaded assignment — no new data fetching.
+    if (driverFilter !== "all" && s.assignedDriverId !== driverFilter) {
+      return false;
+    }
+
+    // 3. Search Text Query Filter
     const q = searchQuery.toLowerCase();
     return (
       s.shipmentNumber.toLowerCase().includes(q) ||
@@ -765,7 +874,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       s.deliveryCity.toLowerCase().includes(q) ||
       (s.assignedDriverName && s.assignedDriverName.toLowerCase().includes(q))
     );
-  }), [inTransitShipments, driversById, selectedTruckTypes, searchQuery]);
+  }), [inTransitShipments, driversById, selectedTruckTypes, driverFilter, searchQuery]);
 
   // Perf Phase 2: precompute per-truck-type counts once per render pass
   // (was O(types × shipments × drivers) via a getTruckTypeCount() called
@@ -827,15 +936,16 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
 
-  // Real-data status strip: honest counts of the four tracking states across
-  // the currently filtered shipments. Never fabricated — derived directly
-  // from resolveTrackingPosition via getShipmentGpsState.
+  // Real-data KPI counts: honest counts of the four tracking states across
+  // ALL loaded (land) shipments — fleet-level numbers for the KPI strip,
+  // independent of the panel's search/filter state. Never fabricated —
+  // derived directly from resolveTrackingPosition via getShipmentGpsState.
   const trackingCounts = useMemo(() => {
     const c: Record<TrackingState, number> = { live_gps: 0, last_reported: 0, estimated: 0, unavailable: 0 };
-    for (const s of filteredTransit) c[getShipmentGpsState(s)] += 1;
+    for (const s of shipments) c[getShipmentGpsState(s)] += 1;
     return c;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredTransit, trackingById]);
+  }, [shipments, trackingById]);
 
   // Vector Radar marker clustering: group placeable markers that sit within a
   // scale-dependent radius so overlapping trucks read as one "N here" bubble
@@ -1033,90 +1143,64 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </button>
       </div>
 
-      {/* Operations command bar — desktop only. ONE compact row replacing the
-          former stacked "overview deck" + "status strip": identity + honest
-          engine status on the left, the four real-data state chips in the
-          middle, and the primary actions (view-mode toggle, Reset, Panel,
-          Fullscreen) on the right. Wording for the engine status is still
-          derived from isGoogleMapsLive — the single runtime source of truth
-          (never an unconditional "Live" claim). */}
-      <div className="hidden lg:flex items-center gap-3 bg-slate-900 border border-slate-800 text-white rounded-xl px-3 py-2 shadow-sm">
-        <div className="flex items-center gap-2 min-w-0">
-          <Compass className="w-4 h-4 text-orange-500 shrink-0 animate-spin" style={{ animationDuration: '10s' }} />
-          <div className="min-w-0">
-            <h3 className="text-[11px] font-black uppercase tracking-wider text-slate-100 leading-tight truncate">
-              {lang === 'tr' ? "Operasyon Takip Merkezi" : lang === 'ar' ? "مركز عمليات التتبع" : "Tracking Operations Center"}
-            </h3>
-            <p className={`text-[10px] font-medium flex items-center gap-1 leading-tight truncate ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
-              <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500' : 'bg-slate-600'}`}></span>
-              <span className="truncate">
-                {mapViewMode === 'vector'
-                  ? (lang === 'tr' ? "Vektör Radar (Akıllı Takip)" : lang === 'ar' ? "رادار متجه (تتبع ذكي)" : "Vector Radar (Smart Tracking)")
-                  : isGoogleMapsLive
-                    ? (lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "خرائط غوغل مباشرة" : "Live Google Maps")
-                    : !hasValidMapsKey
-                      ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
-                      : (lang === 'tr' ? "Demo / Manuel Takip" : lang === 'ar' ? "وضع تجريبي / يدوي" : "Demo / Manual Mode")}
-              </span>
-            </p>
-          </div>
+      {/* Operations Center top bar — desktop only. Dark app-bar per the
+          approved design: title + honest engine status, an honest "Live
+          Data / last updated" pill (stamped from real prop refreshes, and
+          downgraded wording when the map service isn't actually live), and
+          the primary actions: Google Map | Vector Radar segmented toggle,
+          panel collapse, fullscreen. Status wording still derives from
+          isGoogleMapsLive — never an unconditional "Live" claim. */}
+      <div className="hidden lg:flex items-center gap-4 bg-slate-900 border border-slate-800 text-white rounded-xl px-4 py-2.5 shadow-sm">
+        <div className="min-w-0">
+          <h3 className="text-[13px] font-bold text-slate-100 leading-tight truncate">{t.opsTitle}</h3>
+          <p className={`text-[10px] font-medium leading-tight truncate ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-slate-400' : 'text-amber-400'}`}>
+            {mapViewMode === 'vector'
+              ? (lang === 'tr' ? "Vektör Radar (Akıllı Takip)" : lang === 'ar' ? "رادار متجه (تتبع ذكي)" : "Vector Radar (Smart Tracking)")
+              : isGoogleMapsLive
+                ? (lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "خرائط غوغل مباشرة" : "Live Google Maps")
+                : !hasValidMapsKey
+                  ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
+                  : (lang === 'tr' ? "Demo / Manuel Takip" : lang === 'ar' ? "وضع تجريبي / يدوي" : "Demo / Manual Mode")}
+          </p>
         </div>
 
-        {/* Real-data tracking-state chips (honest counts, no fabrication) */}
-        <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-center min-w-0">
-          {([
-            { key: "live_gps" as const, label: t.trackLive, dot: "bg-emerald-500", text: "text-emerald-400" },
-            { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-400" },
-            { key: "estimated" as const, label: t.trackEstimated, dot: "bg-orange-500", text: "text-orange-400" },
-            { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-500", text: "text-slate-400" },
-          ]).map(item => (
-            <span
-              key={item.key}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-2 py-1 text-[10px] font-semibold"
-              title={item.label}
-            >
-              <span className={`inline-block w-1.5 h-1.5 rounded-full ${item.dot}`}></span>
-              <span className="text-slate-400 tracking-wide hidden xl:inline">{item.label}</span>
-              <span className={`tabular-nums font-black ${item.text}`}>{trackingCounts[item.key]}</span>
-            </span>
-          ))}
+        {/* Honest data-freshness pill — timestamp of the last real data refresh */}
+        <div className="flex items-center gap-2 bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-1.5 shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+          <span className="text-[10px] font-bold text-slate-200">{t.liveData}</span>
+          <span className="text-[10px] text-slate-500 font-mono">{t.lastUpdatedAt}: {lastDataAt.toLocaleTimeString()}</span>
         </div>
 
-        {/* Primary actions only */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <div className="bg-slate-950 p-0.5 rounded-lg border border-slate-800 flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={() => setMapViewMode('vector')}
-              className={`px-2.5 py-1 rounded-md text-[10px] font-bold transition-all cursor-pointer border-0 ${
-                mapViewMode === 'vector' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
-              }`}
-            >
-              {lang === 'tr' ? "Radar" : lang === 'ar' ? "رادار" : "Radar"}
-            </button>
+        <div className="flex-1" />
+
+        {/* Primary actions */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="bg-slate-950 p-1 rounded-lg border border-slate-800 flex items-center gap-1">
             <button
               type="button"
               onClick={() => setMapViewMode('google_map')}
-              className={`px-2.5 py-1 rounded-md text-[10px] font-bold transition-all cursor-pointer border-0 ${
+              className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer border-0 ${
                 mapViewMode === 'google_map' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
               }`}
             >
-              {lang === 'tr' ? "Harita" : lang === 'ar' ? "خريطة" : "Map"}
+              {lang === 'tr' ? "Google Harita" : lang === 'ar' ? "خرائط غوغل" : "Google Map"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapViewMode('vector')}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer border-0 ${
+                mapViewMode === 'vector' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
+              }`}
+            >
+              {lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar"}
             </button>
           </div>
-          <button
-            onClick={handleShowAll}
-            title={t.viewAllTransit}
-            className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-950 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-600 transition-all cursor-pointer"
-          >
-            {t.viewAllTransit}
-          </button>
           <button
             onClick={() => setPanelCollapsed(c => !c)}
             title={panelCollapsed
               ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
               : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
-            className="w-7 h-7 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
             {panelCollapsed ? <Expand className="w-3.5 h-3.5" /> : <Minimize className="w-3.5 h-3.5" />}
           </button>
@@ -1126,11 +1210,34 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
             title={isFullscreen
               ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Fullscreen")
               : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
-            className="w-7 h-7 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
         </div>
+      </div>
+
+      {/* KPI strip — six flat light cards with honest, real-data counts:
+          Active / In Transit come straight from shipment statuses; the four
+          tracking-state counts come from resolveTrackingPosition across all
+          loaded shipments. Desktop only (mobile keeps its compact header). */}
+      <div className="hidden lg:grid grid-cols-6 gap-2">
+        {([
+          { key: null, label: t.kpiActive, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
+          { key: null, label: t.kpiInTransit, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status === "In Transit").length },
+          { key: "live_gps" as const, label: t.kpiGpsOnline, dot: "bg-emerald-500", text: "text-emerald-600", value: null },
+          { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-600", value: null },
+          { key: "estimated" as const, label: t.trackEstimated, dot: "bg-sky-500", text: "text-sky-600", value: null },
+          { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-300", text: "text-slate-400", value: null },
+        ]).map(item => (
+          <div key={item.label} className="bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm min-w-0" title={item.label}>
+            <p className="text-[10px] font-semibold text-slate-500 truncate">{item.label}</p>
+            <p className={`text-xl font-black tabular-nums leading-tight flex items-center gap-1.5 ${item.text}`}>
+              {item.key ? trackingCounts[item.key] : item.value}
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${item.dot}`}></span>
+            </p>
+          </div>
+        ))}
       </div>
 
       {/* feature/admin-mobile-ui: mobile-only List/Map toggle — the
@@ -1158,223 +1265,87 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           fixed ~19% column (clamped so it stays usable at small lg widths)
           and the map takes the rest; collapsed => the map spans everything.
           Height is viewport-driven so the map owns ~80-85% of the page. */}
-      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${panelCollapsed ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${isFullscreen ? "flex-1 min-h-0" : "lg:h-[calc(100vh-150px)] lg:min-h-[540px]"}`}>
+      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${panelCollapsed ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${isFullscreen ? "flex-1 min-h-0" : "lg:h-[calc(100vh-235px)] lg:min-h-[500px]"}`}>
 
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
         <div className={`${mobileListOpen ? "flex" : "hidden"} ${panelCollapsed ? "lg:hidden" : "lg:flex"} border-r border-slate-200 flex-col bg-slate-50/50 lg:min-h-0 lg:overflow-hidden ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
-          {/* Sidebar Header — compact: title + count + search + filters only
-              (the former descriptive paragraph was competing label noise). */}
+          {/* Panel header — Operations Center: title + count, search, status
+              chips, and two compact dropdown filters. All map-focus actions
+              moved onto the map as floating controls. */}
           <div className="p-3 border-b border-slate-100 bg-white space-y-2.5 shrink-0">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <Compass className="w-4 h-4 text-orange-500 shrink-0" />
-                <h2 className="font-black text-slate-900 tracking-tight text-[11px] uppercase">{t.activeTracking}</h2>
-              </div>
-              <span className="bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
+              <h2 className="font-bold text-slate-900 tracking-tight text-[13px]">{t.shipmentsTitle}</h2>
+              <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
                 {inTransitShipments.length}
               </span>
             </div>
 
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-              <input 
-                type="text" 
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute start-3 top-2.5" />
+              <input
+                type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t.searchPlaceholder}
-                className="w-full pl-8 pr-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 transition-all font-medium"
+                className="w-full ps-8 pe-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 transition-all font-medium"
               />
             </div>
 
-            {/* Segmented Map Status Filter Control */}
-            <div className="bg-slate-100 p-1 rounded-xl text-[10px] font-bold border border-slate-200 flex gap-1">
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("all")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "all"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                🌍 {fLabels.all} ({shipments.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("active")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "active"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                📡 {fLabels.active} ({shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("in_transit")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "in_transit"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                🚚 {fLabels.inTransit} ({shipments.filter(s => s.status === "In Transit").length})
-              </button>
+            {/* Status filter chips */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {([
+                { id: "all" as const, label: fLabels.all, count: shipments.length },
+                { id: "active" as const, label: fLabels.active, count: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
+                { id: "in_transit" as const, label: fLabels.inTransit, count: shipments.filter(s => s.status === "In Transit").length },
+              ]).map(chip => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => setMapStatusFilter(chip.id)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[10px] font-bold transition-all cursor-pointer ${
+                    mapStatusFilter === chip.id
+                      ? "bg-orange-50 border-orange-300 text-orange-700"
+                      : "bg-white border-slate-200 text-slate-500 hover:border-slate-300"
+                  }`}
+                >
+                  {chip.label}
+                  <span className="tabular-nums font-black">{chip.count}</span>
+                </button>
+              ))}
             </div>
 
-            {/* Truck Type Filter Panel */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-[10px] font-black uppercase text-slate-700">
-                <span className="flex items-center gap-1">
-                  <Filter className="w-3 h-3 text-orange-500" />
-                  {t.truckFilterTitle}
-                </span>
-                
-                {/* Select All / Deselect All Toggles */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setSelectedTruckTypes([...TRUCK_TYPES.map(tk => tk.id), "unspecified"])}
-                    className="text-[9px] font-bold text-orange-600 hover:text-orange-800 transition-colors uppercase font-mono cursor-pointer"
-                  >
-                    {t.allTypes.split(" ")[0]}
-                  </button>
-                  <span className="text-slate-300">|</span>
-                  <button
-                    onClick={() => setSelectedTruckTypes([])}
-                    className="text-[9px] font-bold text-slate-500 hover:text-slate-800 transition-colors uppercase font-mono cursor-pointer"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              {/* Grid of Checkboxes */}
-              <div className="grid grid-cols-2 gap-1.5 pt-1">
-                {TRUCK_TYPES.map(type => {
-                  const isChecked = selectedTruckTypes.includes(type.id);
-                  const count = getTruckTypeCount(type.id);
-                  const label = (type as any)[lang] || type.en;
-
-                  return (
-                    <button
-                      key={type.id}
-                      onClick={() => {
-                        if (isChecked) {
-                          setSelectedTruckTypes(prev => prev.filter(id => id !== type.id));
-                        } else {
-                          setSelectedTruckTypes(prev => [...prev, type.id]);
-                        }
-                      }}
-                      className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left cursor-pointer ${
-                        isChecked
-                          ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="flex items-center gap-1.5 truncate max-w-[130px]">
-                        <span className={`w-3.5 h-3.5 rounded flex items-center justify-center border transition-all ${
-                          isChecked 
-                            ? "bg-orange-500 border-orange-500 text-white" 
-                            : "border-slate-300 bg-white"
-                        }`}>
-                          {isChecked && <Check className="w-2.5 h-2.5 stroke-[3.5]" />}
-                        </span>
-                        <span className="truncate">{label}</span>
-                      </span>
-                      <span className={`font-mono text-[8.5px] px-1 rounded-sm font-bold ${
-                        isChecked 
-                          ? "bg-orange-100 text-orange-800" 
-                          : "bg-slate-100 text-slate-400"
-                      }`}>
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-
-                {/* Unspecified/unassigned driver truck types check button */}
-                {(() => {
-                  const isChecked = selectedTruckTypes.includes("unspecified");
-                  const count = getTruckTypeCount("unspecified");
-                  const label = t.unspecifiedType;
-
-                  return (
-                    <button
-                      onClick={() => {
-                        if (isChecked) {
-                          setSelectedTruckTypes(prev => prev.filter(id => id !== "unspecified"));
-                        } else {
-                          setSelectedTruckTypes(prev => [...prev, "unspecified"]);
-                        }
-                      }}
-                      className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left col-span-2 cursor-pointer ${
-                        isChecked
-                          ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <span className={`w-3.5 h-3.5 rounded flex items-center justify-center border transition-all ${
-                          isChecked 
-                            ? "bg-orange-500 border-orange-500 text-white" 
-                            : "border-slate-300 bg-white"
-                        }`}>
-                          {isChecked && <Check className="w-2.5 h-2.5 stroke-[3.5]" />}
-                        </span>
-                        <span>{label}</span>
-                      </span>
-                      <span className={`font-mono text-[8.5px] px-1 rounded-sm font-bold ${
-                        isChecked 
-                          ? "bg-orange-100 text-orange-800" 
-                          : "bg-slate-100 text-slate-400"
-                      }`}>
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* Sidebar Controls buttons */}
-            <div className="grid grid-cols-2 gap-2">
-              <button 
-                onClick={handleShowAll}
-                className="py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-              >
-                <Globe className="w-3.5 h-3.5" />
-                <span>{t.viewAllTransit}</span>
-              </button>
-              <button 
-                onClick={() => {
-                  if (filteredTransit.length > 0) {
-                    handleSelectShipment(filteredTransit[0]);
-                  } else {
-                    handleShowAll();
-                  }
+            {/* Compact dropdown filters: truck type + driver. The truck-type
+                select drives the same selectedTruckTypes state as before
+                ("all" = every type incl. unspecified). */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <select
+                value={selectedTruckTypes.length >= TRUCK_TYPES.length + 1 ? "all" : (selectedTruckTypes[0] || "all")}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSelectedTruckTypes(v === "all" ? [...TRUCK_TYPES.map(tk => tk.id), "unspecified"] : [v]);
                 }}
-                className="py-2.5 bg-orange-600 hover:bg-orange-500 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-                title="Odaklan"
+                className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-semibold text-slate-600 outline-none focus:border-slate-400 cursor-pointer"
+                title={t.truckFilterTitle}
               >
-                <Navigation className="w-3.5 h-3.5" />
-                <span>{t.bestFitZoom}</span>
-              </button>
+                <option value="all">{t.allTruckTypes}</option>
+                {TRUCK_TYPES.map(type => (
+                  <option key={type.id} value={type.id}>{(type as any)[lang] || type.en} ({getTruckTypeCount(type.id)})</option>
+                ))}
+                <option value="unspecified">{t.unspecifiedType} ({getTruckTypeCount("unspecified")})</option>
+              </select>
+              <select
+                value={driverFilter}
+                onChange={(e) => setDriverFilter(e.target.value)}
+                className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-semibold text-slate-600 outline-none focus:border-slate-400 cursor-pointer"
+                title={t.allDrivers}
+              >
+                <option value="all">{t.allDrivers}</option>
+                {localDrivers.map(d => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </select>
             </div>
-
-            {/* Focus on Driver GPS: pans the map to the assigned driver's last
-                reported GPS fix. Renamed from the misleading "My Current
-                Location" — this never used the browser's geolocation; it has
-                always focused a driver's reported position. */}
-            <button
-              onClick={handleGoToMyLocation}
-              className="w-full mt-2 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-              title={lang === "ar" ? "التركيز على موقع GPS للسائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on the assigned driver's GPS"}
-            >
-              <Navigation className="w-3.5 h-3.5 text-orange-600" />
-              <span>{lang === "ar" ? "التركيز على GPS السائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on Driver GPS"}</span>
-            </button>
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
@@ -1396,77 +1367,47 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
             ) : (
               filteredTransit.map(s => {
                 const isSelected = selectedShipment?.id === s.id;
+                // Honest per-row tracking facts: state chip + real minutes-ago
+                // (only for genuine driver fixes; estimated/unavailable get "—").
+                const pos = trackingById[s.id];
+                const state = pos?.state ?? "unavailable";
+                const colors = stateColors(state);
+                const stateLabel =
+                  state === "live_gps" ? t.trackLive
+                  : state === "last_reported" ? t.trackReported
+                  : state === "estimated" ? t.trackEstimated
+                  : t.trackUnavailable;
+                const timeAgo = pos?.isReal && pos.minutesAgo != null
+                  ? (pos.minutesAgo === 0 ? t.justNow : `${pos.minutesAgo} ${t.minAgo}`)
+                  : "—";
                 return (
                   <div
                     key={s.id}
                     onClick={() => handleSelectShipment(s)}
-                    className={`rounded-xl border transition-all cursor-pointer flex flex-col relative overflow-hidden ${isFullscreen ? "p-2 gap-1" : "p-3 gap-2"} ${
+                    className={`rounded-xl border transition-all cursor-pointer p-2.5 space-y-1.5 ${
                       isSelected
-                        ? "bg-slate-100 border-slate-300 shadow-xs"
-                        : "bg-white border-slate-100 hover:bg-slate-50"
+                        ? "bg-orange-50/60 border-orange-300 shadow-sm"
+                        : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="font-mono text-xs font-extrabold text-blue-600 selectable">#{s.shipmentNumber}</p>
-                        <h4 className="font-black text-[11px] text-slate-800 truncate max-w-[155px]">{s.companyName}</h4>
-                      </div>
-                      <span className="inline-flex items-center gap-0.5 text-[8.5px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md uppercase font-mono">
-                        <Activity className="w-2.5 h-2.5" />
-                        <span>{t.activeTracking}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${colors.lightDot}`}></span>
+                        <span className="font-mono text-[11px] font-extrabold text-blue-600 truncate selectable">{s.shipmentNumber}</span>
+                      </span>
+                      <span className={`shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border ${colors.lightChip}`}>
+                        {stateLabel}
                       </span>
                     </div>
-
-                    <div className={`text-[10px] text-slate-500 font-medium grid grid-cols-2 gap-1 bg-slate-50 rounded-lg border border-slate-100 ${isFullscreen ? "p-1" : "p-1.5"}`}>
-                      <div>
-                        <span className="block text-[8px] text-slate-400 uppercase font-bold">{t.from}</span>
-                        <span className="truncate block font-semibold text-slate-700">{s.loadingCity}</span>
-                      </div>
-                      <div>
-                        <span className="block text-[8px] text-slate-400 uppercase font-bold">{t.to}</span>
-                        <span className="truncate block font-semibold text-slate-700">{s.deliveryCity}</span>
-                      </div>
-                    </div>
-
-                    {/* Honest per-shipment location badge — labels the 4-state
-                        tracking model instead of always claiming a precise fix. */}
-                    {(() => {
-                      const loc = getShipmentVectorLocation(s);
-                      const state = loc.state;
-                      const toneCls =
-                        state === "live_gps" ? "bg-emerald-50/80 text-emerald-800 border-emerald-100"
-                        : state === "last_reported" ? "bg-amber-50/80 text-amber-800 border-amber-100"
-                        : "bg-slate-100 text-slate-500 border-slate-200";
-                      const label =
-                        state === "live_gps" ? t.trackLive
-                        : state === "last_reported" ? t.trackReported
-                        : state === "estimated" ? t.trackEstimated
-                        : t.trackUnavailable;
-                      return (
-                        <div className={`text-[10.5px] font-mono rounded-xl border flex items-center justify-between gap-1.5 ${toneCls} ${isFullscreen ? "p-1" : "p-1.5"}`}>
-                          <span className="flex items-center gap-1 font-extrabold truncate">
-                            <MapPin className="w-3.5 h-3.5 shrink-0" />
-                            <span className="truncate">{loc.available ? getNearestCity(loc.x, loc.y) : t.noFix}</span>
-                          </span>
-                          <span className="text-[8.5px] font-black shrink-0">
-                            {loc.available && loc.isActualGps
-                              ? `${loc.lat!.toFixed(4)}°, ${loc.lng!.toFixed(4)}°`
-                              : label}
-                          </span>
-                        </div>
-                      );
-                    })()}
-
-                    {/* Driver line. The whole card is the click target
-                        (onClick above selects + focuses the shipment on the
-                        map), so the redundant "Locate on Grid" button was
-                        removed — a chevron affordance signals the row action. */}
-                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1">
-                      <p className="flex items-center gap-1 truncate max-w-[160px]">
-                        <Truck className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="font-semibold text-slate-600 truncate">{s.assignedDriverName || "Unknown"}</span>
-                      </p>
-                      <span className={`font-bold text-[9.5px] uppercase transition-all ${isSelected ? "text-orange-600" : "text-slate-300"}`}>➔</span>
+                    <p className="text-[11px] font-semibold text-slate-700 truncate">
+                      {s.loadingCity} <span className="text-slate-400">→</span> {s.deliveryCity}
+                    </p>
+                    <div className="flex items-center justify-between text-[10px] text-slate-400">
+                      <span className="flex items-center gap-1 truncate min-w-0">
+                        <Truck className="w-3 h-3 shrink-0" />
+                        <span className="font-medium text-slate-500 truncate">{s.assignedDriverName || t.unassigned}</span>
+                      </span>
+                      <span className="shrink-0 font-medium tabular-nums">{timeAgo}</span>
                     </div>
                   </div>
                 );
@@ -1514,31 +1455,52 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           {/* Graphical Interactive Map Grid with zoom navigation and smooth translation transitions */}
           <div className="relative w-full h-full flex flex-col justify-between p-4 select-none">
             
-            {/* Background Control Panel for scaling */}
-            <div className="absolute bottom-5 right-5 flex flex-col gap-1.5 z-25">
-              <button 
-                onClick={handleGoToMyLocation} 
-                className="bg-white hover:bg-orange-50 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold relative group"
-                title={lang === "ar" ? "الذهاب إلى موقعي الحالي" : lang === "tr" ? "Koordinatlarıma Odaklan" : "Go to my current location"}
+            {/* Floating radar controls — professional map overlays. Hosts ALL
+                map-focus actions (the panel no longer carries buttons):
+                zoom, Reset View, Auto-Center Focus, and Focus on Driver GPS.
+                Shifts inward when the details drawer is open so they never
+                overlap it. */}
+            <div className={`absolute bottom-5 flex flex-col gap-1.5 z-25 transition-all ${selectedShipment ? "right-5 sm:right-[332px]" : "right-5"}`}>
+              <button
+                onClick={increaseZoom}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title="Zoom In"
               >
-                <Navigation className="w-3.5 h-3.5 text-orange-600 animate-pulse" />
+                <Plus className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={decreaseZoom}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title="Zoom Out"
+              >
+                <Minus className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={handleShowAll}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title={t.viewAllTransit}
+              >
+                <Globe className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={() => {
+                  if (filteredTransit.length > 0) handleSelectShipment(filteredTransit[0]);
+                  else handleShowAll();
+                }}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title={t.bestFitZoom}
+              >
+                <Expand className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={handleGoToMyLocation}
+                className="bg-white hover:bg-orange-50 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold relative group"
+                title={lang === "ar" ? "التركيز على GPS السائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on Driver GPS"}
+              >
+                <Navigation className="w-4 h-4 text-orange-600" />
                 {currentDriverId && (
                   <span className="absolute top-1 right-1 w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
                 )}
-              </button>
-              <button 
-                onClick={increaseZoom} 
-                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold"
-                title="Zoom In Grid"
-              >
-                <Expand className="w-3.5 h-3.5 text-slate-700" />
-              </button>
-              <button 
-                onClick={decreaseZoom} 
-                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold"
-                title="Zoom Out Grid"
-              >
-                <Minimize className="w-3.5 h-3.5 text-slate-700" />
               </button>
             </div>
 
@@ -2048,183 +2010,197 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 </div>
               )}
 
-              {/* Selected shipment overlay detailed visual card */}
-              {selectedShipment && (
-                <div className="absolute bottom-4 right-4 left-4 sm:left-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 p-4 rounded-xl text-white max-w-xs z-15 space-y-2.5 text-left shadow-2xl animate-fade-in">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-ping"></span>
-                      <span className="font-mono font-black text-orange-400 text-xs selectable">#{selectedShipment.shipmentNumber}</span>
+              {/* Selected-shipment details drawer — light, right-side panel
+                  (bottom sheet on small screens). A lightweight operational
+                  summary only: order, status, route, driver, tracking source,
+                  last update, honest Route Progress, on-demand ETA, and two
+                  navigation actions into EXISTING surfaces (details modal /
+                  shipment chat, where documents already live). */}
+              {selectedShipment && (() => {
+                const gpsState = getShipmentGpsState(selectedShipment);
+                const colors = stateColors(gpsState);
+                const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
+                const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
+                const stateLabel =
+                  gpsState === "live_gps" ? t.trackLive
+                  : gpsState === "last_reported" ? t.trackReported
+                  : gpsState === "estimated" ? t.trackEstimated
+                  : t.trackUnavailable;
+                const preDeparture = PRE_DEPARTURE_STATUSES.includes(selectedShipment.status);
+                const terminal = ["Arrived", "Delivered", "Closed", "Completed"].includes(selectedShipment.status);
+                return (
+                <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[300px]">
+                  {/* Header */}
+                  <div className="sticky top-0 bg-white border-b border-slate-100 px-3.5 py-2.5 flex items-center justify-between gap-2 z-10">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono font-extrabold text-blue-700 text-[13px] truncate selectable">{selectedShipment.shipmentNumber}</span>
+                      <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border bg-slate-50 text-slate-600 border-slate-200">{selectedShipment.status}</span>
                     </div>
                     <button
                       onClick={() => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); }}
-                      className="text-slate-400 hover:text-white transition-all cursor-pointer p-0.5 rounded-full hover:bg-slate-800"
+                      className="text-slate-400 hover:text-slate-700 transition-all cursor-pointer p-1 rounded-md hover:bg-slate-100 shrink-0"
                     >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                  
-                  <div className="space-y-1.5 font-mono text-[10px] text-slate-300">
-                    <p><span className="text-slate-500 uppercase font-black">{t.customer}:</span> <strong className="text-white font-sans text-xs">{selectedShipment.companyName}</strong></p>
-                    <p><span className="text-slate-500 uppercase font-black">{t.driver}:</span> <strong className="text-orange-400 font-sans">{selectedShipment.assignedDriverName || "—"}</strong></p>
-                    <p><span className="text-slate-500 uppercase font-black">{t.truckPlate}:</span> <strong className="text-slate-100">{selectedShipment.truckNumber || "—"}</strong></p>
-                    <p className="truncate"><span className="text-slate-500 uppercase font-black">{t.cargo}:</span> <span className="font-sans text-[10px] italic text-slate-400">{selectedShipment.cargoDescription}</span></p>
-                  </div>
 
-                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 font-mono text-[9px]">
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-500 uppercase tracking-wider">{t.from}</span>
-                      <span className="font-extrabold text-slate-200">{selectedShipment.loadingCity}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-500 uppercase tracking-wider">{t.to}</span>
-                      <span className="font-extrabold text-slate-200">{selectedShipment.deliveryCity}</span>
-                    </div>
-                    {(() => {
-                      const loc = getShipmentVectorLocation(selectedShipment);
-                      const city = loc.available ? getNearestCity(loc.x, loc.y) : t.noFix;
-                      const gpsState = getShipmentGpsState(selectedShipment);
-                      const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
-                      const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
-                      const stateLabel =
-                        gpsState === "live_gps" ? t.trackLive
-                        : gpsState === "last_reported" ? t.trackReported
-                        : gpsState === "estimated" ? t.trackEstimated
-                        : t.trackUnavailable;
-                      const stateTone =
-                        gpsState === "live_gps" ? "text-emerald-400"
-                        : gpsState === "last_reported" ? "text-amber-400"
-                        : gpsState === "estimated" ? "text-orange-400"
-                        : "text-slate-500";
-                      const stateChip = stateColors(gpsState).chip;
-                      return (
-                        <>
-                          <div className="flex justify-between items-center border-t border-slate-800 pt-1 mt-1 font-extrabold">
-                            <span className={`uppercase tracking-wider ${gpsState === "estimated" ? "text-orange-400" : "text-emerald-500"}`}>
-                              {gpsState === "estimated" ? "NEAR:" : "LOCATION:"}
+                  <div className="p-3.5 space-y-3">
+                    {/* Facts */}
+                    <div className="space-y-2 text-[11px]">
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.route}</p>
+                        <p className="font-semibold text-slate-800">{selectedShipment.loadingCity} <span className="text-slate-400">→</span> {selectedShipment.deliveryCity}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.driver}</p>
+                        <p className="font-semibold text-slate-800">{selectedShipment.assignedDriverName || t.unassigned}</p>
+                        {driver?.phone && <p className="text-slate-500 font-mono text-[10.5px] selectable" dir="ltr">{driver.phone}</p>}
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.trackingSource}</p>
+                        <p className={`font-bold ${colors.lightText}`}>{stateLabel}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.lastUpdateLabel}</p>
+                        <p className="font-semibold text-slate-700 flex items-center gap-1.5">
+                          {freshness.status === "none"
+                            ? "—"
+                            : freshness.minutesAgo === 0 ? t.justNow : `${freshness.minutesAgo} ${t.minAgo}`}
+                          {freshness.status !== "none" && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md border ${freshness.status === "fresh" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}>
+                              {freshness.status === "fresh" ? t.fresh : t.stale}
                             </span>
-                            <span className={gpsState === "estimated" ? "text-orange-300" : "text-emerald-400"}>{city}</span>
-                          </div>
-                          {loc.available && loc.isActualGps && loc.lat != null && loc.lng != null ? (
-                            <div className="flex justify-between items-center text-[7.5px] text-slate-400">
-                              <span>COORDINATES:</span>
-                              <span>{loc.lat.toFixed(5)}°N, {loc.lng.toFixed(5)}°E</span>
-                            </div>
-                          ) : (
-                            <div className="flex justify-between items-center text-[7.5px] text-slate-500 italic">
-                              <span>COORDINATES:</span>
-                              <span>{gpsState === "estimated" ? t.estimatedNote : t.noFix}</span>
-                            </div>
                           )}
-                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
-                            <span className="text-slate-500 uppercase">TRACKING:</span>
-                            <span className={stateTone}>{stateChip} {stateLabel}</span>
-                          </div>
-                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
-                            <span className="text-slate-500 uppercase">LAST UPDATE:</span>
-                            <span className={freshness.status === "stale" ? "text-amber-400" : freshness.status === "fresh" ? "text-slate-300" : "text-slate-500"}>
-                              {freshness.status === "none"
-                                ? "No GPS update yet"
-                                : freshness.minutesAgo === 0
-                                  ? "Just now"
-                                  : `${freshness.minutesAgo}m ago${freshness.status === "stale" ? " · signal may be stale" : ""}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Route Progress — derived ONLY from the real shipment
+                        status. No checkpoints, no border rows, no percentage,
+                        no fabricated milestones. */}
+                    <div className="border-t border-slate-100 pt-2.5">
+                      <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">{t.routeProgress}</p>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="flex items-center gap-2 min-w-0">
+                            <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${preDeparture ? "bg-white border-orange-500" : "bg-emerald-500 border-emerald-500"}`}></span>
+                            <span className="font-semibold text-slate-700 truncate">{selectedShipment.loadingCity}</span>
+                          </span>
+                          <span className="text-[10px] font-medium text-slate-400 shrink-0">{preDeparture ? selectedShipment.status : t.departed}</span>
+                        </div>
+                        {selectedShipment.status === "In Transit" && (
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0 bg-sky-500 border-2 border-sky-500 animate-pulse"></span>
+                              <span className="font-semibold text-sky-700">{t.kpiInTransit}</span>
                             </span>
                           </div>
-                        </>
-                      );
-                    })()}
-                    <div className="pt-1.5 mt-1 border-t border-dashed border-slate-800 text-[8.5px] text-orange-400 flex items-center justify-between font-extrabold">
-                      <span>STATUS FEED:</span>
-                      <span>{selectedShipment.status}</span>
+                        )}
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="flex items-center gap-2 min-w-0">
+                            <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${terminal ? "bg-emerald-500 border-emerald-500" : "bg-white border-slate-300"}`}></span>
+                            <span className="font-semibold text-slate-700 truncate">{selectedShipment.deliveryCity}</span>
+                          </span>
+                          <span className="text-[10px] font-medium text-slate-400 shrink-0">{terminal ? t.arrived : t.pending}</span>
+                        </div>
+                      </div>
                     </div>
+
+                    {/* ETA & Distance — on-demand only, 5 states (idle /
+                        loading / error / unavailable / success). Success shows
+                        ONLY the API's ETA + remaining distance, labeled
+                        Estimated. Cleared whenever the selection changes. */}
+                    <div className="border-t border-slate-100 pt-2.5">
+                      <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">{t.etaSection}</p>
+                      {(() => {
+                        const eta = etaForId === selectedShipment.id ? etaData : null;
+                        const calcLabel = lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance";
+                        if (etaLoading) {
+                          return (
+                            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 py-2">
+                              <Navigation className="w-3.5 h-3.5 animate-spin text-orange-500" />
+                              <span>{lang === "ar" ? "جارٍ الحساب..." : lang === "tr" ? "Hesaplanıyor..." : "Calculating..."}</span>
+                            </div>
+                          );
+                        }
+                        if (etaError) {
+                          return (
+                            <div className="bg-red-50 border border-red-200 p-2.5 rounded-lg text-[10.5px] text-red-700 flex items-start gap-1.5">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <div className="space-y-1">
+                                <p>{etaError}</p>
+                                <button onClick={() => handleCalculateEta(selectedShipment)} className="underline font-bold cursor-pointer">
+                                  {lang === "ar" ? "إعادة المحاولة" : lang === "tr" ? "Tekrar dene" : "Retry"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        }
+                        if (eta && eta.status === "UNAVAILABLE") {
+                          return (
+                            <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[10.5px] text-amber-800 flex items-start gap-1.5">
+                              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <span>{lang === "ar" ? "المسافة غير متوفرة لهذا المسار" : lang === "tr" ? "Bu rota için mesafe yok" : "Route distance unavailable for this shipment."}</span>
+                            </div>
+                          );
+                        }
+                        if (eta) {
+                          return (
+                            <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg space-y-1.5 text-[11px]">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-500">ETA</span>
+                                <span className="font-bold text-slate-800">{eta.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString() : "—"}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-500">{t.remainingDistance}</span>
+                                <span className="font-bold text-slate-800">{eta.distance?.text || "—"}</span>
+                              </div>
+                              <div className="flex items-center justify-between pt-0.5 text-[9.5px]">
+                                <span className="text-slate-400 font-semibold px-1.5 py-0.5 rounded bg-white border border-slate-200">{t.estimatedTag}</span>
+                                <button onClick={() => handleCalculateEta(selectedShipment)} className="text-orange-600 underline font-bold cursor-pointer">
+                                  {lang === "ar" ? "تحديث" : lang === "tr" ? "Yenile" : "Recalculate"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        }
+                        // idle
+                        return (
+                          <button
+                            onClick={() => handleCalculateEta(selectedShipment)}
+                            className="w-full py-2 px-3 bg-white hover:bg-orange-50 border border-orange-400 text-orange-600 font-sans text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <span>{calcLabel}</span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Navigation actions — into EXISTING surfaces only */}
+                    {(onOpenShipmentDetails || onOpenShipmentChat) && (
+                      <div className="border-t border-slate-100 pt-2.5 space-y-1.5">
+                        {onOpenShipmentDetails && (
+                          <button
+                            onClick={() => onOpenShipmentDetails(selectedShipment.id)}
+                            className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <span>{t.viewDetails}</span>
+                          </button>
+                        )}
+                        {onOpenShipmentChat && (
+                          <button
+                            onClick={() => onOpenShipmentChat(selectedShipment.id)}
+                            className="w-full py-2 px-3 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <span>{t.openChat}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
-
-                  {/* On-demand ETA & Distance — 5 states (idle / loading /
-                      error / unavailable / success). Never auto-called; the
-                      result is cleared whenever the selection changes. */}
-                  {(() => {
-                    const eta = etaForId === selectedShipment.id ? etaData : null;
-                    const calcLabel = lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance";
-                    if (etaLoading) {
-                      return (
-                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 flex items-center justify-center gap-2 text-[9px] font-mono text-slate-400">
-                          <Navigation className="w-3.5 h-3.5 animate-spin text-emerald-500" />
-                          <span className="animate-pulse">{lang === "ar" ? "جارٍ الحساب..." : lang === "tr" ? "Hesaplanıyor..." : "Calculating..."}</span>
-                        </div>
-                      );
-                    }
-                    if (etaError) {
-                      return (
-                        <div className="bg-red-500/10 border border-red-500/30 p-2.5 rounded-lg text-[9px] font-mono text-red-300 flex items-start gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                          <div className="space-y-1">
-                            <p>{etaError}</p>
-                            <button onClick={() => handleCalculateEta(selectedShipment)} className="underline font-bold cursor-pointer">
-                              {lang === "ar" ? "إعادة المحاولة" : lang === "tr" ? "Tekrar dene" : "Retry"}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    }
-                    if (eta && eta.status === "UNAVAILABLE") {
-                      return (
-                        <div className="bg-orange-500/10 border border-orange-500/30 p-2.5 rounded-lg text-[9px] font-mono text-orange-300 flex items-start gap-1.5">
-                          <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                          <span>{lang === "ar" ? "المسافة غير متوفرة لهذا المسار" : lang === "tr" ? "Bu rota için mesafe yok" : "Route distance unavailable for this shipment."}</span>
-                        </div>
-                      );
-                    }
-                    if (eta) {
-                      return (
-                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 font-mono text-[9px]">
-                          <div className="flex justify-between items-center">
-                            <span className="text-slate-500 uppercase tracking-wider">{lang === "ar" ? "المسافة" : lang === "tr" ? "Mesafe" : "Distance"}</span>
-                            <span className="font-extrabold text-slate-100">{eta.distance?.text || "—"}</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-slate-500 uppercase tracking-wider">{lang === "ar" ? "المدة" : lang === "tr" ? "Süre" : "Duration"}</span>
-                            <span className="font-extrabold text-slate-100">{eta.durationInTraffic?.text || eta.duration?.text || "—"}</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-emerald-500 uppercase tracking-wider font-extrabold">ETA</span>
-                            <span className="text-emerald-400 font-extrabold">{eta.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString() : "—"}</span>
-                          </div>
-                          <div className="flex justify-between items-center text-[7.5px] pt-0.5">
-                            <span className="text-slate-600">{eta.status === "OK" ? (lang === "ar" ? "من غوغل ماب" : lang === "tr" ? "Google Haritalar" : "Google Maps") : (lang === "ar" ? "تقدير حسابي" : lang === "tr" ? "Tahmini hesap" : "Estimated")}</span>
-                            <button onClick={() => handleCalculateEta(selectedShipment)} className="text-orange-400 underline font-bold cursor-pointer">
-                              {lang === "ar" ? "تحديث" : lang === "tr" ? "Yenile" : "Recalculate"}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    }
-                    // idle
-                    return (
-                      <button
-                        onClick={() => handleCalculateEta(selectedShipment)}
-                        className="w-full py-1.5 px-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 font-sans text-[11px] font-bold rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <Navigation className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>{calcLabel}</span>
-                      </button>
-                    );
-                  })()}
-
-                  <button
-                    onClick={() => handleAutoFocusRoute(selectedShipment)}
-                    className="w-full py-1.5 px-3 bg-orange-600 hover:bg-orange-500 text-white font-sans text-[11px] font-bold rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer mt-1"
-                  >
-                    <Expand className="w-3.5 h-3.5 animate-pulse" />
-                    <span>
-                      {lang === "ar"
-                        ? "ملاءمة المسار بالكامل"
-                        : lang === "tr"
-                          ? "Rotayı Odakla"
-                          : "Auto-Focus Route"}
-                    </span>
-                  </button>
                 </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* The former in-map footer stats bar was removed: it duplicated
