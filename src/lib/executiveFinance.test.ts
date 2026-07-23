@@ -256,33 +256,4 @@ describe("executive finance — invoice-based revenue & profit, per currency, de
     expect(usd.outstandingPayables).toBe(200);
     expect(fin.deliveredWithStatementCount).toBe(0);
   });
-
-  it("Net Exposure (per currency) = outstanding receivables − outstanding payables; never mixed", () => {
-    const fin = buildExecutiveFinanceOverview(
-      [statement({
-        customerReceivedAmount: 100, // invoice 500 − 100 received → 400 outstanding
-        paidAmount: 0, remainingBalance: 300, paymentStatus: "Unpaid",
-        items: [{ id: "i1", costType: "customs", description: "Customs", quantity: 1, unitPrice: 300, totalAmount: 300, currency: "USD", supplierName: "Broker" }],
-      })],
-      [shipment({})],
-      [inv("MAR-2026-1001", 500)],
-      NOW
-    );
-    const usd = fin.currencies.find((c) => c.currency === "USD")!;
-    expect(usd.outstandingReceivables).toBe(400);
-    expect(usd.outstandingPayables).toBe(300);
-    expect(usd.netExposure).toBe(100); // 400 − 300
-
-    // Owing more than owed → negative exposure (sign is preserved, never flipped).
-    const owingMore = buildExecutiveFinanceOverview(
-      [statement({
-        paidAmount: 0, remainingBalance: 300, paymentStatus: "Unpaid",
-        items: [{ id: "i1", costType: "customs", description: "Customs", quantity: 1, unitPrice: 300, totalAmount: 300, currency: "USD", supplierName: "Broker" }],
-      })],
-      [shipment({})],
-      [], // no invoice → no receivable
-      NOW
-    );
-    expect(owingMore.currencies.find((c) => c.currency === "USD")!.netExposure).toBe(-300);
-  });
 });

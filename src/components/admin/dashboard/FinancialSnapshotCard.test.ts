@@ -6,21 +6,30 @@ import { join } from "node:path";
  * Wiring tests for the Financial Snapshot card. The project has no DOM
  * test runtime (jsdom / Testing Library), so — exactly like the existing
  * accountingNotificationsWiring / unifiedNotificationsWiring suites — the
- * render-level guarantees (default currency, loading/error states, tab
- * keyboard access, the "View details" link) are asserted against the
+ * render-level guarantees (fixed USD/TRY/IQD tabs, loading/error states,
+ * keyboard tab access, Arabic labels, the Funding Gap / Net Surplus /
+ * Balanced row, the "View details" link) are asserted against the
  * component source. The number/currency behaviour itself is proven by the
  * pure financialSnapshot.test.ts + executiveFinance.test.ts suites.
  */
 const HERE = __dirname;
 const ROOT = join(HERE, "..", "..", "..", "..");
 const CARD = readFileSync(join(HERE, "FinancialSnapshotCard.tsx"), "utf-8");
+const ROW = readFileSync(join(HERE, "FinancialMetricRow.tsx"), "utf-8");
 const TABS = readFileSync(join(HERE, "CurrencyTabs.tsx"), "utf-8");
 const SECTION = readFileSync(join(ROOT, "src", "components", "admin", "sections", "AdminDashboardSection.tsx"), "utf-8");
 const ADMIN = readFileSync(join(ROOT, "src", "components", "AdminPanel.tsx"), "utf-8");
 
-describe("Financial Snapshot — one compact currency-tabbed card", () => {
+describe("Financial Snapshot — one compact card, fixed USD/TRY/IQD tabs", () => {
   it("defaults the selected tab to USD", () => {
     expect(CARD).toContain('useState<string>("USD")');
+  });
+
+  it("renders exactly the fixed three tabs (no dynamic/EUR append)", () => {
+    // The card asks the lib for the FIXED tab set (no overview argument),
+    // and the lib returns only USD/TRY/IQD (proven in financialSnapshot.test.ts).
+    expect(CARD).toContain("snapshotCurrencyTabs()");
+    expect(CARD).not.toContain("snapshotCurrencyTabs(overview)");
   });
 
   it("reads REAL accounting data from the dashboard financial endpoint (no mock)", () => {
@@ -38,16 +47,13 @@ describe("Financial Snapshot — one compact currency-tabbed card", () => {
     expect(CARD).toContain("res.status === 403");
     expect(CARD).toContain('setState("no_access")');
     expect(CARD).toContain('if (state === "no_access") return null;');
-    expect(CARD).toContain("if (!res.ok) { setState(\"error\"); return; }");
+    expect(CARD).toContain('if (!res.ok) { setState("error"); return; }');
     expect(CARD).toContain('state === "error"');
   });
 
   it("uses one tabpanel and never converts currencies (reads a single per-currency bucket)", () => {
     expect(CARD).toContain('role="tabpanel"');
     expect(CARD).toContain("currencySnapshot(overview, active)");
-    expect(CARD).toContain("snapshotCurrencyTabs(overview)");
-    // No FX / conversion CODE anywhere in the card (the doc comment may say
-    // "never converted"; what must be absent is actual conversion logic).
     for (const bad of ["convertCurrency", "exchangeRate", "fxRate", "toUSD("]) {
       expect(CARD).not.toContain(bad);
     }
@@ -55,9 +61,40 @@ describe("Financial Snapshot — one compact currency-tabbed card", () => {
 
   it("exposes a working 'View details' link", () => {
     expect(CARD).toContain("onClick={onViewDetails}");
-    // Wired end-to-end: section → card, AdminPanel → Accounting Dashboard.
     expect(SECTION).toContain("<FinancialSnapshotCard lang={lang} onViewDetails={onOpenFinancialDetails} />");
     expect(ADMIN).toContain("onOpenFinancialDetails={() => setActiveTab('acct_dashboard')}");
+  });
+});
+
+describe("Financial Snapshot — Funding Gap / Net Surplus / Balanced row", () => {
+  it("derives the fourth row from the signed net position", () => {
+    expect(CARD).toContain("netPositionKind(snap.metrics.netPosition)");
+    expect(CARD).toContain("netPositionDisplayAmount(snap.metrics.netPosition)");
+  });
+
+  it("maps each outcome to its own label, semantic colour and tooltip", () => {
+    expect(CARD).toContain("funding_gap:");
+    expect(CARD).toContain("net_surplus:");
+    expect(CARD).toContain("balanced:");
+    expect(CARD).toContain('valueClass: "text-rose-600"'); // funding gap = warning
+    expect(CARD).toContain('valueClass: "text-emerald-600"'); // net surplus = positive
+    expect(CARD).toContain('tooltip={tr("netTooltip", lang)}');
+  });
+
+  it("localizes the labels + tooltip, including Arabic", () => {
+    expect(CARD).toContain('ar: "المبلغ المطلوب تغطيته"'); // Funding Gap
+    expect(CARD).toContain('ar: "صافي الفائض"'); // Net Surplus
+    expect(CARD).toContain('ar: "متوازن"'); // Balanced
+    expect(CARD).toContain("مقارنة المبالغ المستحقة من العملاء"); // tooltip (AR)
+    expect(CARD).toContain('en: "Funding Gap"');
+    expect(CARD).toContain('en: "Net Surplus"');
+    expect(CARD).toContain('en: "Balanced"');
+  });
+
+  it("the metric row exposes the tooltip as an accessible (labelled, focusable) control", () => {
+    expect(ROW).toContain("aria-label={tooltip}");
+    expect(ROW).toContain("title={tooltip}");
+    expect(ROW).toContain("focus-visible:ring");
   });
 });
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleDollarSign, Receipt, Package, Scale, ChevronRight, AlertCircle } from "lucide-react";
+import { CircleDollarSign, Receipt, Package, Scale, TrendingUp, AlertTriangle, ChevronRight } from "lucide-react";
 import type { Language } from "../../../types";
 import { apiFetch } from "../../../lib/api";
 import type { ExecutiveFinanceOverview } from "../../../lib/executiveFinance";
@@ -7,8 +7,9 @@ import {
   snapshotCurrencyTabs,
   currencySnapshot,
   formatSnapshotAmount,
-  SNAPSHOT_METRIC_ORDER,
-  type SnapshotMetricKey,
+  netPositionKind,
+  netPositionDisplayAmount,
+  type NetPositionKind,
 } from "../../../lib/financialSnapshot";
 import CurrencyTabs from "./CurrencyTabs";
 import FinancialMetricRow from "./FinancialMetricRow";
@@ -21,30 +22,49 @@ const L: Record<string, Record<Language, string>> = {
   receivables: { en: "Outstanding Receivables", tr: "Bekleyen Alacaklar", ar: "الذمم المدينة المستحقة" },
   vendorPayables: { en: "Vendor Payables", tr: "Tedarikçi Borçları", ar: "مستحقات الموردين" },
   openShipmentValue: { en: "Open Shipment Value", tr: "Açık Sevkiyat Değeri", ar: "قيمة الشحنات المفتوحة" },
-  netExposure: { en: "Net Exposure", tr: "Net Pozisyon", ar: "صافي المكشوف" },
+  fundingGap: { en: "Funding Gap", tr: "Finansman Açığı", ar: "المبلغ المطلوب تغطيته" },
+  netSurplus: { en: "Net Surplus", tr: "Net Fazla", ar: "صافي الفائض" },
+  balanced: { en: "Balanced", tr: "Dengeli", ar: "متوازن" },
+  netTooltip: {
+    en: "Compares outstanding customer receivables with vendor payables for the selected currency.",
+    tr: "Seçili para birimi için müşteri alacakları ile tedarikçi borçlarını karşılaştırır.",
+    ar: "مقارنة المبالغ المستحقة من العملاء مع المبالغ المستحقة للموردين للعملة المحددة.",
+  },
   noData: { en: "No records in this currency yet.", tr: "Bu para biriminde henüz kayıt yok.", ar: "لا توجد سجلات بهذه العملة بعد." },
   error: { en: "Financial snapshot could not be loaded.", tr: "Finansal özet yüklenemedi.", ar: "تعذّر تحميل اللمحة المالية." },
 };
 const tr = (k: string, lang: Language) => L[k]?.[lang] ?? L[k]?.en ?? k;
 
-const ROW_META: Record<SnapshotMetricKey, { icon: typeof Receipt; iconClass: string }> = {
-  receivables: { icon: CircleDollarSign, iconClass: "bg-emerald-50 text-emerald-600" },
-  vendorPayables: { icon: Receipt, iconClass: "bg-amber-50 text-amber-600" },
-  openShipmentValue: { icon: Package, iconClass: "bg-indigo-50 text-indigo-600" },
-  netExposure: { icon: Scale, iconClass: "bg-blue-50 text-blue-600" },
+// The three fixed base rows (the fourth is the derived net-position row).
+const BASE_ROWS = [
+  { key: "receivables" as const, icon: CircleDollarSign, iconClass: "bg-emerald-50 text-emerald-600" },
+  { key: "vendorPayables" as const, icon: Receipt, iconClass: "bg-amber-50 text-amber-600" },
+  { key: "openShipmentValue" as const, icon: Package, iconClass: "bg-indigo-50 text-indigo-600" },
+];
+
+// Net-position row presentation, by outcome. The value shown is always a
+// POSITIVE amount; the outcome (and colour) conveys gap vs surplus.
+const NET_META: Record<NetPositionKind, { labelKey: string; icon: typeof Scale; iconClass: string; valueClass: string }> = {
+  funding_gap: { labelKey: "fundingGap", icon: AlertTriangle, iconClass: "bg-rose-50 text-rose-600", valueClass: "text-rose-600" },
+  net_surplus: { labelKey: "netSurplus", icon: TrendingUp, iconClass: "bg-emerald-50 text-emerald-600", valueClass: "text-emerald-600" },
+  balanced: { labelKey: "balanced", icon: Scale, iconClass: "bg-slate-100 text-slate-500", valueClass: "text-slate-600" },
 };
 
 /**
  * Financial Snapshot (Dashboard Overview) — ONE compact card, currency-
- * tabbed (USD / TRY / IQD by default, plus any extra currency that has
- * records). Every figure is REAL accounting data from
- * GET /api/admin/dashboard/financial (the same server-computed, per-
- * currency overview the Executive Financial page uses). Currencies are
- * never summed or converted; switching a tab reads a different bucket.
+ * tabbed. It shows EXACTLY three tabs: USD / TRY / IQD (USD selected by
+ * default, IQD always present even at zero, EUR and any other currency are
+ * never added here). Every figure is REAL accounting data from
+ * GET /api/admin/dashboard/financial. Currencies are never summed or
+ * converted; switching a tab reads a different per-currency bucket.
+ *
+ * The fourth row is derived per currency from the signed net position
+ * (receivables − vendor payables): a red "Funding Gap" when MARAS owes more
+ * than it is owed (shown as the positive amount to cover), a green "Net
+ * Surplus" when it is owed more, or a neutral "Balanced" at parity.
  *
  * Accounting access only: an operation admin's request 403s and the card
- * simply does not render (never a broken or empty accounting surface for a
- * role that isn't allowed to see money).
+ * simply does not render.
  */
 export default function FinancialSnapshotCard({
   lang,
@@ -117,16 +137,19 @@ export default function FinancialSnapshotCard({
       <section className={cardClass} aria-label={tr("title", lang)}>
         {Header}
         <div className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-4 text-xs font-semibold text-slate-500">
-          <AlertCircle className="h-4 w-4 text-slate-400" />
+          <AlertTriangle className="h-4 w-4 text-slate-400" />
           {tr("error", lang)}
         </div>
       </section>
     );
   }
 
-  const tabs = snapshotCurrencyTabs(overview);
-  const active = tabs.includes(selected) ? selected : tabs[0];
+  const tabs = snapshotCurrencyTabs(); // exactly USD / TRY / IQD
+  const active = tabs.includes(selected as (typeof tabs)[number]) ? selected : tabs[0];
   const snap = currencySnapshot(overview, active);
+
+  const netKind = netPositionKind(snap.metrics.netPosition);
+  const netMeta = NET_META[netKind];
 
   return (
     <section className={cardClass} aria-label={tr("title", lang)}>
@@ -138,16 +161,26 @@ export default function FinancialSnapshotCard({
         aria-labelledby={`${idPrefix}-tab-${active}`}
         className="divide-y divide-slate-100"
       >
-        {SNAPSHOT_METRIC_ORDER.map((key) => (
+        {BASE_ROWS.map((row) => (
           <FinancialMetricRow
-            key={key}
-            icon={ROW_META[key].icon}
-            iconClass={ROW_META[key].iconClass}
-            label={tr(key, lang)}
-            amount={formatSnapshotAmount(snap.metrics[key], lang)}
+            key={row.key}
+            icon={row.icon}
+            iconClass={row.iconClass}
+            label={tr(row.key, lang)}
+            amount={formatSnapshotAmount(snap.metrics[row.key], lang)}
             currency={active}
           />
         ))}
+        {/* Fourth row: Funding Gap / Net Surplus / Balanced (always a positive amount). */}
+        <FinancialMetricRow
+          icon={netMeta.icon}
+          iconClass={netMeta.iconClass}
+          label={tr(netMeta.labelKey, lang)}
+          amount={formatSnapshotAmount(netPositionDisplayAmount(snap.metrics.netPosition), lang)}
+          currency={active}
+          valueClass={netMeta.valueClass}
+          tooltip={tr("netTooltip", lang)}
+        />
       </div>
       {!snap.hasData && (
         <p className="text-[11px] font-medium text-slate-400">{tr("noData", lang)}</p>

@@ -72,7 +72,10 @@ import ReceivablesPayablesPage from "./admin/accounting/ReceivablesPayablesPage"
 import FinancialReportsPage from "./admin/accounting/FinancialReportsPage";
 import AIFinancialAssistantPage from "./admin/accounting/AIFinancialAssistantPage";
 import { ACCOUNTING_PAGES, ACCOUNTING_TAB_IDS, accountingLabel } from "../lib/accountingNav";
-import { DEFAULT_DASHBOARD_LAYOUT, DASHBOARD_SECTION_IDS, normalizeDashboardLayout, moveDashboardSection, reorderDashboardSection, toggleDashboardSection, visibleOrderedSections, type DashboardLayout, type DashboardSectionId } from "../lib/dashboardLayout";
+// Dashboard section-layout personalization retired in the Dashboard Overview
+// redesign (see the retirement note in the component body). The pure
+// dashboardLayout lib + its server persistence endpoints remain for the API,
+// but AdminPanel no longer consumes them.
 import { isOpenShipmentStatus } from "../lib/executiveFinance";
 import MobileTopAppBar from "./admin/mobile/MobileTopAppBar";
 import MobileBottomNav from "./admin/mobile/MobileBottomNav";
@@ -575,40 +578,19 @@ export default function AdminPanel({
   // 'reports' tab id stays valid for backward compatibility (old quick
   // links, saved navigation state) but always redirects to Dashboard
   // with the analytics section expanded.
-  const [isDashboardAnalyticsOpen, setIsDashboardAnalyticsOpen] = useState(false);
-  // PR #133 — per-admin Executive Dashboard personalization: section
-  // visibility + order, persisted per user (adminDashboardLayouts).
-  // Rendering intersects this with the viewer's PERMITTED sections, so
-  // a saved layout can never widen access.
-  const [dashboardLayout, setDashboardLayout] = useState<DashboardLayout>(DEFAULT_DASHBOARD_LAYOUT);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch("/api/admin/dashboard/layout");
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled && data.layout) setDashboardLayout(normalizeDashboardLayout(data.layout));
-        }
-      } catch { /* default layout is fine */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  const permittedDashboardSections = React.useMemo(() => {
-    const effectiveType = adminType || 'super'; // same fallback resolvedAdminType uses below
-    const allowed = new Set<DashboardSectionId>(['executive_brief', 'operations']);
-    if (canViewCostStatements(effectiveType)) { allowed.add('financial'); allowed.add('financial_alerts'); }
-    if (canViewLogisticsAnalytics(effectiveType)) allowed.add('analytics');
-    return allowed;
-  }, [adminType]);
-  const saveDashboardLayout = (next: DashboardLayout) => {
-    setDashboardLayout(next);
-    void apiFetch("/api/admin/dashboard/layout", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ layout: next }),
-    }).catch(() => {});
-  };
+  // Dashboard personalization retired (Dashboard Overview redesign): the
+  // Overview is now a single, fixed, concise dashboard, so the former
+  // per-admin section show/hide/reorder layout (PR #133) no longer applies
+  // and is intentionally not read on the client — a stored "operations
+  // hidden" preference must never blank the new dashboard. The
+  // adminDashboardLayouts persistence endpoints remain server-side (still
+  // covered by their own tests) but are no longer consumed here. The
+  // sections that used to stack here are relocated, not lost: Executive
+  // Financial Overview + Financial Alerts → the Accounting module
+  // (Accounting Dashboard / Action Center) and the MARAS AI monitoring
+  // modal; Logistics Analytics / Reports → the dedicated Reports tab; Audit
+  // Log → the Audit tab. See the PR description for the full relocation map.
+  //
   // 'reports' (Logistics Analytics) is now its own dedicated tab rendering
   // AdminReportsSection directly (see the reports tab content block below),
   // so it no longer redirects into the Dashboard.
@@ -4961,7 +4943,10 @@ MARAS Group etir Center`;
               modal), and their components/JSX below are kept intact. Only
               the `operations` slot is rendered, so the page is dramatically
               shorter while nothing is deleted. */}
-          {visibleOrderedSections(dashboardLayout, permittedDashboardSections).includes('operations') && (
+          {/* The Dashboard Overview is now a single, fixed, concise dashboard
+              rendered for every admin type (its own widgets are still
+              individually permission-gated inside AdminDashboardSection). */}
+          {(
             <React.Suspense fallback={<AdminSectionLoadingFallback lang={lang} />}>
               <AdminDashboardSection
                 lang={lang}

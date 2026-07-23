@@ -492,18 +492,19 @@ describe("executive dashboard (PR #133) — deterministic finances, per-user lay
     expect(SERVER).toContain("adminDashboardLayouts: [],"); // memory-fallback entry (PR #44 lesson)
   });
 
-  it("the dashboard still intersects the saved layout with role permissions (customize UI retired by the redesign)", () => {
-    expect(ADMIN_PANEL).toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections)");
-    const PERM = region(ADMIN_PANEL, "const permittedDashboardSections", 600);
-    expect(PERM).toContain("canViewCostStatements(effectiveType)");
-    expect(PERM).toContain("canViewLogisticsAnalytics(effectiveType)");
-    // Layout persistence stays wired (endpoint + client helper) even though
-    // the concise redesign renders only the operations dashboard.
-    expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/dashboard/layout", {');
-    expect(ADMIN_PANEL).toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections).includes('operations')");
-    // The per-section drag/hide customize panel + stacked financial sections
-    // were removed by the redesign (single concise dashboard).
-    expect(ADMIN_PANEL).not.toContain("saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))");
+  it("the Dashboard Overview is a single fixed dashboard — the client no longer reads the per-admin layout (retired)", () => {
+    // The concise redesign renders the operations dashboard unconditionally
+    // for every admin type; per-section show/hide/reorder personalization
+    // was retired, so the client no longer intersects a stored layout (a
+    // saved "operations hidden" preference must never blank the dashboard).
+    expect(ADMIN_PANEL).not.toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections)");
+    expect(ADMIN_PANEL).not.toContain("const permittedDashboardSections");
+    expect(ADMIN_PANEL).not.toContain("saveDashboardLayout");
+    // The layout PERSISTENCE endpoints remain server-side (still covered by
+    // the "layout persistence is strictly per admin id" test above), so the
+    // stored preferences are not deleted — just no longer consumed here.
+    expect(SERVER).toContain('app.get("/api/admin/dashboard/layout", requireRole("admin")');
+    // The stacked financial sections are gone from the dashboard.
     expect(ADMIN_PANEL).not.toContain("sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType)");
   });
 

@@ -17,20 +17,23 @@ import type { CurrencyFinanceOverview, ExecutiveFinanceOverview } from "./execut
 import type { Language } from "../types";
 
 /**
- * The three currency tabs the card ALWAYS offers, in this fixed order —
- * even when a currency currently has no records (an all-zero IQD tab is
- * still shown; it is never hidden just because its values are zero).
+ * The Dashboard Overview Financial Snapshot shows EXACTLY these three
+ * currency tabs, in this fixed order — never more. EUR (and any other
+ * currency) may exist elsewhere in the accounting module, but this compact
+ * card is intentionally limited to USD / TRY / IQD. IQD is always shown,
+ * even when all its values are zero.
  */
-export const REQUIRED_SNAPSHOT_CURRENCIES = ["USD", "TRY", "IQD"] as const;
+export const SNAPSHOT_CURRENCIES = ["USD", "TRY", "IQD"] as const;
+export type SnapshotCurrency = (typeof SNAPSHOT_CURRENCIES)[number];
 
-export type SnapshotMetricKey = "receivables" | "vendorPayables" | "openShipmentValue" | "netExposure";
+export type SnapshotMetricKey = "receivables" | "vendorPayables" | "openShipmentValue" | "netPosition";
 
 /** The four rows, in display order (matches the reference layout). */
 export const SNAPSHOT_METRIC_ORDER: readonly SnapshotMetricKey[] = [
   "receivables",
   "vendorPayables",
   "openShipmentValue",
-  "netExposure",
+  "netPosition",
 ];
 
 export interface CurrencySnapshot {
@@ -41,17 +44,25 @@ export interface CurrencySnapshot {
 }
 
 /**
- * The ordered list of currency tabs to render: the three required
- * currencies first (always, even at zero), then any OTHER currency that
- * actually has records (e.g. EUR) appended — so real accounting activity
- * is never hidden, while the required three are never dropped.
+ * The fixed list of currency tabs the card renders: exactly USD, TRY, IQD.
+ * The overview argument is intentionally ignored — the card never grows or
+ * shrinks its tab set based on which currencies happen to have data, so IQD
+ * is never hidden at zero and EUR is never appended.
  */
-export function snapshotCurrencyTabs(overview: ExecutiveFinanceOverview | null | undefined): string[] {
-  const tabs: string[] = [...REQUIRED_SNAPSHOT_CURRENCIES];
-  for (const block of overview?.currencies ?? []) {
-    if (!tabs.includes(block.currency)) tabs.push(block.currency);
-  }
-  return tabs;
+export function snapshotCurrencyTabs(): SnapshotCurrency[] {
+  return [...SNAPSHOT_CURRENCIES];
+}
+
+/**
+ * Signed net position for a currency = outstanding customer receivables −
+ * vendor payables (same currency only, never mixed or converted). Positive
+ * = MARAS is net owed (surplus); negative = MARAS owes more than it is owed
+ * (a funding gap). This signed value is the source of truth for accounting;
+ * the card derives a positive, human-readable Funding Gap / Net Surplus /
+ * Balanced figure from it (see netPositionKind / netPositionDisplayAmount).
+ */
+function signedNetPosition(block: CurrencyFinanceOverview): number {
+  return block.outstandingReceivables - block.vendorPayables;
 }
 
 function metricsFromBlock(block: CurrencyFinanceOverview): Record<SnapshotMetricKey, number> {
@@ -59,7 +70,7 @@ function metricsFromBlock(block: CurrencyFinanceOverview): Record<SnapshotMetric
     receivables: block.outstandingReceivables,
     vendorPayables: block.vendorPayables,
     openShipmentValue: block.openShipmentsValue,
-    netExposure: block.netExposure,
+    netPosition: signedNetPosition(block),
   };
 }
 
@@ -77,10 +88,32 @@ export function currencySnapshot(
     return {
       currency,
       hasData: false,
-      metrics: { receivables: 0, vendorPayables: 0, openShipmentValue: 0, netExposure: 0 },
+      metrics: { receivables: 0, vendorPayables: 0, openShipmentValue: 0, netPosition: 0 },
     };
   }
   return { currency, hasData: true, metrics: metricsFromBlock(block) };
+}
+
+export type NetPositionKind = "funding_gap" | "net_surplus" | "balanced";
+
+// Sub-cent noise never flips a currency between gap/surplus; |Δ| below this
+// reads as Balanced.
+const BALANCED_EPSILON = 0.005;
+
+/** Classify a signed net position into the user-facing outcome. */
+export function netPositionKind(signed: number): NetPositionKind {
+  if (!Number.isFinite(signed) || Math.abs(signed) < BALANCED_EPSILON) return "balanced";
+  return signed < 0 ? "funding_gap" : "net_surplus";
+}
+
+/**
+ * The POSITIVE amount shown to the user: the size of the funding gap
+ * (payables − receivables) or the surplus (receivables − payables), and 0
+ * when balanced. The signed value stays intact for accounting; only the
+ * display is made positive.
+ */
+export function netPositionDisplayAmount(signed: number): number {
+  return netPositionKind(signed) === "balanced" ? 0 : Math.abs(signed);
 }
 
 const LOCALE: Record<Language, string> = { en: "en-US", tr: "tr-TR", ar: "ar-EG" };
