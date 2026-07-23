@@ -74,6 +74,19 @@ export interface CurrencyFinanceOverview {
    */
   openShipmentsValue: number;
   openShipmentsCount: number;
+  /**
+   * Net Exposure for THIS currency only = outstandingReceivables −
+   * outstandingPayables (driver + vendor). It is the company's net
+   * financial position in the currency: positive = more is owed TO MARAS
+   * than MARAS owes out; negative = MARAS owes more than it is owed.
+   *
+   * Currency discipline (identical to every other figure here): both
+   * operands already live in the SAME currency bucket, so this is never a
+   * cross-currency subtraction and is never converted. Open Shipments
+   * Value is deliberately NOT part of it — that is agreed pipeline value,
+   * not a recognized receivable or payable.
+   */
+  netExposure: number;
   averageProfitPerShipment: number | null;
   highestProfitShipmentThisMonth: { shipmentNumber: string; profit: number } | null;
   /**
@@ -128,6 +141,7 @@ export function buildExecutiveFinanceOverview(
         vendorPayables: 0,
         openShipmentsValue: 0,
         openShipmentsCount: 0,
+        netExposure: 0,
         averageProfitPerShipment: null,
         highestProfitShipmentThisMonth: null,
         topCustomerThisMonth: null,
@@ -247,6 +261,9 @@ export function buildExecutiveFinanceOverview(
   for (const [currency, b] of perCurrency) {
     const n = yearProfitCounts.get(currency) || 0;
     b.averageProfitPerShipment = n > 0 ? b.grossProfit.thisYear / n : null;
+    // Net Exposure in this currency only (receivables owed to us − payables
+    // we owe). Same-currency subtraction, never mixed or converted.
+    b.netExposure = b.outstandingReceivables - b.outstandingPayables;
     b.highestProfitShipmentThisMonth = monthProfits.get(currency) || null;
     const byCompany = customerMonth.get(currency);
     if (byCompany && byCompany.size) {

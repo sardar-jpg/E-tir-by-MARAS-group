@@ -426,26 +426,30 @@ describe("unified dashboard + MARAS AI Brief (PR #132)", () => {
     expect(AI_CALL).not.toContain("costStatements");
   });
 
-  it("navigation: Logistics Analysis is no longer a primary tab; old 'reports' navigation redirects to Dashboard", () => {
-    expect(ADMIN_PANEL).not.toContain("{ id: 'reports', label: t('reports')");
-    expect(ADMIN_PANEL).toContain("if (activeTab === 'reports') {");
-    expect(ADMIN_PANEL).toContain("setIsDashboardAnalyticsOpen(true);");
-    expect(ADMIN_PANEL).toContain("setActiveTab('dashboard');");
+  it("navigation: Logistics Analytics is a dedicated Reports tab (the Dashboard redesign retired the redirect)", () => {
+    // The redesigned Dashboard no longer stacks analytics; the operational
+    // recharts view is restored as its own role-gated Business-group tab.
+    expect(ADMIN_PANEL).toContain("{ id: 'reports', label: t('reports'), icon: BarChart3 }");
+    expect(ADMIN_PANEL).toContain("activeTab === 'reports' && canViewLogisticsAnalytics(resolvedAdminType)");
+    // The old redirect-into-Dashboard effect is gone.
+    expect(ADMIN_PANEL).not.toContain("if (activeTab === 'reports') {");
   });
 
-  it("analytics moved INTO Dashboard reusing the SAME lazy component, data, and permission gate", () => {
-    // PR #133: the gate moved into the layout-driven section map.
-    expect(ADMIN_PANEL).toContain("sectionId === 'analytics' && canViewLogisticsAnalytics(resolvedAdminType) && (");
-    expect(ADMIN_PANEL.split("<AdminReportsSection").length - 1).toBe(1); // one render site — inside Dashboard
+  it("analytics reuses the SAME lazy component, data, and permission gate (now a dedicated Reports page)", () => {
+    // The redesign moved analytics onto its own tab — still exactly ONE
+    // AdminReportsSection render site, same data + canViewLogisticsAnalytics gate.
+    expect(ADMIN_PANEL.split("<AdminReportsSection").length - 1).toBe(1);
     expect(ADMIN_PANEL).toContain("performanceAnalyticsData={performanceAnalyticsData}");
-    // Progressive disclosure: collapsible on mobile, always open on desktop.
-    expect(ADMIN_PANEL).toContain("isDashboardAnalyticsOpen || !isMobileMode");
+    expect(ADMIN_PANEL).toContain("activeTab === 'reports' && canViewLogisticsAnalytics(resolvedAdminType)");
   });
 
-  it("the brief card renders through ONE layout-driven call site, brief-first by default", () => {
-    // PR #133: mobile and desktop share a single section stack.
-    expect(ADMIN_PANEL.split("<MarasAiBriefCard").length - 1).toBe(1);
-    expect(ADMIN_PANEL.indexOf("<MarasAiBriefCard")).toBeLessThan(ADMIN_PANEL.indexOf("<MobileDashboard"));
+  it("the redesigned Dashboard no longer stacks the MARAS AI brief; MARAS AI stays reachable via its monitoring modal", () => {
+    // The Executive Brief card is no longer rendered on the Dashboard
+    // Overview (the concise redesign dropped the stacked sections). The
+    // component file is kept intact, and MARAS AI stays reachable — the
+    // dashboard Action Center opens the existing monitoring modal.
+    expect(ADMIN_PANEL.split("<MarasAiBriefCard").length - 1).toBe(0);
+    expect(ADMIN_PANEL).toContain("onOpenActionCenter={() => setIsMarasAiMonitoringOpen(true)}");
   });
 
   it("the card is honest and isolated: deterministic content, cached AI, explicit refresh, contained failures", () => {
@@ -488,19 +492,19 @@ describe("executive dashboard (PR #133) — deterministic finances, per-user lay
     expect(SERVER).toContain("adminDashboardLayouts: [],"); // memory-fallback entry (PR #44 lesson)
   });
 
-  it("the dashboard renders through the layout engine, intersected with role permissions", () => {
+  it("the dashboard still intersects the saved layout with role permissions (customize UI retired by the redesign)", () => {
     expect(ADMIN_PANEL).toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections)");
     const PERM = region(ADMIN_PANEL, "const permittedDashboardSections", 600);
     expect(PERM).toContain("canViewCostStatements(effectiveType)");
     expect(PERM).toContain("canViewLogisticsAnalytics(effectiveType)");
-    // Customization: show/hide + drag & drop + reordering, saved per user.
-    expect(ADMIN_PANEL).toContain("saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))");
-    expect(ADMIN_PANEL).toContain("reorderDashboardSection(dashboardLayout, draggedDashboardSection, sectionId)");
-    expect(ADMIN_PANEL).toContain("moveDashboardSection(dashboardLayout, sectionId, 'up')");
+    // Layout persistence stays wired (endpoint + client helper) even though
+    // the concise redesign renders only the operations dashboard.
     expect(ADMIN_PANEL).toContain('apiFetch("/api/admin/dashboard/layout", {');
-    // Financial sections render only inside the accounting permission gate.
-    expect(ADMIN_PANEL).toContain("sectionId === 'financial' && canViewCostStatements(resolvedAdminType)");
-    expect(ADMIN_PANEL).toContain("sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType)");
+    expect(ADMIN_PANEL).toContain("visibleOrderedSections(dashboardLayout, permittedDashboardSections).includes('operations')");
+    // The per-section drag/hide customize panel + stacked financial sections
+    // were removed by the redesign (single concise dashboard).
+    expect(ADMIN_PANEL).not.toContain("saveDashboardLayout(toggleDashboardSection(dashboardLayout, sectionId))");
+    expect(ADMIN_PANEL).not.toContain("sectionId === 'financial_alerts' && canViewCostStatements(resolvedAdminType)");
   });
 
   it("financial UI states its source and reuses deterministic accounting findings for alerts", () => {
@@ -515,10 +519,10 @@ describe("executive dashboard (PR #133) — deterministic finances, per-user lay
   });
 
   it("review refinements: renamed section, Open Shipments Value KPI, Top Customer This Month", () => {
-    // The section is titled Executive Financial Overview — this is an
-    // Executive Dashboard, not an accounting page (UI + customize panel).
+    // The section component is titled Executive Financial Overview — an
+    // Executive Dashboard view, not an accounting page. (The dashboard's
+    // former section-label map was removed in the Dashboard redesign.)
     expect(FIN_SECTION).toContain('en: "Executive Financial Overview"');
-    expect(ADMIN_PANEL).toContain("en: 'Executive Financial Overview'");
     // Open Shipments Value: deterministic shipment data, and its card opens
     // the shipment list pre-filtered to ACTIVE using the SAME status rule
     // (isOpenShipmentStatus) the KPI itself uses — they can never disagree.
