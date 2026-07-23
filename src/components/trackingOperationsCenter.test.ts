@@ -258,6 +258,32 @@ describe("Phase 4 — componentization, clustering, legend, loaded-50 notice", (
   });
 });
 
+describe("Journey Progress — honest milestone timeline in the drawer", () => {
+  it("drives every milestone state through the pure deriveJourneyProgress lib", () => {
+    expect(TRACKING_MAP).toContain('from "../lib/journeyMilestones"');
+    expect(TRACKING_MAP).toContain("deriveJourneyProgress(selectedShipment.status, selectedShipment.timeline)");
+  });
+
+  it("includes the border/customs milestones in the design (labels present en/tr/ar)", () => {
+    for (const key of ["mBorderArrival", "mCustoms", "mBorderExit", "mDestArrival", "mDelivered"]) {
+      const count = (TRACKING_MAP.match(new RegExp(`${key}:`, "g")) || []).length;
+      expect(count).toBeGreaterThanOrEqual(3); // en + tr + ar dictionaries
+    }
+  });
+
+  it("labels the percentage as Estimated and renders the progress bar from it", () => {
+    expect(TRACKING_MAP).toMatch(/\{t\.routeProgress\}[\s\S]{0,120}\{t\.estimatedTag\}/);
+    expect(TRACKING_MAP).toContain("journey.estimatedPercent");
+  });
+
+  it("renders the not-confirmed state for undated stages (never silently completed)", () => {
+    expect(TRACKING_MAP).toContain("t.noData");
+    // No GPS inputs anywhere near milestone derivation: the lib only takes
+    // status + timeline (checked above), and TrackingMap passes exactly that.
+    expect(TRACKING_MAP).not.toMatch(/deriveJourneyProgress\([^)]*(?:lat|lng|gps|position)/i);
+  });
+});
+
 describe("Phase 5 — responsive + RTL", () => {
   const LEGEND = readFileSync(join(__dirname, "admin", "tracking", "TrackingLegend.tsx"), "utf-8");
 

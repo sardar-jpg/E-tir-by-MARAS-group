@@ -31,11 +31,11 @@ import { resolveTrackingStatus } from "../lib/trackingMapStatus";
 import {
   resolveTrackingPosition,
   projectGeoToVector,
-  PRE_DEPARTURE_STATUSES,
   type TrackingState,
   type TrackingPosition,
 } from "../lib/trackingPositions";
 import { clusterMarkers } from "../lib/markerClustering";
+import { deriveJourneyProgress, type JourneyMilestoneKey } from "../lib/journeyMilestones";
 import TrackingLegend from "./admin/tracking/TrackingLegend";
 import { stateColors } from "./admin/tracking/trackingMarkerStyles";
 import GoogleClusterMarkers, { type GoogleTrackMarker } from "./admin/tracking/GoogleClusterMarkers";
@@ -411,12 +411,19 @@ const LABELS = {
     lastUpdateLabel: "Last Update",
     fresh: "Fresh",
     stale: "Stale",
-    routeProgress: "Route Progress",
+    routeProgress: "Journey Progress",
     origin: "Origin",
     destination: "Destination",
     departed: "Departed",
     pending: "Pending",
     arrived: "Arrived",
+    mBorderArrival: "Border Arrival",
+    mCustoms: "Customs Clearance",
+    mBorderExit: "Border Exit",
+    mDestArrival: "Destination Arrival",
+    mDelivered: "Delivered",
+    stateCurrent: "Current",
+    noData: "Not confirmed",
     etaSection: "ETA & Distance",
     estimatedTag: "Estimated",
     remainingDistance: "Remaining distance",
@@ -482,12 +489,19 @@ const LABELS = {
     lastUpdateLabel: "Son Güncelleme",
     fresh: "Güncel",
     stale: "Eski",
-    routeProgress: "Rota Durumu",
+    routeProgress: "Yolculuk Durumu",
     origin: "Çıkış",
     destination: "Varış",
     departed: "Yola Çıktı",
     pending: "Bekliyor",
     arrived: "Vardı",
+    mBorderArrival: "Sınıra Varış",
+    mCustoms: "Gümrük İşlemleri",
+    mBorderExit: "Sınırdan Çıkış",
+    mDestArrival: "Varış Noktasına Ulaşma",
+    mDelivered: "Teslim Edildi",
+    stateCurrent: "Şu an",
+    noData: "Doğrulanmadı",
     etaSection: "ETA ve Mesafe",
     estimatedTag: "Tahmini",
     remainingDistance: "Kalan mesafe",
@@ -553,12 +567,19 @@ const LABELS = {
     lastUpdateLabel: "آخر تحديث",
     fresh: "حديث",
     stale: "قديم",
-    routeProgress: "تقدم المسار",
+    routeProgress: "تقدم الرحلة",
     origin: "الانطلاق",
     destination: "الوجهة",
     departed: "غادرت",
     pending: "قيد الانتظار",
     arrived: "وصلت",
+    mBorderArrival: "الوصول إلى الحدود",
+    mCustoms: "التخليص الجمركي",
+    mBorderExit: "مغادرة الحدود",
+    mDestArrival: "الوصول إلى الوجهة",
+    mDelivered: "تم التسليم",
+    stateCurrent: "حالياً",
+    noData: "غير مؤكد",
     etaSection: "الوقت المتوقع والمسافة",
     estimatedTag: "تقديري",
     remainingDistance: "المسافة المتبقية",
@@ -2026,8 +2047,6 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                   : gpsState === "last_reported" ? t.trackReported
                   : gpsState === "estimated" ? t.trackEstimated
                   : t.trackUnavailable;
-                const preDeparture = PRE_DEPARTURE_STATUSES.includes(selectedShipment.status);
-                const terminal = ["Arrived", "Delivered", "Closed", "Completed"].includes(selectedShipment.status);
                 return (
                 <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[300px]">
                   {/* Header */}
@@ -2075,36 +2094,85 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                       </div>
                     </div>
 
-                    {/* Route Progress — derived ONLY from the real shipment
-                        status. No checkpoints, no border rows, no percentage,
-                        no fabricated milestones. */}
-                    <div className="border-t border-slate-100 pt-2.5">
-                      <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">{t.routeProgress}</p>
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="flex items-center gap-2 min-w-0">
-                            <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${preDeparture ? "bg-white border-orange-500" : "bg-emerald-500 border-emerald-500"}`}></span>
-                            <span className="font-semibold text-slate-700 truncate">{selectedShipment.loadingCity}</span>
-                          </span>
-                          <span className="text-[10px] font-medium text-slate-400 shrink-0">{preDeparture ? selectedShipment.status : t.departed}</span>
-                        </div>
-                        {selectedShipment.status === "In Transit" && (
-                          <div className="flex items-center justify-between text-[11px]">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full shrink-0 bg-sky-500 border-2 border-sky-500 animate-pulse"></span>
-                              <span className="font-semibold text-sky-700">{t.kpiInTransit}</span>
-                            </span>
+                    {/* Journey Progress — operational milestone timeline
+                        including the corridor's border/customs stages. Every
+                        state comes from deriveJourneyProgress (pure, tested):
+                        completed/current ONLY when the shipment's recorded
+                        status/timeline explicitly supports it; stages the
+                        journey passed without data show "Not confirmed";
+                        nothing is ever inferred from GPS proximity. The
+                        percentage counts confirmed milestones only and is
+                        always labeled Estimated. */}
+                    {(() => {
+                      const journey = deriveJourneyProgress(selectedShipment.status, selectedShipment.timeline);
+                      const milestoneLabel = (key: JourneyMilestoneKey): string => {
+                        switch (key) {
+                          case "origin": return `${t.origin} · ${selectedShipment.loadingCity}`;
+                          case "departed": return t.departed;
+                          case "border_arrival": return t.mBorderArrival;
+                          case "customs_clearance": return t.mCustoms;
+                          case "border_exit": return t.mBorderExit;
+                          case "in_transit": return t.kpiInTransit;
+                          case "destination_arrival": return `${t.mDestArrival} · ${selectedShipment.deliveryCity}`;
+                          case "delivered": return t.mDelivered;
+                        }
+                      };
+                      const fmtTs = (ts: string | null): string | null => {
+                        if (!ts) return null;
+                        const d = new Date(ts);
+                        return Number.isNaN(d.getTime()) ? null : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+                      };
+                      return (
+                        <div className="border-t border-slate-100 pt-2.5">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">
+                              {t.routeProgress} <span className="normal-case font-medium">({t.estimatedTag})</span>
+                            </p>
+                            <span className="text-[11px] font-black text-slate-700 tabular-nums">{journey.estimatedPercent}%</span>
                           </div>
-                        )}
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="flex items-center gap-2 min-w-0">
-                            <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${terminal ? "bg-emerald-500 border-emerald-500" : "bg-white border-slate-300"}`}></span>
-                            <span className="font-semibold text-slate-700 truncate">{selectedShipment.deliveryCity}</span>
-                          </span>
-                          <span className="text-[10px] font-medium text-slate-400 shrink-0">{terminal ? t.arrived : t.pending}</span>
+                          {/* Progress bar — confirmed milestones only, labeled Estimated above */}
+                          <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden mb-2.5">
+                            <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${journey.estimatedPercent}%` }} />
+                          </div>
+                          {/* Vertical milestone timeline */}
+                          <div className="space-y-1.5">
+                            {journey.milestones.map(m => {
+                              const label = milestoneLabel(m.key);
+                              const ts = fmtTs(m.timestamp);
+                              const dot =
+                                m.state === "completed" ? "bg-emerald-500 border-emerald-500"
+                                : m.state === "current" ? "bg-sky-500 border-sky-500 animate-pulse"
+                                : m.state === "unknown" ? "bg-slate-200 border-slate-300 border-dashed"
+                                : "bg-white border-slate-300";
+                              const labelCls =
+                                m.state === "completed" ? "text-slate-700"
+                                : m.state === "current" ? "text-sky-700"
+                                : m.state === "unknown" ? "text-slate-400"
+                                : "text-slate-400";
+                              const rightText =
+                                m.state === "completed" ? (ts ?? "✓")
+                                : m.state === "current" ? t.stateCurrent
+                                : m.state === "unknown" ? t.noData
+                                : t.pending;
+                              const rightCls =
+                                m.state === "completed" ? "text-slate-400"
+                                : m.state === "current" ? "text-sky-600 font-bold"
+                                : m.state === "unknown" ? "text-slate-300 italic"
+                                : "text-slate-300";
+                              return (
+                                <div key={m.key} className="flex items-center justify-between text-[11px] gap-2">
+                                  <span className="flex items-center gap-2 min-w-0">
+                                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${dot}`}></span>
+                                    <span className={`font-semibold truncate ${labelCls}`}>{label}</span>
+                                  </span>
+                                  <span className={`text-[10px] font-medium shrink-0 ${rightCls}`}>{rightText}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    </div>
+                      );
+                    })()}
 
                     {/* ETA & Distance — on-demand only, 5 states (idle /
                         loading / error / unavailable / success). Success shows
