@@ -544,6 +544,10 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   // mobile shows one at a time full-height with a small toggle — desktop
   // (lg:) ignores this and always shows both via the existing grid.
   const [mobileListOpen, setMobileListOpen] = useState<boolean>(false);
+  // Operations Center redesign: on desktop the shipment panel is collapsible
+  // so the map can go full-width (map-dominant). Ignored on mobile, which
+  // already shows one pane at a time via mobileListOpen.
+  const [panelCollapsed, setPanelCollapsed] = useState<boolean>(false);
 
   // feature/admin-mobile-ui correction pass: single source of truth
   // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
@@ -815,6 +819,16 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
 
+  // Real-data status strip: honest counts of the four tracking states across
+  // the currently filtered shipments. Never fabricated — derived directly
+  // from resolveTrackingPosition via getShipmentGpsState.
+  const trackingCounts = useMemo(() => {
+    const c: Record<TrackingState, number> = { live_gps: 0, last_reported: 0, estimated: 0, unavailable: 0 };
+    for (const s of filteredTransit) c[getShipmentGpsState(s)] += 1;
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTransit, trackingById]);
+
   const getNearestCity = (x: number, y: number): string => {
     let nearestCityName = "Transit Route";
     let minDistance = Infinity;
@@ -1025,28 +1039,47 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
       </div>
 
-      {/* THREE LANGUAGE ACTION DRAWER — desktop only (correction pass):
-          this paragraph restated what the compact mobile header above
-          already says, and was pure vertical space pushing the actual
-          map/list down on a phone. */}
-      <div className="hidden lg:grid bg-amber-50/70 border border-amber-100 rounded-2xl p-4 text-xs text-amber-950 grid-cols-1 md:grid-cols-12 gap-3 items-center">
-        <div className="md:col-span-10 space-y-1">
-          <h4 className="font-extrabold flex items-center gap-1.5 text-amber-900">
-            <Info className="w-4 h-4 text-orange-600" />
-            <span>{t.operationalStats}</span>
-          </h4>
-          <div className="text-amber-800 leading-relaxed text-[11px] space-y-1">
-            <p>
-              Integrated transit telemetry monitoring for the Turkey-to-Iraq highway network. Auto-center, filter parameters, and interactive nodes are calibrated live with no third-party keys required.
-            </p>
-          </div>
+      {/* Operations Center status strip — desktop only. Replaces the tall
+          amber "action drawer" (pure vertical space that restated the header)
+          with a compact, real-data strip: honest live counts of the four
+          tracking states, plus Reset View and a panel collapse toggle. */}
+      <div className="hidden lg:flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl px-4 py-2 shadow-sm">
+        <div className="flex items-center gap-2 flex-wrap">
+          {([
+            { key: "live_gps" as const, label: t.trackLive, dot: "bg-emerald-500", text: "text-emerald-700" },
+            { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-700" },
+            { key: "estimated" as const, label: t.trackEstimated, dot: "bg-orange-500", text: "text-orange-700" },
+            { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-400", text: "text-slate-500" },
+          ]).map(item => (
+            <span
+              key={item.key}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-bold"
+              title={item.label}
+            >
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${item.dot}`}></span>
+              <span className="text-slate-500 uppercase tracking-wide">{item.label}</span>
+              <span className={`tabular-nums font-black ${item.text}`}>{trackingCounts[item.key]}</span>
+            </span>
+          ))}
         </div>
-        <div className="md:col-span-2 text-right">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={handleShowAll}
-            className="w-full text-center inline-flex justify-center items-center gap-1 bg-amber-900 hover:bg-amber-950 text-white px-3 py-2 rounded-xl font-black tracking-tight text-[11px] shadow-sm transition-all uppercase cursor-pointer"
+            className="inline-flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-xl font-black tracking-tight text-[11px] shadow-sm transition-all uppercase cursor-pointer"
           >
             <span>{t.viewAllTransit}</span>
+          </button>
+          <button
+            onClick={() => setPanelCollapsed(c => !c)}
+            title={panelCollapsed
+              ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
+              : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
+            className="inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold text-[11px] transition-all cursor-pointer"
+          >
+            {panelCollapsed ? <Expand className="w-3.5 h-3.5" /> : <Minimize className="w-3.5 h-3.5" />}
+            <span>{panelCollapsed
+              ? (lang === "ar" ? "اللوحة" : lang === "tr" ? "Panel" : "Panel")
+              : (lang === "ar" ? "طي" : lang === "tr" ? "Daralt" : "Collapse")}</span>
           </button>
         </div>
       </div>
@@ -1076,7 +1109,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
 
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className={`${mobileListOpen ? "flex" : "hidden"} lg:flex lg:col-span-4 border-r border-slate-200 flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
+        <div className={`${mobileListOpen ? "flex" : "hidden"} ${panelCollapsed ? "lg:hidden" : "lg:flex lg:col-span-3"} border-r border-slate-200 flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
           {/* Sidebar Header */}
           <div className="p-4 border-b border-slate-100 bg-white space-y-3">
@@ -1281,14 +1314,17 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
               </button>
             </div>
 
-            {/* Go to my current location button */}
-            <button 
+            {/* Focus on Driver GPS: pans the map to the assigned driver's last
+                reported GPS fix. Renamed from the misleading "My Current
+                Location" — this never used the browser's geolocation; it has
+                always focused a driver's reported position. */}
+            <button
               onClick={handleGoToMyLocation}
               className="w-full mt-2 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-              title={lang === "ar" ? "الذهاب إلى موقعي الحالي" : lang === "tr" ? "Koordinatlarıma Git" : "Go to my current location"}
+              title={lang === "ar" ? "التركيز على موقع GPS للسائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on the assigned driver's GPS"}
             >
-              <MapPin className="w-3.5 h-3.5 text-orange-600 animate-pulse" />
-              <span>{lang === "ar" ? "موقعي الحالي" : lang === "tr" ? "Mevcut Konumum" : "My Current Location"}</span>
+              <Navigation className="w-3.5 h-3.5 text-orange-600" />
+              <span>{lang === "ar" ? "التركيز على GPS السائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on Driver GPS"}</span>
             </button>
           </div>
 
@@ -1369,20 +1405,16 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       );
                     })()}
 
+                    {/* Driver line. The whole card is the click target
+                        (onClick above selects + focuses the shipment on the
+                        map), so the redundant "Locate on Grid" button was
+                        removed — a chevron affordance signals the row action. */}
                     <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1">
                       <p className="flex items-center gap-1 truncate max-w-[160px]">
                         <Truck className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                         <span className="font-semibold text-slate-600 truncate">{s.assignedDriverName || "Unknown"}</span>
                       </p>
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectShipment(s);
-                        }}
-                        className="text-orange-600 hover:text-orange-800 font-bold transition-all text-[9.5px] uppercase cursor-pointer"
-                      >
-                        {t.viewOnMap} ➔
-                      </button>
+                      <span className={`font-bold text-[9.5px] uppercase transition-all ${isSelected ? "text-orange-600" : "text-slate-300"}`}>➔</span>
                     </div>
                   </div>
                 );
@@ -1392,7 +1424,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex lg:col-span-8 relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-[620px]"}`}>
+        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex ${panelCollapsed ? "lg:col-span-12" : "lg:col-span-9"} relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-[620px]"}`}>
           
           {/* Radar Ambient Weather Overlay */}
           <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2.5 py-1 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
@@ -2147,12 +2179,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
               )}
             </div>
 
-            {/* Simulated Live Grid Stats */}
+            {/* In-map footer stats — real counts, honest live-signal label. */}
             <div className="text-[10px] text-slate-400 font-mono flex flex-col sm:flex-row items-center justify-between shrink-0 bg-slate-900/60 p-3 rounded-xl border border-slate-900 gap-1 mt-1">
               <span>{t.operationalStats}: <strong>{inTransitShipments.length} {t.totalShipments}</strong></span>
-              <span className={`flex items-center gap-1 ${anyLiveGps ? "text-emerald-400" : "text-orange-400"}`}>
-                <span className={`w-1.5 h-1.5 rounded-full inline-block animate-ping ${anyLiveGps ? "bg-emerald-500" : "bg-orange-500"}`}></span>
-                {anyLiveGps ? t.gpsAcquired : t.simulatedGps}
+              <span className="flex items-center gap-2">
+                <span className="text-emerald-400">{t.trackLive}: <strong className="tabular-nums">{trackingCounts.live_gps}</strong></span>
+                <span className={`flex items-center gap-1 ${anyLiveGps ? "text-emerald-400" : "text-slate-500"}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full inline-block ${anyLiveGps ? "bg-emerald-500 animate-ping" : "bg-slate-600"}`}></span>
+                  {anyLiveGps ? t.gpsAcquired : t.simulatedGps}
+                </span>
               </span>
             </div>
           </div>

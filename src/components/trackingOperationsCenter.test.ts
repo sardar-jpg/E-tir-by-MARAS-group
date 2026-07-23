@@ -122,3 +122,32 @@ describe("Phase 1 — tracking honesty applied in TrackingMap", () => {
     }
   });
 });
+
+describe("Phase 2 — Operations Center layout", () => {
+  it("makes the shipment panel collapsible so the map can be dominant", () => {
+    expect(TRACKING_MAP).toContain("panelCollapsed");
+    // Collapsed => map spans the full grid; expanded => 3/9 map-dominant split.
+    expect(TRACKING_MAP).toContain("lg:col-span-12");
+    expect(TRACKING_MAP).toContain("lg:col-span-9");
+    expect(TRACKING_MAP).toContain("lg:col-span-3");
+    // The old even 4/8 split must be gone.
+    expect(TRACKING_MAP).not.toContain("lg:col-span-8");
+    expect(TRACKING_MAP).not.toContain("lg:col-span-4");
+  });
+
+  it("renders a real-data status strip from honest state counts", () => {
+    expect(TRACKING_MAP).toContain("trackingCounts");
+    expect(TRACKING_MAP).toMatch(/trackingCounts\[item\.key\]/);
+  });
+
+  it("renames the driver-focus control to 'Focus on Driver GPS' (not 'My Current Location')", () => {
+    expect(TRACKING_MAP).toContain("Focus on Driver GPS");
+    expect(TRACKING_MAP).not.toContain("My Current Location");
+  });
+
+  it("removes the redundant per-row 'Locate on Grid' action button", () => {
+    // The card itself is the click target; there must be no inner button that
+    // re-fires handleSelectShipment via t.viewOnMap.
+    expect(TRACKING_MAP).not.toMatch(/\{t\.viewOnMap\}\s*➔/);
+  });
+});
