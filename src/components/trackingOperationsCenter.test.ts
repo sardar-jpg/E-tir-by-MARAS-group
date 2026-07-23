@@ -101,7 +101,7 @@ describe("Phase 1 — tracking honesty applied in TrackingMap", () => {
     // shipment's asserted position — that now comes from resolveTrackingPosition.)
     const posHelper = TRACKING_MAP.slice(
       TRACKING_MAP.indexOf("const getShipmentVectorLocation"),
-      TRACKING_MAP.indexOf("const stateColors")
+      TRACKING_MAP.indexOf("const anyLiveGps")
     );
     expect(posHelper.length).toBeGreaterThan(0);
     expect(posHelper).not.toContain('CITY_COORDINATES["istanbul"]');
@@ -186,10 +186,12 @@ describe("Phase 3 — details drawer + on-demand ETA", () => {
     expect(TRACKING_MAP).toMatch(/Calculate ETA & Distance/);
   });
 
-  it("selection stays unified: list rows and both map marker sets drive handleSelectShipment", () => {
-    const occurrences = (TRACKING_MAP.match(/handleSelectShipment\(s\)/g) || []).length;
-    // list row + vector marker + google marker = at least three call sites.
-    expect(occurrences).toBeGreaterThanOrEqual(3);
+  it("selection stays unified: list rows, Vector Radar markers, and the Google cluster layer all drive handleSelectShipment", () => {
+    // List row + Vector Radar marker call handleSelectShipment(s) directly.
+    const direct = (TRACKING_MAP.match(/handleSelectShipment\(s\)/g) || []).length;
+    expect(direct).toBeGreaterThanOrEqual(2);
+    // The Google marker/cluster layer receives handleSelectShipment as onSelect.
+    expect(TRACKING_MAP).toMatch(/onSelect=\{handleSelectShipment\}/);
   });
 });
 
@@ -217,6 +219,35 @@ describe("Phase 4 — componentization, clustering, legend, loaded-50 notice", (
     expect(TRACKING_MAP).toContain("clusterMarkers(");
     // Cluster bubbles render a count when more than one marker is grouped.
     expect(TRACKING_MAP).toMatch(/cluster\.count > 1/);
+  });
+
+  it("clusters the REAL Google Map markers via the extracted GoogleClusterMarkers component", () => {
+    const GOOGLE = readFileSync(join(__dirname, "admin", "tracking", "GoogleClusterMarkers.tsx"), "utf-8");
+    // TrackingMap uses it inside the Google <Map>, fed only placeable markers.
+    expect(TRACKING_MAP).toContain('import GoogleClusterMarkers');
+    expect(TRACKING_MAP).toContain("<GoogleClusterMarkers");
+    expect(TRACKING_MAP).toContain("googleMarkers");
+    // The component reuses the same pure clusterMarkers lib on real lat/lng.
+    expect(GOOGLE).toContain('from "../../../lib/markerClustering"');
+    expect(GOOGLE).toContain("clusterMarkers(");
+    expect(GOOGLE).toContain("useMap()");
+    // Cluster click zooms in; single click selects (syncs list/map/drawer).
+    expect(GOOGLE).toContain("map.setZoom");
+    expect(GOOGLE).toContain("onSelect(m.shipment)");
+  });
+
+  it("keeps the selected shipment out of clustering on BOTH maps so it stays identifiable", () => {
+    const GOOGLE = readFileSync(join(__dirname, "admin", "tracking", "GoogleClusterMarkers.tsx"), "utf-8");
+    // Vector Radar excludes the selected shipment from the clustered set.
+    expect(TRACKING_MAP).toMatch(/\.filter\(s => s\.id !== selectedShipment\?\.id\)/);
+    // Google layer pulls the selected marker out and renders it individually.
+    expect(GOOGLE).toMatch(/m\.shipment\.id !== selectedId/);
+    expect(GOOGLE).toContain("selectedMarker");
+  });
+
+  it("never clusters or draws Location Unavailable shipments on the Google Map", () => {
+    // googleMarkers only contains placeable coordinates.
+    expect(TRACKING_MAP).toMatch(/loc\.available && loc\.lat != null && loc\.lng != null/);
   });
 
   it("shows an honest loaded-50 notice without changing the backend limit", () => {

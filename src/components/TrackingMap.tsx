@@ -36,6 +36,8 @@ import {
 } from "../lib/trackingPositions";
 import { clusterMarkers } from "../lib/markerClustering";
 import TrackingLegend from "./admin/tracking/TrackingLegend";
+import { stateColors } from "./admin/tracking/trackingMarkerStyles";
+import GoogleClusterMarkers, { type GoogleTrackMarker } from "./admin/tracking/GoogleClusterMarkers";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
@@ -814,21 +816,9 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     return { x: v.x, y: v.y, lat: pos.lat, lng: pos.lng, isActualGps: pos.isReal, state: pos.state, available: true };
   };
 
-  // Marker colour tokens per honesty state — one source of truth shared by
-  // the Vector Radar and Google Map markers so the same state always reads
-  // the same way (green = live, amber = last reported, orange = estimated).
-  const stateColors = (state: TrackingState) => {
-    switch (state) {
-      case "live_gps":
-        return { ring: "rgba(34,197,94,0.18)", stroke: "#22c55e", bg: "bg-emerald-700 border-emerald-400", text: "text-emerald-400", chip: "● GPS" };
-      case "last_reported":
-        return { ring: "rgba(245,158,11,0.16)", stroke: "#f59e0b", bg: "bg-amber-700 border-amber-400", text: "text-amber-400", chip: "◐ LAST" };
-      case "estimated":
-        return { ring: "rgba(249,115,22,0.12)", stroke: "rgba(249,115,22,0.4)", bg: "bg-slate-900 border-orange-500", text: "text-orange-400", chip: "◌ EST" };
-      default:
-        return { ring: "rgba(100,116,139,0.12)", stroke: "#475569", bg: "bg-slate-800 border-slate-600", text: "text-slate-500", chip: "◯" };
-    }
-  };
+  // Marker colour tokens per honesty state now live in a shared module
+  // (admin/tracking/trackingMarkerStyles) so the Vector Radar, the Google Map
+  // markers and the Google cluster layer all read identically. Imported above.
 
   const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
 
@@ -845,9 +835,12 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   // Vector Radar marker clustering: group placeable markers that sit within a
   // scale-dependent radius so overlapping trucks read as one "N here" bubble
   // (unavailable shipments have no coordinate, so they are never clustered or
-  // shown on the grid). Radius shrinks as the operator zooms in.
+  // shown on the grid). Radius shrinks as the operator zooms in. The SELECTED
+  // shipment is excluded so it always renders as its own highlighted marker
+  // and is never hidden inside a count bubble.
   const vectorClusters = useMemo(() => {
     const pts = filteredTransit
+      .filter(s => s.id !== selectedShipment?.id)
       .map(s => {
         const loc = getShipmentVectorLocation(s);
         return loc.available ? { x: loc.x, y: loc.y, shipment: s, state: loc.state } : null;
@@ -855,7 +848,22 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       .filter((p): p is { x: number; y: number; shipment: Shipment; state: TrackingState } => p !== null);
     return clusterMarkers(pts, 34 / Math.max(viewScale, 0.1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredTransit, trackingById, viewScale]);
+  }, [filteredTransit, trackingById, viewScale, selectedShipment]);
+
+  // Placeable markers for the Google Map cluster layer: real driver/city
+  // coordinates only. Unavailable shipments (null coordinate) are excluded, so
+  // they are never drawn or clustered on the Google Map either.
+  const googleMarkers = useMemo<GoogleTrackMarker[]>(() => {
+    const out: GoogleTrackMarker[] = [];
+    for (const s of filteredTransit) {
+      const loc = getShipmentVectorLocation(s);
+      if (loc.available && loc.lat != null && loc.lng != null) {
+        out.push({ shipment: s, lat: loc.lat, lng: loc.lng, state: loc.state });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTransit, trackingById]);
 
 
   const getNearestCity = (x: number, y: number): string => {
@@ -1798,6 +1806,37 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         </g>
                       );
                     })}
+
+                    {/* Selected shipment — always rendered as its own
+                        highlighted marker (excluded from clustering above), so
+                        it stays identifiable even amid a dense cluster. */}
+                    {selectedShipment && (() => {
+                      const loc = getShipmentVectorLocation(selectedShipment);
+                      if (!loc.available) return null;
+                      return (
+                        <g
+                          key={`selected-${selectedShipment.id}`}
+                          className="cursor-pointer group select-none"
+                          onClick={() => handleSelectShipment(selectedShipment)}
+                          style={{ transform: `translate(${loc.x}px, ${loc.y}px)`, transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)" }}
+                        >
+                          <circle r="22" fill="rgba(249,115,22,0.28)" stroke="#ea580c" strokeWidth="1.5" className="animate-pulse" />
+                          <g transform="translate(-11, -11)">
+                            <rect width="22" height="22" rx="6" fill="#ea580c" stroke="#ffffff" strokeWidth="1.5" className="shadow-xl" />
+                            <foreignObject width="22" height="22" className="flex items-center justify-center pointer-events-none">
+                              <div className="w-full h-full flex items-center justify-center">
+                                <Truck className="w-3.5 h-3.5 text-white animate-bounce" style={{ animationDuration: '3s' }} />
+                              </div>
+                            </foreignObject>
+                          </g>
+                          <text y="24" textAnchor="middle" fill="#ea580c" className="font-mono text-[9px] font-black tracking-tight">#{selectedShipment.shipmentNumber}</text>
+                          <g transform="translate(0, 36)">
+                            <rect x="-55" y="-10" width="110" height="14" rx="3" fill="#0f172a" stroke="#ea580c" strokeWidth="1" />
+                            <text textAnchor="middle" fill="#34d399" className="font-mono text-[8.5px] font-bold">In {getNearestCity(loc.x, loc.y)}</text>
+                          </g>
+                        </g>
+                      );
+                    })()}
                   </svg>
                 </div>
               ) : (
@@ -1962,49 +2001,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                           );
                         })()}
 
-                        {/* All moving trucks markers */}
-                        {filteredTransit.map(s => {
-                          const activeLoc = getShipmentVectorLocation(s);
-                          // Location Unavailable: no coordinate, so no map marker.
-                          if (!activeLoc.available || activeLoc.lat == null || activeLoc.lng == null) return null;
-                          const isSelected = selectedShipment?.id === s.id;
-                          const truckCoords = { lat: activeLoc.lat, lng: activeLoc.lng };
-                          const gpsState = getShipmentGpsState(s);
-                          const colors = stateColors(gpsState);
-
-                          return (
-                            <AdvancedMarker
-                              key={s.id}
-                              position={truckCoords}
-                              title={`Shipment #${s.shipmentNumber}`}
-                              onClick={() => handleSelectShipment(s)}
-                            >
-                              <div className={`flex flex-col items-center justify-center cursor-pointer transform transition-all hover:scale-110 active:scale-95 ${isSelected ? "scale-110 z-20" : "z-10"}`}>
-                                {/* Interactive bubble badge */}
-                                <span className={`shadow-md font-bold font-mono text-[9px]/tight px-1.5 py-0.5 rounded text-white whitespace-nowrap ${
-                                  isSelected ? "bg-orange-600 border border-white" : "bg-slate-900 border border-slate-700"
-                                }`}>
-                                  #{s.shipmentNumber}
-                                </span>
-
-                                <div
-                                  style={{ width: "36px", height: "36px" }}
-                                  className={`w-9 h-9 rounded-full flex items-center justify-center border-2 shadow-lg transition-transform ${
-                                    isSelected ? "bg-orange-600 border-white" : colors.bg
-                                  }`}
-                                >
-                                  <Truck className="w-4 h-4 text-white" />
-                                </div>
-
-                                {!isSelected && (
-                                  <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${colors.text}`}>
-                                    {colors.chip}
-                                  </span>
-                                )}
-                              </div>
-                            </AdvancedMarker>
-                          );
-                        })}
+                        {/* All moving trucks — clustered. Nearby markers group
+                            into a count bubble (zooms in on click); the selected
+                            shipment always stays an individual highlighted marker;
+                            unavailable shipments are excluded upstream. */}
+                        <GoogleClusterMarkers
+                          markers={googleMarkers}
+                          selectedId={selectedShipment?.id}
+                          onSelect={handleSelectShipment}
+                        />
                       </Map>
                     </APIProvider>
                   ) : (
