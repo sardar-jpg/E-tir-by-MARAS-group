@@ -66,7 +66,7 @@ export default function KpiCard({
     <>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 truncate">{label}</p>
+          <p className="line-clamp-2 text-[11px] font-bold uppercase leading-tight tracking-wide text-slate-500">{label}</p>
           <p className="mt-1 text-3xl font-black leading-none text-slate-900 tabular-nums">{value}</p>
         </div>
         <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${toneCfg.icon}`}>

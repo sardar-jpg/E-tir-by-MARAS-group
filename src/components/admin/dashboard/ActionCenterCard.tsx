@@ -17,6 +17,22 @@ const S: Record<string, Record<Language, string>> = {
 };
 const L = (k: string, lang: Language) => S[k]?.[lang] ?? S[k]?.en ?? k;
 
+// Correction pass (PR #155 QA follow-up): the compact card's priority
+// badge used the raw English label straight from AUDIT_PRIORITY_META
+// (src/lib/auditEngine.ts), which stayed English no matter the selected
+// language. That shared lib's `label` also feeds MARAS AI copy and other
+// non-dashboard surfaces, so rather than changing it (out of scope for
+// this pass), the compact card looks up its own localized text here,
+// keyed by the same AuditPriority the lib already returns. English
+// values are unchanged byte-for-byte from AUDIT_PRIORITY_META.
+const PRIORITY_LABEL: Record<string, Record<Language, string>> = {
+  critical_now: { en: "Critical – Fix Immediately", tr: "Kritik – Hemen Düzeltin", ar: "حرِج – يتطلب إصلاحًا فوريًا" },
+  high_today: { en: "High – Fix Today", tr: "Yüksek – Bugün Düzeltin", ar: "مرتفع – يجب إصلاحه اليوم" },
+  medium_soon: { en: "Medium – Review Soon", tr: "Orta – Yakında İncele", ar: "متوسط – للمراجعة قريبًا" },
+  low_monitor: { en: "Low – Monitor", tr: "Düşük – İzleyin", ar: "منخفض – تحت المراقبة" },
+};
+const priorityLabel = (priority: string, lang: Language) => PRIORITY_LABEL[priority]?.[lang] ?? PRIORITY_LABEL[priority]?.en ?? priority;
+
 const CATEGORY_ICON: Record<AuditCategory, typeof Truck> = {
   operations: Truck,
   accounting: Wallet,
@@ -111,21 +127,36 @@ export default function ActionCenterCard({
               <button
                 key={f.id}
                 onClick={() => onOpenFinding(f)}
-                className="flex w-full items-center gap-2.5 rounded-lg border border-slate-100 px-2.5 py-2 text-start transition-colors hover:border-slate-200 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
+                className="flex min-h-[44px] w-full items-start gap-2.5 rounded-lg border border-slate-100 px-2.5 py-2 text-start transition-colors hover:border-slate-200 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
               >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-500">
+                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-500">
                   <Icon className="h-3.5 w-3.5" />
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-bold text-slate-800">{f.title}</span>
-                  <span className="block truncate font-mono text-[10px] text-slate-400">{f.recordRef}</span>
-                </span>
-                {f.priority && (
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-black uppercase ${badge}`}>
-                    {f.priority.label}
+                {/*
+                  Correction pass (PR #155 QA follow-up): this used to be a
+                  single row — icon, title, order number, fixed-width badge,
+                  and arrow all fighting for the same line. The badge text
+                  ("Medium – Review Soon") never shrinks (shrink-0), so on a
+                  ~220px-wide card the sibling `min-w-0 flex-1` text block
+                  had nothing left and collapsed to 0px, making the title
+                  and order number fully invisible (verified via computed
+                  styles, not just visually). Splitting into two rows means
+                  the title always gets its own line (wraps up to 2 lines,
+                  never disappears) and the order number + badge share a
+                  second, wrapping line that can never squeeze row one.
+                */}
+                <span className="min-w-0 flex-1 py-0.5">
+                  <span className="line-clamp-2 block text-xs font-bold leading-snug text-slate-800">{f.title}</span>
+                  <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="font-mono text-[10px] text-slate-400">{f.recordRef}</span>
+                    {f.priority && (
+                      <span className={`rounded px-1.5 py-0.5 text-[9px] font-black uppercase ${badge}`}>
+                        {priorityLabel(f.priority.priority, lang)}
+                      </span>
+                    )}
                   </span>
-                )}
-                <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-300 rtl:rotate-180" />
+                </span>
+                <ArrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 rtl:rotate-180" />
               </button>
             );
           })

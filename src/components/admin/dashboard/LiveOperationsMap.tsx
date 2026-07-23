@@ -3,6 +3,7 @@ import { APIProvider, Map as GoogleMap, AdvancedMarker } from "@vis.gl/react-goo
 import { MapPin, Radio, Maximize2, ArrowRight } from "lucide-react";
 import type { Shipment, Driver, Language } from "../../../types";
 import { apiFetch } from "../../../lib/api";
+import CompactVectorRadar, { type RadarPoint } from "./CompactVectorRadar";
 
 /**
  * Turkey → Iraq land-corridor coordinates (mirrors the set ClientShipmentMap
@@ -130,18 +131,27 @@ export default function LiveOperationsMap({
   }, [drivers]);
 
   // Land corridor only (same scope as the GPS Tracking tab); plot live GPS
-  // when we have it, else the known destination city, else skip.
+  // when we have it, else the known destination city, else skip. `estimated`
+  // records which branch resolved the position, so both the Google map's
+  // marker set and the no-key CompactVectorRadar fallback can be honest
+  // about which pins are live GPS vs. a city-level guess.
   const land = useMemo(() => shipments.filter((s) => (s.freightType || "land") === "land"), [shipments]);
   const points = useMemo(() => {
-    const out: { id: string; pos: { lat: number; lng: number }; status: string; label: string }[] = [];
+    const out: { id: string; pos: { lat: number; lng: number }; status: string; label: string; estimated: boolean }[] = [];
     for (const s of land) {
       if (s.status === "Delivered" || s.status === "Closed") continue;
-      const pos = gps(driverById.get(s.assignedDriverId)) || coordFor(s.deliveryCity);
+      const live = gps(driverById.get(s.assignedDriverId));
+      const pos = live || coordFor(s.deliveryCity);
       if (!pos) continue;
-      out.push({ id: s.id, pos, status: s.status, label: `${s.shipmentNumber} · ${s.deliveryCity}` });
+      out.push({ id: s.id, pos, status: s.status, label: `${s.shipmentNumber} · ${s.deliveryCity}`, estimated: !live });
     }
     return out;
   }, [land, driverById]);
+
+  const radarPoints: RadarPoint[] = useMemo(
+    () => points.map((p) => ({ id: p.id, lat: p.pos.lat, lng: p.pos.lng, status: p.status, label: p.label, estimated: p.estimated })),
+    [points]
+  );
 
   const count = (pred: (s: Shipment) => boolean) => land.filter(pred).length;
   const inTransit = count((s) => s.status === "In Transit");
@@ -176,7 +186,20 @@ export default function LiveOperationsMap({
 
       <div className="relative h-[300px] w-full bg-slate-100 md:h-[340px]">
         {!hasKey ? (
-          emptyState(L("unavailable", lang))
+          // Correction pass (PR #155 QA follow-up): a missing/failed Maps
+          // key used to always show a plain "temporarily unavailable"
+          // message here, even though real shipment positions (live GPS
+          // or known-city fallback) were available the whole time and the
+          // full GPS Tracking page already had a graceful no-key fallback
+          // ("Vector Radar"). Show the same real points on a compact
+          // schematic grid instead of a large empty card; fall back to
+          // the plain message only when there is truly nothing to plot
+          // (keeps the genuine empty state for that case).
+          radarPoints.length > 0 ? (
+            <CompactVectorRadar points={radarPoints} lang={lang} />
+          ) : (
+            emptyState(L("unavailable", lang))
+          )
         ) : (
           <MapBoundary fallback={emptyState(L("unavailable", lang))}>
             <APIProvider apiKey={mapsKey}>

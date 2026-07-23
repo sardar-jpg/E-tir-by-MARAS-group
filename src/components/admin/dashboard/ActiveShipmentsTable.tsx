@@ -241,7 +241,7 @@ export default function ActiveShipmentsTable(props: Props) {
                     <span className="font-mono text-xs font-black text-slate-900 tabular-nums">{s.agreedAmount.toLocaleString()}</span>
                     <span className="ms-1 text-[10px] font-bold text-slate-400">{s.currency}</span>
                   </td>
-                  <td className="p-3"><ShipmentStatusBadge status={s.status} /></td>
+                  <td className="p-3"><ShipmentStatusBadge status={s.status} lang={lang} /></td>
                   <td className="p-3">
                     <div className="text-[11px] font-semibold text-slate-700">{analysis.label}</div>
                     <div className="max-w-[110px] truncate text-[9.5px] text-slate-400" title={analysis.subtext}>{analysis.subtext}</div>
@@ -287,7 +287,7 @@ export default function ActiveShipmentsTable(props: Props) {
                   <FreightIcon type={s.freightType || "land"} />
                   <span className="font-mono text-xs font-bold text-slate-900">#{s.shipmentNumber}</span>
                 </div>
-                <ShipmentStatusBadge status={s.status} />
+                <ShipmentStatusBadge status={s.status} lang={lang} />
               </div>
               <div className="text-xs font-bold text-slate-800">{s.companyName}</div>
               <div className="flex items-center gap-1 text-[11px] text-slate-600">

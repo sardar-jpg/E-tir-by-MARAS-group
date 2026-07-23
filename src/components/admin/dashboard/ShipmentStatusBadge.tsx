@@ -1,4 +1,5 @@
-import type { Shipment } from "../../../types";
+import type { Language, Shipment } from "../../../types";
+import { translateShipmentStatus } from "../../../lib/shipmentStatusLabels";
 
 /**
  * Readable shipment status badge. Colour is semantic but never the ONLY
@@ -35,14 +36,14 @@ export function statusTone(status: string): keyof typeof TONE {
   }
 }
 
-export default function ShipmentStatusBadge({ status }: { status: Shipment["status"] | string }) {
+export default function ShipmentStatusBadge({ status, lang = "en" }: { status: Shipment["status"] | string; lang?: Language }) {
   const tone = statusTone(status);
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-black uppercase leading-none tracking-wide ${TONE[tone]}`}
     >
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
-      {status}
+      {translateShipmentStatus(status, lang)}
     </span>
   );
 }
