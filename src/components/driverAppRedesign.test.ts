@@ -97,12 +97,15 @@ describe("Arabic RTL — driver surfaces use logical layout utilities only", () 
 
   it("directional arrows mirror under RTL", () => {
     // The design system's ONE canonical route element owns the arrow —
-    // every screen renders routes through it, so mirroring is fixed in
-    // exactly one place.
+    // list rows render routes through it, so mirroring is fixed in
+    // exactly one place. (Revision A: the Home hero renders its own
+    // wrap-friendly route line with the same rtl:rotate-180 arrow.)
     const ROUTE = read("driver/RouteBlock.tsx");
     expect(ROUTE).toContain("rtl:rotate-180");
-    const CARD = read("driver/DriverActiveJobCard.tsx");
-    expect(CARD).toContain("<RouteBlock");
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("<RouteBlock");
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).toContain("rtl:rotate-180");
   });
 });
 
@@ -162,12 +165,13 @@ describe("Privacy — driver surfaces never reference customer/internal fields",
   });
 
   it("driver payment surfaces resolve the amount through resolveDriverAgreedAmount only", () => {
-    for (const file of ["driver/DriverActiveJobCard.tsx", "driver/DriverJobDetails.tsx"]) {
-      const source = read(file);
-      expect(source).toContain("resolveDriverAgreedAmount");
-      // Never reads the raw field off the shipment directly.
-      expect(source).not.toMatch(/\bs\.agreedAmount\b|shipment\.agreedAmount\b/);
-    }
+    // Revision A: the agreed amount appears ONLY in the details view
+    // (an existing driver-authorized field), resolved through the shared
+    // helper — never read raw off the shipment, never on Home.
+    const source = read("driver/DriverJobDetails.tsx");
+    expect(source).toContain("resolveDriverAgreedAmount");
+    expect(source).not.toMatch(/\bs\.agreedAmount\b|shipment\.agreedAmount\b/);
+    expect(read("driver/DriverHomeScreen.tsx")).not.toContain("agreedAmount");
   });
 });
 
@@ -305,10 +309,10 @@ describe("Shipment-chat lifecycle — chat exists only after the driver accepts 
     expect(emptyCodeOnly).not.toMatch(/support|customer|tel:/i);
   });
 
-  it("job surfaces hide chat affordances before acceptance (card button, screen shortcut, document handoff)", () => {
-    const CARD = read("driver/DriverActiveJobCard.tsx");
-    expect(CARD).toContain("const chatAvailable = isDriverChatAvailable(s.status);");
-    expect(CARD).toContain("{chatAvailable && (");
+  it("job surfaces hide chat affordances before acceptance (Home shortcut, screen shortcut, file handoff)", () => {
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).toContain("const chatAvailable = isDriverChatAvailable(activeJob.status);");
+    expect(HOME).toContain("{chatAvailable && (");
     const JOB = read("driver/DriverActiveJobScreen.tsx");
     expect(JOB).toContain("isDriverChatAvailable(activeJob.status) ? (");
     expect(JOB).toContain("chatAfterAccept");
@@ -339,5 +343,152 @@ describe("Chat behavior contracts", () => {
 
   it("reading a thread marks only that shipment's chat notifications read, per-user", () => {
     expect(APP).toContain("n.type === 'chat' && n.shipmentId === activeShipment.id && !isNotificationReadForUser(n, loggedInDriverId || \"\")");
+  });
+});
+
+/* ═══════════════════ Revision A (approved redesign) contracts ═══════════════════ */
+
+describe("Revision A — one legal primary action via the existing next-action rule", () => {
+  it("Home hosts DriverNextAction; the action derives from getDriverNextAction only (no duplicated lifecycle logic)", () => {
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).toContain("<DriverNextAction");
+    const ACTION = read("driver/DriverNextAction.tsx");
+    expect(ACTION).toContain("getDriverNextAction(shipment.status, shipment.freightType)");
+    // Never a dropdown of statuses, never a client-side sequence copy.
+    expect(ACTION).not.toContain("<select");
+    expect(ACTION).not.toContain("LAND_STATUS_SEQUENCE");
+  });
+
+  it("the confirmation moment states the exact lifecycle consequence and keeps confirm/cancel behavior", () => {
+    const ACTION = read("driver/DriverNextAction.tsx");
+    expect(ACTION).toContain("This will update the shipment status to");
+    expect(ACTION).toContain("onSubmitNextStatus");
+    expect(ACTION).toContain("setConfirming(false)");
+    // Poll-driven status change under an open confirm resets it (unchanged rule).
+    expect(ACTION).toContain("[shipment.id, shipment.status]");
+  });
+
+  it("the reminder checklist is reminder-only: static copy, never stored, never gating the confirm", () => {
+    const ACTION = read("driver/DriverNextAction.tsx");
+    expect(ACTION).toContain("Reminder only — not recorded");
+    // No checkbox state, no persistence, no payload from the checklist.
+    expect(ACTION).not.toContain('type="checkbox"');
+    expect(ACTION).not.toContain("localStorage");
+    expect(ACTION).not.toMatch(/apiFetch|fetch\(/);
+  });
+});
+
+describe("Revision A — files live in chat; neutral wording; no phone action", () => {
+  const codeOnly = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  it("the chat attach sheet exists with neutral wording (Attach to chat / Files / Recent attachments)", () => {
+    const CHAT = read("driver/DriverChatScreen.tsx");
+    expect(CHAT).toContain("Attach to chat");
+    expect(CHAT).toContain("Recent attachments");
+    expect(CHAT).toContain("Sohbete ekle");
+    expect(CHAT).toContain("إرفاق إلى الدردشة");
+    // All attach routes feed the SAME existing upload flow.
+    expect(CHAT.match(/onAttachmentSelected\(e\)/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("no driver-facing 'Upload Document' or Documents-module wording anywhere", () => {
+    for (const [name, source] of driverSources) {
+      expect(source, name).not.toContain("Upload Document");
+      expect(source, name).not.toContain("Documents page");
+      expect(source, name).not.toContain("Documents tab");
+    }
+    // The details section label is the neutral "Files".
+    const DETAILS = read("driver/DriverJobDetails.tsx");
+    expect(DETAILS).toContain('files: "Files"');
+    expect(DETAILS).not.toContain('"Documents"');
+  });
+
+  it("no phone action exists on any driver surface (Chat is the only channel)", () => {
+    for (const [name, source] of driverSources) {
+      expect(codeOnly(source), name).not.toContain("tel:");
+    }
+  });
+});
+
+describe("Revision A — trust fixes", () => {
+  it("a real offline indicator exists, driven by browser connectivity events", () => {
+    const APP = read("DriverApplication.tsx");
+    expect(APP).toContain('window.addEventListener("offline"');
+    expect(APP).toContain('window.addEventListener("online"');
+    expect(APP).toContain("You are offline — updates will resume automatically.");
+  });
+
+  it("GPS 'checking' falls to the honest unavailable state after a timeout — no fabricated coordinates", () => {
+    const HOOK = read("../hooks/driver/useDriverLocationReporting.ts");
+    expect(HOOK).toContain("GPS_CHECKING_TIMEOUT_MS");
+    expect(HOOK).toContain("setGpsAvailable((prev) => (prev === null ? false : prev))");
+    // The timeout path only ever flips the UI state — it never invents a fix.
+    const timeoutEffect = HOOK.slice(HOOK.indexOf("GPS_CHECKING_TIMEOUT_MS);", HOOK.indexOf("// Revision A trust fix: while reporting")));
+    expect(timeoutEffect).not.toContain("setLastGpsCoords");
+    expect(timeoutEffect).not.toContain("transmitGPS");
+  });
+
+  it("the GPS banner never claims GPS is active — it renders only the unavailable state", () => {
+    const APP = read("DriverApplication.tsx");
+    expect(APP).toContain("isReportingLocation && gpsAvailable === false");
+    expect(APP).not.toContain("gpsAvailable === true");
+  });
+
+  it("logout requires confirmation", () => {
+    const ACCOUNT = read("driver/DriverAccountScreen.tsx");
+    expect(ACCOUNT).toContain("setShowLogoutConfirm(true)");
+    expect(ACCOUNT).toContain("logoutConfirmTitle");
+    // The direct onLogout call lives only inside the confirm dialog / deletion flow.
+    expect(ACCOUNT).not.toContain("onClick={onLogout}\n          className=\"w-full min-h-[52px]");
+  });
+
+  it("Arabic/Turkish notification text localizes embedded status names at display time", () => {
+    const PANEL = read("driver/NotificationsPanel.tsx");
+    expect(PANEL).toContain("localizedNotificationText");
+    const APP = read("DriverApplication.tsx");
+    expect(APP).toContain("localizeStatusesInText");
+  });
+
+  it("Home renders no activity feed at all (five elements only); notifications stay server-scoped", () => {
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).not.toContain("recentNotifications");
+    expect(HOME).not.toContain("Recent activity");
+    const APP = read("DriverApplication.tsx");
+    // The driver's notification list remains the server-scoped endpoint.
+    expect(APP).toContain('apiFetch("/api/notifications")');
+  });
+});
+
+describe("Revision A — honest progress, no fabricated operational data", () => {
+  const codeOnly = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
+
+  it("Trip Progress derives only from the stored status's confirmed sequence position — never GPS", () => {
+    const JOB = read("driver/DriverActiveJobScreen.tsx");
+    expect(JOB).toContain("getJourneyProgress(activeJob.status, activeJob.freightType)");
+    expect(JOB).toContain("Based on confirmed steps");
+    expect(codeOnly(JOB).toLowerCase()).not.toContain("gps");
+    const UI = read("driver/driverUi.ts");
+    expect(UI).toContain("sequence.indexOf(status)");
+  });
+
+  it("no ETA, distance, or map is rendered on Home or Trip Progress", () => {
+    for (const file of ["driver/DriverHomeScreen.tsx", "driver/DriverActiveJobScreen.tsx"]) {
+      const source = codeOnly(read(file));
+      expect(source, file).not.toMatch(/\bETA\b/);
+      expect(source, file).not.toMatch(/\bdistanceKm\b|\bdistance\b/i);
+      expect(source, file).not.toContain("googleapis.com/maps");
+      expect(source, file).not.toContain("Map(");
+    }
+  });
+
+  it("Home contains exactly the approved five elements — no KPI tiles, timeline, or dashboard cards", () => {
+    const HOME = read("driver/DriverHomeScreen.tsx");
+    expect(HOME).toContain("Active shipment");            // 1 hero card
+    expect(HOME).toContain("STATUS_DESCRIPTIONS");        // 2 current status
+    expect(HOME).toContain("<DriverNextAction");          // 3 one primary action
+    expect(HOME).toContain("onOpenChat(activeJob)");      // 4 chat
+    expect(HOME).toContain("onOpenDetails(activeJob)");   // 5 details
+    expect(HOME).not.toContain("DriverStatusTimeline");   // timeline lives on Trip Progress
   });
 });
