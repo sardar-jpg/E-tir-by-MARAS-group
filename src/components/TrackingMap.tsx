@@ -13,21 +13,37 @@ import {
   Search,
   AlertTriangle,
   X,
-  Activity,
   MapPin,
   Globe,
-  Filter,
   Check,
   Expand,
-  Minimize,
   Maximize2,
   Minimize2,
   Plus,
-  Minus
+  Minus,
+  MessageSquare,
+  FileText,
+  ChevronRight,
+  Tv,
+  PanelLeftClose,
+  PanelLeftOpen
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
 import { resolveTrackingStatus } from "../lib/trackingMapStatus";
+import {
+  resolveTrackingPosition,
+  projectGeoToVector,
+  type TrackingState,
+  type TrackingPosition,
+} from "../lib/trackingPositions";
+import { clusterMarkers } from "../lib/markerClustering";
+import { deriveJourneyProgress, type JourneyMilestoneKey } from "../lib/journeyMilestones";
+import { advanceCycle, selectCycleTargets, OPERATOR_CYCLE_INTERVAL_MS } from "../lib/operatorCycle";
+import OperatorRoomOverlay, { type OperatorKpi } from "./admin/tracking/OperatorRoomOverlay";
+import TrackingLegend from "./admin/tracking/TrackingLegend";
+import { stateColors } from "./admin/tracking/trackingMarkerStyles";
+import GoogleClusterMarkers, { type GoogleTrackMarker } from "./admin/tracking/GoogleClusterMarkers";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 const fetch = apiFetch;
@@ -208,7 +224,7 @@ interface MapCustomControlsProps {
   selectedShipment: Shipment | null;
   lang: Language;
   shipments: Shipment[];
-  getShipmentLocation: (s: Shipment) => { lat: number; lng: number };
+  getShipmentLocation: (s: Shipment) => { lat: number | null; lng: number | null };
 }
 
 function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocation }: MapCustomControlsProps) {
@@ -284,7 +300,10 @@ function MapCustomControls({ selectedShipment, lang, shipments, getShipmentLocat
       bounds.extend(endLoc);
 
       const loc = getShipmentLocation(s);
-      bounds.extend({ lat: loc.lat, lng: loc.lng });
+      // Skip shipments with no resolvable position (Location Unavailable).
+      if (loc.lat != null && loc.lng != null) {
+        bounds.extend({ lat: loc.lat, lng: loc.lng });
+      }
     });
 
     map.fitBounds(bounds, 60);
@@ -358,7 +377,7 @@ const LABELS = {
     activeTracking: "Active Tracing",
     viewAllTransit: "Reset View",
     searchPlaceholder: "Filter by customer, number or city...",
-    currentGeoPos: "Simulated position",
+    currentGeoPos: "Estimated position",
     viewOnMap: "Locate on Grid",
     engineSelector: "Operational Tracking Interface",
     engineVector: "ETIR Interactive Vector Radar Grid (Smart Tracking)",
@@ -370,7 +389,62 @@ const LABELS = {
     bestFitZoom: "Auto-Center Focus",
     lastUpdated: "Last Reported Shipment Status",
     gpsAcquired: "GPS Signal Acquired",
-    simulatedGps: "Simulated Dead-Reckoning",
+    simulatedGps: "No live GPS signal",
+    trackLive: "Live GPS",
+    trackReported: "Last Reported",
+    trackEstimated: "Estimated Position",
+    trackUnavailable: "Location Unavailable",
+    estimatedNote: "Estimated from route — no GPS fix",
+    noFix: "No location",
+    loadedCapNotice: "Showing the first 50 loaded shipments.",
+    emptyTitle: "No active shipments are currently being tracked",
+    emptyBody: "Tracking information will appear here automatically when shipments enter transit.",
+    opsTitle: "GPS Tracking – Operations Center",
+    liveData: "Live Data",
+    lastUpdatedAt: "Last updated",
+    kpiActive: "Active",
+    kpiInTransit: "In Transit",
+    kpiGpsOnline: "GPS Online",
+    shipmentsTitle: "Shipments",
+    allTruckTypes: "All Truck Types",
+    allDrivers: "All Drivers",
+    unassigned: "Unassigned",
+    justNow: "just now",
+    minAgo: "min ago",
+    route: "Route",
+    trackingSource: "Tracking Source",
+    lastUpdateLabel: "Last Update",
+    fresh: "Fresh",
+    stale: "Stale",
+    routeProgress: "Journey Progress",
+    origin: "Origin",
+    destination: "Destination",
+    departed: "Departed Origin",
+    pending: "Pending",
+    arrived: "Arrived",
+    mBorderArrival: "Border Arrival",
+    mCustoms: "Customs Clearance",
+    mBorderExit: "Border Exit",
+    mDestArrival: "Destination Arrival",
+    mDelivered: "Delivered",
+    stateCurrent: "In Progress",
+    noData: "Not confirmed",
+    completedLabel: "Completed",
+    tabOverview: "Overview",
+    tabChat: "Chat",
+    currentLocation: "Current Location",
+    borderShort: "Ibrahim Khalil Border",
+    kpiEtaToday: "Estimated ETA Today",
+    estimatedArrival: "Estimated Arrival",
+    notCalculated: "Not calculated yet",
+    openChatSub: "Discuss with operations",
+    viewDetailsSub: "View full shipment info",
+    docsChatNote: "Shipment documents are managed inside the shipment chat.",
+    etaSection: "ETA & Distance",
+    estimatedTag: "Estimated",
+    remainingDistance: "Remaining distance",
+    viewDetails: "Shipment Details",
+    openChat: "Open Chat",
     operationalStats: "Transit Stats Overview",
     totalShipments: "Active Transits",
     totalDistance: "Estimated Route Completion",
@@ -392,7 +466,7 @@ const LABELS = {
     activeTracking: "Aktif Takip",
     viewAllTransit: "Görünümü Sıfırla",
     searchPlaceholder: "Müşteri adı, no veya şehre göre filtrele...",
-    currentGeoPos: "Simüle edilen konum",
+    currentGeoPos: "Tahmini konum",
     viewOnMap: "Izgarada Göster",
     engineSelector: "Operasyonel Takip Arayüzü",
     engineVector: "ETIR Etkileşimli Vektör Radar Izgarası (Akıllı Takip)",
@@ -404,7 +478,62 @@ const LABELS = {
     bestFitZoom: "Hızlı Odaklan",
     lastUpdated: "Son Bildirilen Gönderi Durumu",
     gpsAcquired: "GPS Sinyali Alındı",
-    simulatedGps: "Simüle Edilmiş Rota Verisi",
+    simulatedGps: "Canlı GPS sinyali yok",
+    trackLive: "Canlı GPS",
+    trackReported: "Son Bildirilen",
+    trackEstimated: "Tahmini Konum",
+    trackUnavailable: "Konum Yok",
+    estimatedNote: "Rotadan tahmin edildi — GPS yok",
+    noFix: "Konum yok",
+    loadedCapNotice: "İlk 50 yüklenen sevkiyat gösteriliyor.",
+    emptyTitle: "Şu anda takip edilen aktif sevkiyat yok",
+    emptyBody: "Sevkiyatlar yola çıktığında takip bilgileri burada otomatik olarak görünecektir.",
+    opsTitle: "GPS Takip – Operasyon Merkezi",
+    liveData: "Canlı Veri",
+    lastUpdatedAt: "Son güncelleme",
+    kpiActive: "Aktif",
+    kpiInTransit: "Yolda",
+    kpiGpsOnline: "GPS Aktif",
+    shipmentsTitle: "Sevkiyatlar",
+    allTruckTypes: "Tüm Araç Tipleri",
+    allDrivers: "Tüm Sürücüler",
+    unassigned: "Atanmadı",
+    justNow: "şimdi",
+    minAgo: "dk önce",
+    route: "Rota",
+    trackingSource: "Takip Kaynağı",
+    lastUpdateLabel: "Son Güncelleme",
+    fresh: "Güncel",
+    stale: "Eski",
+    routeProgress: "Yolculuk Durumu",
+    origin: "Çıkış",
+    destination: "Varış",
+    departed: "Çıkıştan Ayrıldı",
+    pending: "Bekliyor",
+    arrived: "Vardı",
+    mBorderArrival: "Sınıra Varış",
+    mCustoms: "Gümrük İşlemleri",
+    mBorderExit: "Sınırdan Çıkış",
+    mDestArrival: "Varış Noktasına Ulaşma",
+    mDelivered: "Teslim Edildi",
+    stateCurrent: "Devam Ediyor",
+    noData: "Doğrulanmadı",
+    completedLabel: "Tamamlandı",
+    tabOverview: "Genel Bakış",
+    tabChat: "Sohbet",
+    currentLocation: "Mevcut Konum",
+    borderShort: "İbrahim Halil Sınır Kapısı",
+    kpiEtaToday: "Bugün Tahmini Varış",
+    estimatedArrival: "Tahmini Varış",
+    notCalculated: "Henüz hesaplanmadı",
+    openChatSub: "Operasyon ekibiyle görüşün",
+    viewDetailsSub: "Tüm sevkiyat bilgisini görün",
+    docsChatNote: "Sevkiyat belgeleri sevkiyat sohbetinde yönetilir.",
+    etaSection: "ETA ve Mesafe",
+    estimatedTag: "Tahmini",
+    remainingDistance: "Kalan mesafe",
+    viewDetails: "Sevkiyat Detayları",
+    openChat: "Sohbeti Aç",
     operationalStats: "Operasyonel İstatistikler",
     totalShipments: "Aktif Araç",
     totalDistance: "Tahmini Rota Durumu",
@@ -426,7 +555,7 @@ const LABELS = {
     activeTracking: "تتبع نشط",
     viewAllTransit: "إعادة ضبط",
     searchPlaceholder: "البحث بالعميل، الرقم أو المدينة...",
-    currentGeoPos: "موقع تقديري محاكى",
+    currentGeoPos: "موقع تقديري",
     viewOnMap: "تحديد على الشبكة",
     engineSelector: "واجهة التتبع والعمليات",
     engineVector: "شبكة رادار رصد ومراقبة ETIR التفاعلية (تتبع ذكي)",
@@ -438,7 +567,62 @@ const LABELS = {
     bestFitZoom: "أوتو-فوكس للشبكة",
     lastUpdated: "آخر حالة مسجلة للشحنة",
     gpsAcquired: "إشارة الـ GPS نشطة",
-    simulatedGps: "عبر نظام الملاحة التقديري",
+    simulatedGps: "لا توجد إشارة GPS مباشرة",
+    trackLive: "تتبع مباشر",
+    trackReported: "آخر موقع مُبلَّغ",
+    trackEstimated: "موقع تقديري",
+    trackUnavailable: "الموقع غير متوفّر",
+    estimatedNote: "تقديري حسب المسار — لا يوجد GPS",
+    noFix: "لا يوجد موقع",
+    loadedCapNotice: "يتم عرض أول 50 شحنة محمّلة.",
+    emptyTitle: "لا توجد شحنات نشطة قيد التتبع حالياً",
+    emptyBody: "ستظهر معلومات التتبع هنا تلقائياً عند دخول الشحنات مرحلة النقل.",
+    opsTitle: "تتبع GPS – مركز العمليات",
+    liveData: "بيانات مباشرة",
+    lastUpdatedAt: "آخر تحديث",
+    kpiActive: "نشطة",
+    kpiInTransit: "قيد النقل",
+    kpiGpsOnline: "GPS متصل",
+    shipmentsTitle: "الشحنات",
+    allTruckTypes: "كل أنواع الشاحنات",
+    allDrivers: "كل السائقين",
+    unassigned: "غير معيّن",
+    justNow: "الآن",
+    minAgo: "دقيقة مضت",
+    route: "المسار",
+    trackingSource: "مصدر التتبع",
+    lastUpdateLabel: "آخر تحديث",
+    fresh: "حديث",
+    stale: "قديم",
+    routeProgress: "تقدم الرحلة",
+    origin: "الانطلاق",
+    destination: "الوجهة",
+    departed: "غادرت نقطة الانطلاق",
+    pending: "قيد الانتظار",
+    arrived: "وصلت",
+    mBorderArrival: "الوصول إلى الحدود",
+    mCustoms: "التخليص الجمركي",
+    mBorderExit: "مغادرة الحدود",
+    mDestArrival: "الوصول إلى الوجهة",
+    mDelivered: "تم التسليم",
+    stateCurrent: "قيد التنفيذ",
+    noData: "غير مؤكد",
+    completedLabel: "مكتمل",
+    tabOverview: "نظرة عامة",
+    tabChat: "المحادثة",
+    currentLocation: "الموقع الحالي",
+    borderShort: "منفذ إبراهيم الخليل",
+    kpiEtaToday: "وصول متوقع اليوم",
+    estimatedArrival: "الوصول المتوقع",
+    notCalculated: "لم يُحسب بعد",
+    openChatSub: "تواصل مع فريق العمليات",
+    viewDetailsSub: "عرض معلومات الشحنة كاملة",
+    docsChatNote: "تُدار مستندات الشحنة داخل محادثة الشحنة.",
+    etaSection: "الوقت المتوقع والمسافة",
+    estimatedTag: "تقديري",
+    remainingDistance: "المسافة المتبقية",
+    viewDetails: "تفاصيل الشحنة",
+    openChat: "فتح المحادثة",
     operationalStats: "ملخص النقل النشط",
     totalShipments: "الشاحنات في الطريق",
     totalDistance: "مؤشر إكمال الرحلات",
@@ -450,9 +634,17 @@ interface TrackingMapProps {
   shipments: Shipment[];
   lang: Language;
   drivers?: Driver[];
+  /**
+   * Optional navigation actions for the details drawer. Both route into
+   * EXISTING Admin surfaces (the shipment details modal / the Chat Center
+   * thread where messages AND shipment documents already live) — the drawer
+   * never builds its own chat or document handling.
+   */
+  onOpenShipmentDetails?: (shipmentId: string) => void;
+  onOpenShipmentChat?: (shipmentId: string) => void;
 }
 
-export default function TrackingMap({ shipments, lang, drivers }: TrackingMapProps) {
+export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDetails, onOpenShipmentChat }: TrackingMapProps) {
   const t = LABELS[lang] || LABELS.en;
 
   const filterTabsLabels = {
@@ -501,22 +693,66 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   const [currentDriverId, setCurrentDriverId] = useState<string | null>(null);
   const [currentDriverName, setCurrentDriverName] = useState<string | null>(null);
   const [locationStatusMessage, setLocationStatusMessage] = useState<string | null>(null);
-  // feature/admin-mobile-ui correction pass: the legend used to always
-  // default open, covering a large share of a phone's map area. Closed
-  // by default under the same 1024px breakpoint AdminPanel's own mobile
-  // mode uses; desktop is unaffected (defaults open, same as before).
-  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(() => (typeof window === "undefined" ? true : window.innerWidth >= 1024));
+  // Operations Center UX pass: the legend is collapsed by default on ALL
+  // viewports (low visual weight — one small "Show Legend" pill). It expands
+  // only when the operator asks for it.
+  const [isLegendOpen, setIsLegendOpen] = useState<boolean>(false);
   const [mapViewMode, setMapViewMode] = useState<'vector' | 'google_map'>('google_map');
   const [googleMapLoading, setGoogleMapLoading] = useState<boolean>(true);
   const [mapsAuthError, setMapsAuthError] = useState<boolean>(() => {
     return Boolean((window as any).googleMapsAuthFailed);
   });
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  // Full Screen uses the REAL browser Fullscreen API on the tracking root
+  // whenever it exists, falling back to the legacy CSS takeover only where
+  // the API is unavailable/limited (e.g. iOS Safari). fsMethod records which
+  // path is active so the Escape/body-overflow shim runs only for the CSS
+  // fallback (native fullscreen handles both itself).
+  const trackingRootRef = useRef<HTMLDivElement>(null);
+  const [fsMethod, setFsMethod] = useState<'native' | 'css' | null>(null);
+
+  // Operator Room — a dedicated READ-ONLY monitoring mode for the operations
+  // TV. Distinct from Full Screen: it switches the page into a monitoring
+  // LAYOUT (map dominant; panel/filters/drawer/actions hidden; TV-scale
+  // overlay chrome) and merely requests browser fullscreen as a convenience
+  // on entry. Same data, permissions, polling and honesty model.
+  const [operatorRoom, setOperatorRoom] = useState<boolean>(false);
+  const [cyclePaused, setCyclePaused] = useState<boolean>(false);
+  const cycleIdxRef = useRef<number>(-1);
+
   // feature/admin-mobile-ui: on narrow viewports the sidebar (filters +
   // shipment list) and the map can't reasonably sit side-by-side, so
   // mobile shows one at a time full-height with a small toggle — desktop
   // (lg:) ignores this and always shows both via the existing grid.
   const [mobileListOpen, setMobileListOpen] = useState<boolean>(false);
+  // Operations Center redesign: on desktop the shipment panel is collapsible
+  // so the map can go full-width (map-dominant). Ignored on mobile, which
+  // already shows one pane at a time via mobileListOpen.
+  const [panelCollapsed, setPanelCollapsed] = useState<boolean>(false);
+
+  // Operations Center: optional driver filter (client-side, honest — filters
+  // the already-loaded list by assignedDriverId, no new data fetching).
+  const [driverFilter, setDriverFilter] = useState<string>("all");
+
+  // Honest "last updated" clock for the top bar: stamped whenever the
+  // shipments/drivers props actually change (AdminPanel's SWR poll), never a
+  // fake ticking "live" claim.
+  const [lastDataAt, setLastDataAt] = useState<Date>(() => new Date());
+  useEffect(() => { setLastDataAt(new Date()); }, [shipments, drivers]);
+
+  // On-demand ETA & Distance (details drawer). Never auto-called and never
+  // persisted client-side: the result is tied to etaForId and cleared whenever
+  // the selection changes, so a stale ETA never leaks onto another shipment.
+  const [etaData, setEtaData] = useState<any | null>(null);
+  const [etaLoading, setEtaLoading] = useState<boolean>(false);
+  const [etaError, setEtaError] = useState<string | null>(null);
+  const [etaForId, setEtaForId] = useState<string | null>(null);
+
+  // Details drawer tab: Overview is the operational summary; Chat routes to
+  // the existing Chat Center thread. There is deliberately NO Documents tab —
+  // in eTIR, shipment documents are uploaded, viewed and exchanged inside the
+  // shipment chat, so chat is the single place for messages and documents.
+  const [drawerTab, setDrawerTab] = useState<'overview' | 'chat'>('overview');
 
   // feature/admin-mobile-ui correction pass: single source of truth
   // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
@@ -542,18 +778,90 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     }
   }, [mapViewMode]);
 
+  // Native Fullscreen API lifecycle: keep isFullscreen in sync with the
+  // browser (covers Esc, F11, OS gestures). Also exits the Operator Room
+  // when the user leaves native fullscreen while the room is open.
   useEffect(() => {
-    if (!isFullscreen) return;
+    const onFsChange = () => {
+      const active = Boolean(document.fullscreenElement);
+      if (!active) {
+        setIsFullscreen(false);
+        setFsMethod(null);
+        setOperatorRoom(prev => (prev ? false : prev));
+      } else {
+        setIsFullscreen(true);
+        setFsMethod('native');
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const enterFullscreen = () => {
+    const el = trackingRootRef.current;
+    if (el && typeof el.requestFullscreen === "function") {
+      el.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+        setFsMethod('native');
+      }).catch(() => {
+        // API present but rejected (permissions/embedding) — CSS fallback.
+        setIsFullscreen(true);
+        setFsMethod('css');
+      });
+    } else {
+      // Fullscreen API unavailable (e.g. iOS Safari) — CSS takeover fallback.
+      setIsFullscreen(true);
+      setFsMethod('css');
+    }
+  };
+  const exitFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+    setIsFullscreen(false);
+    setFsMethod(null);
+  };
+  const toggleFullscreen = () => {
+    if (isFullscreen) exitFullscreen();
+    else enterFullscreen();
+  };
+
+  // Escape/body-overflow shim — ONLY for the CSS fallback (native fullscreen
+  // provides its own Escape handling and viewport isolation).
+  useEffect(() => {
+    if (!isFullscreen || fsMethod !== 'css') return;
     document.body.style.overflow = "hidden";
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsFullscreen(false);
+      if (e.key === "Escape") { setIsFullscreen(false); setFsMethod(null); }
     };
     window.addEventListener("keydown", handleEscape);
     return () => {
       document.body.style.overflow = "";
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [isFullscreen]);
+  }, [isFullscreen, fsMethod]);
+
+  // ---- Operator Room ------------------------------------------------------
+  const enterOperatorRoom = () => {
+    setOperatorRoom(true);
+    setCyclePaused(false);
+    cycleIdxRef.current = -1;
+    // Convenience only — the room's identity is its monitoring layout, not
+    // fullscreen. Best-effort; failure changes nothing.
+    const el = trackingRootRef.current;
+    if (el && typeof el.requestFullscreen === "function" && !document.fullscreenElement) {
+      el.requestFullscreen().then(() => { setIsFullscreen(true); setFsMethod('native'); }).catch(() => {});
+    }
+  };
+  const exitOperatorRoom = () => {
+    setOperatorRoom(false);
+    setCyclePaused(false);
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+      setFsMethod(null);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -667,10 +975,10 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     }
   }, [drivers]);
 
-  // Perf Phase 2: O(1) driver lookups. This component re-renders every 4s
-  // (the animation ticker) and on every search keystroke / filter toggle;
-  // the map/filter passes below used to run `localDrivers.find(...)` per
-  // shipment (O(shipments × drivers)) on each of those renders. A driver-by-id
+  // Perf Phase 2: O(1) driver lookups. This component re-renders on every
+  // search keystroke / filter toggle and whenever driver/shipment data is
+  // refetched; the map/filter passes below used to run `localDrivers.find(...)`
+  // per shipment (O(shipments × drivers)) on each of those renders. A driver-by-id
   // index makes every lookup O(1) and only rebuilds when the drivers change.
   // NB: `Map` here would resolve to the @vis.gl/react-google-maps <Map>
   // component (imported above), so we use a plain Record as the O(1) index.
@@ -681,8 +989,8 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   }, [localDrivers]);
 
   // Dynamically filter shipments based on state.
-  // Perf Phase 2: memoized so the status filter isn't re-run on every 4s
-  // animation tick (only when the shipment list or the status filter change).
+  // Perf Phase 2: memoized so the status filter only re-runs when the
+  // shipment list or the status filter change.
   const inTransitShipments = useMemo(() => shipments.filter(s => {
     if (mapStatusFilter === "in_transit") {
       return s.status === "In Transit";
@@ -694,20 +1002,9 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     return true; // "all" shows all statuses
   }), [shipments, mapStatusFilter]);
 
-  // Simple state count for a ticking timer that slightly alters the position of transit trucks
-  const [ticker, setTicker] = useState<number>(0);
-
-  // Auto-ticks every 4 seconds to animate simulated truck crawling
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTicker(prev => prev + 1);
-    }, 4000);
-    return () => clearInterval(interval);
-  }, []);
-
   // Filter by dynamic search query AND active truck filter selections.
-  // Perf Phase 2: memoized (was recomputed on every 4s ticker tick and every
-  // unrelated re-render) and driver lookups are now O(1) via driversById.
+  // Perf Phase 2: memoized (was recomputed on every unrelated re-render) and
+  // driver lookups are now O(1) via driversById.
   const filteredTransit = useMemo(() => inTransitShipments.filter(s => {
     // 1. Truck Type Filter
     const driver = driversById[s.assignedDriverId || ""];
@@ -716,7 +1013,13 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       return false;
     }
 
-    // 2. Search Text Query Filter
+    // 2. Driver Filter (Operations Center): plain client-side match on the
+    // already-loaded assignment — no new data fetching.
+    if (driverFilter !== "all" && s.assignedDriverId !== driverFilter) {
+      return false;
+    }
+
+    // 3. Search Text Query Filter
     const q = searchQuery.toLowerCase();
     return (
       s.shipmentNumber.toLowerCase().includes(q) ||
@@ -725,7 +1028,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
       s.deliveryCity.toLowerCase().includes(q) ||
       (s.assignedDriverName && s.assignedDriverName.toLowerCase().includes(q))
     );
-  }), [inTransitShipments, driversById, selectedTruckTypes, searchQuery]);
+  }), [inTransitShipments, driversById, selectedTruckTypes, driverFilter, searchQuery]);
 
   // Perf Phase 2: precompute per-truck-type counts once per render pass
   // (was O(types × shipments × drivers) via a getTruckTypeCount() called
@@ -741,103 +1044,96 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
   }, [inTransitShipments, driversById]);
   const getTruckTypeCount = (typeId: string): number => truckTypeCounts[typeId] || 0;
 
-  const getShipmentGpsState = (s: Shipment): "live_gps" | "dead_reckoning" | "static" => {
-    const driver = driversById[s.assignedDriverId || ""];
-    if (
-      driver &&
-      typeof driver.latitude === "number" &&
-      typeof driver.longitude === "number" &&
-      driver.latitude !== 0 &&
-      driver.longitude !== 0
-    ) {
-      return "live_gps";
+  /**
+   * Tracking honesty (Operations Center redesign): the single source of
+   * truth for every shipment's map placement and honesty state, computed by
+   * the pure resolveTrackingPosition lib. No more 4-second "crawl" ticker
+   * and no more silent Istanbul/Baghdad fallback — a shipment we cannot
+   * place is honestly "unavailable" (no marker) rather than a fabricated one.
+   * Recomputes only when the shipment or driver data changes (Date.now() is
+   * re-read on each real data refetch, keeping freshness reasonably current
+   * without animating fake movement).
+   */
+  const trackingById = useMemo(() => {
+    const now = Date.now();
+    const map: Record<string, TrackingPosition> = {};
+    for (const s of shipments) {
+      map[s.id] = resolveTrackingPosition(s, driversById[s.assignedDriverId || ""], now);
     }
-    return s.status === "In Transit" ? "dead_reckoning" : "static";
+    return map;
+  }, [shipments, driversById]);
+
+  const resolvePos = (s: Shipment): TrackingPosition =>
+    trackingById[s.id] ?? resolveTrackingPosition(s, driversById[s.assignedDriverId || ""], Date.now());
+
+  const getShipmentGpsState = (s: Shipment): TrackingState => resolvePos(s).state;
+
+  // Vector/geo placement for a shipment. `available` is false ONLY for the
+  // "unavailable" state (no coordinate); render code must skip those markers
+  // instead of pinning them to a default location. For every other state the
+  // coordinate is real (driver GPS) or a clearly-labeled city estimate, and
+  // is projected onto the Vector Radar grid with the shared projection.
+  const getShipmentVectorLocation = (
+    s: Shipment
+  ): { x: number; y: number; lat: number | null; lng: number | null; isActualGps: boolean; state: TrackingState; available: boolean } => {
+    const pos = resolvePos(s);
+    if (pos.lat == null || pos.lng == null) {
+      return { x: 0, y: 0, lat: null, lng: null, isActualGps: false, state: pos.state, available: false };
+    }
+    const v = projectGeoToVector(pos.lat, pos.lng);
+    return { x: v.x, y: v.y, lat: pos.lat, lng: pos.lng, isActualGps: pos.isReal, state: pos.state, available: true };
   };
 
-  // Get vector graphical SVG coordinates and real GPS coordinates
-  const getShipmentVectorLocation = (s: Shipment): { x: number; y: number; percentage: number; isActualGps?: boolean; lat: number; lng: number } => {
-    const driver = driversById[s.assignedDriverId || ""];
-    if (driver && typeof driver.latitude === 'number' && typeof driver.longitude === 'number' && driver.latitude !== 0 && driver.longitude !== 0) {
-      // Map Lat/Lng to Vector 850x550 coordinate space
-      const latMin = 30.0;
-      const latMax = 42.0;
-      const lngMin = 28.0;
-      const lngMax = 48.0;
-
-      const pctX = (driver.longitude - lngMin) / (lngMax - lngMin);
-      const x = 100 + pctX * 625;
-
-      const pctY = (driver.latitude - latMin) / (latMax - latMin);
-      const y = 465 - pctY * 335;
-
-      return {
-        x: Math.min(800, Math.max(50, x)),
-        y: Math.min(500, Math.max(50, y)),
-        percentage: 0.5,
-        isActualGps: true,
-        lat: driver.latitude,
-        lng: driver.longitude
-      };
-    }
-
-    const startLoc = CITY_COORDINATES[s.loadingCity.toLowerCase().trim()] || CITY_COORDINATES["istanbul"];
-    const endLoc = CITY_COORDINATES[s.deliveryCity.toLowerCase().trim()] || CITY_COORDINATES["baghdad"];
-
-    const startVec = findVectorCity(s.loadingCity);
-    const endVec = findVectorCity(s.deliveryCity);
-
-    // If shipment is not in transit yet, it is still at loadingCity
-    if (["New", "Waiting for Driver Quotes", "Assigned", "Accepted", "Loading", "Loaded"].includes(s.status)) {
-      return { 
-        x: startVec.x, 
-        y: startVec.y, 
-        percentage: 0, 
-        isActualGps: false,
-        lat: startLoc.lat,
-        lng: startLoc.lng
-      };
-    }
-
-    // If shipment has arrived or is delivered, it is at deliveryCity
-    if (["Arrived", "Delivered", "Closed"].includes(s.status)) {
-      return { 
-        x: endVec.x, 
-        y: endVec.y, 
-        percentage: 1, 
-        isActualGps: false,
-        lat: endLoc.lat,
-        lng: endLoc.lng
-      };
-    }
-
-    // Otherwise, simulate a position on the highway
-    let hash = 0;
-    for (let i = 0; i < s.id.length; i++) {
-      hash += s.id.charCodeAt(i);
-    }
-    const basePct = 0.15 + ((hash % 60) / 100); 
-
-    const drift = ((ticker + (hash % 10)) % 100) / 1200; 
-    const percentage = Math.min(0.92, Math.max(0.08, basePct + drift));
-
-    const x = startVec.x + (endVec.x - startVec.x) * percentage;
-    const y = startVec.y + (endVec.y - startVec.y) * percentage;
-
-    const lat = startLoc.lat + (endLoc.lat - startLoc.lat) * percentage;
-    const lng = startLoc.lng + (endLoc.lng - startLoc.lng) * percentage;
-
-    return { 
-      x, 
-      y, 
-      percentage, 
-      isActualGps: false,
-      lat,
-      lng
-    };
-  };
+  // Marker colour tokens per honesty state now live in a shared module
+  // (admin/tracking/trackingMarkerStyles) so the Vector Radar, the Google Map
+  // markers and the Google cluster layer all read identically. Imported above.
 
   const anyLiveGps = filteredTransit.some(s => getShipmentGpsState(s) === "live_gps");
+
+  // Real-data KPI counts: honest counts of the four tracking states across
+  // ALL loaded (land) shipments — fleet-level numbers for the KPI strip,
+  // independent of the panel's search/filter state. Never fabricated —
+  // derived directly from resolveTrackingPosition via getShipmentGpsState.
+  const trackingCounts = useMemo(() => {
+    const c: Record<TrackingState, number> = { live_gps: 0, last_reported: 0, estimated: 0, unavailable: 0 };
+    for (const s of shipments) c[getShipmentGpsState(s)] += 1;
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shipments, trackingById]);
+
+  // Vector Radar marker clustering: group placeable markers that sit within a
+  // scale-dependent radius so overlapping trucks read as one "N here" bubble
+  // (unavailable shipments have no coordinate, so they are never clustered or
+  // shown on the grid). Radius shrinks as the operator zooms in. The SELECTED
+  // shipment is excluded so it always renders as its own highlighted marker
+  // and is never hidden inside a count bubble.
+  const vectorClusters = useMemo(() => {
+    const pts = filteredTransit
+      .filter(s => s.id !== selectedShipment?.id)
+      .map(s => {
+        const loc = getShipmentVectorLocation(s);
+        return loc.available ? { x: loc.x, y: loc.y, shipment: s, state: loc.state } : null;
+      })
+      .filter((p): p is { x: number; y: number; shipment: Shipment; state: TrackingState } => p !== null);
+    return clusterMarkers(pts, 34 / Math.max(viewScale, 0.1));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTransit, trackingById, viewScale, selectedShipment]);
+
+  // Placeable markers for the Google Map cluster layer: real driver/city
+  // coordinates only. Unavailable shipments (null coordinate) are excluded, so
+  // they are never drawn or clustered on the Google Map either.
+  const googleMarkers = useMemo<GoogleTrackMarker[]>(() => {
+    const out: GoogleTrackMarker[] = [];
+    for (const s of filteredTransit) {
+      const loc = getShipmentVectorLocation(s);
+      if (loc.available && loc.lat != null && loc.lng != null) {
+        out.push({ shipment: s, lat: loc.lat, lng: loc.lng, state: loc.state });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTransit, trackingById]);
+
 
   const getNearestCity = (x: number, y: number): string => {
     let nearestCityName = "Transit Route";
@@ -854,32 +1150,96 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
 
   const handleShowAll = () => {
     setSelectedShipment(null);
+    setEtaData(null);
+    setEtaError(null);
+    setEtaForId(null);
+    setDrawerTab('overview');
     setViewScale(1);
     setViewPan({ x: 0, y: 0 });
   };
 
+  // On-demand only: fetch ETA & distance for the given shipment. Called solely
+  // from the details drawer's button — never on selection, render, or refresh.
+  const handleCalculateEta = async (s: Shipment) => {
+    setEtaLoading(true);
+    setEtaError(null);
+    try {
+      const res = await fetch(`/api/shipments/${s.id}/distance-matrix`);
+      if (res.ok) {
+        const data = await res.json();
+        setEtaData(data);
+        setEtaForId(s.id);
+      } else {
+        setEtaError(lang === "ar" ? "تعذّر حساب المسافة والوقت" : lang === "tr" ? "Mesafe/süre hesaplanamadı" : "Could not calculate ETA & distance");
+      }
+    } catch {
+      setEtaError(lang === "ar" ? "تعذّر الاتصال بخدمة الحساب" : lang === "tr" ? "Hesaplama servisine ulaşılamadı" : "Could not reach the calculation service");
+    } finally {
+      setEtaLoading(false);
+    }
+  };
+
   const handleSelectShipment = (s: Shipment) => {
     setSelectedShipment(s);
+    // Clear any prior on-demand ETA so it never carries over to a new selection.
+    setEtaData(null);
+    setEtaError(null);
+    setEtaForId(null);
+    setDrawerTab('overview');
     const loc = getShipmentVectorLocation(s);
-    
+    // When the shipment has no placeable position (Location Unavailable),
+    // frame the route corridor (origin/destination dots) instead of panning
+    // to (0,0).
+    const start = findVectorCity(s.loadingCity);
+    const end = findVectorCity(s.deliveryCity);
+    const cx = loc.available ? loc.x : (start.x + end.x) / 2;
+    const cy = loc.available ? loc.y : (start.y + end.y) / 2;
+
     // Zoom in on target truck
     setViewScale(1.4);
     // Center viewport (850x550) on coordinate
     setViewPan({
-      x: (425 - loc.x * 1.4),
-      y: (275 - loc.y * 1.4)
+      x: (425 - cx * 1.4),
+      y: (275 - cy * 1.4)
     });
   };
+
+  // Operator Room auto-cycle: slowly steps the focus through the REAL,
+  // placeable shipments (pure selectCycleTargets/advanceCycle sequencing —
+  // shipments with no honest position are skipped, nothing is fabricated).
+  // Focuses the first target immediately on entry; a click on the room's
+  // capture layer pauses/resumes.
+  const cycleTargets = useMemo(
+    () => selectCycleTargets(filteredTransit, s => (trackingById[s.id]?.lat ?? null) !== null),
+    [filteredTransit, trackingById]
+  );
+  useEffect(() => {
+    if (!operatorRoom || cyclePaused || cycleTargets.length === 0) return;
+    if (cycleIdxRef.current < 0 || cycleIdxRef.current >= cycleTargets.length) {
+      cycleIdxRef.current = 0;
+      handleSelectShipment(cycleTargets[0]);
+    }
+    const id = setInterval(() => {
+      cycleIdxRef.current = advanceCycle(cycleIdxRef.current, cycleTargets.length);
+      const next = cycleTargets[cycleIdxRef.current];
+      if (next) handleSelectShipment(next);
+    }, OPERATOR_CYCLE_INTERVAL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operatorRoom, cyclePaused, cycleTargets]);
 
   const handleAutoFocusRoute = (s: Shipment) => {
     const start = findVectorCity(s.loadingCity);
     const end = findVectorCity(s.deliveryCity);
     const loc = getShipmentVectorLocation(s);
 
-    const minX = Math.min(start.x, end.x, loc.x);
-    const maxX = Math.max(start.x, end.x, loc.x);
-    const minY = Math.min(start.y, end.y, loc.y);
-    const maxY = Math.max(start.y, end.y, loc.y);
+    // Only include the truck position in the bounding box when it is placeable.
+    const xs = loc.available ? [start.x, end.x, loc.x] : [start.x, end.x];
+    const ys = loc.available ? [start.y, end.y, loc.y] : [start.y, end.y];
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
 
     const boxWidth = Math.max(20, maxX - minX);
     const boxHeight = Math.max(20, maxY - minY);
@@ -920,11 +1280,51 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
     });
   };
 
+  // "Estimated ETA Today": shipments whose server-stored eta (persisted by
+  // the distance-matrix route) falls on the current local day. Real stored
+  // data only — shared by the KPI strip and the Operator Room.
+  const etaTodayCount = shipments.filter(s => {
+    if (!s.eta) return false;
+    const d = new Date(s.eta);
+    const now = new Date();
+    return !Number.isNaN(d.getTime()) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  }).length;
+
+  // Operator Room derived props — every value comes from the same honest
+  // state the normal mode renders; nothing is recomputed differently and
+  // nothing is fabricated for the TV.
+  const operatorKpis: OperatorKpi[] = [
+    { label: t.kpiActive, value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length, tone: "text-white" },
+    { label: t.kpiInTransit, value: shipments.filter(s => s.status === "In Transit").length, tone: "text-white" },
+    { label: t.kpiGpsOnline, value: trackingCounts.live_gps, tone: "text-emerald-400" },
+    { label: t.trackReported, value: trackingCounts.last_reported, tone: "text-amber-400" },
+    { label: t.kpiEtaToday, value: etaTodayCount, tone: "text-sky-400" },
+    { label: t.trackUnavailable, value: trackingCounts.unavailable, tone: "text-slate-400" },
+  ];
+  const operatorFocus = selectedShipment ? (() => {
+    const st = getShipmentGpsState(selectedShipment);
+    const drv = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
+    const fr = getGpsFreshness(drv?.lastUpdated, Date.now());
+    return {
+      shipmentNumber: selectedShipment.shipmentNumber,
+      route: `${selectedShipment.loadingCity} → ${selectedShipment.deliveryCity}`,
+      stateLabel: st === "live_gps" ? t.trackLive : st === "last_reported" ? t.trackReported : st === "estimated" ? t.trackEstimated : t.trackUnavailable,
+      stateTone: stateColors(st).text,
+      lastUpdate: fr.status === "none" ? "—" : fr.minutesAgo === 0 ? t.justNow : `${fr.minutesAgo} ${t.minAgo}`,
+      status: selectedShipment.status,
+    };
+  })() : null;
+
   return (
-    <div className={isFullscreen
-      ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-4 p-4"
-      : "space-y-4"
-    }>
+    <div
+      ref={trackingRootRef}
+      className={operatorRoom
+        ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col"
+        : isFullscreen
+          ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-2 p-3"
+          : "space-y-2"
+      }
+    >
       {/* feature/admin-mobile-ui correction pass: compact mobile-only
           header — icon, honest runtime-derived status text (same
           isGoogleMapsLive logic as the desktop deck below), a small
@@ -932,6 +1332,7 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           desktop deck (hidden below via lg:flex) plus the amber
           "operational stats" paragraph drawer, which is redundant with
           the status text and was pure vertical space on a phone. */}
+      {!operatorRoom && (
       <div className="lg:hidden bg-slate-900 border border-slate-800 text-white rounded-2xl px-3 py-2.5 flex items-center gap-2">
         <Compass className="w-4 h-4 text-orange-500 shrink-0 animate-spin" style={{ animationDuration: '10s' }} />
         <p className={`flex-1 min-w-0 truncate text-[11px] font-bold flex items-center gap-1.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
@@ -956,119 +1357,141 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
         </button>
         <button
           type="button"
-          onClick={() => setIsFullscreen(f => !f)}
+          onClick={toggleFullscreen}
           className="shrink-0 w-8 h-8 flex items-center justify-center bg-slate-950 border border-slate-800 rounded-lg text-slate-300 cursor-pointer"
         >
           {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
         </button>
       </div>
+      )}
 
-      {/* ⚠️ HIGH-DENSITY RADAR OVERVIEW DECK — desktop only, see the
-          compact mobile replacement immediately above. */}
-      <div className="hidden lg:flex bg-slate-900 border border-slate-800 text-white p-4 rounded-2xl shadow-md flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-orange-500/10 text-orange-500 rounded-xl border border-orange-500/20 shrink-0">
-            <Compass className="w-5 h-5 animate-spin" style={{ animationDuration: '10s' }} />
-          </div>
-          <div>
-            <h3 className="text-xs font-black uppercase tracking-wider text-slate-100">{t.engineSelector}</h3>
-            {/* feature/admin-mobile-ui correction pass: this used to say
-                "Live Google Maps GIS Tracking Active" any time google_map
-                mode was selected, even with no configured key or an auth
-                failure — directly contradicting the "Key Required"/error
-                fallback panel shown in the same view. Wording is now
-                derived from isGoogleMapsLive (mapViewMode === 'google_map'
-                && hasValidMapsKey && !mapsAuthError), the single runtime
-                source of truth for whether this is actually connected. */}
-            <p className={`text-[11px] font-medium flex items-center gap-1.5 mt-0.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
-              <span className={`inline-block w-2 h-2 rounded-full ${mapViewMode === 'vector' || isGoogleMapsLive ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`}></span>
-              {mapViewMode === 'vector'
-                ? t.engineVector
-                : isGoogleMapsLive
-                  ? (lang === 'tr' ? "Canlı Google Harita Modu Aktif" : lang === 'ar' ? "تتبع غوغل ماب المباشر نشط" : "Live Google Maps GIS Tracking Active")
-                  : !hasValidMapsKey
-                    ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
-                    : (lang === 'tr' ? "Demo / Manuel Takip Modu" : lang === 'ar' ? "وضع التتبع التجريبي / اليدوي" : "Demo / Manual Tracking Mode")}
-            </p>
-          </div>
+      {/* Operations Center top bar — desktop only. Dark app-bar per the
+          approved design: title + honest engine status, an honest "Live
+          Data / last updated" pill (stamped from real prop refreshes, and
+          downgraded wording when the map service isn't actually live), and
+          the primary actions: Google Map | Vector Radar segmented toggle,
+          panel collapse, fullscreen. Status wording still derives from
+          isGoogleMapsLive — never an unconditional "Live" claim. */}
+      {!operatorRoom && (
+      <div className="hidden lg:flex items-center gap-4 bg-slate-900 border border-slate-800 text-white rounded-xl px-4 py-2.5 shadow-sm">
+        <div className="min-w-0">
+          <h3 className="text-[13px] font-bold text-slate-100 leading-tight truncate">{t.opsTitle}</h3>
+          <p className={`text-[10px] font-medium leading-tight truncate ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-slate-400' : 'text-amber-400'}`}>
+            {mapViewMode === 'vector'
+              ? (lang === 'tr' ? "Vektör Radar (Akıllı Takip)" : lang === 'ar' ? "رادار متجه (تتبع ذكي)" : "Vector Radar (Smart Tracking)")
+              : isGoogleMapsLive
+                ? (lang === 'tr' ? "Canlı Google Harita" : lang === 'ar' ? "خرائط غوغل مباشرة" : "Live Google Maps")
+                : !hasValidMapsKey
+                  ? (lang === 'tr' ? "Harita hizmeti yapılandırılmamış" : lang === 'ar' ? "خدمة الخريطة غير مهيأة" : "Map service not configured")
+                  : (lang === 'tr' ? "Demo / Manuel Takip" : lang === 'ar' ? "وضع تجريبي / يدوي" : "Demo / Manual Mode")}
+          </p>
         </div>
 
-        {/* Telemetry Indicator Tags */}
-        <div className="flex flex-wrap items-center gap-2 self-stretch md:self-auto">
-          {/* Segmented control for toggling between Vector and Google Map views */}
-          <div className="bg-slate-950 p-1 rounded-xl border border-slate-800 flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setMapViewMode('vector')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border-0 ${
-                mapViewMode === 'vector'
-                  ? 'bg-orange-600 text-white shadow-xs font-black'
-                  : 'text-slate-400 hover:text-slate-200 bg-transparent'
-              }`}
-            >
-              🗺️ {lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar"}
-            </button>
+        {/* Honest data-freshness pill — timestamp of the last real data refresh */}
+        <div className="flex items-center gap-2 bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-1.5 shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+          <span className="text-[10px] font-bold text-slate-200">{t.liveData}</span>
+          <span className="text-[10px] text-slate-500 font-mono">{t.lastUpdatedAt}: {lastDataAt.toLocaleTimeString()}</span>
+        </div>
+
+        <div className="flex-1" />
+
+        {/* Primary actions */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="bg-slate-950 p-1 rounded-lg border border-slate-800 flex items-center gap-1">
             <button
               type="button"
               onClick={() => setMapViewMode('google_map')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border-0 ${
-                mapViewMode === 'google_map'
-                  ? 'bg-orange-600 text-white shadow-xs font-black'
-                  : 'text-slate-400 hover:text-slate-200 bg-transparent'
+              className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer border-0 ${
+                mapViewMode === 'google_map' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
               }`}
             >
-              📍 {lang === 'tr' ? "Google Harita" : lang === 'ar' ? "خرائط غوغل" : "Google Map"}
+              {lang === 'tr' ? "Google Harita" : lang === 'ar' ? "خرائط غوغل" : "Google Map"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapViewMode('vector')}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer border-0 ${
+                mapViewMode === 'vector' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200 bg-transparent'
+              }`}
+            >
+              {lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar"}
             </button>
           </div>
-
-          <div className="bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-[10px] font-mono text-slate-400 flex items-center gap-2">
-            <Activity className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
-            <span>{t.lastUpdated}</span>
-          </div>
-
+          {/* Three DISTINCT controls: panel collapse (panel icon), Full
+              Screen (expand icon, real browser fullscreen), Operator Room
+              (TV icon, dedicated monitoring mode — not a fullscreen alias). */}
+          <button
+            onClick={() => setPanelCollapsed(c => !c)}
+            aria-label={panelCollapsed
+              ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
+              : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
+            title={panelCollapsed
+              ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
+              : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
+          >
+            {panelCollapsed ? <PanelLeftOpen className="w-4 h-4 rtl:rotate-180" /> : <PanelLeftClose className="w-4 h-4 rtl:rotate-180" />}
+          </button>
           <button
             type="button"
-            onClick={() => setIsFullscreen(f => !f)}
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen
+              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Full Screen")
+              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Full Screen")}
             title={isFullscreen
-              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Fullscreen")
-              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
-            className="w-8 h-8 bg-slate-950 border border-slate-800 hover:border-slate-600 rounded-xl flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0"
+              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Full Screen")
+              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Full Screen")}
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
-            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
+          <button
+            type="button"
+            onClick={enterOperatorRoom}
+            aria-label={lang === "ar" ? "غرفة العمليات" : lang === "tr" ? "Operasyon Odası" : "Operator Room"}
+            title={lang === "ar" ? "غرفة العمليات (شاشة المراقبة)" : lang === "tr" ? "Operasyon Odası (izleme ekranı)" : "Operator Room (monitoring display)"}
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-orange-400 hover:border-orange-500/50 flex items-center justify-center transition-all cursor-pointer"
+          >
+            <Tv className="w-4 h-4" />
           </button>
         </div>
       </div>
+      )}
 
-      {/* THREE LANGUAGE ACTION DRAWER — desktop only (correction pass):
-          this paragraph restated what the compact mobile header above
-          already says, and was pure vertical space pushing the actual
-          map/list down on a phone. */}
-      <div className="hidden lg:grid bg-amber-50/70 border border-amber-100 rounded-2xl p-4 text-xs text-amber-950 grid-cols-1 md:grid-cols-12 gap-3 items-center">
-        <div className="md:col-span-10 space-y-1">
-          <h4 className="font-extrabold flex items-center gap-1.5 text-amber-900">
-            <Info className="w-4 h-4 text-orange-600" />
-            <span>{t.operationalStats}</span>
-          </h4>
-          <div className="text-amber-800 leading-relaxed text-[11px] space-y-1">
-            <p>
-              Integrated transit telemetry monitoring for the Turkey-to-Iraq highway network. Auto-center, filter parameters, and interactive nodes are calibrated live with no third-party keys required.
+      {/* KPI strip — six flat light cards with honest, real-data counts:
+          Active / In Transit come straight from shipment statuses; GPS
+          Online / Last Reported / Unavailable from resolveTrackingPosition
+          across all loaded shipments; Estimated ETA Today counts shipments
+          whose server-stored `eta` (persisted by the distance-matrix route)
+          falls on the current local day — never a fabricated forecast.
+          Desktop only (mobile keeps its compact header). */}
+      {!operatorRoom && (
+      <div className="hidden lg:grid grid-cols-6 gap-2">
+        {([
+          { key: null, label: t.kpiActive, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
+          { key: null, label: t.kpiInTransit, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status === "In Transit").length },
+          { key: "live_gps" as const, label: t.kpiGpsOnline, dot: "bg-emerald-500", text: "text-emerald-600", value: null },
+          { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-600", value: null },
+          { key: null, label: t.kpiEtaToday, dot: "bg-sky-500", text: "text-sky-600", value: etaTodayCount },
+          { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-300", text: "text-slate-400", value: null },
+        ]).map(item => (
+          <div key={item.label} className="bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm min-w-0" title={item.label}>
+            <p className="text-[10px] font-semibold text-slate-500 truncate">{item.label}</p>
+            <p className={`text-xl font-black tabular-nums leading-tight flex items-center gap-1.5 ${item.text}`}>
+              {item.key ? trackingCounts[item.key] : item.value}
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${item.dot}`}></span>
             </p>
           </div>
-        </div>
-        <div className="md:col-span-2 text-right">
-          <button
-            onClick={handleShowAll}
-            className="w-full text-center inline-flex justify-center items-center gap-1 bg-amber-900 hover:bg-amber-950 text-white px-3 py-2 rounded-xl font-black tracking-tight text-[11px] shadow-sm transition-all uppercase cursor-pointer"
-          >
-            <span>{t.viewAllTransit}</span>
-          </button>
-        </div>
+        ))}
       </div>
+      )}
 
       {/* feature/admin-mobile-ui: mobile-only List/Map toggle — the
           sidebar and map below render one at a time on narrow viewports
           (see mobileListOpen), so this pill is the way to switch between
           them. Hidden at lg: where both already show side-by-side. */}
+      {!operatorRoom && (
       <div className="lg:hidden bg-slate-100 p-1 rounded-xl border border-slate-200 flex gap-1 text-xs font-bold">
         <button
           type="button"
@@ -1085,355 +1508,248 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
           {lang === "tr" ? "Liste" : lang === "ar" ? "القائمة" : "List"} ({inTransitShipments.length})
         </button>
       </div>
+      )}
 
-      {/* MAIN CONTAINER LAYOUT */}
-      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 max-w-full ${isFullscreen ? "flex-1 min-h-0" : "min-h-[620px]"}`}>
+      {/* MAIN CONTAINER LAYOUT — map-dominant. The shipment panel takes a
+          fixed ~19% column (clamped so it stays usable at small lg widths)
+          and the map takes the rest; collapsed => the map spans everything.
+          Height is viewport-driven so the map owns ~80-85% of the page. */}
+      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${(panelCollapsed || operatorRoom) ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${(isFullscreen || operatorRoom) ? "flex-1 min-h-0" : "lg:h-[calc(100vh-235px)] lg:min-h-[500px]"}`}>
 
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className={`${mobileListOpen ? "flex" : "hidden"} lg:flex lg:col-span-4 border-r border-slate-200 flex-col bg-slate-50/50 ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
+        <div className={`${operatorRoom ? "hidden" : mobileListOpen ? "flex" : "hidden"} ${(panelCollapsed || operatorRoom) ? "lg:hidden" : "lg:flex"} border-r border-slate-200 flex-col bg-slate-50/50 lg:min-h-0 lg:overflow-hidden ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
-          {/* Sidebar Header */}
-          <div className="p-4 border-b border-slate-100 bg-white space-y-3">
+          {/* Panel header — Operations Center: title + count, search, status
+              chips, and two compact dropdown filters. All map-focus actions
+              moved onto the map as floating controls. */}
+          <div className="p-3 border-b border-slate-100 bg-white space-y-2.5 shrink-0">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Compass className="w-5 h-5 text-orange-500 shrink-0" />
-                <h2 className="font-black text-slate-900 tracking-tight text-[11px] uppercase">{t.activeTracking}</h2>
-              </div>
-              <span className="bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
+              <h2 className="font-bold text-slate-900 tracking-tight text-[13px]">{t.shipmentsTitle}</h2>
+              <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full text-[10px] font-black font-mono">
                 {inTransitShipments.length}
               </span>
             </div>
-            
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              {t.subTitle}
-            </p>
 
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-              <input 
-                type="text" 
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute start-3 top-2.5" />
+              <input
+                type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t.searchPlaceholder}
-                className="w-full pl-8 pr-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 transition-all font-medium"
+                className="w-full ps-8 pe-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] outline-none text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 transition-all font-medium"
               />
             </div>
 
-            {/* Segmented Map Status Filter Control */}
-            <div className="bg-slate-100 p-1 rounded-xl text-[10px] font-bold border border-slate-200 flex gap-1">
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("all")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "all"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                🌍 {fLabels.all} ({shipments.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("active")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "active"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                📡 {fLabels.active} ({shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setMapStatusFilter("in_transit")}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg transition-all text-center cursor-pointer ${
-                  mapStatusFilter === "in_transit"
-                    ? "bg-slate-900 text-white shadow-xs"
-                    : "text-slate-500 hover:text-slate-800"
-                }`}
-              >
-                🚚 {fLabels.inTransit} ({shipments.filter(s => s.status === "In Transit").length})
-              </button>
+            {/* Status filter chips */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {([
+                { id: "all" as const, label: fLabels.all, count: shipments.length },
+                { id: "active" as const, label: fLabels.active, count: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
+                { id: "in_transit" as const, label: fLabels.inTransit, count: shipments.filter(s => s.status === "In Transit").length },
+              ]).map(chip => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => setMapStatusFilter(chip.id)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[10px] font-bold transition-all cursor-pointer ${
+                    mapStatusFilter === chip.id
+                      ? "bg-orange-50 border-orange-300 text-orange-700"
+                      : "bg-white border-slate-200 text-slate-500 hover:border-slate-300"
+                  }`}
+                >
+                  {chip.label}
+                  <span className="tabular-nums font-black">{chip.count}</span>
+                </button>
+              ))}
             </div>
 
-            {/* Truck Type Filter Panel */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-[10px] font-black uppercase text-slate-700">
-                <span className="flex items-center gap-1">
-                  <Filter className="w-3 h-3 text-orange-500" />
-                  {t.truckFilterTitle}
-                </span>
-                
-                {/* Select All / Deselect All Toggles */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setSelectedTruckTypes([...TRUCK_TYPES.map(tk => tk.id), "unspecified"])}
-                    className="text-[9px] font-bold text-orange-600 hover:text-orange-800 transition-colors uppercase font-mono cursor-pointer"
-                  >
-                    {t.allTypes.split(" ")[0]}
-                  </button>
-                  <span className="text-slate-300">|</span>
-                  <button
-                    onClick={() => setSelectedTruckTypes([])}
-                    className="text-[9px] font-bold text-slate-500 hover:text-slate-800 transition-colors uppercase font-mono cursor-pointer"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              {/* Grid of Checkboxes */}
-              <div className="grid grid-cols-2 gap-1.5 pt-1">
-                {TRUCK_TYPES.map(type => {
-                  const isChecked = selectedTruckTypes.includes(type.id);
-                  const count = getTruckTypeCount(type.id);
-                  const label = (type as any)[lang] || type.en;
-
-                  return (
-                    <button
-                      key={type.id}
-                      onClick={() => {
-                        if (isChecked) {
-                          setSelectedTruckTypes(prev => prev.filter(id => id !== type.id));
-                        } else {
-                          setSelectedTruckTypes(prev => [...prev, type.id]);
-                        }
-                      }}
-                      className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left cursor-pointer ${
-                        isChecked
-                          ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="flex items-center gap-1.5 truncate max-w-[130px]">
-                        <span className={`w-3.5 h-3.5 rounded flex items-center justify-center border transition-all ${
-                          isChecked 
-                            ? "bg-orange-500 border-orange-500 text-white" 
-                            : "border-slate-300 bg-white"
-                        }`}>
-                          {isChecked && <Check className="w-2.5 h-2.5 stroke-[3.5]" />}
-                        </span>
-                        <span className="truncate">{label}</span>
-                      </span>
-                      <span className={`font-mono text-[8.5px] px-1 rounded-sm font-bold ${
-                        isChecked 
-                          ? "bg-orange-100 text-orange-800" 
-                          : "bg-slate-100 text-slate-400"
-                      }`}>
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-
-                {/* Unspecified/unassigned driver truck types check button */}
-                {(() => {
-                  const isChecked = selectedTruckTypes.includes("unspecified");
-                  const count = getTruckTypeCount("unspecified");
-                  const label = t.unspecifiedType;
-
-                  return (
-                    <button
-                      onClick={() => {
-                        if (isChecked) {
-                          setSelectedTruckTypes(prev => prev.filter(id => id !== "unspecified"));
-                        } else {
-                          setSelectedTruckTypes(prev => [...prev, "unspecified"]);
-                        }
-                      }}
-                      className={`flex items-center justify-between px-2 py-1.5 rounded-lg border text-[9px] font-medium transition-all text-left col-span-2 cursor-pointer ${
-                        isChecked
-                          ? "bg-orange-50/70 text-slate-800 border-orange-500/30"
-                          : "bg-white text-slate-400 border-slate-100 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <span className={`w-3.5 h-3.5 rounded flex items-center justify-center border transition-all ${
-                          isChecked 
-                            ? "bg-orange-500 border-orange-500 text-white" 
-                            : "border-slate-300 bg-white"
-                        }`}>
-                          {isChecked && <Check className="w-2.5 h-2.5 stroke-[3.5]" />}
-                        </span>
-                        <span>{label}</span>
-                      </span>
-                      <span className={`font-mono text-[8.5px] px-1 rounded-sm font-bold ${
-                        isChecked 
-                          ? "bg-orange-100 text-orange-800" 
-                          : "bg-slate-100 text-slate-400"
-                      }`}>
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* Sidebar Controls buttons */}
-            <div className="grid grid-cols-2 gap-2">
-              <button 
-                onClick={handleShowAll}
-                className="py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-              >
-                <Globe className="w-3.5 h-3.5" />
-                <span>{t.viewAllTransit}</span>
-              </button>
-              <button 
-                onClick={() => {
-                  if (filteredTransit.length > 0) {
-                    handleSelectShipment(filteredTransit[0]);
-                  } else {
-                    handleShowAll();
-                  }
+            {/* Compact dropdown filters: truck type + driver. The truck-type
+                select drives the same selectedTruckTypes state as before
+                ("all" = every type incl. unspecified). */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <select
+                value={selectedTruckTypes.length >= TRUCK_TYPES.length + 1 ? "all" : (selectedTruckTypes[0] || "all")}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSelectedTruckTypes(v === "all" ? [...TRUCK_TYPES.map(tk => tk.id), "unspecified"] : [v]);
                 }}
-                className="py-2.5 bg-orange-600 hover:bg-orange-500 text-white font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-                title="Odaklan"
+                className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-semibold text-slate-600 outline-none focus:border-slate-400 cursor-pointer"
+                title={t.truckFilterTitle}
               >
-                <Navigation className="w-3.5 h-3.5" />
-                <span>{t.bestFitZoom}</span>
-              </button>
+                <option value="all">{t.allTruckTypes}</option>
+                {TRUCK_TYPES.map(type => (
+                  <option key={type.id} value={type.id}>{(type as any)[lang] || type.en} ({getTruckTypeCount(type.id)})</option>
+                ))}
+                <option value="unspecified">{t.unspecifiedType} ({getTruckTypeCount("unspecified")})</option>
+              </select>
+              <select
+                value={driverFilter}
+                onChange={(e) => setDriverFilter(e.target.value)}
+                className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-semibold text-slate-600 outline-none focus:border-slate-400 cursor-pointer"
+                title={t.allDrivers}
+              >
+                <option value="all">{t.allDrivers}</option>
+                {localDrivers.map(d => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </select>
             </div>
-
-            {/* Go to my current location button */}
-            <button 
-              onClick={handleGoToMyLocation}
-              className="w-full mt-2 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-extrabold text-[10px] rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer uppercase font-mono"
-              title={lang === "ar" ? "الذهاب إلى موقعي الحالي" : lang === "tr" ? "Koordinatlarıma Git" : "Go to my current location"}
-            >
-              <MapPin className="w-3.5 h-3.5 text-orange-600 animate-pulse" />
-              <span>{lang === "ar" ? "موقعي الحالي" : lang === "tr" ? "Mevcut Konumum" : "My Current Location"}</span>
-            </button>
           </div>
 
           {/* Sidebar Body: Shipment Cards List */}
-          <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${isFullscreen ? "min-h-0" : "h-[65vh] lg:h-[480px]"}`}>
+          <div className={`flex-1 overflow-y-auto p-2 space-y-2 min-h-0 ${isFullscreen ? "" : "h-[65vh] lg:h-auto"}`}>
             {inTransitShipments.length === 0 ? (
-              <div className="p-6 text-center space-y-2">
-                <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto" />
-                <p className="text-[11px] text-slate-400 font-semibold italic">
-                  {t.noInTransit}
-                </p>
+              /* Compact operational empty state — no alarm icon, no giant
+                 reserved block; a calm, professional message. */
+              <div className="px-4 py-6 text-center space-y-1.5">
+                <span className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                  <Truck className="w-4 h-4" />
+                </span>
+                <p className="text-[11px] font-bold text-slate-600">{t.emptyTitle}</p>
+                <p className="text-[10px] text-slate-400 leading-relaxed">{t.emptyBody}</p>
               </div>
             ) : filteredTransit.length === 0 ? (
-              <div className="p-6 text-center text-slate-400 text-xs italic">
-                No matches found
+              <div className="px-4 py-6 text-center text-slate-400 text-[11px] font-medium">
+                {lang === "ar" ? "لا توجد نتائج مطابقة للبحث أو الفلاتر." : lang === "tr" ? "Arama veya filtrelerle eşleşen sonuç yok." : "No shipments match the current search or filters."}
               </div>
             ) : (
               filteredTransit.map(s => {
                 const isSelected = selectedShipment?.id === s.id;
+                // Honest per-row tracking facts: state chip + real minutes-ago
+                // (only for genuine driver fixes; estimated/unavailable get "—").
+                const pos = trackingById[s.id];
+                const state = pos?.state ?? "unavailable";
+                const colors = stateColors(state);
+                const stateLabel =
+                  state === "live_gps" ? t.trackLive
+                  : state === "last_reported" ? t.trackReported
+                  : state === "estimated" ? t.trackEstimated
+                  : t.trackUnavailable;
+                const timeAgo = pos?.isReal && pos.minutesAgo != null
+                  ? (pos.minutesAgo === 0 ? t.justNow : `${pos.minutesAgo} ${t.minAgo}`)
+                  : "—";
                 return (
                   <div
                     key={s.id}
                     onClick={() => handleSelectShipment(s)}
-                    className={`rounded-xl border transition-all cursor-pointer flex flex-col relative overflow-hidden ${isFullscreen ? "p-2 gap-1" : "p-3 gap-2"} ${
+                    className={`rounded-xl border transition-all cursor-pointer p-2.5 space-y-1.5 ${
                       isSelected
-                        ? "bg-slate-100 border-slate-300 shadow-xs"
-                        : "bg-white border-slate-100 hover:bg-slate-50"
+                        ? "bg-orange-50/60 border-orange-300 shadow-sm"
+                        : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="font-mono text-xs font-extrabold text-blue-600 selectable">#{s.shipmentNumber}</p>
-                        <h4 className="font-black text-[11px] text-slate-800 truncate max-w-[155px]">{s.companyName}</h4>
-                      </div>
-                      <span className="inline-flex items-center gap-0.5 text-[8.5px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md uppercase font-mono">
-                        <Activity className="w-2.5 h-2.5" />
-                        <span>{t.activeTracking}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${colors.lightDot}`}></span>
+                        <span className="font-mono text-[11px] font-extrabold text-blue-600 truncate selectable">{s.shipmentNumber}</span>
+                      </span>
+                      <span className={`shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border ${colors.lightChip}`}>
+                        {stateLabel}
                       </span>
                     </div>
-
-                    <div className={`text-[10px] text-slate-500 font-medium grid grid-cols-2 gap-1 bg-slate-50 rounded-lg border border-slate-100 ${isFullscreen ? "p-1" : "p-1.5"}`}>
-                      <div>
-                        <span className="block text-[8px] text-slate-400 uppercase font-bold">{t.from}</span>
-                        <span className="truncate block font-semibold text-slate-700">{s.loadingCity}</span>
-                      </div>
-                      <div>
-                        <span className="block text-[8px] text-slate-400 uppercase font-bold">{t.to}</span>
-                        <span className="truncate block font-semibold text-slate-700">{s.deliveryCity}</span>
-                      </div>
-                    </div>
-
-                    {/* Highly interactive Dynamic Location Coordinate Badge */}
-                    {(() => {
-                      const loc = getShipmentVectorLocation(s);
-                      const city = getNearestCity(loc.x, loc.y);
-                      return (
-                        <div className={`text-[10.5px] bg-emerald-50/80 text-emerald-800 font-mono rounded-xl border border-emerald-100 flex items-center justify-between gap-1.5 ${isFullscreen ? "p-1" : "p-1.5"}`}>
-                          <span className="flex items-center gap-1 font-extrabold truncate">
-                            <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                            <span className="truncate">{city}</span>
-                          </span>
-                          <span className="text-emerald-700 text-[8.5px] font-black shrink-0">
-                            {loc.lat.toFixed(4)}°, {loc.lng.toFixed(4)}°
-                          </span>
-                        </div>
-                      );
-                    })()}
-
-                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1">
-                      <p className="flex items-center gap-1 truncate max-w-[160px]">
-                        <Truck className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="font-semibold text-slate-600 truncate">{s.assignedDriverName || "Unknown"}</span>
-                      </p>
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectShipment(s);
-                        }}
-                        className="text-orange-600 hover:text-orange-800 font-bold transition-all text-[9.5px] uppercase cursor-pointer"
-                      >
-                        {t.viewOnMap} ➔
-                      </button>
+                    <p className="text-[11px] font-semibold text-slate-700 truncate">
+                      {s.loadingCity} <span className="text-slate-400">→</span> {s.deliveryCity}
+                    </p>
+                    <div className="flex items-center justify-between text-[10px] text-slate-400">
+                      <span className="flex items-center gap-1 truncate min-w-0">
+                        <Truck className="w-3 h-3 shrink-0" />
+                        <span className="font-medium text-slate-500 truncate">{s.assignedDriverName || t.unassigned}</span>
+                      </span>
+                      <span className="shrink-0 font-medium tabular-nums">{timeAgo}</span>
                     </div>
                   </div>
                 );
               })
             )}
           </div>
+
+          {/* Loaded-page notice: AdminPanel fetches shipments with a server
+              limit of 50. When the list is at that cap we say so honestly,
+              rather than implying the whole fleet is shown. No backend change. */}
+          {shipments.length >= 50 && (
+            <div className="shrink-0 border-t border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-semibold text-slate-500 flex items-center gap-1.5">
+              <Info className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <span>{t.loadedCapNotice}</span>
+            </div>
+          )}
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex lg:col-span-8 relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-[620px]"}`}>
+        <div className={`${(mobileListOpen && !operatorRoom) ? "hidden" : "flex"} lg:flex relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${(isFullscreen || operatorRoom) ? "h-full" : "h-[65vh] lg:h-full"}`}>
           
-          {/* Radar Ambient Weather Overlay */}
-          <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2.5 py-1 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-            <span className="text-slate-300">{t.lastUpdated}</span>
+          {/* Floating map overlays — low-weight professional chrome. */}
+          <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2 py-1 rounded-md shadow-md text-[9px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800/80 z-10">
+            <span className={`w-1.5 h-1.5 rounded-full inline-block ${anyLiveGps ? "bg-emerald-500 animate-ping" : "bg-slate-600"}`}></span>
+            <span className="text-slate-300">{anyLiveGps ? t.gpsAcquired : t.simulatedGps}</span>
           </div>
 
-          <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-slate-300 px-2 rounded-lg shadow-md text-[9.5px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800 z-10">
-            <span>Grid Scale: {viewScale.toFixed(1)}x</span>
+          <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-slate-400 px-2 py-1 rounded-md shadow-md text-[9px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800/80 z-10">
+            <span>{viewScale.toFixed(1)}x</span>
           </div>
+
+          {/* Operational empty state — floating over the corridor grid, so the
+              map never reads as a dead black rectangle. The radar's cities,
+              corridor and border-crossing render behind it as the living
+              background. */}
+          {filteredTransit.length === 0 && (
+            <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 z-10 flex justify-center pointer-events-none px-6">
+              <div className="bg-slate-900/85 backdrop-blur-sm border border-slate-800 rounded-xl px-5 py-3.5 text-center shadow-2xl max-w-sm">
+                <p className="text-[12px] font-bold text-slate-200">{t.emptyTitle}</p>
+                <p className="text-[10.5px] text-slate-400 mt-1 leading-relaxed">{t.emptyBody}</p>
+              </div>
+            </div>
+          )}
 
           {/* Graphical Interactive Map Grid with zoom navigation and smooth translation transitions */}
           <div className="relative w-full h-full flex flex-col justify-between p-4 select-none">
             
-            {/* Background Control Panel for scaling */}
-            <div className="absolute bottom-5 right-5 flex flex-col gap-1.5 z-25">
-              <button 
-                onClick={handleGoToMyLocation} 
-                className="bg-white hover:bg-orange-50 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold relative group"
-                title={lang === "ar" ? "الذهاب إلى موقعي الحالي" : lang === "tr" ? "Koordinatlarıma Odaklan" : "Go to my current location"}
+            {/* Floating radar controls — professional map overlays. Hosts ALL
+                map-focus actions (the panel no longer carries buttons):
+                zoom, Reset View, Auto-Center Focus, and Focus on Driver GPS.
+                Shifts inward when the details drawer is open so they never
+                overlap it. */}
+            <div className={`absolute bottom-5 flex-col gap-1.5 z-25 transition-all ${operatorRoom ? "hidden" : "flex"} ${selectedShipment && !operatorRoom ? "right-5 sm:right-[332px]" : "right-5"}`}>
+              <button
+                onClick={increaseZoom}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title="Zoom In"
               >
-                <Navigation className="w-3.5 h-3.5 text-orange-600 animate-pulse" />
+                <Plus className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={decreaseZoom}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title="Zoom Out"
+              >
+                <Minus className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={handleShowAll}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title={t.viewAllTransit}
+              >
+                <Globe className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={() => {
+                  if (filteredTransit.length > 0) handleSelectShipment(filteredTransit[0]);
+                  else handleShowAll();
+                }}
+                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
+                title={t.bestFitZoom}
+              >
+                <Expand className="w-4 h-4 text-slate-700" />
+              </button>
+              <button
+                onClick={handleGoToMyLocation}
+                className="bg-white hover:bg-orange-50 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold relative group"
+                title={lang === "ar" ? "التركيز على GPS السائق" : lang === "tr" ? "Sürücü GPS'ine Odaklan" : "Focus on Driver GPS"}
+              >
+                <Navigation className="w-4 h-4 text-orange-600" />
                 {currentDriverId && (
                   <span className="absolute top-1 right-1 w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
                 )}
-              </button>
-              <button 
-                onClick={increaseZoom} 
-                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold"
-                title="Zoom In Grid"
-              >
-                <Expand className="w-3.5 h-3.5 text-slate-700" />
-              </button>
-              <button 
-                onClick={decreaseZoom} 
-                className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 p-2 rounded-xl shadow-md cursor-pointer flex items-center justify-center font-bold"
-                title="Zoom Out Grid"
-              >
-                <Minimize className="w-3.5 h-3.5 text-slate-700" />
               </button>
             </div>
 
@@ -1457,122 +1773,11 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 </div>
               )}
 
-              {/* Collapsible Legend Panel inside the map frame */}
+              {/* Compact, honest map legend — extracted to admin/tracking.
+                  Documents the 4-state tracking-confidence colours (which is
+                  what markers now encode) plus the clustering hint. */}
               <div className="absolute bottom-4 left-4 z-20 font-mono text-[10px] select-none text-left flex flex-col pointer-events-auto transition-all duration-300">
-                {isLegendOpen ? (
-                  <div className="bg-slate-900/95 backdrop-blur-md border border-slate-800 w-[230px] rounded-xl shadow-2xl p-3 text-white space-y-2.5">
-                    <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                      <div className="flex items-center gap-1.5 font-sans font-bold text-orange-400">
-                        <Compass className="w-3.5 h-3.5 text-orange-500 animate-spin" style={{ animationDuration: "6s" }} />
-                        <span>{lang === "ar" ? "رموز الخريطة" : lang === "tr" ? "Harita Göstergeleri" : "Map Legend"}</span>
-                      </div>
-                      <button 
-                        onClick={() => setIsLegendOpen(false)}
-                        className="text-slate-400 hover:text-white transition-all cursor-pointer p-0.5 hover:bg-slate-800/85 rounded"
-                        title="Collapse"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Status Sections */}
-                    <div className="space-y-1.5">
-                      <h4 className="text-[8.5px] uppercase tracking-wider font-extrabold text-slate-400 font-mono">
-                        {lang === "ar" ? "مراحل الشحنات" : lang === "tr" ? "Sevkiyat Aşamaları" : "Shipment Milestones"}
-                      </h4>
-                      <div className="space-y-1 text-[9px]">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-orange-500 border border-slate-950 shadow-xs shrink-0 animate-pulse"></span>
-                          <span className="text-slate-300 font-sans">
-                            {lang === "ar" ? "قيد الانتقال والعبور" : lang === "tr" ? "Yolda (Canlı Takip)" : "En-Route (Active GPS)"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 border border-slate-950 shadow-xs shrink-0"></span>
-                          <span className="text-slate-300 font-sans">
-                            {lang === "ar" ? "وصلت / تم التسليم" : lang === "tr" ? "Ar vardı / Teslim Edildi" : "Arrived / Delivered"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-slate-500 border border-slate-950 shadow-xs shrink-0"></span>
-                          <span className="text-slate-300 font-sans">
-                            {lang === "ar" ? "معينة / قيد التحميل" : lang === "tr" ? "Atandı / Yükleniyor" : "Loading / Assigned / Setup"}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Truck classification identifiers */}
-                    <div className="space-y-1.5 border-t border-slate-800/60 pt-2">
-                      <h4 className="text-[8.5px] uppercase tracking-wider font-extrabold text-slate-400 font-mono">
-                        {lang === "ar" ? "أنواع الشاحنات والتغطية" : lang === "tr" ? "Araç Sınıf Simgeleri" : "Truck Categorization"}
-                      </h4>
-                      <div className="grid grid-cols-1 gap-1 text-[9px] font-sans">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0 select-none">
-                            ❄️
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "مبردة (Reefer)" : lang === "tr" ? "Frigorifik (Frigo)" : "Refrigerated (Reefer)"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0 select-none">
-                            ⚓
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "Tenteli" : lang === "tr" ? "Tenteli Dorse" : "Curtainsider / Tilt"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0 select-none">
-                            🛹
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "مسطحة" : lang === "tr" ? "Açık Kasa (Sal)" : "Flatbed Platform"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0 select-none">
-                            🏗️
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "منخفضة للحمولات" : lang === "tr" ? "Alçak Şasi (Lowbed)" : "Lowboy (Heavy Haul)"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0 select-none">
-                            📦
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "صندوق مغلق" : lang === "tr" ? "Kapalı Kasa" : "Box / Dry Van"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-md bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 select-none">
-                            🧪
-                          </span>
-                          <span className="text-slate-300 truncate">
-                            {lang === "ar" ? "ناقلة سوائل" : lang === "tr" ? "Tanker" : "Liquid Tanker"}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-slate-800/60 pt-1 flex items-center justify-between text-[7.5px] text-slate-500 font-mono uppercase">
-                      <span>RADAR GRID</span>
-                      <span>ACTIVE</span>
-                    </div>
-                  </div>
-                ) : (
-                  <button 
-                    onClick={() => setIsLegendOpen(true)}
-                    className="bg-slate-900/95 backdrop-blur-md border border-slate-800 hover:border-orange-500/40 text-white font-sans text-[9px] font-bold py-1.5 px-2.5 rounded-lg shadow-xl flex items-center gap-1.5 cursor-pointer z-20 group transition-all"
-                  >
-                    <Compass className="w-3.5 h-3.5 text-orange-500 group-hover:animate-spin" />
-                    <span>{lang === "ar" ? "عرض الرموز" : lang === "tr" ? "Göstergeleri Göster" : "Show Legend"}</span>
-                  </button>
-                )}
+                <TrackingLegend lang={lang} isOpen={isLegendOpen} onToggle={setIsLegendOpen} />
               </div>
 
               {/* CONDITIONAL MAP VIEWS UNDERLAY */}
@@ -1713,38 +1918,49 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                       );
                     })}
 
-                    {/* Moving Trucks on SVG Corridor Grid - Animated Smoothly using transform with CSS Transitions */}
-                    {filteredTransit.map(s => {
-                      const activeLoc = getShipmentVectorLocation(s);
+                    {/* Moving Trucks on SVG Corridor Grid. Nearby markers are
+                        grouped into cluster bubbles (pure clusterMarkers); a
+                        cluster shows "N" and zooms in on click to separate. */}
+                    {vectorClusters.map(cluster => {
+                      if (cluster.count > 1) {
+                        const target = Math.min(2.6, viewScale + 0.8);
+                        return (
+                          <g
+                            key={`cluster-${cluster.items[0].shipment.id}-${cluster.count}`}
+                            className="cursor-pointer select-none"
+                            onClick={() => { setViewScale(target); setViewPan({ x: 425 - cluster.x * target, y: 275 - cluster.y * target }); }}
+                            style={{ transform: `translate(${cluster.x}px, ${cluster.y}px)`, transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)" }}
+                          >
+                            <circle r="19" fill="rgba(249,115,22,0.18)" stroke="#f97316" strokeWidth="1.5" className="animate-pulse" />
+                            <circle r="13" fill="#1e293b" stroke="#f97316" strokeWidth="1.5" />
+                            <text textAnchor="middle" dy="3.5" fill="#f8fafc" className="font-mono text-[10px] font-black">{cluster.count}</text>
+                          </g>
+                        );
+                      }
+
+                      const s = cluster.items[0].shipment;
+                      const activeLoc = { x: cluster.x, y: cluster.y };
                       const isSelected = selectedShipment?.id === s.id;
-                      const gpsState = getShipmentGpsState(s);
+                      const gpsState = cluster.items[0].state;
+                      const colors = stateColors(gpsState);
 
                       return (
                         <g
                           key={s.id}
                           className="cursor-pointer group select-none"
                           onClick={() => handleSelectShipment(s)}
-                          // Beautiful CSS coordinate transition applied directly to translation matrix
+                          // CSS coordinate transition applied directly to translation matrix.
+                          // Positions change only on real data refresh — no simulated crawl.
                           style={{
                             transform: `translate(${activeLoc.x}px, ${activeLoc.y}px)`,
                             transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)",
                           }}
                         >
-                          {/* Shimmer pulse rings on the truck – colour by GPS state */}
+                          {/* Shimmer pulse rings on the truck – colour by tracking state */}
                           <circle
                             r={isSelected ? "22" : "15"}
-                            fill={
-                              isSelected ? "rgba(249,115,22,0.28)"
-                              : gpsState === "live_gps" ? "rgba(34,197,94,0.18)"
-                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.12)"
-                              : "rgba(100,116,139,0.12)"
-                            }
-                            stroke={
-                              isSelected ? "#ea580c"
-                              : gpsState === "live_gps" ? "#22c55e"
-                              : gpsState === "dead_reckoning" ? "rgba(249,115,22,0.3)"
-                              : "#475569"
-                            }
+                            fill={isSelected ? "rgba(249,115,22,0.28)" : colors.ring}
+                            stroke={isSelected ? "#ea580c" : colors.stroke}
                             strokeWidth="1.5"
                             className="animate-pulse"
                           />
@@ -1801,6 +2017,37 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         </g>
                       );
                     })}
+
+                    {/* Selected shipment — always rendered as its own
+                        highlighted marker (excluded from clustering above), so
+                        it stays identifiable even amid a dense cluster. */}
+                    {selectedShipment && (() => {
+                      const loc = getShipmentVectorLocation(selectedShipment);
+                      if (!loc.available) return null;
+                      return (
+                        <g
+                          key={`selected-${selectedShipment.id}`}
+                          className="cursor-pointer group select-none"
+                          onClick={() => handleSelectShipment(selectedShipment)}
+                          style={{ transform: `translate(${loc.x}px, ${loc.y}px)`, transition: "transform 1.8s cubic-bezier(0.25, 1, 0.5, 1)" }}
+                        >
+                          <circle r="22" fill="rgba(249,115,22,0.28)" stroke="#ea580c" strokeWidth="1.5" className="animate-pulse" />
+                          <g transform="translate(-11, -11)">
+                            <rect width="22" height="22" rx="6" fill="#ea580c" stroke="#ffffff" strokeWidth="1.5" className="shadow-xl" />
+                            <foreignObject width="22" height="22" className="flex items-center justify-center pointer-events-none">
+                              <div className="w-full h-full flex items-center justify-center">
+                                <Truck className="w-3.5 h-3.5 text-white animate-bounce" style={{ animationDuration: '3s' }} />
+                              </div>
+                            </foreignObject>
+                          </g>
+                          <text y="24" textAnchor="middle" fill="#ea580c" className="font-mono text-[9px] font-black tracking-tight">#{selectedShipment.shipmentNumber}</text>
+                          <g transform="translate(0, 36)">
+                            <rect x="-55" y="-10" width="110" height="14" rx="3" fill="#0f172a" stroke="#ea580c" strokeWidth="1" />
+                            <text textAnchor="middle" fill="#34d399" className="font-mono text-[8.5px] font-bold">In {getNearestCity(loc.x, loc.y)}</text>
+                          </g>
+                        </g>
+                      );
+                    })()}
                   </svg>
                 </div>
               ) : (
@@ -1919,13 +2166,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                         {/* Selected Shipment Route rendering dynamic polylines */}
                         {selectedShipment && (() => {
                           const activeLoc = getShipmentVectorLocation(selectedShipment);
+                          // No route line when the selected shipment has no placeable position.
+                          if (!activeLoc.available || activeLoc.lat == null || activeLoc.lng == null) return null;
                           const truckLoc = { lat: activeLoc.lat, lng: activeLoc.lng };
                           return (
-                            <RouteDisplay 
+                            <RouteDisplay
                               shipment={selectedShipment}
                               truckLocation={truckLoc}
-                              origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]} 
-                              destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]} 
+                              origin={CITY_COORDINATES[selectedShipment.loadingCity?.toLowerCase().trim()] || CITY_COORDINATES["istanbul"]}
+                              destination={CITY_COORDINATES[selectedShipment.deliveryCity?.toLowerCase().trim()] || CITY_COORDINATES["baghdad"]}
                             />
                           );
                         })()}
@@ -1963,53 +2212,15 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                           );
                         })()}
 
-                        {/* All moving trucks markers */}
-                        {filteredTransit.map(s => {
-                          const activeLoc = getShipmentVectorLocation(s);
-                          const isSelected = selectedShipment?.id === s.id;
-                          const truckCoords = { lat: activeLoc.lat, lng: activeLoc.lng };
-                          const gpsState = getShipmentGpsState(s);
-
-                          return (
-                            <AdvancedMarker
-                              key={s.id}
-                              position={truckCoords}
-                              title={`Shipment #${s.shipmentNumber}`}
-                              onClick={() => handleSelectShipment(s)}
-                            >
-                              <div className={`flex flex-col items-center justify-center cursor-pointer transform transition-all hover:scale-110 active:scale-95 ${isSelected ? "scale-110 z-20" : "z-10"}`}>
-                                {/* Interactive bubble badge */}
-                                <span className={`shadow-md font-bold font-mono text-[9px]/tight px-1.5 py-0.5 rounded text-white whitespace-nowrap ${
-                                  isSelected ? "bg-orange-600 border border-white" : "bg-slate-900 border border-slate-700"
-                                }`}>
-                                  #{s.shipmentNumber}
-                                </span>
-
-                                <div
-                                  style={{ width: "36px", height: "36px" }}
-                                  className={`w-9 h-9 rounded-full flex items-center justify-center border-2 shadow-lg transition-transform ${
-                                    isSelected           ? "bg-orange-600 border-white"
-                                    : gpsState === "live_gps"       ? "bg-emerald-700 border-emerald-400"
-                                    : gpsState === "dead_reckoning" ? "bg-slate-900 border-orange-500"
-                                    :                                  "bg-slate-800 border-slate-600"
-                                  }`}
-                                >
-                                  <Truck className="w-4 h-4 text-white" />
-                                </div>
-
-                                {!isSelected && (
-                                  <span className={`text-[7px] font-mono font-black px-1 rounded mt-0.5 ${
-                                    gpsState === "live_gps"       ? "text-emerald-400"
-                                    : gpsState === "dead_reckoning" ? "text-orange-400"
-                                    :                               "text-slate-500"
-                                  }`}>
-                                    {gpsState === "live_gps" ? "● GPS" : gpsState === "dead_reckoning" ? "◌ EST" : "◯"}
-                                  </span>
-                                )}
-                              </div>
-                            </AdvancedMarker>
-                          );
-                        })}
+                        {/* All moving trucks — clustered. Nearby markers group
+                            into a count bubble (zooms in on click); the selected
+                            shipment always stays an individual highlighted marker;
+                            unavailable shipments are excluded upstream. */}
+                        <GoogleClusterMarkers
+                          markers={googleMarkers}
+                          selectedId={selectedShipment?.id}
+                          onSelect={handleSelectShipment}
+                        />
                       </Map>
                     </APIProvider>
                   ) : (
@@ -2048,114 +2259,344 @@ export default function TrackingMap({ shipments, lang, drivers }: TrackingMapPro
                 </div>
               )}
 
-              {/* Selected shipment overlay detailed visual card */}
-              {selectedShipment && (
-                <div className="absolute bottom-4 right-4 left-4 sm:left-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 p-4 rounded-xl text-white max-w-xs z-15 space-y-2.5 text-left shadow-2xl animate-fade-in">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-ping"></span>
-                      <span className="font-mono font-black text-orange-400 text-xs selectable">#{selectedShipment.shipmentNumber}</span>
+              {/* Selected-shipment details drawer — header + Overview/Chat
+                  tabs; Overview holds route, driver, current location,
+                  tracking source, last update, the honest Journey Progress
+                  timeline, ETA & Distance, and the two navigation action
+                  cards. There is deliberately NO Documents tab/list/action:
+                  in eTIR, shipment documents live inside the shipment chat
+                  between the relevant parties, so the Chat tab (and the Open
+                  Chat action) route to the existing Chat Center thread where
+                  messages AND documents are already managed. No new chat or
+                  document surfaces or APIs. */}
+              {selectedShipment && !operatorRoom && (() => {
+                const gpsState = getShipmentGpsState(selectedShipment);
+                const colors = stateColors(gpsState);
+                const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
+                const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
+                const stateLabel =
+                  gpsState === "live_gps" ? t.trackLive
+                  : gpsState === "last_reported" ? t.trackReported
+                  : gpsState === "estimated" ? t.trackEstimated
+                  : t.trackUnavailable;
+                const loc = getShipmentVectorLocation(selectedShipment);
+                const closeDrawer = () => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); setDrawerTab('overview'); };
+                return (
+                <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[318px]">
+                  {/* Header */}
+                  <div className="sticky top-0 bg-white border-b border-slate-100 z-20">
+                    <div className="px-3.5 pt-2.5 pb-1.5 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono font-extrabold text-blue-700 text-[13px] truncate selectable">{selectedShipment.shipmentNumber}</span>
+                        <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border bg-emerald-50 text-emerald-700 border-emerald-200">{selectedShipment.status}</span>
+                      </div>
+                      <button
+                        onClick={closeDrawer}
+                        className="text-slate-400 hover:text-slate-700 transition-all cursor-pointer p-1 rounded-md hover:bg-slate-100 shrink-0"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
-                    <button 
-                      onClick={() => setSelectedShipment(null)}
-                      className="text-slate-400 hover:text-white transition-all cursor-pointer p-0.5 rounded-full hover:bg-slate-800"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                  
-                  <div className="space-y-1.5 font-mono text-[10px] text-slate-300">
-                    <p><span className="text-slate-500 uppercase font-black">{t.customer}:</span> <strong className="text-white font-sans text-xs">{selectedShipment.companyName}</strong></p>
-                    <p><span className="text-slate-500 uppercase font-black">{t.driver}:</span> <strong className="text-orange-400 font-sans">{selectedShipment.assignedDriverName || "—"}</strong></p>
-                    <p><span className="text-slate-500 uppercase font-black">{t.truckPlate}:</span> <strong className="text-slate-100">{selectedShipment.truckNumber || "—"}</strong></p>
-                    <p className="truncate"><span className="text-slate-500 uppercase font-black">{t.cargo}:</span> <span className="font-sans text-[10px] italic text-slate-400">{selectedShipment.cargoDescription}</span></p>
+                    {/* Tabs — Overview and Chat only (documents live in chat) */}
+                    <div className="px-3.5 flex items-center gap-4 text-[11px] font-bold">
+                      {([
+                        { id: 'overview' as const, label: t.tabOverview },
+                        { id: 'chat' as const, label: t.tabChat },
+                      ]).map(tab => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setDrawerTab(tab.id)}
+                          className={`pb-2 border-b-2 -mb-px transition-all cursor-pointer ${
+                            drawerTab === tab.id ? "border-orange-500 text-orange-600" : "border-transparent text-slate-400 hover:text-slate-600"
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
-                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 font-mono text-[9px]">
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-500 uppercase tracking-wider">{t.from}</span>
-                      <span className="font-extrabold text-slate-200">{selectedShipment.loadingCity}</span>
+                  {drawerTab === 'chat' ? (
+                    /* Chat lives in the existing Chat Center — messages AND
+                       shipment documents are managed there. Route to it. */
+                    <div className="p-3.5 space-y-3 text-center">
+                      <span className="mx-auto mt-2 flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                        <MessageSquare className="w-5 h-5" />
+                      </span>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">{t.docsChatNote}</p>
+                      {onOpenShipmentChat && (
+                        <button
+                          onClick={() => onOpenShipmentChat(selectedShipment.id)}
+                          className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                        >
+                          {t.openChat}
+                        </button>
+                      )}
                     </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-500 uppercase tracking-wider">{t.to}</span>
-                      <span className="font-extrabold text-slate-200">{selectedShipment.deliveryCity}</span>
+                  ) : (
+                  <div className="p-3.5 space-y-3">
+                    {/* Facts */}
+                    <div className="space-y-2 text-[11px]">
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.route}</p>
+                        <p className="font-semibold text-slate-800">{selectedShipment.loadingCity} <span className="text-slate-400">→</span> {selectedShipment.deliveryCity}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.driver}</p>
+                        <p className="font-semibold text-slate-800">{selectedShipment.assignedDriverName || t.unassigned}</p>
+                        {driver?.phone && <p className="text-slate-500 font-mono text-[10.5px] selectable" dir="ltr">{driver.phone}</p>}
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.currentLocation}</p>
+                        {loc.available && loc.isActualGps && loc.lat != null && loc.lng != null ? (
+                          <>
+                            <p className="font-semibold text-slate-800">{getNearestCity(loc.x, loc.y)}</p>
+                            <p className="text-slate-500 font-mono text-[10.5px]" dir="ltr">{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</p>
+                          </>
+                        ) : loc.available ? (
+                          <>
+                            <p className="font-semibold text-slate-800">{getNearestCity(loc.x, loc.y)}</p>
+                            <p className="text-slate-400 text-[10px] italic">{t.estimatedNote}</p>
+                          </>
+                        ) : (
+                          <p className="font-semibold text-slate-400">{t.noFix}</p>
+                        )}
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.trackingSource}</p>
+                        <p className={`font-bold ${colors.lightText}`}>{stateLabel}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.lastUpdateLabel}</p>
+                        <p className="font-semibold text-slate-700 flex items-center gap-1.5">
+                          {freshness.status === "none"
+                            ? "—"
+                            : freshness.minutesAgo === 0 ? t.justNow : `${freshness.minutesAgo} ${t.minAgo}`}
+                          {freshness.status !== "none" && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md border ${freshness.status === "fresh" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}>
+                              {freshness.status === "fresh" ? t.fresh : t.stale}
+                            </span>
+                          )}
+                        </p>
+                      </div>
                     </div>
+
+                    {/* Journey Progress — official design: orange-bordered card,
+                        progress bar above a numbered vertical milestone
+                        timeline with sublabels, connector rail, and per-row
+                        state + timestamp. Every state comes from the pure
+                        deriveJourneyProgress lib (recorded status/timeline
+                        only): completed/current need explicit data; stages
+                        passed without data show Not confirmed; nothing is
+                        ever inferred from GPS proximity. The percentage
+                        counts confirmed milestones only, labeled Estimated. */}
                     {(() => {
-                      const loc = getShipmentVectorLocation(selectedShipment);
-                      const city = getNearestCity(loc.x, loc.y);
-                      const gpsState = getShipmentGpsState(selectedShipment);
-                      const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
-                      const freshness = getGpsFreshness(driver?.lastUpdated, Date.now());
+                      const journey = deriveJourneyProgress(selectedShipment.status, selectedShipment.timeline);
+                      const originPlace = `${selectedShipment.loadingCity}${selectedShipment.loadingCountry ? ", " + selectedShipment.loadingCountry : ""}`;
+                      const destPlace = `${selectedShipment.deliveryCity}${selectedShipment.deliveryCountry ? ", " + selectedShipment.deliveryCountry : ""}`;
+                      const milestoneMeta = (key: JourneyMilestoneKey): { name: string; sub: string } => {
+                        switch (key) {
+                          case "origin": return { name: t.origin, sub: originPlace };
+                          case "departed": return { name: t.departed, sub: originPlace };
+                          case "border_arrival": return { name: t.mBorderArrival, sub: t.borderShort };
+                          case "customs_clearance": return { name: t.mCustoms, sub: t.borderShort };
+                          case "border_exit": return { name: t.mBorderExit, sub: t.borderShort };
+                          case "in_transit": return { name: t.kpiInTransit, sub: selectedShipment.deliveryCountry || selectedShipment.deliveryCity };
+                          case "destination_arrival": return { name: t.mDestArrival, sub: destPlace };
+                          case "delivered": return { name: t.mDelivered, sub: destPlace };
+                        }
+                      };
+                      const fmtTs = (ts: string | null): string | null => {
+                        if (!ts) return null;
+                        const d = new Date(ts);
+                        return Number.isNaN(d.getTime()) ? null : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+                      };
                       return (
-                        <>
-                          <div className="flex justify-between items-center border-t border-slate-800 pt-1 mt-1 font-extrabold">
-                            <span className="text-emerald-500 uppercase tracking-wider">CURRENT CITY:</span>
-                            <span className="text-emerald-400">{city}</span>
+                        <div className="border border-orange-300 rounded-xl p-3">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <p className="text-[11px] font-bold text-slate-800">
+                              {t.routeProgress} <span className="font-medium text-slate-400 text-[9.5px]">({t.estimatedTag})</span>
+                            </p>
+                            <span className="text-[12px] font-black text-slate-800 tabular-nums">{journey.estimatedPercent}%</span>
                           </div>
-                          <div className="flex justify-between items-center text-[7.5px] text-slate-400">
-                            <span>COORDINATES:</span>
-                            <span>{loc.lat.toFixed(5)}°N, {loc.lng.toFixed(5)}°E</span>
+                          {/* Progress bar — confirmed milestones only, labeled Estimated above */}
+                          <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden mb-3">
+                            <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${journey.estimatedPercent}%` }} />
                           </div>
-                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
-                            <span className="text-slate-500 uppercase">GPS MODE:</span>
-                            <span className={
-                              gpsState === "live_gps"       ? "text-emerald-400"
-                              : gpsState === "dead_reckoning" ? "text-orange-400"
-                              :                               "text-slate-500"
-                            }>
-                              {gpsState === "live_gps"       ? "● LIVE GPS"
-                              : gpsState === "dead_reckoning" ? "◌ DEAD RECKONING"
-                              :                               "◯ STATIC"}
-                            </span>
+                          {/* Numbered vertical milestone timeline with connector rail */}
+                          <div>
+                            {journey.milestones.map((m, idx) => {
+                              const meta = milestoneMeta(m.key);
+                              const ts = fmtTs(m.timestamp);
+                              const isLast = idx === journey.milestones.length - 1;
+                              const dot =
+                                m.state === "completed" ? (
+                                  <span className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center shrink-0 z-10">
+                                    <Check className="w-2.5 h-2.5 text-white stroke-[3.5]" />
+                                  </span>
+                                ) : m.state === "current" ? (
+                                  <span className="w-4 h-4 rounded-full bg-sky-500 border-2 border-sky-200 animate-pulse shrink-0 z-10"></span>
+                                ) : m.state === "unknown" ? (
+                                  <span className="w-4 h-4 rounded-full bg-white border-2 border-dashed border-slate-300 shrink-0 z-10"></span>
+                                ) : (
+                                  <span className="w-4 h-4 rounded-full bg-white border-2 border-slate-300 shrink-0 z-10"></span>
+                                );
+                              const rightTop =
+                                m.state === "completed" ? <span className="text-[10px] font-bold text-emerald-600">{t.completedLabel}</span>
+                                : m.state === "current" ? <span className="text-[10px] font-bold text-sky-600">{t.stateCurrent}</span>
+                                : m.state === "unknown" ? <span className="text-[10px] font-medium text-slate-300 italic">{t.noData}</span>
+                                : <span className="text-[10px] font-medium text-slate-300">{t.pending}</span>;
+                              return (
+                                <div key={m.key} className="flex gap-2.5">
+                                  {/* Marker + connector rail */}
+                                  <div className="flex flex-col items-center">
+                                    {dot}
+                                    {!isLast && <span className={`w-px flex-1 min-h-[14px] ${m.state === "completed" ? "bg-emerald-300" : "bg-slate-200"}`}></span>}
+                                  </div>
+                                  {/* Row body */}
+                                  <div className={`flex-1 min-w-0 flex items-start justify-between gap-2 ${isLast ? "" : "pb-2"}`}>
+                                    <span className="min-w-0">
+                                      <span className={`block text-[11px] font-bold leading-tight truncate ${
+                                        m.state === "completed" ? "text-slate-800"
+                                        : m.state === "current" ? "text-sky-700"
+                                        : "text-slate-400"
+                                      }`}>{idx + 1}. {meta.name}</span>
+                                      <span className="block text-[9.5px] text-slate-400 leading-tight truncate">{meta.sub}</span>
+                                    </span>
+                                    <span className="shrink-0 text-end leading-tight">
+                                      {rightTop}
+                                      <span className="block text-[9px] text-slate-400 tabular-nums">{m.state === "completed" ? (ts ?? "") : m.state === "current" ? "—" : ""}</span>
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
-                          <div className="flex justify-between items-center text-[7.5px] font-extrabold">
-                            <span className="text-slate-500 uppercase">LAST UPDATE:</span>
-                            <span className={freshness.status === "stale" ? "text-amber-400" : freshness.status === "fresh" ? "text-slate-300" : "text-slate-500"}>
-                              {freshness.status === "none"
-                                ? "No GPS update yet"
-                                : freshness.minutesAgo === 0
-                                  ? "Just now"
-                                  : `${freshness.minutesAgo}m ago${freshness.status === "stale" ? " · signal may be stale" : ""}`}
-                            </span>
-                          </div>
-                        </>
+                        </div>
                       );
                     })()}
-                    <div className="pt-1.5 mt-1 border-t border-dashed border-slate-800 text-[8.5px] text-orange-400 flex items-center justify-between font-extrabold">
-                      <span>STATUS FEED:</span>
-                      <span>{selectedShipment.status}</span>
+
+                    {/* ETA & Distance — official design: two-value grid +
+                        persistent orange action button. On-demand only, 5
+                        states; values stay "—" until the operator presses the
+                        button, and results are labeled Estimated. Cleared
+                        whenever the selection changes. */}
+                    <div className="border border-slate-200 rounded-xl p-3">
+                      <p className="text-[11px] font-bold text-slate-800 mb-2">
+                        {t.etaSection} <span className="font-medium text-slate-400 text-[9.5px]">({t.estimatedTag})</span>
+                      </p>
+                      {(() => {
+                        const eta = etaForId === selectedShipment.id ? etaData : null;
+                        if (etaLoading) {
+                          return (
+                            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 py-3">
+                              <Navigation className="w-3.5 h-3.5 animate-spin text-orange-500" />
+                              <span>{lang === "ar" ? "جارٍ الحساب..." : lang === "tr" ? "Hesaplanıyor..." : "Calculating..."}</span>
+                            </div>
+                          );
+                        }
+                        if (etaError) {
+                          return (
+                            <div className="bg-red-50 border border-red-200 p-2.5 rounded-lg text-[10.5px] text-red-700 flex items-start gap-1.5 mb-2">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <p>{etaError}</p>
+                            </div>
+                          );
+                        }
+                        if (eta && eta.status === "UNAVAILABLE") {
+                          return (
+                            <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[10.5px] text-amber-800 flex items-start gap-1.5 mb-2">
+                              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <span>{lang === "ar" ? "المسافة غير متوفرة لهذا المسار" : lang === "tr" ? "Bu rota için mesafe yok" : "Route distance unavailable for this shipment."}</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="grid grid-cols-2 gap-2 mb-1">
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-black text-slate-800 truncate">{eta?.distance?.text || "—"}</p>
+                              <p className="text-[9.5px] text-slate-400">{t.remainingDistance}</p>
+                            </div>
+                            <div className="min-w-0 border-s border-slate-100 ps-2">
+                              <p className="text-[13px] font-black text-slate-800 truncate">
+                                {eta?.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString(undefined, { weekday: undefined, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}
+                              </p>
+                              <p className="text-[9.5px] text-slate-400">{t.estimatedArrival}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <button
+                        onClick={() => handleCalculateEta(selectedShipment)}
+                        disabled={etaLoading}
+                        className="w-full mt-1.5 py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white font-sans text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <span>{lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance"}</span>
+                      </button>
                     </div>
+
+                    {/* Navigation action cards — into EXISTING surfaces only */}
+                    {(onOpenShipmentDetails || onOpenShipmentChat) && (
+                      <div className="grid grid-cols-2 gap-2">
+                        {onOpenShipmentChat && (
+                          <button
+                            onClick={() => onOpenShipmentChat(selectedShipment.id)}
+                            className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 transition-all text-start cursor-pointer"
+                          >
+                            <MessageSquare className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                            <span className="min-w-0">
+                              <span className="block text-[10.5px] font-bold text-slate-700 leading-tight">{t.openChat}</span>
+                              <span className="block text-[9px] text-slate-400 leading-tight truncate">{t.openChatSub}</span>
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0 ms-auto mt-0.5 rtl:rotate-180" />
+                          </button>
+                        )}
+                        {onOpenShipmentDetails && (
+                          <button
+                            onClick={() => onOpenShipmentDetails(selectedShipment.id)}
+                            className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 transition-all text-start cursor-pointer"
+                          >
+                            <FileText className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                            <span className="min-w-0">
+                              <span className="block text-[10.5px] font-bold text-slate-700 leading-tight">{t.viewDetails}</span>
+                              <span className="block text-[9px] text-slate-400 leading-tight truncate">{t.viewDetailsSub}</span>
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0 ms-auto mt-0.5 rtl:rotate-180" />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
-
-                  <button
-                    onClick={() => handleAutoFocusRoute(selectedShipment)}
-                    className="w-full py-1.5 px-3 bg-orange-600 hover:bg-orange-500 text-white font-sans text-[11px] font-bold rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer mt-1"
-                  >
-                    <Expand className="w-3.5 h-3.5 animate-pulse" />
-                    <span>
-                      {lang === "ar"
-                        ? "ملاءمة المسار بالكامل"
-                        : lang === "tr"
-                          ? "Rotayı Odakla"
-                          : "Auto-Focus Route"}
-                    </span>
-                  </button>
+                  )}
                 </div>
-              )}
+                );
+              })()}
             </div>
 
-            {/* Simulated Live Grid Stats */}
-            <div className="text-[10px] text-slate-400 font-mono flex flex-col sm:flex-row items-center justify-between shrink-0 bg-slate-900/60 p-3 rounded-xl border border-slate-900 gap-1 mt-1">
-              <span>{t.operationalStats}: <strong>{inTransitShipments.length} {t.totalShipments}</strong></span>
-              <span className={`flex items-center gap-1 ${anyLiveGps ? "text-emerald-400" : "text-orange-400"}`}>
-                <span className={`w-1.5 h-1.5 rounded-full inline-block animate-ping ${anyLiveGps ? "bg-emerald-500" : "bg-orange-500"}`}></span>
-                {anyLiveGps ? t.gpsAcquired : t.simulatedGps}
-              </span>
-            </div>
+            {/* The former in-map footer stats bar was removed: it duplicated
+                the command-bar state chips and cost the map ~50px of height.
+                The honest live-signal indicator now lives as a compact
+                floating overlay at the bottom-right of the map itself. */}
           </div>
         </div>
 
       </div>
+
+      {/* Operator Room chrome — rendered ON TOP of the same live map. The
+          overlay is read-only by construction (click layer only pauses the
+          cycle; Exit/Escape leave the mode) and all values are the exact
+          derived state the normal mode shows. */}
+      {operatorRoom && (
+        <OperatorRoomOverlay
+          lang={lang}
+          lastDataAt={lastDataAt}
+          kpis={operatorKpis}
+          focus={operatorFocus}
+          paused={cyclePaused}
+          onTogglePause={() => setCyclePaused(p => !p)}
+          onExit={exitOperatorRoom}
+        />
+      )}
     </div>
   );
 }
