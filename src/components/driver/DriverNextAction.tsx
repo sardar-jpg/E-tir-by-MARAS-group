@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowLeft, Check, CheckCircle2, Clock, Flag, Landmark, Lock, MapPin, Package, Truck, X,
 } from "lucide-react";
@@ -222,9 +223,11 @@ export default function DriverNextAction({
   if (confirming) {
     /* ── Full-screen confirmation moment (Revision A, mockup 04) ──
        States the exact action and its exact lifecycle consequence; one
-       large green confirmation button; a clear cancel/back action. */
-    return (
-      <div className="fixed inset-0 z-[70] flex flex-col bg-slate-100 animate-fade-in" role="dialog" aria-modal="true" aria-label={actionLabel}>
+       large green confirmation button; a clear cancel/back action.
+       Rendered through a portal so ancestor transforms can never trap
+       the fixed overlay underneath the app chrome. */
+    return createPortal(
+      <div className="driver-shell fixed inset-0 z-[70] flex flex-col bg-slate-100" role="dialog" aria-modal="true" aria-label={actionLabel} dir={lang === "ar" ? "rtl" : "ltr"}>
         {/* Consequence header */}
         <div className="bg-gradient-to-b from-blue-900 to-blue-700 text-white px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-8">
           <button
@@ -292,7 +295,8 @@ export default function DriverNextAction({
             {t.back}
           </button>
         </div>
-      </div>
+      </div>,
+      document.body
     );
   }
 

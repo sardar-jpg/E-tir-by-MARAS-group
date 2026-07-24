@@ -527,7 +527,7 @@ export default function DriverAccountScreen({
             </button>
           </div>
           <div className="min-w-0 text-start">
-            <h3 className="text-lg font-bold text-white truncate tracking-tight">{profileName || "—"}</h3>
+            <h3 className="text-lg font-bold text-slate-900 truncate tracking-tight">{profileName || "—"}</h3>
             <p className="text-sm text-slate-500 truncate">@{profileUsername || "driver"}</p>
             <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 tabular-nums">
               <Truck className="w-3.5 h-3.5 shrink-0 text-slate-400" />
@@ -590,7 +590,7 @@ export default function DriverAccountScreen({
                 className="w-full min-h-[48px] px-3.5 bg-slate-50 border border-slate-200 text-sm text-slate-800 rounded-2xl outline-none cursor-pointer"
               >
                 {TRUCK_TYPES.map((type) => (
-                  <option key={type.id} value={type.id} className="bg-slate-50 text-white">
+                  <option key={type.id} value={type.id} className="bg-white text-slate-900">
                     {lang === "en" ? type.en : lang === "tr" ? type.tr : type.ar}
                   </option>
                 ))}

@@ -209,7 +209,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
       {/* Job thread selector */}
       <div className="shrink-0 px-3 pt-2 pb-2.5 border-b border-slate-200 bg-slate-50 space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-white text-start">{t.title}</h2>
+          <h2 className="text-sm font-bold text-slate-900 text-start">{t.title}</h2>
           <button
             type="button"
             aria-label={t.searchToggle}
@@ -330,7 +330,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
                         download={msg.fileName || "document"}
                         className="font-bold underline cursor-pointer flex items-center gap-1.5 break-all"
                       >
-                        <FileText className={`w-4 h-4 shrink-0 ${isMe ? "text-white" : "text-slate-300"}`} />
+                        <FileText className={`w-4 h-4 shrink-0 ${isMe ? "text-white" : "text-slate-500"}`} />
                         <span>{msg.fileName}</span>
                       </a>
                       {((msg.fileCategory === "photo" || msg.fileName?.match(/\.(jpeg|jpg|gif|png|webp)/i)) && msg.fileUrl && msg.fileUrl !== "#") && (
@@ -448,7 +448,7 @@ export default function DriverChatScreen(props: DriverChatScreenProps) {
             maxLength={MAX_CHAT_TEXT_LENGTH}
             disabled={isSending}
             style={{ minHeight: composerMinHeightPx, maxHeight: composerMaxHeightPx }}
-            className="flex-1 px-4 py-3 bg-white border border-slate-200 focus:border-slate-500 outline-none rounded-3xl text-[15px] text-white placeholder-slate-400 transition-colors disabled:opacity-60 resize-none overflow-y-auto leading-normal"
+            className="flex-1 px-4 py-3 bg-white border border-slate-200 focus:border-blue-400 outline-none rounded-3xl text-[15px] text-slate-900 placeholder-slate-400 transition-colors disabled:opacity-60 resize-none overflow-y-auto leading-normal"
           />
 
           <button

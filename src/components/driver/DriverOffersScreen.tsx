@@ -410,7 +410,7 @@ export default function DriverOffersScreen({
             {canAnswer && (
               phase === "confirming" ? (
                 <div className="bg-slate-50 border border-orange-200 rounded-2xl p-4 space-y-3 text-start">
-                  <p className="text-base font-bold text-white">{t.confirmTitle(Number(price).toLocaleString())}</p>
+                  <p className="text-base font-bold text-slate-900">{t.confirmTitle(Number(price).toLocaleString())}</p>
                   <p className="text-sm text-slate-500 leading-snug">{t.confirmWarning}</p>
                   <div className="grid grid-cols-3 gap-2">
                     <button
@@ -477,7 +477,7 @@ export default function DriverOffersScreen({
                       placeholder={t.pricePlaceholder}
                       value={price}
                       onChange={(e) => setPrice(e.target.value)}
-                      className="flex-1 min-w-0 min-h-[52px] px-3.5 bg-slate-50 border border-slate-200 focus:border-blue-400 text-xl font-bold text-white rounded-2xl outline-none transition-colors placeholder-slate-400"
+                      className="flex-1 min-w-0 min-h-[52px] px-3.5 bg-slate-50 border border-slate-200 focus:border-blue-400 text-xl font-bold text-slate-900 rounded-2xl outline-none transition-colors placeholder-slate-400"
                     />
                   </div>
                   <input
