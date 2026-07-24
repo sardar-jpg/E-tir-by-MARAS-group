@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
-import { Compass, MapPin, Plus, Minus, Truck } from "lucide-react";
+import { Compass, MapPin, Plus, Minus, Truck, LocateFixed } from "lucide-react";
 import { Language, Shipment, Driver } from "../types";
 import { apiFetch } from "../lib/api";
 
@@ -68,9 +68,16 @@ function RouteDisplay({ origin, destination }: RouteDisplayProps) {
 interface ZoomControlsProps {
   origin: google.maps.LatLngLiteral;
   destination: google.maps.LatLngLiteral;
+  /** Live vehicle position — when present, a "center on vehicle" control appears. */
+  vehicle?: google.maps.LatLngLiteral | null;
+  centerOnVehicleLabel?: string;
 }
 
-function ZoomControls({ origin, destination }: ZoomControlsProps) {
+// Customer App Revision A — light-theme map controls, matching the ecosystem
+// design system (white surfaces, blue accent). Refinement #7 adds an optional
+// "center on vehicle" control that only appears when a real GPS fix exists —
+// it re-centers the existing map view, it does not change any tracking logic.
+function ZoomControls({ origin, destination, vehicle, centerOnVehicleLabel }: ZoomControlsProps) {
   const map = useMap();
 
   const zoomIn  = () => map && map.setZoom((map.getZoom() || 6) + 1);
@@ -84,19 +91,36 @@ function ZoomControls({ origin, destination }: ZoomControlsProps) {
     map.fitBounds(bounds);
   };
 
+  const centerOnVehicle = () => {
+    if (!map || !vehicle) return;
+    map.panTo(vehicle);
+    map.setZoom(Math.max(map.getZoom() || 6, 9));
+  };
+
   return (
-    <div className="absolute top-3 right-3 z-20 flex flex-col gap-1.5 pointer-events-auto">
-      <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col overflow-hidden">
-        <button type="button" onClick={zoomIn} className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors border-b border-slate-800 cursor-pointer">
-          <Plus className="w-3.5 h-3.5" />
+    <div className="absolute top-3 end-3 z-20 flex flex-col gap-1.5 pointer-events-auto">
+      <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg flex flex-col overflow-hidden">
+        <button type="button" onClick={zoomIn} aria-label="Zoom in" className="w-8 h-8 flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors border-b border-slate-200 cursor-pointer">
+          <Plus className="w-4 h-4" />
         </button>
-        <button type="button" onClick={zoomOut} className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer">
-          <Minus className="w-3.5 h-3.5" />
+        <button type="button" onClick={zoomOut} aria-label="Zoom out" className="w-8 h-8 flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer">
+          <Minus className="w-4 h-4" />
         </button>
       </div>
-      <button type="button" onClick={center} className="w-7 h-7 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex items-center justify-center hover:bg-slate-800 transition-all cursor-pointer">
-        <Compass className="w-3.5 h-3.5 text-orange-500 animate-pulse" style={{ animationDuration: "3s" }} />
+      <button type="button" onClick={center} aria-label="Fit route" className="w-8 h-8 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg flex items-center justify-center hover:bg-slate-100 transition-all cursor-pointer">
+        <Compass className="w-4 h-4 text-blue-600" />
       </button>
+      {vehicle && (
+        <button
+          type="button"
+          onClick={centerOnVehicle}
+          title={centerOnVehicleLabel || "Center on vehicle"}
+          aria-label={centerOnVehicleLabel || "Center on vehicle"}
+          className="w-8 h-8 bg-blue-600 border border-blue-600 rounded-xl shadow-lg flex items-center justify-center hover:bg-blue-700 transition-all cursor-pointer"
+        >
+          <LocateFixed className="w-4 h-4 text-white" />
+        </button>
+      )}
     </div>
   );
 }
@@ -107,9 +131,11 @@ interface ClientShipmentMapProps {
   shipment: Shipment;
   drivers: Driver[];
   lang: Language;
+  /** "card" = fixed-height rounded card (default). "fill" = fills its parent (tracking screen). */
+  variant?: "card" | "fill";
 }
 
-export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShipmentMapProps) {
+export default function ClientShipmentMap({ shipment, drivers, lang, variant = "card" }: ClientShipmentMapProps) {
   const [activeMapsKey, setActiveMapsKey] = useState<string>(GOOGLE_MAPS_KEY_FALLBACK);
   const hasValidMapsKey = Boolean(activeMapsKey) && activeMapsKey !== "YOUR_API_KEY";
 
@@ -153,37 +179,60 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
       ? { lat: assignedDriver.latitude, lng: assignedDriver.longitude }
       : null;
 
+  const centerOnVehicleLabel =
+    lang === "ar" ? "توسيط على المركبة" : lang === "tr" ? "Araca odaklan" : "Center on vehicle";
+
+  // Light-theme shell. "fill" makes the map own its parent's box (tracking
+  // screen); "card" keeps the original rounded fixed-height card.
+  const shellClass =
+    variant === "fill"
+      ? "relative w-full h-full bg-slate-100 overflow-hidden"
+      : "relative w-full rounded-2xl overflow-hidden border border-slate-200 bg-slate-100";
+  const shellStyle = variant === "fill" ? undefined : { height: "280px" };
+
+  const FallbackShell = ({ children }: { children: React.ReactNode }) => (
+    <div
+      className={
+        variant === "fill"
+          ? "w-full h-full bg-slate-100 flex flex-col items-center justify-center text-center gap-2 px-6"
+          : "w-full rounded-2xl border border-slate-200 bg-slate-100 flex flex-col items-center justify-center text-center gap-2 min-h-[200px] px-6"
+      }
+    >
+      {children}
+    </div>
+  );
+
   if (mapsAuthError) {
     return (
-      <div className="w-full rounded-xl border border-red-950 bg-slate-950 p-5 flex flex-col items-center justify-center text-center space-y-3 min-h-[200px] select-text">
-        <div className="w-9 h-9 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-500 animate-bounce">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
+      <FallbackShell>
+        <div className="w-11 h-11 rounded-2xl bg-red-50 border border-red-100 flex items-center justify-center text-red-500">
+          <MapPin className="w-5 h-5" />
         </div>
-        <p className="text-[10px] text-slate-400 leading-relaxed max-w-[220px]">
+        <p className="text-[12px] text-slate-500 leading-relaxed max-w-[240px] font-medium">
           {lang === "ar"
             ? "فشل تحميل الخريطة. يرجى المحاولة لاحقاً."
             : lang === "tr"
             ? "Harita yüklenemedi. Lütfen tekrar deneyin."
             : "Map failed to load. Please try again later."}
         </p>
-      </div>
+      </FallbackShell>
     );
   }
 
   if (!hasValidMapsKey) {
     return (
-      <div className="w-full rounded-xl border border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-center space-y-2 min-h-[200px]">
-        <MapPin className="w-5 h-5 text-slate-600" />
-        <p className="text-[10.5px] text-slate-500 max-w-[200px] leading-relaxed px-4">
+      <FallbackShell>
+        <div className="w-11 h-11 rounded-2xl bg-slate-200/70 flex items-center justify-center text-slate-400">
+          <MapPin className="w-5 h-5" />
+        </div>
+        <p className="text-[12px] text-slate-500 max-w-[220px] leading-relaxed font-medium">
           {lang === "ar"
             ? "الخريطة غير متاحة حالياً."
             : lang === "tr"
             ? "Harita şu an kullanılamıyor."
-            : "Map currently unavailable."}
+            : "Live location unavailable right now."}
         </p>
-      </div>
+      </FallbackShell>
     );
   }
 
@@ -192,16 +241,18 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
   // rather than city) instead of drawing a fake Istanbul->Baghdad route.
   if (!hasKnownRoute) {
     return (
-      <div className="w-full rounded-xl border border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-center space-y-2 min-h-[200px]">
-        <MapPin className="w-5 h-5 text-slate-600" />
-        <p className="text-[10.5px] text-slate-500 max-w-[220px] leading-relaxed px-4">
+      <FallbackShell>
+        <div className="w-11 h-11 rounded-2xl bg-slate-200/70 flex items-center justify-center text-slate-400">
+          <MapPin className="w-5 h-5" />
+        </div>
+        <p className="text-[12px] text-slate-500 max-w-[240px] leading-relaxed font-medium">
           {lang === "ar"
             ? "معاينة الخريطة غير متاحة لهذه الشحنة."
             : lang === "tr"
             ? "Bu sevkiyat için harita önizlemesi mevcut değil."
             : "Map preview isn't available for this shipment's route."}
         </p>
-      </div>
+      </FallbackShell>
     );
   }
 
@@ -210,10 +261,7 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
   const destCoords = dest as google.maps.LatLngLiteral;
 
   return (
-    <div
-      className="relative w-full rounded-xl overflow-hidden border border-slate-800 bg-slate-950"
-      style={{ height: "280px" }}
-    >
+    <div className={shellClass} style={shellStyle}>
       <APIProvider apiKey={activeMapsKey}>
         <Map
           id="client_shipment_map"
@@ -226,7 +274,7 @@ export default function ClientShipmentMap({ shipment, drivers, lang }: ClientShi
           style={{ width: "100%", height: "100%" }}
         >
           <RouteDisplay origin={originCoords} destination={destCoords} />
-          <ZoomControls origin={originCoords} destination={destCoords} />
+          <ZoomControls origin={originCoords} destination={destCoords} vehicle={truckPos} centerOnVehicleLabel={centerOnVehicleLabel} />
 
           {/* Origin marker */}
           <AdvancedMarker position={originCoords} title={`Origin: ${shipment.loadingCity}`}>

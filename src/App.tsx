@@ -1098,8 +1098,8 @@ export default function App() {
   // If logged in as client, display authentic customer dashboard directly
   if (session.role === "client") {
     return (
-      <div className="bg-slate-900 h-[100dvh] text-slate-100 font-sans flex flex-col overflow-hidden animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
-        <main className="flex-1 overflow-y-auto py-6 px-4">
+      <div className="bg-[#F4F6FA] h-[100dvh] text-slate-900 font-sans flex flex-col overflow-hidden animate-fade-in" dir={isRtl ? "rtl" : "ltr"}>
+        <main className="flex-1 overflow-hidden">
           <Suspense fallback={<RouteLoadingFallback />}>
             <ClientDashboard
               lang={lang}
@@ -1107,6 +1107,7 @@ export default function App() {
               clientEmail={session.client?.email || ""}
               clientId={session.client?.id || ""}
               onLogout={handleLogout}
+              onLanguageChange={setLang}
               viewOnly={!!(session.client?.isEmployee)}
             />
           </Suspense>

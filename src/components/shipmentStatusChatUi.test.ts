@@ -186,11 +186,20 @@ describe("ClientDashboard.tsx", () => {
   });
 
   it("shows a distinct closed banner ahead of the view-only-account banner, and both replace the composer", () => {
-    const bannerIndex = SOURCE.indexOf("{isChatClosed ? (");
+    // Customer App Revision A: the composer moved into renderChatConversation,
+    // which derives the same two gates and renders them in the same order —
+    // closed lock first, then view-only, then the composer.
+    expect(SOURCE).toContain("const locked = isShipmentClosed(ship.status, ship.freightType);");
+    expect(SOURCE).toContain("const canSend = !locked && canClientSendChatMessage({ isEmployee: viewOnly });");
+    const bannerIndex = SOURCE.indexOf("{locked ? (");
     expect(bannerIndex).toBeGreaterThan(-1);
     const bannerRegion = SOURCE.slice(bannerIndex, bannerIndex + 700);
-    expect(bannerRegion).toContain("This shipment is closed");
-    expect(bannerRegion).toContain("!canClientSendChatMessage({ isEmployee: viewOnly })");
+    // closed banner branch comes first, then the view-only (!canSend) branch,
+    // then the actual composer.
+    expect(bannerRegion).toContain("curT.chatClosed");
+    expect(bannerRegion).toContain(") : !canSend ? (");
+    // the closed wording itself is preserved (in the localized dictionary).
+    expect(SOURCE).toContain("This shipment is closed");
   });
 
   it("handleSendInquiry syncs local selectedShipment status on a SHIPMENT_CHAT_CLOSED rejection", () => {
