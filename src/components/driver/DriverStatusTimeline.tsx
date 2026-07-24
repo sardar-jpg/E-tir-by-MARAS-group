@@ -7,14 +7,32 @@ import {
 import { localizeShipmentStatus } from "./driverUi";
 
 /**
- * feature/driver-app-comprehensive-redesign — read-only journey timeline
- * for the job details view. Renders the shipment's OWN freight-mode
- * sequence (shipmentStatusTransitions.ts, the same source the server
- * enforces) with completed stages checked, the current stage highlighted,
- * and future stages visible but dimmed. Deliberately non-interactive:
+ * feature/driver-app-comprehensive-redesign (Revision A) — read-only
+ * journey timeline. Renders the shipment's OWN freight-mode sequence
+ * (shipmentStatusTransitions.ts, the same source the server enforces)
+ * with completed stages checked green, the current stage highlighted
+ * blue with a "you are here" line, and future stages visible but
+ * dimmed. Progress is derived ONLY from the confirmed stored status —
+ * never GPS, never invented percentages. Deliberately non-interactive:
  * a driver can never select a stage here — progression happens only
  * through DriverNextAction's single forward action.
  */
+const HERE_LABEL: Record<Language, string> = {
+  en: "You are here",
+  tr: "Şu an buradasınız",
+  ar: "أنت هنا الآن",
+};
+const PENDING_LABEL: Record<Language, string> = {
+  en: "Pending",
+  tr: "Bekliyor",
+  ar: "قادم",
+};
+const DONE_LABEL: Record<Language, string> = {
+  en: "Completed",
+  tr: "Tamamlandı",
+  ar: "مكتمل",
+};
+
 interface DriverStatusTimelineProps {
   shipment: Pick<Shipment, "status" | "freightType">;
   lang: Language;
@@ -31,34 +49,37 @@ export default function DriverStatusTimeline({ shipment, lang }: DriverStatusTim
         const isCurrent = index === currentIndex;
         const isLast = index === sequence.length - 1;
         return (
-          <li key={status} className="flex items-stretch gap-3">
+          <li key={status} className="flex items-stretch gap-3.5">
             <div className="flex flex-col items-center">
               <span
-                className={`w-7 h-7 rounded-full border-2 flex items-center justify-center shrink-0 text-[11px] font-bold ${
+                className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-[12px] font-bold ${
                   isCurrent
-                    ? "bg-sky-400 border-sky-400 text-slate-950 light-preserve"
+                    ? "bg-blue-600 text-white shadow-[0_0_0_5px_rgba(37,99,235,0.12)]"
                     : isDone
-                    ? "bg-emerald-500/15 border-emerald-500/60 text-emerald-400"
-                    : "bg-slate-950 border-slate-700 text-slate-600"
+                    ? "bg-green-600 text-white"
+                    : "bg-white border-2 border-slate-200 text-slate-400"
                 }`}
               >
-                {isDone ? <Check className="w-3.5 h-3.5" /> : index + 1}
+                {isDone ? <Check className="w-4 h-4" /> : index + 1}
               </span>
               {!isLast && (
-                <span className={`w-0.5 flex-1 min-h-4 ${isDone ? "bg-emerald-500/40" : "bg-slate-800"}`} />
+                <span className={`w-0.5 flex-1 min-h-4 ${isDone ? "bg-green-500" : "bg-slate-200"}`} />
               )}
             </div>
             <div className={`pb-4 text-start ${isLast ? "pb-0" : ""}`}>
               <p
-                className={`text-sm leading-7 ${
+                className={`text-[15px] leading-8 ${
                   isCurrent
-                    ? "font-bold text-sky-400"
+                    ? "font-extrabold text-slate-900"
                     : isDone
-                    ? "font-semibold text-slate-300"
-                    : "font-medium text-slate-600"
+                    ? "font-bold text-slate-700"
+                    : "font-semibold text-slate-400"
                 }`}
               >
                 {localizeShipmentStatus(status, lang)}
+              </p>
+              <p className={`text-xs font-semibold -mt-1 ${isCurrent ? "text-blue-600" : "text-slate-400"}`}>
+                {isCurrent ? (HERE_LABEL[lang] ?? HERE_LABEL.en) : isDone ? (DONE_LABEL[lang] ?? DONE_LABEL.en) : (PENDING_LABEL[lang] ?? PENDING_LABEL.en)}
               </p>
             </div>
           </li>

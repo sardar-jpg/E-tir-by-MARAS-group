@@ -11,6 +11,9 @@ import type { Language } from "../../types";
  * logical utilities (grid order follows the document direction, so
  * Arabic mirrors automatically), and the bar reserves the device
  * safe-area inset so it never sits under a home indicator.
+ *
+ * Revision A: light surface, BLUE active state (identity/information),
+ * ORANGE reserved for the unread/offer badges.
  */
 export type DriverTab = "home" | "job" | "chat" | "profile";
 
@@ -50,7 +53,7 @@ export default function DriverBottomNavigation({
   return (
     <nav
       aria-label={lang === "tr" ? "Ana gezinme" : lang === "ar" ? "التنقل الرئيسي" : "Main navigation"}
-      className="grid grid-cols-4 gap-1 px-2 bg-slate-950 border-t border-slate-800/60 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0 select-none"
+      className="grid grid-cols-4 gap-1 px-2 bg-white border-t border-slate-200 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0 select-none"
     >
       {TABS.map((tab) => {
         const Icon = NAV_ICONS[tab];
@@ -64,19 +67,19 @@ export default function DriverBottomNavigation({
             onClick={() => onSelect(tab)}
             aria-current={isActive ? "page" : undefined}
             className={`flex flex-col items-center justify-center gap-1 min-h-[56px] rounded-xl transition-colors cursor-pointer ${
-              isActive ? "text-orange-500 bg-orange-500/10" : "text-slate-500 hover:text-slate-300"
+              isActive ? "text-blue-600" : "text-slate-400 hover:text-slate-600"
             }`}
           >
             <span className="relative">
               <Icon className="w-6 h-6 shrink-0" strokeWidth={isActive ? 2.5 : 2} />
               {badge > 0 && (
-                <span className="absolute -top-1.5 -end-2 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-[18px] text-center light-preserve">
+                <span className="absolute -top-1.5 -end-2 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-[18px] text-center">
                   {badge > 9 ? "9+" : badge}
                 </span>
               )}
             </span>
             <span className={`text-[11px] leading-none ${isActive ? "font-bold" : "font-medium"}`}>{label}</span>
-            <span className={`h-[3px] w-6 rounded-full transition-all duration-150 ${isActive ? "bg-orange-500" : "bg-transparent"}`} />
+            <span className={`h-[3px] w-6 rounded-full transition-all duration-150 ${isActive ? "bg-blue-600" : "bg-transparent"}`} />
           </button>
         );
       })}

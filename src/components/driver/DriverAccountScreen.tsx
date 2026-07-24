@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowRight, Camera, Check, Edit2, Globe, Loader2, LogOut, Megaphone, Moon,
-  Phone, Route, Shield, ShieldAlert, Sun, Trash2, Truck, User, X,
+  ArrowRight, Camera, Check, Edit2, Globe, Loader2, LogOut, Megaphone,
+  Phone, Route, Shield, ShieldAlert, Trash2, Truck, User, X,
 } from "lucide-react";
 import type { Driver, Language } from "../../types";
 import { TRUCK_TYPES } from "../../types";
@@ -60,12 +60,12 @@ const LABELS: Record<Language, {
   routesEmpty: string;
   routesManaged: string;
   language: string;
-  appearance: string;
-  lightMode: string;
-  darkMode: string;
   privacy: string;
   privacySub: string;
   logout: string;
+  logoutConfirmTitle: string;
+  logoutConfirm: string;
+  logoutCancel: string;
   deleteTitle: string;
   deleteButton: string;
   deleteWarning: string;
@@ -98,12 +98,12 @@ const LABELS: Record<Language, {
     routesEmpty: "No routes registered yet.",
     routesManaged: "Routes are managed by MARAS Operations.",
     language: "Language",
-    appearance: "Appearance",
-    lightMode: "Light — for daylight",
-    darkMode: "Dark — for night driving",
     privacy: "Privacy policy",
     privacySub: "How your data is used",
     logout: "Log out",
+    logoutConfirmTitle: "Log out of your account?",
+    logoutConfirm: "Yes, log out",
+    logoutCancel: "Cancel",
     deleteTitle: "Delete account",
     deleteButton: "Delete my account",
     deleteWarning: "This cannot be undone. Your account, job history, and access will be permanently removed.",
@@ -136,12 +136,12 @@ const LABELS: Record<Language, {
     routesEmpty: "Henüz kayıtlı güzergah yok.",
     routesManaged: "Güzergahlar MARAS Operasyon tarafından yönetilir.",
     language: "Dil",
-    appearance: "Görünüm",
-    lightMode: "Açık — gün ışığı için",
-    darkMode: "Koyu — gece sürüşü için",
     privacy: "Gizlilik politikası",
     privacySub: "Verilerinizin nasıl kullanıldığı",
     logout: "Çıkış yap",
+    logoutConfirmTitle: "Hesabınızdan çıkış yapılsın mı?",
+    logoutConfirm: "Evet, çıkış yap",
+    logoutCancel: "İptal",
     deleteTitle: "Hesabı sil",
     deleteButton: "Hesabımı sil",
     deleteWarning: "Bu işlem geri alınamaz. Hesabınız, sefer geçmişiniz ve erişiminiz kalıcı olarak silinir.",
@@ -174,12 +174,12 @@ const LABELS: Record<Language, {
     routesEmpty: "لا توجد مسارات مسجلة بعد.",
     routesManaged: "تُدار المسارات من قبل عمليات MARAS.",
     language: "اللغة",
-    appearance: "المظهر",
-    lightMode: "فاتح — لضوء النهار",
-    darkMode: "داكن — للقيادة الليلية",
     privacy: "سياسة الخصوصية",
     privacySub: "كيف تُستخدم بياناتك",
     logout: "تسجيل الخروج",
+    logoutConfirmTitle: "هل تريد تسجيل الخروج من حسابك؟",
+    logoutConfirm: "نعم، تسجيل الخروج",
+    logoutCancel: "إلغاء",
     deleteTitle: "حذف الحساب",
     deleteButton: "حذف حسابي",
     deleteWarning: "لا يمكن التراجع عن هذا الإجراء. سيتم حذف حسابك وسجل مهامك وصلاحية دخولك نهائياً.",
@@ -193,8 +193,6 @@ interface DriverAccountScreenProps {
   lang: Language;
   driverId: string;
   driver: Driver | null;
-  theme: "light" | "dark";
-  onThemeChange: (theme: "light" | "dark") => void;
   onLanguageChange?: (lang: Language) => void;
   onLogout?: () => void;
   onDriverUpdated: (driver: Driver) => void;
@@ -205,8 +203,6 @@ export default function DriverAccountScreen({
   lang,
   driverId,
   driver,
-  theme,
-  onThemeChange,
   onLanguageChange,
   onLogout,
   onDriverUpdated,
@@ -225,6 +221,7 @@ export default function DriverAccountScreen({
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const avatarFileRef = useRef<HTMLInputElement>(null);
 
   const syncFromDriver = () => {
@@ -506,16 +503,16 @@ export default function DriverAccountScreen({
       <h2 className={SCREEN_TITLE}>{t.title}</h2>
 
       {/* ── Profile card ── */}
-      <section className="bg-slate-900 border border-slate-800/60 rounded-3xl p-5 space-y-4">
+      <section className="bg-white border border-slate-200 rounded-3xl p-5 space-y-4">
         <div className="flex items-center gap-4">
           <div className="relative shrink-0">
-            <div className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center text-white font-bold text-lg border-2 border-slate-800 bg-slate-800">
+            <div className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center text-white font-bold text-lg border-2 border-slate-200 bg-slate-100">
               {isUploadingAvatar ? (
                 <Loader2 className="w-5 h-5 animate-spin text-orange-500" />
               ) : profileAvatarUrl ? (
                 <img src={profileAvatarUrl} alt={profileName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
               ) : (
-                <div className="w-full h-full bg-orange-500 flex items-center justify-center light-preserve">{initials}</div>
+                <div className="w-full h-full bg-orange-500 flex items-center justify-center">{initials}</div>
               )}
             </div>
             <input type="file" ref={avatarFileRef} accept="image/*" className="hidden" onChange={handleUploadAvatar} />
@@ -524,16 +521,16 @@ export default function DriverAccountScreen({
               onClick={() => avatarFileRef.current?.click()}
               disabled={isUploadingAvatar}
               aria-label={t.changePhoto}
-              className="absolute -bottom-1 -end-1 w-8 h-8 rounded-full bg-slate-950 border border-slate-700 text-orange-500 flex items-center justify-center cursor-pointer active:scale-95"
+              className="absolute -bottom-1 -end-1 w-8 h-8 rounded-full bg-slate-50 border border-slate-300 text-orange-500 flex items-center justify-center cursor-pointer active:scale-95"
             >
               <Camera className="w-4 h-4" />
             </button>
           </div>
           <div className="min-w-0 text-start">
-            <h3 className="text-lg font-bold text-white truncate tracking-tight">{profileName || "—"}</h3>
-            <p className="text-sm text-slate-400 truncate">@{profileUsername || "driver"}</p>
-            <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-bold text-slate-200 bg-slate-950 border border-slate-700/60 rounded-lg px-2 py-1 tabular-nums">
-              <Truck className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+            <h3 className="text-lg font-bold text-slate-900 truncate tracking-tight">{profileName || "—"}</h3>
+            <p className="text-sm text-slate-500 truncate">@{profileUsername || "driver"}</p>
+            <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 tabular-nums">
+              <Truck className="w-3.5 h-3.5 shrink-0 text-slate-400" />
               <span className="truncate">{profileTruckNumber || "—"}</span>
             </p>
           </div>
@@ -548,19 +545,19 @@ export default function DriverAccountScreen({
                 { icon: Truck, label: t.truckNumber, value: profileTruckNumber },
                 { icon: Truck, label: t.truckType, value: truckTypeLabel },
               ].map((row, i) => (
-                <div key={row.label} className={`flex items-center justify-between gap-3 py-2.5 ${i > 0 ? "border-t border-slate-800/60" : ""}`}>
-                  <dt className="text-slate-500 flex items-center gap-2 shrink-0">
+                <div key={row.label} className={`flex items-center justify-between gap-3 py-2.5 ${i > 0 ? "border-t border-slate-200" : ""}`}>
+                  <dt className="text-slate-400 flex items-center gap-2 shrink-0">
                     <row.icon className="w-4 h-4" />
                     {row.label}
                   </dt>
-                  <dd className="font-semibold text-slate-200 text-end truncate selectable">{row.value || "—"}</dd>
+                  <dd className="font-semibold text-slate-800 text-end truncate selectable">{row.value || "—"}</dd>
                 </div>
               ))}
             </dl>
             <button
               type="button"
               onClick={() => setIsEditingProfile(true)}
-              className="w-full min-h-[48px] bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
+              className="w-full min-h-[48px] bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-800 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
             >
               <Edit2 className="w-4 h-4 shrink-0" />
               <span>{t.edit}</span>
@@ -575,25 +572,25 @@ export default function DriverAccountScreen({
               { label: t.truckNumber, value: profileTruckNumber, set: setProfileTruckNumber },
             ].map((field) => (
               <div key={field.label} className="text-start">
-                <label className="text-xs font-semibold text-slate-400 block mb-1">{field.label}</label>
+                <label className="text-xs font-semibold text-slate-500 block mb-1">{field.label}</label>
                 <input
                   type="text"
                   required
                   value={field.value}
                   onChange={(e) => field.set(e.target.value)}
-                  className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-sm text-slate-200 rounded-2xl outline-none transition-colors"
+                  className="w-full min-h-[48px] px-3.5 bg-slate-50 border border-slate-200 focus:border-blue-400 text-sm text-slate-800 rounded-2xl outline-none transition-colors"
                 />
               </div>
             ))}
             <div className="text-start">
-              <label className="text-xs font-semibold text-slate-400 block mb-1">{t.truckType}</label>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">{t.truckType}</label>
               <select
                 value={profileTruckType}
                 onChange={(e) => setProfileTruckType(e.target.value)}
-                className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 text-sm text-slate-200 rounded-2xl outline-none cursor-pointer"
+                className="w-full min-h-[48px] px-3.5 bg-slate-50 border border-slate-200 text-sm text-slate-800 rounded-2xl outline-none cursor-pointer"
               >
                 {TRUCK_TYPES.map((type) => (
-                  <option key={type.id} value={type.id} className="bg-slate-950 text-white">
+                  <option key={type.id} value={type.id} className="bg-white text-slate-900">
                     {lang === "en" ? type.en : lang === "tr" ? type.tr : type.ar}
                   </option>
                 ))}
@@ -607,14 +604,14 @@ export default function DriverAccountScreen({
                   setIsEditingProfile(false);
                 }}
                 disabled={isSavingProfile}
-                className="flex-1 min-h-[48px] bg-slate-950 border border-slate-700 text-slate-300 font-bold text-sm rounded-2xl transition-all cursor-pointer active:scale-95"
+                className="flex-1 min-h-[48px] bg-slate-50 border border-slate-300 text-slate-600 font-bold text-sm rounded-2xl transition-all cursor-pointer active:scale-95"
               >
                 {t.cancel}
               </button>
               <button
                 type="submit"
                 disabled={isSavingProfile}
-                className="flex-1 min-h-[48px] bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-white font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 light-preserve"
+                className="flex-1 min-h-[48px] bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
               >
                 {isSavingProfile ? <span>{t.saving}</span> : (<><Check className="w-4 h-4 shrink-0" /><span>{t.save}</span></>)}
               </button>
@@ -624,24 +621,24 @@ export default function DriverAccountScreen({
       </section>
 
       {/* ── Settings ── */}
-      <section className="bg-slate-900 border border-slate-800/60 rounded-3xl p-5 space-y-4">
-        <h3 className="text-sm font-bold text-slate-200 text-start">{t.settings}</h3>
+      <section className="bg-white border border-slate-200 rounded-3xl p-5 space-y-4">
+        <h3 className="text-sm font-bold text-slate-800 text-start">{t.settings}</h3>
 
         {/* Availability status — read-only; the switch itself is on Home */}
         <div
           className={`w-full flex items-center gap-3 min-h-[52px] px-3.5 border rounded-2xl text-start ${
-            offersEnabled ? "bg-orange-500/10 border-orange-500/40" : "bg-slate-950 border-slate-800"
+            offersEnabled ? "bg-orange-50 border-orange-200" : "bg-slate-50 border-slate-200"
           }`}
         >
-          <Megaphone className={`w-5 h-5 shrink-0 ${offersEnabled ? "text-orange-400" : "text-slate-500"}`} />
+          <Megaphone className={`w-5 h-5 shrink-0 ${offersEnabled ? "text-orange-600" : "text-slate-400"}`} />
           <span className="min-w-0 flex-1">
-            <span className="block text-sm font-bold text-slate-200">{t.offersToggle}</span>
-            <span className={`block text-xs ${offersEnabled ? "text-orange-400/90" : "text-slate-500"}`}>
+            <span className="block text-sm font-bold text-slate-800">{t.offersToggle}</span>
+            <span className={`block text-xs ${offersEnabled ? "text-orange-600" : "text-slate-400"}`}>
               {offersEnabled ? t.offersOn : t.offersOff}
             </span>
           </span>
           <span className={`shrink-0 text-xs font-bold rounded-full px-2.5 py-1 border ${
-            offersEnabled ? "bg-orange-500/10 border-orange-500/40 text-orange-400" : "bg-slate-900 border-slate-700 text-slate-400"
+            offersEnabled ? "bg-orange-50 border-orange-200 text-orange-600" : "bg-white border-slate-300 text-slate-500"
           }`}>
             {t.statusOnHome}
           </span>
@@ -649,16 +646,16 @@ export default function DriverAccountScreen({
 
         {/* Registered routes — managed by MARAS Operations, read-only here */}
         <div className="text-start space-y-2">
-          <p className="text-sm text-slate-400 flex items-center gap-2">
+          <p className="text-sm text-slate-500 flex items-center gap-2">
             <Route className="w-4 h-4" />
             {t.routes}
           </p>
           {(driver?.workingRoutes || []).filter((r) => r.active).length === 0 ? (
-            <p className="text-xs text-slate-500">{t.routesEmpty}</p>
+            <p className="text-xs text-slate-400">{t.routesEmpty}</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {(driver?.workingRoutes || []).filter((r) => r.active).map((r) => (
-                <span key={r.id} className="inline-flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-bold text-slate-200">
+                <span key={r.id} className="inline-flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-bold text-slate-800">
                   <span>{r.from}</span>
                   <ArrowRight className="w-3 h-3 text-orange-500 rtl:rotate-180" />
                   <span>{r.to}</span>
@@ -666,12 +663,12 @@ export default function DriverAccountScreen({
               ))}
             </div>
           )}
-          <p className="text-xs text-slate-500">{t.routesManaged}</p>
+          <p className="text-xs text-slate-400">{t.routesManaged}</p>
         </div>
 
         {/* Language */}
         <div className="text-start space-y-2">
-          <p className="text-sm text-slate-400 flex items-center gap-2">
+          <p className="text-sm text-slate-500 flex items-center gap-2">
             <Globe className="w-4 h-4" />
             {t.language}
           </p>
@@ -690,8 +687,8 @@ export default function DriverAccountScreen({
                   aria-pressed={isActive}
                   className={`min-h-[48px] rounded-2xl border text-sm font-bold transition-colors cursor-pointer ${
                     isActive
-                      ? "bg-orange-500/10 border-orange-500/50 text-orange-400"
-                      : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600"
+                      ? "bg-orange-50 border-orange-200 text-orange-600"
+                      : "bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300"
                   }`}
                 >
                   {opt.label}
@@ -701,70 +698,57 @@ export default function DriverAccountScreen({
           </div>
         </div>
 
-        {/* Appearance */}
-        <div className="text-start space-y-2">
-          <p className="text-sm text-slate-400 flex items-center gap-2">
-            {theme === "dark" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            {t.appearance}
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => onThemeChange("light")}
-              aria-pressed={theme === "light"}
-              className={`min-h-[48px] rounded-2xl border text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
-                theme === "light"
-                  ? "bg-orange-500/10 border-orange-500/50 text-orange-400"
-                  : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600"
-              }`}
-            >
-              <Sun className="w-4 h-4 shrink-0" />
-              <span className="text-start leading-tight">{t.lightMode}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onThemeChange("dark")}
-              aria-pressed={theme === "dark"}
-              className={`min-h-[48px] rounded-2xl border text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
-                theme === "dark"
-                  ? "bg-orange-500/10 border-orange-500/50 text-orange-400"
-                  : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600"
-              }`}
-            >
-              <Moon className="w-4 h-4 shrink-0" />
-              <span className="text-start leading-tight">{t.darkMode}</span>
-            </button>
-          </div>
-        </div>
-
         {/* Privacy */}
         <button
           type="button"
           onClick={() => setShowPrivacyPolicy(true)}
-          className="w-full flex items-center gap-3 min-h-[52px] px-3.5 bg-slate-950 border border-slate-800 hover:border-slate-600 rounded-2xl text-start transition-colors cursor-pointer"
+          className="w-full flex items-center gap-3 min-h-[52px] px-3.5 bg-slate-50 border border-slate-200 hover:border-slate-300 rounded-2xl text-start transition-colors cursor-pointer"
         >
           <Shield className="w-5 h-5 text-orange-500 shrink-0" />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-slate-200">{t.privacy}</span>
-            <span className="block text-xs text-slate-500">{t.privacySub}</span>
+            <span className="block text-sm font-bold text-slate-800">{t.privacy}</span>
+            <span className="block text-xs text-slate-400">{t.privacySub}</span>
           </span>
         </button>
       </section>
 
-      {/* ── Logout ── */}
+      {/* ── Logout — Revision A: always confirmed, never immediate ── */}
       {onLogout && (
-        <button
-          type="button"
-          onClick={onLogout}
-          className="w-full min-h-[52px] bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
-        >
-          <LogOut className="w-4 h-4 shrink-0 text-red-400 rtl:-scale-x-100" />
-          <span>{t.logout}</span>
-        </button>
+        !showLogoutConfirm ? (
+          <button
+            type="button"
+            onClick={() => setShowLogoutConfirm(true)}
+            className="w-full min-h-[52px] bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
+          >
+            <LogOut className="w-4 h-4 shrink-0 text-red-600 rtl:-scale-x-100" />
+            <span>{t.logout}</span>
+          </button>
+        ) : (
+          <div className="bg-white border border-slate-200 rounded-3xl p-4 space-y-3 animate-fade-in shadow-[0_10px_30px_-12px_rgba(15,27,45,0.1)]">
+            <p className="text-sm font-bold text-slate-800 text-start">{t.logoutConfirmTitle}</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setShowLogoutConfirm(false)}
+                className="min-h-[48px] bg-slate-50 border border-slate-200 text-slate-600 font-bold text-sm rounded-2xl transition-all cursor-pointer active:scale-95"
+              >
+                {t.logoutCancel}
+              </button>
+              <button
+                type="button"
+                onClick={onLogout}
+                className="min-h-[48px] bg-red-600 hover:bg-red-700 text-white font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+              >
+                <LogOut className="w-4 h-4 shrink-0 rtl:-scale-x-100" />
+                <span>{t.logoutConfirm}</span>
+              </button>
+            </div>
+          </div>
+        )
       )}
 
       {/* ── Delete account (existing protected workflow) ── */}
-      <section className="pt-2 border-t border-slate-800">
+      <section className="pt-2 border-t border-slate-200">
         {!showDeleteConfirm ? (
           <button
             type="button"
@@ -776,19 +760,19 @@ export default function DriverAccountScreen({
               setDeletePasswordStepError(null);
               setDeleteCurrentPassword("");
             }}
-            className="w-full min-h-[52px] bg-red-950/20 hover:bg-red-950/40 border border-red-900/40 text-red-400 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer"
+            className="w-full min-h-[52px] bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 font-bold text-sm rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
             <Trash2 className="w-4 h-4 shrink-0" />
             <span>{t.deleteButton}</span>
           </button>
         ) : (
-          <div className="bg-slate-900 p-4 rounded-3xl border border-red-900/30 space-y-3 animate-fade-in">
-            <div className="flex items-start gap-2.5 text-red-400">
+          <div className="bg-white p-4 rounded-3xl border border-red-900/30 space-y-3 animate-fade-in">
+            <div className="flex items-start gap-2.5 text-red-600">
               <ShieldAlert className="w-5 h-5 shrink-0 mt-0.5" />
               <div className="text-start">
                 <h4 className="text-sm font-bold">{t.deleteTitle}</h4>
-                <p className="text-xs text-slate-400 leading-snug mt-1">{t.deleteWarning}</p>
-                <p className="text-xs text-slate-500 leading-snug mt-2 pt-2 border-t border-slate-800">
+                <p className="text-xs text-slate-500 leading-snug mt-1">{t.deleteWarning}</p>
+                <p className="text-xs text-slate-400 leading-snug mt-2 pt-2 border-t border-slate-200">
                   {accountDeletionCopy(lang).privacyNotice}
                 </p>
               </div>
@@ -796,7 +780,7 @@ export default function DriverAccountScreen({
 
             {!auth.currentUser && !backendRecordDeleted && (
               <div className="text-start">
-                <label className="text-xs font-semibold text-slate-400 block mb-1">
+                <label className="text-xs font-semibold text-slate-500 block mb-1">
                   {accountDeletionCopy(lang).passwordLabel}
                 </label>
                 <input
@@ -805,13 +789,13 @@ export default function DriverAccountScreen({
                   value={deleteCurrentPassword}
                   onChange={(e) => setDeleteCurrentPassword(e.target.value)}
                   placeholder={accountDeletionCopy(lang).passwordPlaceholder}
-                  className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-red-500/60 text-sm text-slate-200 rounded-2xl outline-none transition-colors"
+                  className="w-full min-h-[48px] px-3.5 bg-slate-50 border border-slate-200 focus:border-red-300 text-sm text-slate-800 rounded-2xl outline-none transition-colors"
                 />
               </div>
             )}
 
             {deletePasswordStepError && (
-              <div className="bg-red-950/30 border border-red-800/40 rounded-2xl p-3 text-xs text-red-300 leading-snug text-start">
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-3 text-xs text-red-600 leading-snug text-start">
                 {deletePasswordStepError === "missing"
                   ? accountDeletionCopy(lang).missingPasswordError
                   : deletePasswordStepError === "incorrect"
@@ -830,7 +814,7 @@ export default function DriverAccountScreen({
                 checked={understandDelete}
                 disabled={backendRecordDeleted}
                 onChange={(e) => setUnderstandDelete(e.target.checked)}
-                className="w-4 h-4 mt-0.5 rounded border-slate-700 bg-slate-950 accent-red-500 cursor-pointer disabled:opacity-60"
+                className="w-4 h-4 mt-0.5 rounded border-slate-300 bg-slate-50 accent-red-500 cursor-pointer disabled:opacity-60"
               />
               <span className="leading-snug text-start">{t.deleteConsent}</span>
             </label>
@@ -839,7 +823,7 @@ export default function DriverAccountScreen({
               deletionState === "reauthentication_required" ||
               deletionState === "firebase_identity_deletion_failed" ||
               deletionState === "firebase_identity_deletion_unresolved") && (
-              <div className="bg-red-950/30 border border-red-800/40 rounded-2xl p-3 text-xs text-red-300 leading-snug text-start">
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-3 text-xs text-red-600 leading-snug text-start">
                 {deletionState === "backend_failure"
                   ? driverAccountDeletionCopy(lang).backendFailure
                   : deletionState === "reauthentication_required"
@@ -864,7 +848,7 @@ export default function DriverAccountScreen({
                   }
                   setShowDeleteConfirm(false);
                 }}
-                className="flex-1 min-h-[48px] bg-slate-950 border border-slate-700 text-slate-300 text-sm font-bold rounded-2xl transition-all cursor-pointer"
+                className="flex-1 min-h-[48px] bg-slate-50 border border-slate-300 text-slate-600 text-sm font-bold rounded-2xl transition-all cursor-pointer"
               >
                 {backendRecordDeleted ? driverAccountDeletionCopy(lang).logOutButton : t.keepAccount}
               </button>
@@ -872,7 +856,7 @@ export default function DriverAccountScreen({
                 type="button"
                 disabled={isDeleting || !understandDelete}
                 onClick={deletionState === "firebase_identity_deletion_unresolved" ? handleFinishFirebaseDeletion : handleDeleteAccount}
-                className="flex-1 min-h-[48px] bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold text-sm rounded-2xl transition-all cursor-pointer flex items-center justify-center gap-1.5 light-preserve"
+                className="flex-1 min-h-[48px] bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold text-sm rounded-2xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
               >
                 {isDeleting ? (
                   <Loader2 className="w-4 h-4 animate-spin shrink-0" />

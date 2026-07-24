@@ -41,6 +41,16 @@ export interface DriverLocationReporting {
   requestImmediateFix: (onUnavailable?: () => void) => void;
 }
 
+/**
+ * Revision A trust fix: the "checking your location…" UI state must never
+ * persist indefinitely (e.g. the OS permission prompt is left unanswered,
+ * so getCurrentPosition neither succeeds nor errors). After this timeout
+ * with no answer, the UI state falls to the honest "unavailable" (false).
+ * Presentation-only: no coordinates are ever fabricated, no transmission
+ * behavior changes, and a later real fix still flips the state to true.
+ */
+export const GPS_CHECKING_TIMEOUT_MS = 20000;
+
 export function useDriverLocationReporting(options: {
   driverId: string;
   /** Location reporting window — from the shared active-job rule, never UI selection. */
@@ -198,6 +208,19 @@ export function useDriverLocationReporting(options: {
     const interval = setInterval(() => pollOnce(), GPS_DEFAULT_UPDATE_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [isActive, driverId, pollOnce]);
+
+  // Revision A trust fix: while reporting is active but the very first
+  // fix has neither succeeded nor errored (gpsAvailable still null —
+  // typically an unanswered OS permission prompt), fall to the honest
+  // "unavailable" state after GPS_CHECKING_TIMEOUT_MS instead of showing
+  // "checking…" forever. UI state only; a real fix later still wins.
+  useEffect(() => {
+    if (!isActive || gpsAvailable !== null) return;
+    const timer = setTimeout(() => {
+      setGpsAvailable((prev) => (prev === null ? false : prev));
+    }, GPS_CHECKING_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [isActive, gpsAvailable]);
 
   return {
     gpsAvailable,

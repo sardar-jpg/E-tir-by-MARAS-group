@@ -194,6 +194,13 @@ describe("resolveDriverAgreedAmount", () => {
     expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-2")).toBeNull();
     expect(resolveDriverAgreedAmount(shipment as Shipment, "driver-3")).toBeNull();
   });
+
+  it("returns null (honest unavailable — never 0) when the primary driver has no agreed amount on file", () => {
+    const shipment = makeShipment({ assignedDriverId: "driver-1" });
+    const result = resolveDriverAgreedAmount(shipment as Shipment, "driver-1");
+    expect(result).toBeNull();
+    expect(result).not.toBe(0);
+  });
 });
 
 describe("resolveDriverTruckNumber", () => {

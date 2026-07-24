@@ -35,18 +35,18 @@ export default function DriverChatEmptyState({ lang, onOpenJob }: DriverChatEmpt
   const t = LABELS[lang] ?? LABELS.en;
   return (
     <div className="h-full flex items-center justify-center p-6">
-      <div className="w-full max-w-[320px] py-12 text-center space-y-4 bg-slate-900 rounded-3xl p-6 border border-slate-800/60">
-        <div className="w-14 h-14 rounded-full bg-slate-950 border border-slate-800/60 flex items-center justify-center mx-auto">
+      <div className="w-full max-w-[320px] py-12 text-center space-y-4 bg-white rounded-3xl p-6 border border-slate-200">
+        <div className="w-14 h-14 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center mx-auto">
           <MessageSquare className="w-7 h-7 text-slate-600 shrink-0" />
         </div>
         <div>
-          <p className="text-base font-bold text-slate-200">{t.title}</p>
-          <p className="text-sm text-slate-500 mt-1.5 leading-relaxed">{t.body}</p>
+          <p className="text-base font-bold text-slate-800">{t.title}</p>
+          <p className="text-sm text-slate-400 mt-1.5 leading-relaxed">{t.body}</p>
         </div>
         <button
           type="button"
           onClick={onOpenJob}
-          className="w-full min-h-[56px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer light-preserve"
+          className="w-full min-h-[56px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-[0.98] cursor-pointer"
         >
           <Briefcase className="w-5 h-5 shrink-0" />
           <span>{t.openJob}</span>

@@ -2,14 +2,16 @@ import { FileText, Image as ImageIcon, Send } from "lucide-react";
 import type { Language, ShipmentDocument } from "../../types";
 
 /**
- * feature/driver-app-comprehensive-redesign — documents section of the
- * job details view. Shows the documents MARAS shared with this driver
- * (the list is already filtered server-side by isDocumentVisibleToDriver
- * — buildShipmentViewForRole; nothing here re-decides visibility). The
- * driver's only upload path remains the chat attachment flow (photo /
- * general document — CMR and other controlled categories are not
- * creatable by drivers, enforced server-side), so the upload action here
- * hands off to chat rather than inventing a second upload pipeline.
+ * feature/driver-app-comprehensive-redesign (Revision A) — the Files
+ * section of the job details view. Shows the files MARAS shared with
+ * this driver (the list is already filtered server-side by
+ * isDocumentVisibleToDriver — buildShipmentViewForRole; nothing here
+ * re-decides visibility, and internal invoices never reach this list).
+ * The driver's only upload path remains the CHAT attachment flow (photo
+ * / general file — CMR and other controlled categories are not
+ * creatable by drivers, enforced server-side), so the attach action
+ * here hands off to chat rather than inventing a second upload
+ * pipeline. Neutral wording only — there is no Documents module.
  */
 const LABELS: Record<Language, {
   empty: string;
@@ -18,21 +20,21 @@ const LABELS: Record<Language, {
   sendViaChatSub: string;
 }> = {
   en: {
-    empty: "No documents shared with you yet.",
+    empty: "No files shared with you yet.",
     view: "Open",
-    sendViaChat: "Send a photo or document",
+    sendViaChat: "Attach a photo or file",
     sendViaChatSub: "Delivery papers and cargo photos go to MARAS through chat.",
   },
   tr: {
-    empty: "Henüz sizinle paylaşılan belge yok.",
+    empty: "Henüz sizinle paylaşılan dosya yok.",
     view: "Aç",
-    sendViaChat: "Fotoğraf veya belge gönder",
+    sendViaChat: "Fotoğraf veya dosya ekle",
     sendViaChatSub: "Teslimat evrakları ve yük fotoğrafları MARAS'a mesajlaşma üzerinden gönderilir.",
   },
   ar: {
-    empty: "لا توجد مستندات تمت مشاركتها معك بعد.",
+    empty: "لا توجد ملفات تمت مشاركتها معك بعد.",
     view: "فتح",
-    sendViaChat: "إرسال صورة أو مستند",
+    sendViaChat: "إرفاق صورة أو ملف",
     sendViaChatSub: "تُرسل أوراق التسليم وصور الحمولة إلى MARAS عبر المحادثة.",
   },
 };
@@ -64,16 +66,16 @@ export default function DriverDocumentSection({
                 href={d.url}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-3 p-3 min-h-[56px] bg-slate-950 border border-slate-800/60 rounded-2xl hover:border-orange-500/40 transition-colors cursor-pointer"
+                className="flex items-center gap-3 p-3 min-h-[56px] bg-slate-50 border border-slate-200 rounded-2xl hover:border-blue-300 transition-colors cursor-pointer"
               >
-                <span className="w-10 h-10 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-500 flex items-center justify-center shrink-0">
+                <span className="w-10 h-10 rounded-xl bg-red-50 text-red-500 flex items-center justify-center shrink-0">
                   {d.category === "photo" ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
                 </span>
                 <span className="min-w-0 flex-1 text-start">
-                  <span className="block text-sm font-semibold text-slate-200 truncate">{d.name}</span>
-                  <span className="block text-xs text-slate-500 uppercase mt-0.5">{d.category}</span>
+                  <span className="block text-sm font-bold text-slate-800 truncate">{d.name}</span>
+                  <span className="block text-xs text-slate-400 font-semibold uppercase mt-0.5">{d.category}</span>
                 </span>
-                <span className="text-xs font-bold text-slate-400 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 shrink-0">
+                <span className="text-xs font-bold text-blue-700 bg-blue-50 rounded-full px-3 py-1.5 shrink-0">
                   {t.view}
                 </span>
               </a>
@@ -81,21 +83,21 @@ export default function DriverDocumentSection({
           ))}
         </ul>
       ) : (
-        <p className="text-sm text-slate-500 text-start py-2">{t.empty}</p>
+        <p className="text-sm text-slate-400 text-start py-2">{t.empty}</p>
       )}
 
       {canSendDocuments && (
         <button
           type="button"
           onClick={onSendDocumentViaChat}
-          className="w-full flex items-center gap-3 p-3 min-h-[56px] bg-slate-900 border border-slate-700 border-dashed rounded-2xl hover:border-orange-500/50 text-start transition-colors cursor-pointer"
+          className="w-full flex items-center gap-3 p-3 min-h-[56px] bg-white border border-slate-300 border-dashed rounded-2xl hover:border-blue-400 text-start transition-colors cursor-pointer"
         >
-          <span className="w-10 h-10 rounded-xl bg-slate-950 border border-slate-800 text-orange-500 flex items-center justify-center shrink-0">
+          <span className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
             <Send className="w-5 h-5" />
           </span>
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-slate-200">{t.sendViaChat}</span>
-            <span className="block text-xs text-slate-500 mt-0.5 leading-snug">{t.sendViaChatSub}</span>
+            <span className="block text-sm font-bold text-slate-800">{t.sendViaChat}</span>
+            <span className="block text-xs text-slate-400 font-medium mt-0.5 leading-snug">{t.sendViaChatSub}</span>
           </span>
         </button>
       )}
