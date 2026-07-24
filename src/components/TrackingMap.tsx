@@ -429,7 +429,6 @@ const LABELS = {
     noData: "Not confirmed",
     completedLabel: "Completed",
     tabOverview: "Overview",
-    tabDocuments: "Documents",
     tabChat: "Chat",
     currentLocation: "Current Location",
     borderShort: "Ibrahim Khalil Border",
@@ -438,7 +437,6 @@ const LABELS = {
     notCalculated: "Not calculated yet",
     openChatSub: "Discuss with operations",
     viewDetailsSub: "View full shipment info",
-    noDocuments: "No documents uploaded yet.",
     docsChatNote: "Shipment documents are managed inside the shipment chat.",
     etaSection: "ETA & Distance",
     estimatedTag: "Estimated",
@@ -520,7 +518,6 @@ const LABELS = {
     noData: "Doğrulanmadı",
     completedLabel: "Tamamlandı",
     tabOverview: "Genel Bakış",
-    tabDocuments: "Belgeler",
     tabChat: "Sohbet",
     currentLocation: "Mevcut Konum",
     borderShort: "İbrahim Halil Sınır Kapısı",
@@ -529,7 +526,6 @@ const LABELS = {
     notCalculated: "Henüz hesaplanmadı",
     openChatSub: "Operasyon ekibiyle görüşün",
     viewDetailsSub: "Tüm sevkiyat bilgisini görün",
-    noDocuments: "Henüz belge yüklenmedi.",
     docsChatNote: "Sevkiyat belgeleri sevkiyat sohbetinde yönetilir.",
     etaSection: "ETA ve Mesafe",
     estimatedTag: "Tahmini",
@@ -611,7 +607,6 @@ const LABELS = {
     noData: "غير مؤكد",
     completedLabel: "مكتمل",
     tabOverview: "نظرة عامة",
-    tabDocuments: "المستندات",
     tabChat: "المحادثة",
     currentLocation: "الموقع الحالي",
     borderShort: "منفذ إبراهيم الخليل",
@@ -620,7 +615,6 @@ const LABELS = {
     notCalculated: "لم يُحسب بعد",
     openChatSub: "تواصل مع فريق العمليات",
     viewDetailsSub: "عرض معلومات الشحنة كاملة",
-    noDocuments: "لا توجد مستندات مرفوعة بعد.",
     docsChatNote: "تُدار مستندات الشحنة داخل محادثة الشحنة.",
     etaSection: "الوقت المتوقع والمسافة",
     estimatedTag: "تقديري",
@@ -735,11 +729,11 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
   const [etaError, setEtaError] = useState<string | null>(null);
   const [etaForId, setEtaForId] = useState<string | null>(null);
 
-  // Details drawer tab (per the approved design): Overview is the summary;
-  // Documents is a READ-ONLY listing of the shipment's existing documents
-  // array; Chat routes to the existing Chat Center thread. No new document
-  // or chat surfaces/APIs are introduced here.
-  const [drawerTab, setDrawerTab] = useState<'overview' | 'documents' | 'chat'>('overview');
+  // Details drawer tab: Overview is the operational summary; Chat routes to
+  // the existing Chat Center thread. There is deliberately NO Documents tab —
+  // in eTIR, shipment documents are uploaded, viewed and exchanged inside the
+  // shipment chat, so chat is the single place for messages and documents.
+  const [drawerTab, setDrawerTab] = useState<'overview' | 'chat'>('overview');
 
   // feature/admin-mobile-ui correction pass: single source of truth
   // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
@@ -2089,13 +2083,16 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                 </div>
               )}
 
-              {/* Selected-shipment details drawer — per the official design:
-                  header + Overview/Documents/Chat tabs; Overview holds route,
-                  driver, current location, tracking source, last update, the
-                  honest Journey Progress timeline, ETA & Distance, and the two
-                  navigation action cards. Documents is a READ-ONLY list of the
-                  shipment's existing documents; Chat routes to the existing
-                  Chat Center thread. No new chat/document surfaces or APIs. */}
+              {/* Selected-shipment details drawer — header + Overview/Chat
+                  tabs; Overview holds route, driver, current location,
+                  tracking source, last update, the honest Journey Progress
+                  timeline, ETA & Distance, and the two navigation action
+                  cards. There is deliberately NO Documents tab/list/action:
+                  in eTIR, shipment documents live inside the shipment chat
+                  between the relevant parties, so the Chat tab (and the Open
+                  Chat action) route to the existing Chat Center thread where
+                  messages AND documents are already managed. No new chat or
+                  document surfaces or APIs. */}
               {selectedShipment && (() => {
                 const gpsState = getShipmentGpsState(selectedShipment);
                 const colors = stateColors(gpsState);
@@ -2107,7 +2104,6 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                   : gpsState === "estimated" ? t.trackEstimated
                   : t.trackUnavailable;
                 const loc = getShipmentVectorLocation(selectedShipment);
-                const docs = selectedShipment.documents || [];
                 const closeDrawer = () => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); setDrawerTab('overview'); };
                 return (
                 <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[318px]">
@@ -2125,11 +2121,10 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                         <X className="w-4 h-4" />
                       </button>
                     </div>
-                    {/* Tabs */}
+                    {/* Tabs — Overview and Chat only (documents live in chat) */}
                     <div className="px-3.5 flex items-center gap-4 text-[11px] font-bold">
                       {([
                         { id: 'overview' as const, label: t.tabOverview },
-                        { id: 'documents' as const, label: `${t.tabDocuments} (${docs.length})` },
                         { id: 'chat' as const, label: t.tabChat },
                       ]).map(tab => (
                         <button
@@ -2145,32 +2140,9 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                     </div>
                   </div>
 
-                  {drawerTab === 'documents' ? (
-                    /* READ-ONLY listing of the shipment's existing documents. */
-                    <div className="p-3.5 space-y-2">
-                      {docs.length === 0 ? (
-                        <p className="text-[11px] text-slate-400 py-4 text-center">{t.noDocuments}</p>
-                      ) : docs.map(doc => (
-                        <a
-                          key={doc.id}
-                          href={doc.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-2.5 p-2.5 rounded-lg border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all"
-                        >
-                          <span className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
-                            <FileText className="w-4 h-4 text-slate-500" />
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block text-[11px] font-semibold text-slate-700 truncate">{doc.name}</span>
-                            <span className="block text-[9.5px] text-slate-400 truncate">{doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleDateString() : ""}</span>
-                          </span>
-                        </a>
-                      ))}
-                      <p className="text-[9.5px] text-slate-400 pt-1">{t.docsChatNote}</p>
-                    </div>
-                  ) : drawerTab === 'chat' ? (
-                    /* Chat lives in the existing Chat Center — route there. */
+                  {drawerTab === 'chat' ? (
+                    /* Chat lives in the existing Chat Center — messages AND
+                       shipment documents are managed there. Route to it. */
                     <div className="p-3.5 space-y-3 text-center">
                       <span className="mx-auto mt-2 flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400">
                         <MessageSquare className="w-5 h-5" />
