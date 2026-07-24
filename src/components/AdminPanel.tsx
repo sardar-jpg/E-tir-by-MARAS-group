@@ -95,6 +95,7 @@ import MobileOrdersList from "./admin/mobile/MobileOrdersList";
 const TrackingMap = React.lazy(() => import("./TrackingMap"));
 const ChatCenter = React.lazy(() => import("./admin/ChatCenter"));
 const AdminDashboardSection = React.lazy(() => import("./admin/sections/AdminDashboardSection"));
+import ShipmentOperationsCenter from "./admin/sections/ShipmentOperationsCenter";
 const AdminReportsSection = React.lazy(() => import("./admin/sections/AdminReportsSection"));
 const AdminCostsSection = React.lazy(() => import("./admin/sections/AdminCostsSection"));
 const AdminClientsSection = React.lazy(() => import("./admin/sections/AdminClientsSection"));
@@ -5100,243 +5101,64 @@ MARAS Group etir Center`;
               </div>
             </div>
           ) : (
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-4">
-            <div className="flex flex-col gap-4 w-full">
-              {/* Row 1: Search & Shipment Type */}
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 w-full">
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search by Shipment #, Container, BL, AWB, Company, Vessel, Airline..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-9 pr-8 py-2 bg-slate-50 hover:bg-slate-100 focus:bg-white text-xs border border-slate-200 focus:border-slate-400 rounded-lg focus:outline-none transition-all"
-                  />
-                  {searchQuery && (
-                    <button
-                      onClick={() => setSearchQuery("")}
-                      className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-900"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-500 text-xs font-semibold whitespace-nowrap">Shipment Type:</span>
-                  <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
-                    {([
-                      { id: 'all', label: 'All' },
-                      { id: 'land', label: 'Land Freight' },
-                      { id: 'sea', label: 'Sea Freight' },
-                      { id: 'air', label: 'Air Freight' }
-                    ] as const).map(type => (
-                      <button
-                        key={type.id}
-                        type="button"
-                        onClick={() => {
-                          setStatusFilter("all");
-                          setTypeFilter(type.id);
-                        }}
-                        className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
-                          typeFilter === type.id
-                            ? 'bg-white text-slate-950 shadow-xs font-bold'
-                            : 'text-slate-500 hover:text-slate-900'
-                        }`}
-                      >
-                        {type.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Row 2: Status Badges (Dependent on Freight Type) */}
-              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
-                <span className="text-slate-500 text-xs font-semibold flex items-center gap-1">
-                  <Filter className="w-4 h-4" /> Status Indicator:
-                </span>
-
-                {/* Dynamically list candidate statuses depending on freight type */}
-                {(typeFilter === 'sea'
-                  ? ['all', 'active', 'Booking Confirmed', 'Container Released', 'Loaded on Vessel', 'Vessel Departed', 'In Transit', 'Arrived at Port', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                  : typeFilter === 'air'
-                    ? ['all', 'active', 'Booking Confirmed', 'Cargo Received', 'Security Check Completed', 'Departed Airport', 'In Transit', 'Arrived Airport', 'Customs Clearance', 'Released', 'Out for Delivery', 'Delivered', 'Completed']
-                    : ['all', 'active', 'New', 'Waiting for Driver Quotes', 'Assigned', 'Accepted', 'Loading', 'Loaded', 'In Transit', 'Border Crossing', 'Customs Clearance', 'Arrived', 'Delivered', 'Closed']
-                ).map((st) => (
-                  <button
-                    key={st}
-                    onClick={() => setStatusFilter(st)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                      statusFilter === st
-                        ? 'bg-slate-900 text-white shadow-xs'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {st === "all" ? t('allStatuses') : st === "active" ? (ACTIVE_FILTER_LABEL[lang] || ACTIVE_FILTER_LABEL.en) : st}
-                  </button>
-                ))}
-              </div>
+            /* Desktop: approved Revision-2 Shipment Operations Center.
+               Presentational only — it reuses the exact same filter state,
+               timing/progress helpers and View/Edit/Chat/Create handlers as
+               before, so no business logic changes. Mobile keeps the existing
+               compact registry below. */
+            <div className="hidden lg:block">
+            <ShipmentOperationsCenter
+              lang={lang}
+              isRtl={isRtl}
+              shipments={shipments}
+              filteredShipments={filteredShipments}
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              typeFilter={typeFilter}
+              setTypeFilter={setTypeFilter}
+              statusFilter={statusFilter}
+              setStatusFilter={setStatusFilter}
+              analyzeShipmentTiming={analyzeShipmentTiming}
+              getShipmentProgressPercentage={getShipmentProgressPercentage}
+              onView={(id) => setOpenDetailsId(id)}
+              onEdit={(s) => {
+                const portsL = getPortsForCountry(s.loadingCountry || "");
+                const portsD = getPortsForCountry(s.deliveryCountry || "");
+                setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
+                setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
+                setEditingShipment(s);
+                setEditConflict(null);
+                setIsEditOpen(true);
+              }}
+              onChat={(s) => onSelectShipmentChat(s)}
+              onCreate={() => setIsCreateOpen(true)}
+            />
             </div>
-          </div>
           )}
 
-          {/* feature/admin-mobile-ui: card list replaces the wide table on
-              mobile — same filteredShipments array, same
-              analyzeShipmentTiming/getShipmentProgressPercentage helpers,
-              same View/Edit/Chat handlers as the desktop row actions
-              below (desktop table is untouched, just hidden via
-              lg:hidden on the card list / hidden lg:block on the table). */}
-          <MobileOrdersList
-            lang={lang}
-            t={t}
-            shipments={filteredShipments}
-            analyzeShipmentTiming={analyzeShipmentTiming}
-            getShipmentProgressPercentage={getShipmentProgressPercentage}
-            onViewDetails={(id) => setOpenDetailsId(id)}
-            onEdit={(s) => {
-              const portsL = getPortsForCountry(s.loadingCountry || "");
-              const portsD = getPortsForCountry(s.deliveryCountry || "");
-              setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
-              setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
-              setEditingShipment(s);
-              setEditConflict(null);
-              setIsEditOpen(true);
-            }}
-            onChat={(s) => onSelectShipmentChat(s)}
-          />
-
-          {/* Table Container */}
-          <div className="hidden lg:block bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-100 text-slate-500 font-semibold text-xs">
-                    <th className="p-4">Shipment #</th>
-                    <th className="p-4">{t('companyName')}</th>
-                    <th className="p-4">{t('loadingInfo')}</th>
-                    <th className="p-4">{t('deliveryInfo')}</th>
-                    <th className="p-4">{t('cargoInfo')}</th>
-                    <th className="p-4">{t('carrierAmount')}</th>
-                    <th className="p-4">{t('status')}</th>
-                    <th className="p-4 text-center">{t('actions')}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-xs balance-rows">
-                  {filteredShipments.map((s) => {
-                    const fType = s.freightType || "land";
-                    return (
-                    <tr key={s.id} className="hover:bg-slate-50/50">
-                      <td className="p-4">
-                        <div className="flex items-center gap-2">
-                          {fType === 'sea' ? (
-                            <span className="p-1.5 bg-blue-50 text-blue-600 rounded-md shrink-0" title="Ocean Freight"><Anchor className="w-3.5 h-3.5" /></span>
-                          ) : fType === 'air' ? (
-                            <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-md shrink-0" title="Air Cargo"><Plane className="w-3.5 h-3.5" /></span>
-                          ) : (
-                            <span className="p-1.5 bg-orange-50 text-orange-600 rounded-md shrink-0" title="Land Goods"><Truck className="w-3.5 h-3.5" /></span>
-                          )}
-                          <span className="font-mono font-bold text-slate-900 selectable">{s.shipmentNumber}</span>
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <p className="font-semibold text-slate-800">{s.companyName}</p>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">Created: {new Date(s.createdAt).toLocaleDateString()}</span>
-                      </td>
-                      <td className="p-4">
-                        <span className="font-semibold text-slate-800 block">{s.loadingCity}</span>
-                        <span className="text-slate-500">{s.loadingCountry}</span>
-                      </td>
-                      <td className="p-4">
-                        <span className="font-semibold text-slate-800 block">{s.deliveryCity}</span>
-                        <span className="text-slate-500">{s.deliveryCountry}</span>
-                      </td>
-                      <td className="p-4">
-                        <p className="truncate max-w-[150px] font-medium text-slate-700">{s.cargoDescription}</p>
-                        <span className="text-[10px] text-slate-400 block italic">{s.cargoWeight.toLocaleString()} kg</span>
-                      </td>
-                      <td className="p-4 font-mono font-bold text-slate-900">
-                        {s.agreedAmount.toLocaleString()} {s.currency}
-                      </td>
-                      <td className="p-4">
-                        <div className="space-y-1">
-                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
-                            s.status === 'New' ? 'bg-slate-100 text-slate-700/80' :
-                            s.status === 'Waiting for Driver Quotes' ? 'bg-sky-100 text-sky-800' :
-                            s.status === 'Assigned' || s.status === 'Accepted' ? 'bg-orange-100 text-orange-800' :
-                            s.status === 'Delivered' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
-                          }`}>
-                            {s.status}
-                          </span>
-                          
-                          {/* Visual Progress bar inside table row with dynamic remaining time color transitions */}
-                          {(() => {
-                            const analysis = analyzeShipmentTiming(s);
-                            const progress = getShipmentProgressPercentage(s);
-                            return (
-                              <div className="flex flex-col gap-0.5 w-32">
-                                <div className="flex items-center justify-between text-[9px] font-mono font-bold text-slate-400 leading-none">
-                                  <span>{analysis.label}</span>
-                                  <span className={analysis.textColorClass}>{progress}%</span>
-                                </div>
-                                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                  <div 
-                                    className={`h-full rounded-full transition-all duration-500 ${analysis.colorClass}`}
-                                    style={{ width: `${progress}%` }}
-                                  />
-                                </div>
-                                <div className="text-[8px] text-slate-400 font-medium truncate" title={analysis.subtext}>
-                                  {analysis.subtext}
-                                </div>
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      </td>
-                      <td className="p-4 text-center space-x-1.5 whitespace-nowrap">
-                        <button 
-                          onClick={() => setOpenDetailsId(s.id)}
-                          className="text-orange-600 hover:underline font-bold"
-                        >
-                          View
-                        </button>
-                        <button
-                          onClick={() => {
-                            const portsL = getPortsForCountry(s.loadingCountry || "");
-                            const portsD = getPortsForCountry(s.deliveryCountry || "");
-                            setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
-                            setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
-                            setEditingShipment(s);
-                            setEditConflict(null);
-                            setIsEditOpen(true);
-                          }}
-                          className="text-slate-500 hover:text-slate-900 font-bold"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => onSelectShipmentChat(s)}
-                          className="text-slate-500 hover:text-slate-900 font-bold"
-                        >
-                          Chat
-                        </button>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                  {filteredShipments.length === 0 && (
-                    <tr>
-                      <td colSpan={8} className="p-12 text-center text-slate-400 italic">
-                        <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                        <span>{t('noShipmentsMatched')}</span>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          {/* Mobile registry (existing compact card list) — desktop uses the
+              Operations Center above. Same filteredShipments array, same
+              helpers and View/Edit/Chat handlers as before. */}
+          {isMobileMode && (
+            <MobileOrdersList
+              lang={lang}
+              t={t}
+              shipments={filteredShipments}
+              analyzeShipmentTiming={analyzeShipmentTiming}
+              getShipmentProgressPercentage={getShipmentProgressPercentage}
+              onViewDetails={(id) => setOpenDetailsId(id)}
+              onEdit={(s) => {
+                const portsL = getPortsForCountry(s.loadingCountry || "");
+                const portsD = getPortsForCountry(s.deliveryCountry || "");
+                setUseEditCustomPOL(s.portOfLoading ? !portsL.includes(s.portOfLoading) : false);
+                setUseEditCustomPOD(s.portOfDischarge ? !portsD.includes(s.portOfDischarge) : false);
+                setEditingShipment(s);
+                setEditConflict(null);
+                setIsEditOpen(true);
+              }}
+              onChat={(s) => onSelectShipmentChat(s)}
+            />
+          )}
 
           {/* Phase 2A follow-up (blocking-issue fix): explicit "Load
               Older Shipments" action — GET /api/shipments now returns
