@@ -1537,6 +1537,7 @@ export default function DriverApplication({
                 {activeTab === 'job' && !activeShipment && (
                   <DriverActiveJobScreen
                     shipments={shipments}
+                    driverId={selectedDriverId}
                     lang={lang}
                     activeJob={activeJob}
                     unreadByShipmentId={unreadChatByShipmentId}

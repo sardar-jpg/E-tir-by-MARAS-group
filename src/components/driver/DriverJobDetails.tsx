@@ -62,7 +62,7 @@ const LABELS: Record<Language, {
     weight: "Weight",
     container: "Container",
     packages: "Packages",
-    payment: "Your payment",
+    payment: "Agreed Driver Payment",
     paymentSub: "Amount agreed with MARAS",
     notAvailable: "Not available",
     truck: "Truck",
@@ -83,7 +83,7 @@ const LABELS: Record<Language, {
     weight: "Ağırlık",
     container: "Konteyner",
     packages: "Paketler",
-    payment: "Ödemeniz",
+    payment: "Sürücü için anlaşılan ücret",
     paymentSub: "MARAS ile anlaşılan tutar",
     notAvailable: "Belirtilmemiş",
     truck: "Araç",
@@ -104,7 +104,7 @@ const LABELS: Record<Language, {
     weight: "الوزن",
     container: "الحاوية",
     packages: "الطرود",
-    payment: "أجرك المتفق عليه",
+    payment: "الأجرة المتفق عليها للسائق",
     paymentSub: "المبلغ المتفق عليه مع MARAS",
     notAvailable: "غير متوفر",
     truck: "الشاحنة",
@@ -222,7 +222,9 @@ export default function DriverJobDetails({
         </span>
       </div>
 
-      {/* Primary action */}
+      {/* Primary action — the agreed driver payment is shown in the
+          accept prompt so it is clearly visible before accepting (the
+          Payment section below is further down the page). */}
       <DriverNextAction
         shipment={s}
         lang={lang}
@@ -230,6 +232,8 @@ export default function DriverJobDetails({
         onSubmitNextStatus={onSubmitNextStatus}
         onAccept={onAccept}
         onDecline={onDecline}
+        agreedAmount={agreedAmount}
+        currency={s.currency}
       />
 
       {showNoteInput && (

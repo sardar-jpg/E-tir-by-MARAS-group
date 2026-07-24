@@ -165,13 +165,15 @@ describe("Privacy — driver surfaces never reference customer/internal fields",
   });
 
   it("driver payment surfaces resolve the amount through resolveDriverAgreedAmount only", () => {
-    // Revision A: the agreed amount appears ONLY in the details view
-    // (an existing driver-authorized field), resolved through the shared
-    // helper — never read raw off the shipment, never on Home.
-    const source = read("driver/DriverJobDetails.tsx");
-    expect(source).toContain("resolveDriverAgreedAmount");
-    expect(source).not.toMatch(/\bs\.agreedAmount\b|shipment\.agreedAmount\b/);
-    expect(read("driver/DriverHomeScreen.tsx")).not.toContain("agreedAmount");
+    // The agreed driver payment (an existing driver-authorized field) is
+    // shown on the details view AND as a compact line on Home — always
+    // resolved through the shared helper, never read raw off the
+    // shipment (so a co-driver can never see another driver's figure).
+    for (const file of ["driver/DriverJobDetails.tsx", "driver/DriverHomeScreen.tsx"]) {
+      const source = read(file);
+      expect(source, file).toContain("resolveDriverAgreedAmount");
+      expect(source, file).not.toMatch(/\bs\.agreedAmount\b|shipment\.agreedAmount\b|activeJob\.agreedAmount\b/);
+    }
   });
 });
 
@@ -490,5 +492,74 @@ describe("Revision A — honest progress, no fabricated operational data", () =>
     expect(HOME).toContain("onOpenChat(activeJob)");      // 4 chat
     expect(HOME).toContain("onOpenDetails(activeJob)");   // 5 details
     expect(HOME).not.toContain("DriverStatusTimeline");   // timeline lives on Trip Progress
+  });
+});
+
+describe("Agreed driver payment — visible, currency-correct, honest, never leaks financials", () => {
+  const HOME = read("driver/DriverHomeScreen.tsx");
+  const DETAILS = read("driver/DriverJobDetails.tsx");
+  const ACTION = read("driver/DriverNextAction.tsx");
+  const JOB = read("driver/DriverActiveJobScreen.tsx");
+
+  it("is shown on all three required surfaces, always resolved through resolveDriverAgreedAmount", () => {
+    // Home — Active Shipment (compact secondary line)
+    expect(HOME).toContain("resolveDriverAgreedAmount(activeJob, driverId)");
+    expect(HOME).toContain("t.agreedPayment");
+    // Shipment Details (labeled row)
+    expect(DETAILS).toContain("resolveDriverAgreedAmount(s, driverId)");
+    // Assignment acceptance moment (before the driver accepts)
+    expect(ACTION).toContain("t.agreedPayment");
+    expect(JOB).toContain("resolveDriverAgreedAmount(activeJob, driverId)");
+  });
+
+  it("uses the exact required labels in English, Arabic, and Turkish", () => {
+    for (const src of [HOME, DETAILS, ACTION]) {
+      expect(src).toContain("Agreed Driver Payment");
+      expect(src).toContain("الأجرة المتفق عليها للسائق");
+      expect(src).toContain("Sürücü için anlaşılan ücret");
+    }
+  });
+
+  it("shows the shipment's OWN currency — never converts, estimates, or hardcodes a rate", () => {
+    // The currency comes straight from the shipment/job record.
+    expect(HOME).toContain("activeJob.currency");
+    expect(DETAILS).toContain("s.currency");
+    expect(JOB).toContain("activeJob.currency");
+    // No FX conversion anywhere on these surfaces.
+    for (const src of [HOME, DETAILS, ACTION, JOB]) {
+      expect(src).not.toMatch(/exchangeRate|convertCurrency|fxRate|\* rate\b/);
+    }
+  });
+
+  it("renders nothing (no 0, no placeholder) when the amount is absent — every surface is null-guarded", () => {
+    // Home compact line
+    expect(HOME).toContain("agreedAmount !== null &&");
+    // Details Wallet row keeps its existing null branch (Not available), never 0
+    expect(DETAILS).toContain("agreedAmount !== null ?");
+    expect(DETAILS).toContain("t.notAvailable");
+    // Accept prompt row
+    expect(ACTION).toContain("agreedAmount !== null &&");
+    // No fabricated fallback like `|| 0` on the amount anywhere.
+    for (const src of [HOME, DETAILS, ACTION]) {
+      expect(src).not.toMatch(/agreedAmount\s*\|\|\s*0/);
+    }
+  });
+
+  it("the driver cannot edit the amount — the payment surfaces render it read-only (no input bound to it)", () => {
+    // No editable control is wired to the agreed amount on any surface.
+    for (const src of [HOME, DETAILS, ACTION]) {
+      expect(src).not.toMatch(/onChange=\{[^}]*[Aa]greed/);
+      expect(src).not.toMatch(/value=\{[^}]*agreedAmount/);
+    }
+  });
+
+  it("never exposes customer price or internal financials alongside the driver payment", () => {
+    // The broad privacy sweep already covers the field list; this pins the
+    // intent explicitly on the payment-bearing surfaces.
+    for (const src of [HOME, DETAILS, ACTION]) {
+      expect(src).not.toContain("customerPrice");
+      expect(src).not.toContain("agreedAmount:"); // never writes/patches it
+      expect(src).not.toMatch(/profit|margin|totalCost|invoiceNumber/);
+    }
   });
 });

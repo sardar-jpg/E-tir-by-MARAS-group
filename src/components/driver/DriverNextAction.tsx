@@ -32,6 +32,7 @@ const LABELS: Record<Language, {
   accept: string;
   decline: string;
   acceptPrompt: string;
+  agreedPayment: string;
   confirmTitle: (action: string) => string;
   consequence: (status: string) => string;
   reminderTitle: string;
@@ -51,6 +52,7 @@ const LABELS: Record<Language, {
     accept: "Accept Job",
     decline: "Decline",
     acceptPrompt: "New job assigned to you. Accept to start.",
+    agreedPayment: "Agreed Driver Payment",
     confirmTitle: (a) => a,
     consequence: (s) => `This will update the shipment status to “${s}”.`,
     reminderTitle: "Before you go",
@@ -70,6 +72,7 @@ const LABELS: Record<Language, {
     accept: "Görevi Kabul Et",
     decline: "Reddet",
     acceptPrompt: "Size yeni bir sefer atandı. Başlamak için kabul edin.",
+    agreedPayment: "Sürücü için anlaşılan ücret",
     confirmTitle: (a) => a,
     consequence: (s) => `Bu işlem sevkiyat durumunu “${s}” olarak güncelleyecek.`,
     reminderTitle: "Yola çıkmadan önce",
@@ -89,6 +92,7 @@ const LABELS: Record<Language, {
     accept: "قبول المهمة",
     decline: "رفض",
     acceptPrompt: "تم تعيين مهمة جديدة لك. اقبلها للبدء.",
+    agreedPayment: "الأجرة المتفق عليها للسائق",
     confirmTitle: (a) => a,
     consequence: (s) => `سيؤدي هذا إلى تحديث حالة الشحنة إلى «${s}».`,
     reminderTitle: "قبل الانطلاق",
@@ -130,6 +134,15 @@ interface DriverNextActionProps {
   onSubmitNextStatus: () => void;
   onAccept: () => void;
   onDecline: () => void;
+  /**
+   * The driver's OWN agreed payment (already resolved by the parent via
+   * resolveDriverAgreedAmount) and its currency. Shown ONLY at the
+   * assignment-acceptance moment so the driver sees the amount before
+   * accepting. null → nothing is rendered (no zero, no placeholder,
+   * nothing fabricated). Never a customer price or another driver's figure.
+   */
+  agreedAmount?: number | null;
+  currency?: string | null;
 }
 
 export default function DriverNextAction({
@@ -139,6 +152,8 @@ export default function DriverNextAction({
   onSubmitNextStatus,
   onAccept,
   onDecline,
+  agreedAmount = null,
+  currency = null,
 }: DriverNextActionProps) {
   const t = LABELS[lang] ?? LABELS.en;
   const [confirming, setConfirming] = useState(false);
@@ -154,6 +169,16 @@ export default function DriverNextAction({
     return (
       <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 shadow-[0_1px_2px_rgba(15,27,45,0.03)]">
         <p className="text-sm font-semibold text-slate-700 text-start">{t.acceptPrompt}</p>
+        {/* Agreed driver payment — shown clearly before the driver accepts.
+            Only the driver's own resolved amount; null hides the row. */}
+        {agreedAmount !== null && (
+          <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-2xl px-3.5 py-2.5">
+            <span className="text-[13px] font-semibold text-slate-500 text-start">{t.agreedPayment}</span>
+            <span className="text-lg font-extrabold text-slate-900 tabular-nums shrink-0">
+              {agreedAmount.toLocaleString()} <span className="text-xs font-bold text-slate-500">{currency || "USD"}</span>
+            </span>
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-2">
           <button
             type="button"

@@ -6,6 +6,7 @@ import DriverNextAction from "./DriverNextAction";
 import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverOffersScreen from "./DriverOffersScreen";
 import { isShipmentClosed } from "../../lib/shipmentStatusTransitions";
+import { resolveDriverAgreedAmount } from "../../lib/driverVisibility";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import { BTN_QUIET, CARD, HERO_CARD, LIST_ROW, SCREEN_TITLE, SECTION_LABEL, getJourneyProgress, getStatusChipClasses, localizeShipmentStatus } from "./driverUi";
 
@@ -86,6 +87,7 @@ const LABELS: Record<Language, {
 
 interface DriverActiveJobScreenProps {
   shipments: Shipment[];
+  driverId: string;
   lang: Language;
   activeJob: Shipment | null;
   unreadByShipmentId: Record<string, number>;
@@ -107,6 +109,7 @@ interface DriverActiveJobScreenProps {
 
 export default function DriverActiveJobScreen({
   shipments,
+  driverId,
   lang,
   activeJob,
   unreadByShipmentId,
@@ -172,6 +175,8 @@ export default function DriverActiveJobScreen({
             onSubmitNextStatus={() => onSubmitNextStatus(activeJob)}
             onAccept={() => onAccept(activeJob)}
             onDecline={() => onDecline(activeJob)}
+            agreedAmount={resolveDriverAgreedAmount(activeJob, driverId)}
+            currency={activeJob.currency}
           />
 
           {/* One conversation shortcut — everything (files, photos,

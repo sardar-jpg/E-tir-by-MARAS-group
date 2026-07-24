@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import type { Driver, Language, Shipment, ShipmentStatus } from "../../types";
 import { apiFetch } from "../../lib/api";
+import { resolveDriverAgreedAmount } from "../../lib/driverVisibility";
 import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import DriverNextAction from "./DriverNextAction";
 import {
@@ -36,6 +37,7 @@ import {
 const LABELS: Record<Language, {
   greeting: (name: string) => string;
   activeShipment: string;
+  agreedPayment: string;
   updated: string;
   stepOf: (step: number, total: number) => string;
   chat: string;
@@ -55,6 +57,7 @@ const LABELS: Record<Language, {
   en: {
     greeting: (n) => `Hello, ${n} 👋`,
     activeShipment: "Active shipment",
+    agreedPayment: "Agreed Driver Payment",
     updated: "Updated",
     stepOf: (s, t2) => `Step ${s} of ${t2} · Based on confirmed steps`,
     chat: "Chat",
@@ -74,6 +77,7 @@ const LABELS: Record<Language, {
   tr: {
     greeting: (n) => `Merhaba, ${n} 👋`,
     activeShipment: "Aktif sevkiyat",
+    agreedPayment: "Sürücü için anlaşılan ücret",
     updated: "Güncellendi",
     stepOf: (s, t2) => `Adım ${s} / ${t2} · Onaylanan adımlara göre`,
     chat: "Mesajlar",
@@ -93,6 +97,7 @@ const LABELS: Record<Language, {
   ar: {
     greeting: (n) => `مرحباً، ${n} 👋`,
     activeShipment: "الشحنة النشطة",
+    agreedPayment: "الأجرة المتفق عليها للسائق",
     updated: "آخر تحديث",
     stepOf: (s, t2) => `الخطوة ${s} من ${t2} · وفق الخطوات المؤكدة`,
     chat: "الدردشة",
@@ -246,6 +251,11 @@ export default function DriverHomeScreen({
       localizeShipmentStatus(activeJob.status, lang);
     const updatedAt = formatUpdatedTime(activeJob.updatedAt);
     const chatAvailable = isDriverChatAvailable(activeJob.status);
+    // The driver's OWN agreed amount only (resolveDriverAgreedAmount —
+    // existing driver-facing field; never a customer price, never another
+    // driver's figure). null → the line is simply not rendered: no zero,
+    // no placeholder, nothing fabricated.
+    const agreedAmount = resolveDriverAgreedAmount(activeJob, driverId);
     const progress = getJourneyProgress(activeJob.status, activeJob.freightType);
 
     return (
@@ -271,8 +281,14 @@ export default function DriverHomeScreen({
           </div>
           <div className="h-px bg-slate-100 my-4" />
           <p className="text-sm text-slate-600 font-medium leading-relaxed text-start">{statusDesc}</p>
+          {agreedAmount !== null && (
+            <p className="text-[13px] mt-2.5 text-start">
+              <span className="font-semibold text-slate-400">{t.agreedPayment}: </span>
+              <span className="font-bold text-slate-700 tabular-nums">{agreedAmount.toLocaleString()} {activeJob.currency || "USD"}</span>
+            </p>
+          )}
           {updatedAt && (
-            <p className="text-xs font-bold text-slate-400 mt-2.5 tabular-nums text-start">{t.updated} {updatedAt}</p>
+            <p className="text-xs font-bold text-slate-400 mt-2 tabular-nums text-start">{t.updated} {updatedAt}</p>
           )}
         </div>
 
