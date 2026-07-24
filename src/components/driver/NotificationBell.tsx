@@ -12,11 +12,11 @@ export default function NotificationBell({ unreadCount, label, onClick }: Notifi
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="p-1.5 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-white transition-all relative cursor-pointer"
+      className="w-10 h-10 rounded-2xl bg-white border border-slate-200 hover:border-slate-300 text-slate-500 hover:text-slate-800 transition-all relative cursor-pointer flex items-center justify-center active:scale-95"
     >
-      <Bell className="w-4 h-4" />
+      <Bell className="w-[18px] h-[18px]" />
       {unreadCount > 0 && (
-        <span className="absolute -top-1 -end-1 min-w-[15px] h-[15px] px-[3px] rounded-full bg-orange-500 text-white text-[9px] font-black leading-[15px] text-center font-mono">
+        <span className="absolute -top-1.5 -end-1.5 min-w-[17px] h-[17px] px-[3px] rounded-full bg-orange-500 text-white text-[10px] font-bold leading-[17px] text-center border-2 border-white box-content">
           {unreadCount > 9 ? '9+' : unreadCount}
         </span>
       )}

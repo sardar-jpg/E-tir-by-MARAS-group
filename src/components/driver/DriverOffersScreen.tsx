@@ -272,8 +272,8 @@ export default function DriverOffersScreen({
 
   if (offers.length === 0 && !hasActiveJob) {
     return (
-      <div className="py-10 text-center bg-slate-900 rounded-3xl p-6 border border-slate-800/60">
-        <p className="text-sm text-slate-400 leading-relaxed max-w-[280px] mx-auto">{t.empty}</p>
+      <div className="py-10 text-center bg-white rounded-3xl p-6 border border-slate-200">
+        <p className="text-sm text-slate-500 leading-relaxed max-w-[280px] mx-auto">{t.empty}</p>
       </div>
     );
   }
@@ -294,8 +294,8 @@ export default function DriverOffersScreen({
           pending && !hasActiveJob
             ? `${HERO_CARD} border-s-4 border-s-amber-400`
             : o.isWinner
-              ? "bg-slate-900 border border-emerald-500/30 rounded-3xl border-s-4 border-s-emerald-500"
-              : "bg-slate-900 border border-slate-800/60 rounded-3xl"
+              ? "bg-white border border-emerald-200 rounded-3xl border-s-4 border-s-emerald-500"
+              : "bg-white border border-slate-200 rounded-3xl"
         }`}
       >
         {/* ── Collapsed summary: only what matters at a glance ── */}
@@ -309,26 +309,26 @@ export default function DriverOffersScreen({
               <RouteBlock fromCity={o.pickupCity} toCity={o.deliveryCity} />
             </span>
             {pending && !hasActiveJob && (
-              <span className="shrink-0 bg-amber-400 text-slate-950 text-xs font-bold rounded-full px-2.5 py-0.5 light-preserve">{t.newTag}</span>
+              <span className="shrink-0 bg-amber-400 text-amber-950 text-xs font-bold rounded-full px-2.5 py-0.5">{t.newTag}</span>
             )}
-            {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
+            {o.isWinner && <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />}
           </div>
 
-          <p className="text-sm text-slate-300 font-semibold truncate">
+          <p className="text-sm text-slate-600 font-semibold truncate">
             {o.cargoDescription}
             {typeof o.weightKg === "number" ? ` · ${o.weightKg.toLocaleString()} kg` : ""}
           </p>
 
           {o.expectedLoadingDate && (
             <div className="flex items-center gap-2 flex-wrap text-sm text-slate-300">
-              <span className="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1 font-semibold">
+              <span className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 font-semibold">
                 {t.loading}: {o.expectedLoadingDate}
               </span>
             </div>
           )}
 
           {o.expiresAt && pending && (
-            <p className="text-sm font-semibold text-amber-400/90 flex items-center gap-1.5">
+            <p className="text-sm font-semibold text-amber-600/90 flex items-center gap-1.5">
               <Clock className="w-4 h-4 shrink-0" />
               <span>{t.expires}: {new Date(o.expiresAt).toLocaleString()}</span>
             </p>
@@ -336,20 +336,20 @@ export default function DriverOffersScreen({
 
           {/* Decided / answered states on the card face */}
           {o.isWinner ? (
-            <p className="text-sm font-bold text-emerald-400 leading-snug">{t.won}</p>
+            <p className="text-sm font-bold text-emerald-600 leading-snug">{t.won}</p>
           ) : anotherDriverSelected ? (
-            <p className="text-sm font-semibold text-slate-400 leading-snug">{t.lost}</p>
+            <p className="text-sm font-semibold text-slate-500 leading-snug">{t.lost}</p>
           ) : o.myResponse.status === "quoted" ? (
-            <p className="text-sm font-bold text-slate-200 flex items-center gap-1.5">
-              <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+            <p className="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
               {t.submitted((o.myResponse.priceUsd ?? 0).toLocaleString())} · {t.waiting}
             </p>
           ) : o.myResponse.status === "rejected" ? (
-            <p className="text-sm font-semibold text-slate-500">{t.rejected}</p>
+            <p className="text-sm font-semibold text-slate-400">{t.rejected}</p>
           ) : o.status === "expired" ? (
-            <p className="text-sm font-semibold text-slate-500">{t.expired}</p>
+            <p className="text-sm font-semibold text-slate-400">{t.expired}</p>
           ) : !canAnswer && !pending ? (
-            <p className="text-sm font-semibold text-slate-500">{t.closed}</p>
+            <p className="text-sm font-semibold text-slate-400">{t.closed}</p>
           ) : null}
         </button>
 
@@ -359,7 +359,7 @@ export default function DriverOffersScreen({
             <button
               type="button"
               onClick={() => toggleCard(o.id)}
-              className="w-full min-h-[52px] rounded-2xl bg-slate-950 border border-slate-700 hover:border-orange-500/50 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
+              className="w-full min-h-[52px] rounded-2xl bg-slate-50 border border-slate-300 hover:border-slate-300 text-slate-800 font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
             >
               <FileText className="w-4 h-4 text-orange-500 shrink-0" />
               <span>{t.viewDetails}</span>
@@ -375,49 +375,49 @@ export default function DriverOffersScreen({
                 the offer contract yet — they render here automatically
                 once the contract carries them (no placeholders, no
                 invented values). */}
-            <div className={`${INNER_CARD} p-4 space-y-0 divide-y divide-slate-800/50 text-start text-sm [&>p]:py-2 [&>p:first-child]:pt-0 [&>p:last-child]:pb-0`}>
-              <p className="text-slate-300"><span className="text-slate-500">{t.from}:</span> <span className="font-semibold">{o.pickupCity}, {o.pickupCountry}</span></p>
-              <p className="text-slate-300"><span className="text-slate-500">{t.to}:</span> <span className="font-semibold">{o.deliveryCity}, {o.deliveryCountry}</span></p>
+            <div className={`${INNER_CARD} p-4 space-y-0 divide-y divide-slate-100/50 text-start text-sm [&>p]:py-2 [&>p:first-child]:pt-0 [&>p:last-child]:pb-0`}>
+              <p className="text-slate-300"><span className="text-slate-400">{t.from}:</span> <span className="font-semibold">{o.pickupCity}, {o.pickupCountry}</span></p>
+              <p className="text-slate-300"><span className="text-slate-400">{t.to}:</span> <span className="font-semibold">{o.deliveryCity}, {o.deliveryCountry}</span></p>
               {o.loadingAddress && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.loadingAddress}:</span> <span className="font-semibold">{o.loadingAddress}</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.loadingAddress}:</span> <span className="font-semibold">{o.loadingAddress}</span></p>
               )}
               {o.deliveryAddress && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.deliveryAddress}:</span> <span className="font-semibold">{o.deliveryAddress}</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.deliveryAddress}:</span> <span className="font-semibold">{o.deliveryAddress}</span></p>
               )}
-              <p className="text-slate-300"><span className="text-slate-500">{t.cargo}:</span> <span className="font-semibold">{o.cargoDescription}</span></p>
+              <p className="text-slate-300"><span className="text-slate-400">{t.cargo}:</span> <span className="font-semibold">{o.cargoDescription}</span></p>
               {typeof o.weightKg === "number" && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.weight}:</span> <span className="font-semibold">{o.weightKg.toLocaleString()} kg</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.weight}:</span> <span className="font-semibold">{o.weightKg.toLocaleString()} kg</span></p>
               )}
               {o.expectedLoadingDate && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.loading}:</span> <span className="font-semibold">{o.expectedLoadingDate}</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.loading}:</span> <span className="font-semibold">{o.expectedLoadingDate}</span></p>
               )}
               {o.notes && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.note}:</span> <span className="font-semibold">{o.notes}</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.note}:</span> <span className="font-semibold">{o.notes}</span></p>
               )}
               {o.expiresAt && (
-                <p className="text-slate-300"><span className="text-slate-500">{t.expires}:</span> <span className="font-semibold">{new Date(o.expiresAt).toLocaleString()}</span></p>
+                <p className="text-slate-300"><span className="text-slate-400">{t.expires}:</span> <span className="font-semibold">{new Date(o.expiresAt).toLocaleString()}</span></p>
               )}
             </div>
 
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-bold text-slate-500 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1">{t.usdOnly}</span>
+              <span className="text-xs font-bold text-slate-400 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1">{t.usdOnly}</span>
               {/* Truck type: small reference only — matching already
                   guaranteed it fits this driver's registered truck. */}
-              <span className="text-xs text-slate-500">{t.truck}: {truckTypeLabel(o.truckType, lang)}</span>
+              <span className="text-xs text-slate-400">{t.truck}: {truckTypeLabel(o.truckType, lang)}</span>
             </div>
 
             {/* ── Answer controls — only while still answerable ── */}
             {canAnswer && (
               phase === "confirming" ? (
-                <div className="bg-slate-950 border border-orange-500/40 rounded-2xl p-4 space-y-3 text-start">
+                <div className="bg-slate-50 border border-orange-200 rounded-2xl p-4 space-y-3 text-start">
                   <p className="text-base font-bold text-white">{t.confirmTitle(Number(price).toLocaleString())}</p>
-                  <p className="text-sm text-slate-400 leading-snug">{t.confirmWarning}</p>
+                  <p className="text-sm text-slate-500 leading-snug">{t.confirmWarning}</p>
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
                       onClick={() => setPhase("idle")}
                       disabled={isSending}
-                      className="col-span-1 min-h-[56px] rounded-2xl bg-slate-900 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                      className="col-span-1 min-h-[56px] rounded-2xl bg-white border border-slate-300 text-slate-600 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       {t.back}
                     </button>
@@ -425,7 +425,7 @@ export default function DriverOffersScreen({
                       type="button"
                       onClick={() => submit(o, "quote")}
                       disabled={isSending}
-                      className="col-span-2 min-h-[56px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                      className="col-span-2 min-h-[56px] rounded-2xl bg-green-600 hover:bg-green-700 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       <Check className="w-5 h-5 shrink-0" />
                       <span>{isSending ? t.sending : t.confirmSend}</span>
@@ -433,21 +433,21 @@ export default function DriverOffersScreen({
                   </div>
                 </div>
               ) : phase === "rejecting" ? (
-                <div className="bg-slate-950 border border-red-500/30 rounded-2xl p-4 space-y-3">
+                <div className="bg-slate-50 border border-red-200 rounded-2xl p-4 space-y-3">
                   <input
                     type="text"
                     maxLength={500}
                     placeholder={t.reasonPlaceholder}
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
-                    className="w-full min-h-[48px] px-3.5 bg-slate-900 border border-slate-800 focus:border-red-500/50 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
+                    className="w-full min-h-[48px] px-3.5 bg-white border border-slate-200 focus:border-red-300 text-sm text-slate-800 rounded-2xl outline-none transition-colors placeholder-slate-400"
                   />
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
                       onClick={resetComposer}
                       disabled={isSending}
-                      className="col-span-1 min-h-[56px] rounded-2xl bg-slate-900 border border-slate-700 text-slate-300 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                      className="col-span-1 min-h-[56px] rounded-2xl bg-white border border-slate-300 text-slate-600 font-bold text-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       {t.back}
                     </button>
@@ -455,7 +455,7 @@ export default function DriverOffersScreen({
                       type="button"
                       onClick={() => submit(o, "reject")}
                       disabled={isSending}
-                      className="col-span-2 min-h-[56px] rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                      className="col-span-2 min-h-[56px] rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       <X className="w-5 h-5 shrink-0" />
                       <span>{isSending ? t.sending : t.confirmReject}</span>
@@ -464,9 +464,9 @@ export default function DriverOffersScreen({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <label className="text-sm font-bold text-slate-200 block text-start">{t.yourPrice}</label>
+                  <label className="text-sm font-bold text-slate-800 block text-start">{t.yourPrice}</label>
                   <div className="flex items-center gap-2">
-                    <span className="w-12 h-12 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center text-orange-500 shrink-0">
+                    <span className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center text-orange-500 shrink-0">
                       <DollarSign className="w-5 h-5" />
                     </span>
                     <input
@@ -477,7 +477,7 @@ export default function DriverOffersScreen({
                       placeholder={t.pricePlaceholder}
                       value={price}
                       onChange={(e) => setPrice(e.target.value)}
-                      className="flex-1 min-w-0 min-h-[52px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-xl font-bold text-white rounded-2xl outline-none transition-colors placeholder-slate-600"
+                      className="flex-1 min-w-0 min-h-[52px] px-3.5 bg-slate-50 border border-slate-200 focus:border-blue-400 text-xl font-bold text-white rounded-2xl outline-none transition-colors placeholder-slate-400"
                     />
                   </div>
                   <input
@@ -486,14 +486,14 @@ export default function DriverOffersScreen({
                     placeholder={t.notePlaceholder}
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
-                    className="w-full min-h-[48px] px-3.5 bg-slate-950 border border-slate-800 focus:border-orange-500/60 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
+                    className="w-full min-h-[48px] px-3.5 bg-slate-50 border border-slate-200 focus:border-blue-400 text-sm text-slate-800 rounded-2xl outline-none transition-colors placeholder-slate-400"
                   />
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
                       onClick={() => { setPhase("rejecting"); setNote(""); }}
                       disabled={isSending}
-                      className="col-span-1 min-h-[60px] rounded-2xl bg-slate-950 border border-red-500/30 text-red-400 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                      className="col-span-1 min-h-[60px] rounded-2xl bg-slate-50 border border-red-200 text-red-600 font-bold text-sm flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       <X className="w-4 h-4 shrink-0" />
                       <span>{t.reject}</span>
@@ -502,7 +502,7 @@ export default function DriverOffersScreen({
                       type="button"
                       onClick={() => setPhase("confirming")}
                       disabled={isSending || !price.trim() || Number(price) <= 0}
-                      className="col-span-2 min-h-[60px] rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(249,115,22,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50 light-preserve"
+                      className="col-span-2 min-h-[60px] rounded-2xl bg-green-600 hover:bg-green-700 text-white font-bold text-base flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(22,163,74,0.35)] transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                     >
                       <DollarSign className="w-5 h-5 shrink-0" />
                       <span>{t.submitPrice}</span>
@@ -515,7 +515,7 @@ export default function DriverOffersScreen({
             <button
               type="button"
               onClick={() => toggleCard(o.id)}
-              className="w-full min-h-[44px] rounded-2xl text-slate-500 hover:text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+              className="w-full min-h-[44px] rounded-2xl text-slate-400 hover:text-slate-600 font-bold text-xs transition-colors cursor-pointer"
             >
               {t.hideDetails}
             </button>
@@ -528,17 +528,17 @@ export default function DriverOffersScreen({
   return (
     <div className="space-y-5">
       {hasActiveJob && offers.length > 0 && (
-        <div className="flex items-start gap-2.5 px-3.5 py-3 rounded-2xl bg-slate-900 border border-amber-500/30 text-start">
-          <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <p className="text-sm font-semibold text-amber-400 leading-snug">{t.pausedBanner}</p>
+        <div className="flex items-start gap-2.5 px-3.5 py-3 rounded-2xl bg-white border border-amber-200 text-start">
+          <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-sm font-semibold text-amber-600 leading-snug">{t.pausedBanner}</p>
         </div>
       )}
 
       {newOffers.length > 0 && (
         <section className="space-y-2.5">
-          <h3 className="text-sm font-bold text-orange-400 text-start flex items-center gap-2">
+          <h3 className="text-sm font-bold text-orange-600 text-start flex items-center gap-2">
             {t.newOffers}
-            <span className="text-xs font-bold text-white bg-orange-500 rounded-full px-2 py-0.5 light-preserve">{newOffers.length}</span>
+            <span className="text-xs font-bold text-white bg-orange-500 rounded-full px-2 py-0.5">{newOffers.length}</span>
           </h3>
           {newOffers.map(renderCard)}
         </section>
@@ -546,14 +546,14 @@ export default function DriverOffersScreen({
 
       {submittedOffers.length > 0 && (
         <section className="space-y-2.5">
-          <h3 className="text-sm font-bold text-slate-400 text-start">{t.submittedOffers}</h3>
+          <h3 className="text-sm font-bold text-slate-500 text-start">{t.submittedOffers}</h3>
           {submittedOffers.map(renderCard)}
         </section>
       )}
 
       {decidedOffers.length > 0 && (
         <section className="space-y-2.5">
-          <h3 className="text-sm font-bold text-slate-400 text-start">{t.decidedOffers}</h3>
+          <h3 className="text-sm font-bold text-slate-500 text-start">{t.decidedOffers}</h3>
           {decidedOffers.map(renderCard)}
         </section>
       )}

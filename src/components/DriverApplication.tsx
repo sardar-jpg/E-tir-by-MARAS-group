@@ -40,7 +40,8 @@ import DriverChatEmptyState from "./driver/DriverChatEmptyState";
 import DriverAccountScreen from "./driver/DriverAccountScreen";
 import NotificationBell from "./driver/NotificationBell";
 import NotificationsPanel from "./driver/NotificationsPanel";
-import { CheckCircle2, Truck, WifiOff, Wifi } from "lucide-react";
+import { CheckCircle2, MapPinOff, Truck, WifiOff, Wifi } from "lucide-react";
+import { localizeStatusesInText } from "../lib/notificationTextLocalization";
 
 interface DriverApplicationProps {
   lang: Language;
@@ -354,15 +355,25 @@ export default function DriverApplication({
     );
   }, [chatMessages, chatSearchQuery]);
 
-  // Theme mode switch (light vs dark)
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('driver_app_theme');
-    return (saved === 'light' || saved === 'dark') ? saved : 'dark';
-  });
+  // Revision A: the Driver App is light-first by design (approved visual
+  // system — readable in daylight inside a truck cab). The old dark/light
+  // toggle is retired; there is no theme state.
 
+  // Revision A trust fix: a REAL offline indicator. Tracks the browser's
+  // own connectivity signal (plus the local-dev "simulate offline"
+  // switch) and shows a plain banner while disconnected. Presentation
+  // only — polling already pauses itself via attachBrowserPolling.
+  const [isBrowserOffline, setIsBrowserOffline] = useState<boolean>(() => typeof navigator !== "undefined" && !navigator.onLine);
   useEffect(() => {
-    localStorage.setItem('driver_app_theme', theme);
-  }, [theme]);
+    const goOffline = () => setIsBrowserOffline(true);
+    const goOnline = () => setIsBrowserOffline(false);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, []);
 
   // Native chat attachment (paperclip -> file input in DriverChatScreen -> auto-send)
   const [isUploading, setIsUploading] = useState(false);
@@ -592,8 +603,11 @@ export default function DriverApplication({
                 continue;
               }
 
-              const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
-              const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
+              // Revision A trust fix: raw English lifecycle statuses
+              // embedded in localized sentences are localized at display
+              // time (stored values never change).
+              const title = localizeStatusesInText(lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr), lang);
+              const msg = localizeStatusesInText(lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr), lang);
 
               // Trigger toast alert for message/doc_upload/status_update
               triggerToast(`🔔 ${title}: ${msg}`);
@@ -1163,6 +1177,15 @@ export default function DriverApplication({
     [allianceOffers]
   );
 
+  // Latest non-active job — the one quiet "Previous jobs" row on the
+  // no-active-job Home (Revision A). Most recently updated first.
+  const latestPreviousJob = useMemo(() => {
+    const others = shipments
+      .filter(s => s.id !== activeJob?.id)
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    return others[0] || null;
+  }, [shipments, activeJob?.id]);
+
   // Audited "Offer Viewed" ping — fire-and-forget, idempotent server-side.
   const handleOpenAllianceOffer = (offerId: string) => {
     apiFetch(`/api/alliance/offers/${offerId}/viewed`, { method: "POST" }).catch(() => {});
@@ -1244,12 +1267,20 @@ export default function DriverApplication({
     setActiveTab('job');
   };
 
+  // The offline banner covers the real browser signal and the local-dev
+  // simulate-offline switch (a logged-in driver only ever sees the real one).
+  const showOfflineBanner = isBrowserOffline || isForceOffline;
+  // Honest GPS problem surface: shown ONLY while reporting should be
+  // running but no fix is available (denied / unavailable / timed out).
+  // Never claims GPS is active — silence is the healthy state.
+  const showGpsUnavailable = isReportingLocation && gpsAvailable === false;
+
   return (
     <div
       className={`driver-shell ${isMobileMode
-        ? "w-full h-[100dvh] text-slate-100 flex flex-col bg-slate-950 overflow-hidden relative select-none"
-        : "p-4 md:p-8 bg-slate-950 min-h-screen text-slate-100 flex flex-col lg:flex-row gap-8 justify-center items-center font-sans select-none"
-      } ${theme === 'light' ? 'theme-light' : ''}`}
+        ? "w-full h-[100dvh] text-slate-900 flex flex-col bg-slate-100 overflow-hidden relative select-none"
+        : "p-4 md:p-8 bg-slate-200 min-h-screen text-slate-900 flex flex-col lg:flex-row gap-8 justify-center items-center font-sans select-none"
+      }`}
       dir={isRtl ? 'rtl' : 'ltr'}
     >
 
@@ -1257,15 +1288,15 @@ export default function DriverApplication({
           driver session exists. Plain wording; a logged-in driver never
           sees any of this. */}
       {!loggedInDriverId && !isMobileMode && (
-        <div className="w-full lg:w-80 bg-slate-900 p-6 rounded-3xl border border-slate-800 space-y-5 shrink-0 overflow-y-auto">
+        <div className="w-full lg:w-80 bg-white p-6 rounded-3xl border border-slate-200 space-y-5 shrink-0 overflow-y-auto">
           <div>
             <span className="text-xs font-bold text-orange-500 block mb-1">Developer preview</span>
-            <h3 className="font-bold text-white text-base">Simulated driver account</h3>
-            <p className="text-xs text-slate-400 mt-1 leading-relaxed">Local testing only — pick an account and optionally simulate being offline.</p>
+            <h3 className="font-bold text-slate-900 text-base">Simulated driver account</h3>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">Local testing only — pick an account and optionally simulate being offline.</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-400 block">Account</label>
+            <label className="text-xs font-semibold text-slate-500 block">Account</label>
             <select
               value={selectedDriverId}
               onChange={(e) => {
@@ -1273,10 +1304,10 @@ export default function DriverApplication({
                 setActiveShipment(null);
                 setActiveTab('home');
               }}
-              className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 text-sm font-semibold rounded-xl outline-none cursor-pointer"
+              className="w-full p-2.5 bg-slate-50 border border-slate-200 text-slate-800 text-sm font-semibold rounded-xl outline-none cursor-pointer"
             >
               {drivers.map(d => (
-                <option key={d.id} value={d.id} className="bg-slate-950 text-slate-200">
+                <option key={d.id} value={d.id} className="bg-white text-slate-800">
                   {d.name} ({d.truckNumber})
                 </option>
               ))}
@@ -1287,8 +1318,8 @@ export default function DriverApplication({
             onClick={() => setIsForceOffline(prev => !prev)}
             className={`w-full py-2.5 px-3 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 border cursor-pointer ${
               isForceOffline
-                ? 'bg-emerald-600/10 border-emerald-500/30 text-emerald-400'
-                : 'bg-amber-600/10 border-amber-500/30 text-amber-500'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-600'
+                : 'bg-amber-50 border-amber-200 text-amber-600'
             }`}
           >
             {isForceOffline ? <Wifi className="w-4 h-4 shrink-0" /> : <WifiOff className="w-4 h-4 shrink-0" />}
@@ -1301,10 +1332,10 @@ export default function DriverApplication({
       {isMobileMode && !loggedInDriverId && (
         <div className="fixed bottom-24 end-4 z-[999] flex flex-col items-end gap-2">
           {showControlsModal && (
-            <div className="w-72 bg-slate-900 text-slate-100 p-4 rounded-3xl border border-slate-800 shadow-xl space-y-3 text-start">
+            <div className="w-72 bg-white text-slate-900 p-4 rounded-3xl border border-slate-200 shadow-xl space-y-3 text-start">
               <div>
                 <span className="text-xs font-bold text-orange-500 block">Developer preview</span>
-                <h4 className="font-bold text-sm text-white">Simulated driver account</h4>
+                <h4 className="font-bold text-sm text-slate-900">Simulated driver account</h4>
               </div>
 
               <select
@@ -1315,7 +1346,7 @@ export default function DriverApplication({
                   setActiveTab('home');
                   setShowControlsModal(false);
                 }}
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 text-slate-200 text-sm font-semibold rounded-xl outline-none"
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 text-slate-800 text-sm font-semibold rounded-xl outline-none"
               >
                 {drivers.map(d => (
                   <option key={d.id} value={d.id}>
@@ -1329,8 +1360,8 @@ export default function DriverApplication({
                   setIsForceOffline(prev => !prev);
                   setShowControlsModal(false);
                 }}
-                className={`w-full py-2.5 bg-slate-950 border text-sm font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer ${
-                  isForceOffline ? 'border-emerald-500/30 text-emerald-400' : 'border-amber-500/30 text-amber-500'
+                className={`w-full py-2.5 bg-slate-50 border text-sm font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer ${
+                  isForceOffline ? 'border-emerald-300 text-emerald-600' : 'border-amber-300 text-amber-600'
                 }`}
               >
                 {isForceOffline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
@@ -1360,24 +1391,24 @@ export default function DriverApplication({
         <div
           className={isMobileMode
             ? "w-full h-full flex flex-col justify-between overflow-hidden relative"
-            : "w-full max-w-[390px] h-[790px] bg-slate-950 rounded-[50px] p-[10px] shadow-[0_35px_80px_-15px_rgba(0,0,0,0.9)] relative border-[12px] border-slate-800 flex flex-col justify-between overflow-hidden"
+            : "w-full max-w-[390px] h-[790px] bg-slate-900 rounded-[50px] p-[10px] shadow-[0_35px_80px_-15px_rgba(0,0,0,0.45)] relative border-[12px] border-slate-800 flex flex-col justify-between overflow-hidden"
           }
         >
           {/* Inner app screen */}
           <div
             className={isMobileMode
-              ? "w-full h-full bg-slate-950 text-slate-100 overflow-hidden flex flex-col relative"
-              : "w-full h-full bg-slate-950 text-slate-100 rounded-[38px] overflow-hidden flex flex-col pt-6 relative"
+              ? "w-full h-full bg-slate-100 text-slate-900 overflow-hidden flex flex-col relative"
+              : "w-full h-full bg-slate-100 text-slate-900 rounded-[38px] overflow-hidden flex flex-col pt-6 relative"
             }
           >
 
             {/* Header */}
-            <div className="px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] bg-slate-950 border-b border-slate-800/60 flex items-center justify-between z-20 relative shrink-0">
+            <div className="px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] bg-slate-100 flex items-center justify-between z-20 relative shrink-0">
               <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
-                  <Truck className="w-5 h-5 text-orange-500" />
+                <div className="w-9 h-9 rounded-xl bg-orange-500 flex items-center justify-center shadow-[0_4px_12px_-4px_rgba(249,115,22,0.5)]">
+                  <Truck className="w-5 h-5 text-white" />
                 </div>
-                <h1 className="text-white font-extrabold text-base tracking-tight">{t('brand')}</h1>
+                <h1 className="text-slate-900 font-extrabold text-base tracking-tight">{t('brand')}</h1>
               </div>
 
               <NotificationBell
@@ -1387,10 +1418,38 @@ export default function DriverApplication({
               />
             </div>
 
+            {/* Revision A trust fixes — shown only when something is wrong.
+                Offline: real connectivity loss. GPS: reporting should be
+                running but no honest fix exists (never fabricated). */}
+            {showOfflineBanner && (
+              <div className="mx-4 mb-2 px-3.5 py-2.5 rounded-2xl bg-slate-800 text-white text-[13px] font-semibold flex items-center gap-2.5 shrink-0 z-20">
+                <WifiOff className="w-4 h-4 shrink-0" />
+                <span className="text-start">
+                  {lang === 'tr'
+                    ? "Çevrimdışısınız — bağlantı gelince güncellemeler otomatik devam eder."
+                    : lang === 'ar'
+                    ? "أنت غير متصل — ستستأنف التحديثات تلقائياً عند عودة الاتصال."
+                    : "You are offline — updates will resume automatically."}
+                </span>
+              </div>
+            )}
+            {!showOfflineBanner && showGpsUnavailable && (
+              <div className="mx-4 mb-2 px-3.5 py-2.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-[13px] font-semibold flex items-center gap-2.5 shrink-0 z-20">
+                <MapPinOff className="w-4 h-4 shrink-0" />
+                <span className="text-start">
+                  {lang === 'tr'
+                    ? "Konum alınamıyor — GPS iznini kontrol edin."
+                    : lang === 'ar'
+                    ? "تعذر تحديد الموقع — تحقق من إذن GPS."
+                    : "Location unavailable — check GPS permission."}
+                </span>
+              </div>
+            )}
+
             {/* Toast */}
             {toast && (
-              <div className="absolute top-16 start-4 end-4 bg-orange-600 text-white p-3 rounded-2xl text-sm font-semibold flex items-center gap-2 shadow-lg z-50 light-preserve">
-                <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
+              <div className="absolute top-16 start-4 end-4 bg-slate-900 text-white p-3 rounded-2xl text-sm font-semibold flex items-center gap-2 shadow-xl z-50">
+                <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
                 <span className="text-start">{toast}</span>
               </div>
             )}
@@ -1399,7 +1458,7 @@ export default function DriverApplication({
                 other screens scroll here. Bottom navigation sits OUTSIDE
                 this area, so it can never cover content. */}
             {showNotifications ? (
-              <div className="flex-1 overflow-y-auto bg-slate-950 px-4 pt-5 pb-4">
+              <div className="flex-1 overflow-y-auto bg-slate-100 px-4 pt-2 pb-4">
                 <NotificationsPanel
                   notifications={myNotifications}
                   lang={lang}
@@ -1409,14 +1468,14 @@ export default function DriverApplication({
                 />
               </div>
             ) : activeTab === 'chat' && chatJobs.length === 0 ? (
-              <div className="flex-1 min-h-0 bg-slate-950">
+              <div className="flex-1 min-h-0 bg-slate-100">
                 <DriverChatEmptyState
                   lang={lang}
                   onOpenJob={() => { setActiveShipment(null); setActiveTab('job'); }}
                 />
               </div>
             ) : activeTab === 'chat' ? (
-              <div className="flex-1 min-h-0 bg-slate-950">
+              <div className="flex-1 min-h-0 bg-slate-100">
                 <DriverChatScreen
                   lang={lang}
                   jobs={chatJobs}
@@ -1449,7 +1508,7 @@ export default function DriverApplication({
                 />
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto bg-slate-950 px-4 pt-5 pb-4">
+              <div className="flex-1 overflow-y-auto bg-slate-100 px-4 pt-2 pb-4">
                 {activeTab === 'home' && (
                   <DriverHomeScreen
                     driverName={getDriverName()}
@@ -1457,11 +1516,16 @@ export default function DriverApplication({
                     driver={currentDriver}
                     activeJob={activeJob}
                     lang={lang}
-                    gpsAvailable={gpsAvailable}
-                    isReportingLocation={isReportingLocation}
                     pendingOffersCount={pendingOffersCount}
-                    recentNotifications={myNotifications}
+                    activeJobUnreadChat={activeJob ? (unreadChatByShipmentId[activeJob.id] || 0) : 0}
+                    latestPreviousJob={latestPreviousJob}
+                    isSubmittingStatus={isSubmittingStatus}
+                    onSubmitNextStatus={handleSubmitNextStatus}
+                    onAccept={handleAcceptAssignment}
+                    onDecline={handleRejectAssignment}
                     onOpenJob={() => { setActiveShipment(null); setActiveTab('job'); }}
+                    onOpenChat={openJobChat}
+                    onOpenDetails={openJobDetails}
                     onDriverUpdated={(updated) => {
                       setDrivers(prev => prev.map(d => d.id === updated.id ? updated : d));
                       fetchData();
@@ -1473,7 +1537,6 @@ export default function DriverApplication({
                 {activeTab === 'job' && !activeShipment && (
                   <DriverActiveJobScreen
                     shipments={shipments}
-                    driverId={selectedDriverId}
                     lang={lang}
                     activeJob={activeJob}
                     unreadByShipmentId={unreadChatByShipmentId}
@@ -1514,8 +1577,6 @@ export default function DriverApplication({
                     lang={lang}
                     driverId={selectedDriverId}
                     driver={currentDriver}
-                    theme={theme}
-                    onThemeChange={setTheme}
                     onLanguageChange={onLanguageChange}
                     onLogout={onLogout}
                     onDriverUpdated={(updated) => {

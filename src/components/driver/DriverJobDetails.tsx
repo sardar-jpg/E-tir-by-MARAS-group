@@ -7,7 +7,6 @@ import {
   ListChecks,
   MapPin,
   Navigation,
-  Phone,
   Wallet,
 } from "lucide-react";
 import type { Language, Shipment } from "../../types";
@@ -17,17 +16,19 @@ import { isDriverChatAvailable } from "../../lib/driverJobFlow";
 import DriverNextAction from "./DriverNextAction";
 import DriverStatusTimeline from "./DriverStatusTimeline";
 import DriverDocumentSection from "./DriverDocumentSection";
-import { resolveDriverCallContact } from "./DriverActiveJobCard";
 import { getStatusChipClasses, localizeShipmentStatus, localizeFreightType } from "./driverUi";
 
 /**
- * feature/driver-app-comprehensive-redesign — job details, reorganized
- * into clear sections: Route, Cargo, Your Payment, Documents, Journey
- * timeline, and the latest operational note. Only driver-safe data is
- * rendered — the shipment object itself already arrived through
+ * feature/driver-app-comprehensive-redesign (Revision A) — job details,
+ * concise sections: Route, Cargo, Your Payment, Files, Journey timeline,
+ * and the latest operational note. Only driver-safe data is rendered —
+ * the shipment object itself already arrived through
  * buildShipmentViewForRole (no customer identity/prices, no internal
- * notes), and this view never reaches for any of those fields. Status
+ * notes), and this view never reaches for any of those fields. The
+ * driver's own agreed amount comes exclusively through
+ * resolveDriverAgreedAmount (an existing driver-facing field). Status
  * progression happens exclusively through DriverNextAction below.
+ * There is no phone action anywhere — Chat is the only channel.
  */
 const LABELS: Record<Language, {
   back: string;
@@ -35,7 +36,6 @@ const LABELS: Record<Language, {
   loading: string;
   delivery: string;
   navigate: string;
-  callBroker: string;
   loadingDate: string;
   cargo: string;
   weight: string;
@@ -45,7 +45,7 @@ const LABELS: Record<Language, {
   paymentSub: string;
   notAvailable: string;
   truck: string;
-  documents: string;
+  files: string;
   timeline: string;
   latestNote: string;
   noteToMaras: string;
@@ -57,7 +57,6 @@ const LABELS: Record<Language, {
     loading: "Loading",
     delivery: "Delivery",
     navigate: "Open in Maps",
-    callBroker: "Call contact",
     loadingDate: "Loading date",
     cargo: "Cargo",
     weight: "Weight",
@@ -67,7 +66,7 @@ const LABELS: Record<Language, {
     paymentSub: "Amount agreed with MARAS",
     notAvailable: "Not available",
     truck: "Truck",
-    documents: "Documents",
+    files: "Files",
     timeline: "Journey progress",
     latestNote: "Latest update",
     noteToMaras: "Note to MARAS (optional)",
@@ -79,7 +78,6 @@ const LABELS: Record<Language, {
     loading: "Yükleme",
     delivery: "Teslimat",
     navigate: "Haritada aç",
-    callBroker: "İrtibatı ara",
     loadingDate: "Yükleme tarihi",
     cargo: "Yük",
     weight: "Ağırlık",
@@ -89,7 +87,7 @@ const LABELS: Record<Language, {
     paymentSub: "MARAS ile anlaşılan tutar",
     notAvailable: "Belirtilmemiş",
     truck: "Araç",
-    documents: "Belgeler",
+    files: "Dosyalar",
     timeline: "Sefer ilerlemesi",
     latestNote: "Son güncelleme",
     noteToMaras: "MARAS'a not (isteğe bağlı)",
@@ -101,7 +99,6 @@ const LABELS: Record<Language, {
     loading: "التحميل",
     delivery: "التسليم",
     navigate: "فتح في الخرائط",
-    callBroker: "اتصال",
     loadingDate: "تاريخ التحميل",
     cargo: "الحمولة",
     weight: "الوزن",
@@ -111,7 +108,7 @@ const LABELS: Record<Language, {
     paymentSub: "المبلغ المتفق عليه مع MARAS",
     notAvailable: "غير متوفر",
     truck: "الشاحنة",
-    documents: "المستندات",
+    files: "الملفات",
     timeline: "تقدم الرحلة",
     latestNote: "آخر تحديث",
     noteToMaras: "ملاحظة إلى MARAS (اختياري)",
@@ -136,24 +133,24 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="bg-slate-900 border border-slate-800/60 rounded-3xl overflow-hidden">
+    <section className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-[0_1px_2px_rgba(15,27,45,0.03),0_10px_30px_-12px_rgba(15,27,45,0.06)]">
       <button
         type="button"
         disabled={!collapsible}
         onClick={() => collapsible && setOpen((v) => !v)}
         className={`w-full flex items-center gap-2.5 p-4 text-start ${collapsible ? "cursor-pointer" : "cursor-default"}`}
       >
-        <span className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-500 flex items-center justify-center shrink-0">
+        <span className="w-8 h-8 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
           {icon}
         </span>
-        <span className="flex-1 text-sm font-bold text-slate-200">{title}</span>
+        <span className="flex-1 text-sm font-bold text-slate-800">{title}</span>
         {badge && (
-          <span className="text-xs font-bold text-slate-400 bg-slate-950 border border-slate-800 rounded-full px-2 py-0.5">
+          <span className="text-xs font-bold text-slate-500 bg-slate-50 border border-slate-200 rounded-full px-2 py-0.5">
             {badge}
           </span>
         )}
         {collapsible && (
-          <ChevronDown className={`w-5 h-5 text-slate-500 transition-transform ${open ? "rotate-180" : ""}`} />
+          <ChevronDown className={`w-5 h-5 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
         )}
       </button>
       {open && <div className="px-4 pb-4">{children}</div>}
@@ -196,7 +193,6 @@ export default function DriverJobDetails({
   const t = LABELS[lang] ?? LABELS.en;
   const agreedAmount = resolveDriverAgreedAmount(s, driverId);
   const truckNumber = resolveDriverTruckNumber(s, driverId);
-  const callContact = resolveDriverCallContact(s);
   const closed = isShipmentClosed(s.status, s.freightType);
   const latestTimelineEntry = s.timeline && s.timeline.length > 0 ? s.timeline[s.timeline.length - 1] : null;
   const latestNote =
@@ -210,7 +206,7 @@ export default function DriverJobDetails({
       <button
         type="button"
         onClick={onBack}
-        className="inline-flex items-center gap-2 min-h-[44px] px-3.5 text-sm font-bold text-slate-300 hover:text-white bg-slate-900 border border-slate-800 rounded-2xl transition-all cursor-pointer active:scale-95"
+        className="inline-flex items-center gap-2 min-h-[44px] px-3.5 text-sm font-bold text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-2xl transition-all cursor-pointer active:scale-95"
       >
         <ArrowLeft className="w-4 h-4 shrink-0 rtl:rotate-180" />
         <span>{t.back}</span>
@@ -218,8 +214,8 @@ export default function DriverJobDetails({
 
       <div className="flex items-center justify-between gap-2 flex-wrap text-start">
         <div className="min-w-0">
-          <h2 className="text-lg font-bold text-white selectable truncate">#{s.shipmentNumber}</h2>
-          <p className="text-xs text-slate-500 font-semibold mt-0.5">{localizeFreightType(s.freightType, lang)}</p>
+          <h2 className="text-lg font-bold text-slate-900 selectable truncate">#{s.shipmentNumber}</h2>
+          <p className="text-xs text-slate-400 font-semibold mt-0.5">{localizeFreightType(s.freightType, lang)}</p>
         </div>
         <span className={`px-3 py-1 rounded-full text-xs font-bold border shrink-0 ${getStatusChipClasses(s.status, s.freightType)}`}>
           {localizeShipmentStatus(s.status, lang)}
@@ -238,13 +234,13 @@ export default function DriverJobDetails({
 
       {showNoteInput && (
         <div className="text-start">
-          <label className="text-xs font-semibold text-slate-400 block mb-1.5">{t.noteToMaras}</label>
+          <label className="text-xs font-semibold text-slate-500 block mb-1.5">{t.noteToMaras}</label>
           <input
             type="text"
             value={remarks}
             onChange={(e) => onRemarksChange(e.target.value)}
             placeholder={t.notePlaceholder}
-            className="w-full min-h-[48px] px-3.5 bg-slate-900 border border-slate-800 focus:border-orange-500/60 text-sm text-slate-200 rounded-2xl outline-none transition-colors placeholder-slate-600"
+            className="w-full min-h-[48px] px-3.5 bg-white border border-slate-200 focus:border-blue-400 text-sm text-slate-800 rounded-2xl outline-none transition-colors placeholder-slate-400"
           />
         </div>
       )}
@@ -256,40 +252,30 @@ export default function DriverJobDetails({
             { label: t.loading, city: s.loadingCity, country: s.loadingCountry, address: s.loadingAddress },
             { label: t.delivery, city: s.deliveryCity, country: s.deliveryCountry, address: s.deliveryAddress },
           ].map((stop) => (
-            <div key={stop.label} className="bg-slate-950 rounded-2xl p-3.5 text-start">
-              <p className="text-xs text-slate-500 font-semibold">{stop.label}</p>
-              <p className="text-base font-bold text-slate-200 mt-0.5">
+            <div key={stop.label} className="bg-slate-50 rounded-2xl p-3.5 text-start">
+              <p className="text-xs text-slate-400 font-bold uppercase tracking-wide">{stop.label}</p>
+              <p className="text-base font-bold text-slate-900 mt-0.5 break-words">
                 {stop.city || "—"}
-                {stop.country ? <span className="text-slate-400 font-semibold">, {stop.country}</span> : null}
+                {stop.country ? <span className="text-slate-500 font-semibold">, {stop.country}</span> : null}
               </p>
-              {stop.address && <p className="text-sm text-slate-400 mt-1 leading-snug selectable">{stop.address}</p>}
+              {stop.address && <p className="text-sm text-slate-500 mt-1 leading-snug selectable break-words">{stop.address}</p>}
               {(stop.city || stop.address) && (
                 <a
                   href={mapsUrl(stop.city, stop.country, stop.address)}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 mt-2.5 min-h-[40px] px-3 bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-xl text-sm font-bold text-slate-200 transition-all cursor-pointer active:scale-95"
+                  className="inline-flex items-center gap-1.5 mt-2.5 min-h-[40px] px-3 bg-white border border-blue-200 hover:border-blue-300 rounded-xl text-sm font-bold text-blue-700 transition-all cursor-pointer active:scale-95"
                 >
-                  <Navigation className="w-4 h-4 text-orange-500 shrink-0" />
+                  <Navigation className="w-4 h-4 shrink-0" />
                   <span>{t.navigate}</span>
                 </a>
               )}
             </div>
           ))}
           {s.loadingDate && (
-            <p className="text-sm text-slate-400 text-start">
-              {t.loadingDate}: <span className="font-semibold text-slate-200">{s.loadingDate}</span>
+            <p className="text-sm text-slate-500 text-start">
+              {t.loadingDate}: <span className="font-semibold text-slate-800">{s.loadingDate}</span>
             </p>
-          )}
-          {callContact && (
-            <a
-              href={`tel:${callContact}`}
-              className="flex items-center justify-center gap-2 min-h-[52px] bg-slate-950 border border-slate-800 hover:border-emerald-500/40 rounded-2xl text-sm font-bold text-slate-200 transition-all cursor-pointer active:scale-95"
-            >
-              <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>{t.callBroker}</span>
-              <span dir="ltr" className="text-slate-400 font-semibold selectable">{callContact}</span>
-            </a>
           )}
         </div>
       </Section>
@@ -297,24 +283,24 @@ export default function DriverJobDetails({
       {/* B. Cargo */}
       <Section icon={<Box className="w-4 h-4" />} title={t.cargo}>
         <div className="space-y-2.5 text-start">
-          <p className="text-sm font-semibold text-slate-200 leading-relaxed">{s.cargoDescription || "—"}</p>
+          <p className="text-sm font-semibold text-slate-800 leading-relaxed">{s.cargoDescription || "—"}</p>
           <div className="flex flex-wrap gap-2 text-sm">
-            <span className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-slate-300">
-              {t.weight}: <strong>{typeof s.cargoWeight === "number" ? `${s.cargoWeight.toLocaleString()} kg` : t.notAvailable}</strong>
+            <span className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-slate-600">
+              {t.weight}: <strong className="text-slate-900">{typeof s.cargoWeight === "number" ? `${s.cargoWeight.toLocaleString()} kg` : t.notAvailable}</strong>
             </span>
             {s.containerNumber && (
-              <span className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-slate-300">
-                {t.container}: <strong className="selectable">{s.containerNumber}</strong>
+              <span className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-slate-600">
+                {t.container}: <strong className="selectable text-slate-900">{s.containerNumber}</strong>
               </span>
             )}
             {typeof s.numberOfPackages === "number" && s.numberOfPackages > 0 && (
-              <span className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-slate-300">
-                {t.packages}: <strong>{s.numberOfPackages}</strong>
+              <span className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-slate-600">
+                {t.packages}: <strong className="text-slate-900">{s.numberOfPackages}</strong>
               </span>
             )}
             {truckNumber && (
-              <span className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-slate-300">
-                {t.truck}: <strong className="selectable">{truckNumber}</strong>
+              <span className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-slate-600">
+                {t.truck}: <strong className="selectable text-slate-900">{truckNumber}</strong>
               </span>
             )}
           </div>
@@ -325,22 +311,24 @@ export default function DriverJobDetails({
           pricing/costs/invoices are never present on a driver-scoped
           shipment view and are never rendered here. */}
       <Section icon={<Wallet className="w-4 h-4" />} title={t.payment}>
-        <div className="flex items-center justify-between bg-slate-950 rounded-2xl p-3.5">
-          <span className="text-sm text-slate-400 text-start">{t.paymentSub}</span>
+        <div className="flex items-center justify-between bg-slate-50 rounded-2xl p-3.5 gap-3">
+          <span className="text-sm text-slate-500 text-start">{t.paymentSub}</span>
           {agreedAmount !== null ? (
-            <span className="text-xl font-bold text-orange-500">
-              {agreedAmount.toLocaleString()} <span className="text-sm">{s.currency || "USD"}</span>
+            <span className="text-xl font-extrabold text-slate-900 tabular-nums shrink-0">
+              {agreedAmount.toLocaleString()} <span className="text-sm font-bold text-slate-500">{s.currency || "USD"}</span>
             </span>
           ) : (
-            <span className="text-sm font-semibold text-slate-500">{t.notAvailable}</span>
+            <span className="text-sm font-semibold text-slate-400">{t.notAvailable}</span>
           )}
         </div>
       </Section>
 
-      {/* D. Documents */}
+      {/* D. Files — MARAS-shared shipment files (visibility already
+          enforced server-side); the driver's own upload path is the chat
+          attachment flow. Neutral wording only — no Documents module. */}
       <Section
         icon={<FileText className="w-4 h-4" />}
-        title={t.documents}
+        title={t.files}
         collapsible
         defaultOpen={(s.documents?.length || 0) > 0}
         badge={String(s.documents?.length || 0)}
@@ -360,9 +348,9 @@ export default function DriverJobDetails({
 
       {/* F. Latest operational note (from the shipment's own driver-visible timeline) */}
       {latestNote && (
-        <div className="bg-slate-900 border border-slate-800/60 rounded-3xl p-4 text-start">
-          <p className="text-xs font-semibold text-slate-500 mb-1">{t.latestNote}</p>
-          <p className="text-sm text-slate-300 leading-relaxed">{latestNote}</p>
+        <div className="bg-white border border-slate-200 rounded-3xl p-4 text-start shadow-[0_1px_2px_rgba(15,27,45,0.03)]">
+          <p className="text-xs font-semibold text-slate-400 mb-1">{t.latestNote}</p>
+          <p className="text-sm text-slate-600 leading-relaxed">{latestNote}</p>
         </div>
       )}
     </div>
