@@ -23,7 +23,10 @@ import {
   Maximize2,
   Minimize2,
   Plus,
-  Minus
+  Minus,
+  MessageSquare,
+  FileText,
+  ChevronRight
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
@@ -414,7 +417,7 @@ const LABELS = {
     routeProgress: "Journey Progress",
     origin: "Origin",
     destination: "Destination",
-    departed: "Departed",
+    departed: "Departed Origin",
     pending: "Pending",
     arrived: "Arrived",
     mBorderArrival: "Border Arrival",
@@ -422,13 +425,26 @@ const LABELS = {
     mBorderExit: "Border Exit",
     mDestArrival: "Destination Arrival",
     mDelivered: "Delivered",
-    stateCurrent: "Current",
+    stateCurrent: "In Progress",
     noData: "Not confirmed",
+    completedLabel: "Completed",
+    tabOverview: "Overview",
+    tabDocuments: "Documents",
+    tabChat: "Chat",
+    currentLocation: "Current Location",
+    borderShort: "Ibrahim Khalil Border",
+    kpiEtaToday: "Estimated ETA Today",
+    estimatedArrival: "Estimated Arrival",
+    notCalculated: "Not calculated yet",
+    openChatSub: "Discuss with operations",
+    viewDetailsSub: "View full shipment info",
+    noDocuments: "No documents uploaded yet.",
+    docsChatNote: "Shipment documents are managed inside the shipment chat.",
     etaSection: "ETA & Distance",
     estimatedTag: "Estimated",
     remainingDistance: "Remaining distance",
-    viewDetails: "View Shipment Details",
-    openChat: "Open Shipment Chat",
+    viewDetails: "Shipment Details",
+    openChat: "Open Chat",
     operationalStats: "Transit Stats Overview",
     totalShipments: "Active Transits",
     totalDistance: "Estimated Route Completion",
@@ -492,7 +508,7 @@ const LABELS = {
     routeProgress: "Yolculuk Durumu",
     origin: "Çıkış",
     destination: "Varış",
-    departed: "Yola Çıktı",
+    departed: "Çıkıştan Ayrıldı",
     pending: "Bekliyor",
     arrived: "Vardı",
     mBorderArrival: "Sınıra Varış",
@@ -500,13 +516,26 @@ const LABELS = {
     mBorderExit: "Sınırdan Çıkış",
     mDestArrival: "Varış Noktasına Ulaşma",
     mDelivered: "Teslim Edildi",
-    stateCurrent: "Şu an",
+    stateCurrent: "Devam Ediyor",
     noData: "Doğrulanmadı",
+    completedLabel: "Tamamlandı",
+    tabOverview: "Genel Bakış",
+    tabDocuments: "Belgeler",
+    tabChat: "Sohbet",
+    currentLocation: "Mevcut Konum",
+    borderShort: "İbrahim Halil Sınır Kapısı",
+    kpiEtaToday: "Bugün Tahmini Varış",
+    estimatedArrival: "Tahmini Varış",
+    notCalculated: "Henüz hesaplanmadı",
+    openChatSub: "Operasyon ekibiyle görüşün",
+    viewDetailsSub: "Tüm sevkiyat bilgisini görün",
+    noDocuments: "Henüz belge yüklenmedi.",
+    docsChatNote: "Sevkiyat belgeleri sevkiyat sohbetinde yönetilir.",
     etaSection: "ETA ve Mesafe",
     estimatedTag: "Tahmini",
     remainingDistance: "Kalan mesafe",
     viewDetails: "Sevkiyat Detayları",
-    openChat: "Sevkiyat Sohbetini Aç",
+    openChat: "Sohbeti Aç",
     operationalStats: "Operasyonel İstatistikler",
     totalShipments: "Aktif Araç",
     totalDistance: "Tahmini Rota Durumu",
@@ -570,7 +599,7 @@ const LABELS = {
     routeProgress: "تقدم الرحلة",
     origin: "الانطلاق",
     destination: "الوجهة",
-    departed: "غادرت",
+    departed: "غادرت نقطة الانطلاق",
     pending: "قيد الانتظار",
     arrived: "وصلت",
     mBorderArrival: "الوصول إلى الحدود",
@@ -578,13 +607,26 @@ const LABELS = {
     mBorderExit: "مغادرة الحدود",
     mDestArrival: "الوصول إلى الوجهة",
     mDelivered: "تم التسليم",
-    stateCurrent: "حالياً",
+    stateCurrent: "قيد التنفيذ",
     noData: "غير مؤكد",
+    completedLabel: "مكتمل",
+    tabOverview: "نظرة عامة",
+    tabDocuments: "المستندات",
+    tabChat: "المحادثة",
+    currentLocation: "الموقع الحالي",
+    borderShort: "منفذ إبراهيم الخليل",
+    kpiEtaToday: "وصول متوقع اليوم",
+    estimatedArrival: "الوصول المتوقع",
+    notCalculated: "لم يُحسب بعد",
+    openChatSub: "تواصل مع فريق العمليات",
+    viewDetailsSub: "عرض معلومات الشحنة كاملة",
+    noDocuments: "لا توجد مستندات مرفوعة بعد.",
+    docsChatNote: "تُدار مستندات الشحنة داخل محادثة الشحنة.",
     etaSection: "الوقت المتوقع والمسافة",
     estimatedTag: "تقديري",
     remainingDistance: "المسافة المتبقية",
     viewDetails: "تفاصيل الشحنة",
-    openChat: "فتح محادثة الشحنة",
+    openChat: "فتح المحادثة",
     operationalStats: "ملخص النقل النشط",
     totalShipments: "الشاحنات في الطريق",
     totalDistance: "مؤشر إكمال الرحلات",
@@ -692,6 +734,12 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
   const [etaLoading, setEtaLoading] = useState<boolean>(false);
   const [etaError, setEtaError] = useState<string | null>(null);
   const [etaForId, setEtaForId] = useState<string | null>(null);
+
+  // Details drawer tab (per the approved design): Overview is the summary;
+  // Documents is a READ-ONLY listing of the shipment's existing documents
+  // array; Chat routes to the existing Chat Center thread. No new document
+  // or chat surfaces/APIs are introduced here.
+  const [drawerTab, setDrawerTab] = useState<'overview' | 'documents' | 'chat'>('overview');
 
   // feature/admin-mobile-ui correction pass: single source of truth
   // (src/lib/trackingMapStatus.ts, unit tested) for whether the UI is
@@ -1020,6 +1068,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     setEtaData(null);
     setEtaError(null);
     setEtaForId(null);
+    setDrawerTab('overview');
     setViewScale(1);
     setViewPan({ x: 0, y: 0 });
   };
@@ -1051,6 +1100,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     setEtaData(null);
     setEtaError(null);
     setEtaForId(null);
+    setDrawerTab('overview');
     const loc = getShipmentVectorLocation(s);
     // When the shipment has no placeable position (Location Unavailable),
     // frame the route corridor (origin/destination dots) instead of panning
@@ -1239,16 +1289,24 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
       </div>
 
       {/* KPI strip — six flat light cards with honest, real-data counts:
-          Active / In Transit come straight from shipment statuses; the four
-          tracking-state counts come from resolveTrackingPosition across all
-          loaded shipments. Desktop only (mobile keeps its compact header). */}
+          Active / In Transit come straight from shipment statuses; GPS
+          Online / Last Reported / Unavailable from resolveTrackingPosition
+          across all loaded shipments; Estimated ETA Today counts shipments
+          whose server-stored `eta` (persisted by the distance-matrix route)
+          falls on the current local day — never a fabricated forecast.
+          Desktop only (mobile keeps its compact header). */}
       <div className="hidden lg:grid grid-cols-6 gap-2">
         {([
           { key: null, label: t.kpiActive, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
           { key: null, label: t.kpiInTransit, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status === "In Transit").length },
           { key: "live_gps" as const, label: t.kpiGpsOnline, dot: "bg-emerald-500", text: "text-emerald-600", value: null },
           { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-600", value: null },
-          { key: "estimated" as const, label: t.trackEstimated, dot: "bg-sky-500", text: "text-sky-600", value: null },
+          { key: null, label: t.kpiEtaToday, dot: "bg-sky-500", text: "text-sky-600", value: shipments.filter(s => {
+            if (!s.eta) return false;
+            const d = new Date(s.eta);
+            const now = new Date();
+            return !Number.isNaN(d.getTime()) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+          }).length },
           { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-300", text: "text-slate-400", value: null },
         ]).map(item => (
           <div key={item.label} className="bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm min-w-0" title={item.label}>
@@ -2031,12 +2089,13 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                 </div>
               )}
 
-              {/* Selected-shipment details drawer — light, right-side panel
-                  (bottom sheet on small screens). A lightweight operational
-                  summary only: order, status, route, driver, tracking source,
-                  last update, honest Route Progress, on-demand ETA, and two
-                  navigation actions into EXISTING surfaces (details modal /
-                  shipment chat, where documents already live). */}
+              {/* Selected-shipment details drawer — per the official design:
+                  header + Overview/Documents/Chat tabs; Overview holds route,
+                  driver, current location, tracking source, last update, the
+                  honest Journey Progress timeline, ETA & Distance, and the two
+                  navigation action cards. Documents is a READ-ONLY list of the
+                  shipment's existing documents; Chat routes to the existing
+                  Chat Center thread. No new chat/document surfaces or APIs. */}
               {selectedShipment && (() => {
                 const gpsState = getShipmentGpsState(selectedShipment);
                 const colors = stateColors(gpsState);
@@ -2047,22 +2106,86 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                   : gpsState === "last_reported" ? t.trackReported
                   : gpsState === "estimated" ? t.trackEstimated
                   : t.trackUnavailable;
+                const loc = getShipmentVectorLocation(selectedShipment);
+                const docs = selectedShipment.documents || [];
+                const closeDrawer = () => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); setDrawerTab('overview'); };
                 return (
-                <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[300px]">
+                <div className="absolute z-20 bg-white border border-slate-200 rounded-xl shadow-2xl text-slate-800 overflow-y-auto inset-x-2 bottom-2 max-h-[68%] sm:inset-x-auto sm:end-3 sm:top-3 sm:bottom-3 sm:max-h-none sm:w-[318px]">
                   {/* Header */}
-                  <div className="sticky top-0 bg-white border-b border-slate-100 px-3.5 py-2.5 flex items-center justify-between gap-2 z-10">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-mono font-extrabold text-blue-700 text-[13px] truncate selectable">{selectedShipment.shipmentNumber}</span>
-                      <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border bg-slate-50 text-slate-600 border-slate-200">{selectedShipment.status}</span>
+                  <div className="sticky top-0 bg-white border-b border-slate-100 z-20">
+                    <div className="px-3.5 pt-2.5 pb-1.5 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono font-extrabold text-blue-700 text-[13px] truncate selectable">{selectedShipment.shipmentNumber}</span>
+                        <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-md border bg-emerald-50 text-emerald-700 border-emerald-200">{selectedShipment.status}</span>
+                      </div>
+                      <button
+                        onClick={closeDrawer}
+                        className="text-slate-400 hover:text-slate-700 transition-all cursor-pointer p-1 rounded-md hover:bg-slate-100 shrink-0"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
-                    <button
-                      onClick={() => { setSelectedShipment(null); setEtaData(null); setEtaError(null); setEtaForId(null); }}
-                      className="text-slate-400 hover:text-slate-700 transition-all cursor-pointer p-1 rounded-md hover:bg-slate-100 shrink-0"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                    {/* Tabs */}
+                    <div className="px-3.5 flex items-center gap-4 text-[11px] font-bold">
+                      {([
+                        { id: 'overview' as const, label: t.tabOverview },
+                        { id: 'documents' as const, label: `${t.tabDocuments} (${docs.length})` },
+                        { id: 'chat' as const, label: t.tabChat },
+                      ]).map(tab => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setDrawerTab(tab.id)}
+                          className={`pb-2 border-b-2 -mb-px transition-all cursor-pointer ${
+                            drawerTab === tab.id ? "border-orange-500 text-orange-600" : "border-transparent text-slate-400 hover:text-slate-600"
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
+                  {drawerTab === 'documents' ? (
+                    /* READ-ONLY listing of the shipment's existing documents. */
+                    <div className="p-3.5 space-y-2">
+                      {docs.length === 0 ? (
+                        <p className="text-[11px] text-slate-400 py-4 text-center">{t.noDocuments}</p>
+                      ) : docs.map(doc => (
+                        <a
+                          key={doc.id}
+                          href={doc.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2.5 p-2.5 rounded-lg border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all"
+                        >
+                          <span className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+                            <FileText className="w-4 h-4 text-slate-500" />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-[11px] font-semibold text-slate-700 truncate">{doc.name}</span>
+                            <span className="block text-[9.5px] text-slate-400 truncate">{doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleDateString() : ""}</span>
+                          </span>
+                        </a>
+                      ))}
+                      <p className="text-[9.5px] text-slate-400 pt-1">{t.docsChatNote}</p>
+                    </div>
+                  ) : drawerTab === 'chat' ? (
+                    /* Chat lives in the existing Chat Center — route there. */
+                    <div className="p-3.5 space-y-3 text-center">
+                      <span className="mx-auto mt-2 flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                        <MessageSquare className="w-5 h-5" />
+                      </span>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">{t.docsChatNote}</p>
+                      {onOpenShipmentChat && (
+                        <button
+                          onClick={() => onOpenShipmentChat(selectedShipment.id)}
+                          className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                        >
+                          {t.openChat}
+                        </button>
+                      )}
+                    </div>
+                  ) : (
                   <div className="p-3.5 space-y-3">
                     {/* Facts */}
                     <div className="space-y-2 text-[11px]">
@@ -2074,6 +2197,22 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                         <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.driver}</p>
                         <p className="font-semibold text-slate-800">{selectedShipment.assignedDriverName || t.unassigned}</p>
                         {driver?.phone && <p className="text-slate-500 font-mono text-[10.5px] selectable" dir="ltr">{driver.phone}</p>}
+                      </div>
+                      <div>
+                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.currentLocation}</p>
+                        {loc.available && loc.isActualGps && loc.lat != null && loc.lng != null ? (
+                          <>
+                            <p className="font-semibold text-slate-800">{getNearestCity(loc.x, loc.y)}</p>
+                            <p className="text-slate-500 font-mono text-[10.5px]" dir="ltr">{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</p>
+                          </>
+                        ) : loc.available ? (
+                          <>
+                            <p className="font-semibold text-slate-800">{getNearestCity(loc.x, loc.y)}</p>
+                            <p className="text-slate-400 text-[10px] italic">{t.estimatedNote}</p>
+                          </>
+                        ) : (
+                          <p className="font-semibold text-slate-400">{t.noFix}</p>
+                        )}
                       </div>
                       <div>
                         <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{t.trackingSource}</p>
@@ -2094,78 +2233,93 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                       </div>
                     </div>
 
-                    {/* Journey Progress — operational milestone timeline
-                        including the corridor's border/customs stages. Every
-                        state comes from deriveJourneyProgress (pure, tested):
-                        completed/current ONLY when the shipment's recorded
-                        status/timeline explicitly supports it; stages the
-                        journey passed without data show "Not confirmed";
-                        nothing is ever inferred from GPS proximity. The
-                        percentage counts confirmed milestones only and is
-                        always labeled Estimated. */}
+                    {/* Journey Progress — official design: orange-bordered card,
+                        progress bar above a numbered vertical milestone
+                        timeline with sublabels, connector rail, and per-row
+                        state + timestamp. Every state comes from the pure
+                        deriveJourneyProgress lib (recorded status/timeline
+                        only): completed/current need explicit data; stages
+                        passed without data show Not confirmed; nothing is
+                        ever inferred from GPS proximity. The percentage
+                        counts confirmed milestones only, labeled Estimated. */}
                     {(() => {
                       const journey = deriveJourneyProgress(selectedShipment.status, selectedShipment.timeline);
-                      const milestoneLabel = (key: JourneyMilestoneKey): string => {
+                      const originPlace = `${selectedShipment.loadingCity}${selectedShipment.loadingCountry ? ", " + selectedShipment.loadingCountry : ""}`;
+                      const destPlace = `${selectedShipment.deliveryCity}${selectedShipment.deliveryCountry ? ", " + selectedShipment.deliveryCountry : ""}`;
+                      const milestoneMeta = (key: JourneyMilestoneKey): { name: string; sub: string } => {
                         switch (key) {
-                          case "origin": return `${t.origin} · ${selectedShipment.loadingCity}`;
-                          case "departed": return t.departed;
-                          case "border_arrival": return t.mBorderArrival;
-                          case "customs_clearance": return t.mCustoms;
-                          case "border_exit": return t.mBorderExit;
-                          case "in_transit": return t.kpiInTransit;
-                          case "destination_arrival": return `${t.mDestArrival} · ${selectedShipment.deliveryCity}`;
-                          case "delivered": return t.mDelivered;
+                          case "origin": return { name: t.origin, sub: originPlace };
+                          case "departed": return { name: t.departed, sub: originPlace };
+                          case "border_arrival": return { name: t.mBorderArrival, sub: t.borderShort };
+                          case "customs_clearance": return { name: t.mCustoms, sub: t.borderShort };
+                          case "border_exit": return { name: t.mBorderExit, sub: t.borderShort };
+                          case "in_transit": return { name: t.kpiInTransit, sub: selectedShipment.deliveryCountry || selectedShipment.deliveryCity };
+                          case "destination_arrival": return { name: t.mDestArrival, sub: destPlace };
+                          case "delivered": return { name: t.mDelivered, sub: destPlace };
                         }
                       };
                       const fmtTs = (ts: string | null): string | null => {
                         if (!ts) return null;
                         const d = new Date(ts);
-                        return Number.isNaN(d.getTime()) ? null : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+                        return Number.isNaN(d.getTime()) ? null : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
                       };
                       return (
-                        <div className="border-t border-slate-100 pt-2.5">
+                        <div className="border border-orange-300 rounded-xl p-3">
                           <div className="flex items-center justify-between mb-1.5">
-                            <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400">
-                              {t.routeProgress} <span className="normal-case font-medium">({t.estimatedTag})</span>
+                            <p className="text-[11px] font-bold text-slate-800">
+                              {t.routeProgress} <span className="font-medium text-slate-400 text-[9.5px]">({t.estimatedTag})</span>
                             </p>
-                            <span className="text-[11px] font-black text-slate-700 tabular-nums">{journey.estimatedPercent}%</span>
+                            <span className="text-[12px] font-black text-slate-800 tabular-nums">{journey.estimatedPercent}%</span>
                           </div>
                           {/* Progress bar — confirmed milestones only, labeled Estimated above */}
-                          <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden mb-2.5">
+                          <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden mb-3">
                             <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${journey.estimatedPercent}%` }} />
                           </div>
-                          {/* Vertical milestone timeline */}
-                          <div className="space-y-1.5">
-                            {journey.milestones.map(m => {
-                              const label = milestoneLabel(m.key);
+                          {/* Numbered vertical milestone timeline with connector rail */}
+                          <div>
+                            {journey.milestones.map((m, idx) => {
+                              const meta = milestoneMeta(m.key);
                               const ts = fmtTs(m.timestamp);
+                              const isLast = idx === journey.milestones.length - 1;
                               const dot =
-                                m.state === "completed" ? "bg-emerald-500 border-emerald-500"
-                                : m.state === "current" ? "bg-sky-500 border-sky-500 animate-pulse"
-                                : m.state === "unknown" ? "bg-slate-200 border-slate-300 border-dashed"
-                                : "bg-white border-slate-300";
-                              const labelCls =
-                                m.state === "completed" ? "text-slate-700"
-                                : m.state === "current" ? "text-sky-700"
-                                : m.state === "unknown" ? "text-slate-400"
-                                : "text-slate-400";
-                              const rightText =
-                                m.state === "completed" ? (ts ?? "✓")
-                                : m.state === "current" ? t.stateCurrent
-                                : m.state === "unknown" ? t.noData
-                                : t.pending;
-                              const rightCls =
-                                m.state === "completed" ? "text-slate-400"
-                                : m.state === "current" ? "text-sky-600 font-bold"
-                                : m.state === "unknown" ? "text-slate-300 italic"
-                                : "text-slate-300";
-                              return (
-                                <div key={m.key} className="flex items-center justify-between text-[11px] gap-2">
-                                  <span className="flex items-center gap-2 min-w-0">
-                                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 border-2 ${dot}`}></span>
-                                    <span className={`font-semibold truncate ${labelCls}`}>{label}</span>
+                                m.state === "completed" ? (
+                                  <span className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center shrink-0 z-10">
+                                    <Check className="w-2.5 h-2.5 text-white stroke-[3.5]" />
                                   </span>
-                                  <span className={`text-[10px] font-medium shrink-0 ${rightCls}`}>{rightText}</span>
+                                ) : m.state === "current" ? (
+                                  <span className="w-4 h-4 rounded-full bg-sky-500 border-2 border-sky-200 animate-pulse shrink-0 z-10"></span>
+                                ) : m.state === "unknown" ? (
+                                  <span className="w-4 h-4 rounded-full bg-white border-2 border-dashed border-slate-300 shrink-0 z-10"></span>
+                                ) : (
+                                  <span className="w-4 h-4 rounded-full bg-white border-2 border-slate-300 shrink-0 z-10"></span>
+                                );
+                              const rightTop =
+                                m.state === "completed" ? <span className="text-[10px] font-bold text-emerald-600">{t.completedLabel}</span>
+                                : m.state === "current" ? <span className="text-[10px] font-bold text-sky-600">{t.stateCurrent}</span>
+                                : m.state === "unknown" ? <span className="text-[10px] font-medium text-slate-300 italic">{t.noData}</span>
+                                : <span className="text-[10px] font-medium text-slate-300">{t.pending}</span>;
+                              return (
+                                <div key={m.key} className="flex gap-2.5">
+                                  {/* Marker + connector rail */}
+                                  <div className="flex flex-col items-center">
+                                    {dot}
+                                    {!isLast && <span className={`w-px flex-1 min-h-[14px] ${m.state === "completed" ? "bg-emerald-300" : "bg-slate-200"}`}></span>}
+                                  </div>
+                                  {/* Row body */}
+                                  <div className={`flex-1 min-w-0 flex items-start justify-between gap-2 ${isLast ? "" : "pb-2"}`}>
+                                    <span className="min-w-0">
+                                      <span className={`block text-[11px] font-bold leading-tight truncate ${
+                                        m.state === "completed" ? "text-slate-800"
+                                        : m.state === "current" ? "text-sky-700"
+                                        : "text-slate-400"
+                                      }`}>{idx + 1}. {meta.name}</span>
+                                      <span className="block text-[9.5px] text-slate-400 leading-tight truncate">{meta.sub}</span>
+                                    </span>
+                                    <span className="shrink-0 text-end leading-tight">
+                                      {rightTop}
+                                      <span className="block text-[9px] text-slate-400 tabular-nums">{m.state === "completed" ? (ts ?? "") : m.state === "current" ? "—" : ""}</span>
+                                    </span>
+                                  </div>
                                 </div>
                               );
                             })}
@@ -2174,18 +2328,20 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                       );
                     })()}
 
-                    {/* ETA & Distance — on-demand only, 5 states (idle /
-                        loading / error / unavailable / success). Success shows
-                        ONLY the API's ETA + remaining distance, labeled
-                        Estimated. Cleared whenever the selection changes. */}
-                    <div className="border-t border-slate-100 pt-2.5">
-                      <p className="text-[9.5px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">{t.etaSection}</p>
+                    {/* ETA & Distance — official design: two-value grid +
+                        persistent orange action button. On-demand only, 5
+                        states; values stay "—" until the operator presses the
+                        button, and results are labeled Estimated. Cleared
+                        whenever the selection changes. */}
+                    <div className="border border-slate-200 rounded-xl p-3">
+                      <p className="text-[11px] font-bold text-slate-800 mb-2">
+                        {t.etaSection} <span className="font-medium text-slate-400 text-[9.5px]">({t.estimatedTag})</span>
+                      </p>
                       {(() => {
                         const eta = etaForId === selectedShipment.id ? etaData : null;
-                        const calcLabel = lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance";
                         if (etaLoading) {
                           return (
-                            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 py-2">
+                            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 py-3">
                               <Navigation className="w-3.5 h-3.5 animate-spin text-orange-500" />
                               <span>{lang === "ar" ? "جارٍ الحساب..." : lang === "tr" ? "Hesaplanıyor..." : "Calculating..."}</span>
                             </div>
@@ -2193,79 +2349,77 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                         }
                         if (etaError) {
                           return (
-                            <div className="bg-red-50 border border-red-200 p-2.5 rounded-lg text-[10.5px] text-red-700 flex items-start gap-1.5">
+                            <div className="bg-red-50 border border-red-200 p-2.5 rounded-lg text-[10.5px] text-red-700 flex items-start gap-1.5 mb-2">
                               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                              <div className="space-y-1">
-                                <p>{etaError}</p>
-                                <button onClick={() => handleCalculateEta(selectedShipment)} className="underline font-bold cursor-pointer">
-                                  {lang === "ar" ? "إعادة المحاولة" : lang === "tr" ? "Tekrar dene" : "Retry"}
-                                </button>
-                              </div>
+                              <p>{etaError}</p>
                             </div>
                           );
                         }
                         if (eta && eta.status === "UNAVAILABLE") {
                           return (
-                            <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[10.5px] text-amber-800 flex items-start gap-1.5">
+                            <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[10.5px] text-amber-800 flex items-start gap-1.5 mb-2">
                               <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                               <span>{lang === "ar" ? "المسافة غير متوفرة لهذا المسار" : lang === "tr" ? "Bu rota için mesafe yok" : "Route distance unavailable for this shipment."}</span>
                             </div>
                           );
                         }
-                        if (eta) {
-                          return (
-                            <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg space-y-1.5 text-[11px]">
-                              <div className="flex items-center justify-between">
-                                <span className="text-slate-500">ETA</span>
-                                <span className="font-bold text-slate-800">{eta.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString() : "—"}</span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-slate-500">{t.remainingDistance}</span>
-                                <span className="font-bold text-slate-800">{eta.distance?.text || "—"}</span>
-                              </div>
-                              <div className="flex items-center justify-between pt-0.5 text-[9.5px]">
-                                <span className="text-slate-400 font-semibold px-1.5 py-0.5 rounded bg-white border border-slate-200">{t.estimatedTag}</span>
-                                <button onClick={() => handleCalculateEta(selectedShipment)} className="text-orange-600 underline font-bold cursor-pointer">
-                                  {lang === "ar" ? "تحديث" : lang === "tr" ? "Yenile" : "Recalculate"}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        }
-                        // idle
                         return (
-                          <button
-                            onClick={() => handleCalculateEta(selectedShipment)}
-                            className="w-full py-2 px-3 bg-white hover:bg-orange-50 border border-orange-400 text-orange-600 font-sans text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <span>{calcLabel}</span>
-                          </button>
+                          <div className="grid grid-cols-2 gap-2 mb-1">
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-black text-slate-800 truncate">{eta?.distance?.text || "—"}</p>
+                              <p className="text-[9.5px] text-slate-400">{t.remainingDistance}</p>
+                            </div>
+                            <div className="min-w-0 border-s border-slate-100 ps-2">
+                              <p className="text-[13px] font-black text-slate-800 truncate">
+                                {eta?.estimatedArrivalTime ? new Date(eta.estimatedArrivalTime).toLocaleString(undefined, { weekday: undefined, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}
+                              </p>
+                              <p className="text-[9.5px] text-slate-400">{t.estimatedArrival}</p>
+                            </div>
+                          </div>
                         );
                       })()}
+                      <button
+                        onClick={() => handleCalculateEta(selectedShipment)}
+                        disabled={etaLoading}
+                        className="w-full mt-1.5 py-2 px-3 bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white font-sans text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <span>{lang === "ar" ? "حساب الوقت والمسافة" : lang === "tr" ? "Süre ve Mesafeyi Hesapla" : "Calculate ETA & Distance"}</span>
+                      </button>
                     </div>
 
-                    {/* Navigation actions — into EXISTING surfaces only */}
+                    {/* Navigation action cards — into EXISTING surfaces only */}
                     {(onOpenShipmentDetails || onOpenShipmentChat) && (
-                      <div className="border-t border-slate-100 pt-2.5 space-y-1.5">
-                        {onOpenShipmentDetails && (
-                          <button
-                            onClick={() => onOpenShipmentDetails(selectedShipment.id)}
-                            className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <span>{t.viewDetails}</span>
-                          </button>
-                        )}
+                      <div className="grid grid-cols-2 gap-2">
                         {onOpenShipmentChat && (
                           <button
                             onClick={() => onOpenShipmentChat(selectedShipment.id)}
-                            className="w-full py-2 px-3 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                            className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 transition-all text-start cursor-pointer"
                           >
-                            <span>{t.openChat}</span>
+                            <MessageSquare className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                            <span className="min-w-0">
+                              <span className="block text-[10.5px] font-bold text-slate-700 leading-tight">{t.openChat}</span>
+                              <span className="block text-[9px] text-slate-400 leading-tight truncate">{t.openChatSub}</span>
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0 ms-auto mt-0.5 rtl:rotate-180" />
+                          </button>
+                        )}
+                        {onOpenShipmentDetails && (
+                          <button
+                            onClick={() => onOpenShipmentDetails(selectedShipment.id)}
+                            className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 transition-all text-start cursor-pointer"
+                          >
+                            <FileText className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                            <span className="min-w-0">
+                              <span className="block text-[10.5px] font-bold text-slate-700 leading-tight">{t.viewDetails}</span>
+                              <span className="block text-[9px] text-slate-400 leading-tight truncate">{t.viewDetailsSub}</span>
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0 ms-auto mt-0.5 rtl:rotate-180" />
                           </button>
                         )}
                       </div>
                     )}
                   </div>
+                  )}
                 </div>
                 );
               })()}
