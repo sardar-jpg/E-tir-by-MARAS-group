@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Language, Shipment, Driver, DocumentCategory } from "../types";
 import {
-  Globe, Star, Truck, Eye,
-  Search, Clipboard, ArrowRight, MessageSquare, CheckCircle2,
-  FileText, Download, Clock, ChevronRight, X, Send,
-  Activity, RefreshCw, Bell, Lock, Trash2, ShieldAlert, Paperclip
+  Home, Package, MessageSquare, User, Bell, ArrowRight, FileText, Navigation,
+  Search, SlidersHorizontal, Truck, Ship, Plane, ChevronRight, ChevronLeft,
+  Clock, Scale, Info, RefreshCw, MapPin, CheckCircle2, Paperclip, Send,
+  Download, Lock, X, Globe, LifeBuoy, Shield, LogOut, Trash2, ShieldAlert,
+  WifiOff, Building2, Mail
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { isNotificationReadForUser, addReaderToNotification } from "../lib/notificationAccess";
@@ -14,7 +15,13 @@ import { canClientSendChatMessage } from "../lib/clientAccess";
 import { validateUpload } from "../lib/uploadValidation";
 import { MAX_CHAT_TEXT_LENGTH } from "../lib/chatMessageValidation";
 import { canSubmitChatMessage } from "../lib/chatComposerState";
-import { isShipmentClosed } from "../lib/shipmentStatusTransitions";
+import {
+  isShipmentClosed,
+  resolveFreightMode,
+  getStatusSequenceForFreightMode,
+  normalizeStatusForSequence,
+  getShipmentStatusLabel,
+} from "../lib/shipmentStatusTransitions";
 import { shouldShowDateSeparator, formatDateSeparatorLabel, isNearBottom, computeAutoGrowHeightPx } from "../lib/chatDisplay";
 
 // Local multilingual dictionary
@@ -60,7 +67,91 @@ const t = {
     markAllRead: "Mark All as Read",
     noNewNotifs: "No recent updates",
     viewShipment: "Track",
-    notifications: "Notifications"
+    notifications: "Notifications",
+    hello: "Hello,",
+    currentShipment: "Current shipment",
+    trackShipment: "Track Shipment",
+    details: "Details",
+    lastUpdate: "Last update",
+    step: "Step",
+    of: "of",
+    statTotal: "Total",
+    statActive: "In Transit",
+    statDelivered: "Delivered",
+    earlierShipments: "Earlier shipments",
+    navHome: "Home",
+    navShipments: "Shipments",
+    navChat: "Chat",
+    navProfile: "Profile",
+    segAll: "All",
+    segActive: "In Transit",
+    segDelivered: "Delivered",
+    segCancelled: "Cancelled",
+    loadOlder: "Load older shipments",
+    loading: "Loading…",
+    searchFilter: "Search & Filter",
+    reset: "Reset",
+    searchPlaceholderShort: "Search by number, city, route",
+    freightType: "Freight type",
+    filterAllShort: "All",
+    status: "Status",
+    showResults: "Show results",
+    mode_land: "Land · TIR",
+    mode_sea: "Sea · Container",
+    mode_air: "Air · Express",
+    shipmentDetails: "Shipment Details",
+    tabOverview: "Overview",
+    tabTracking: "Tracking",
+    cargo: "Cargo",
+    weight: "Weight",
+    freightTypeLabel: "Freight type",
+    truck: "Truck",
+    created: "Created",
+    filesInChatNote: "Documents like the CMR and packing list are shared with you inside Chat.",
+    openChat: "Open Shipment Chat",
+    live: "Live",
+    estArrival: "Est. arrival",
+    sharedByMaras: "Shared by MARAS",
+    viewTimeline: "View full timeline",
+    journeyProgress: "Journey Progress",
+    confirmedSteps: "Confirmed steps only",
+    pending: "Pending",
+    chatEmpty: "No messages yet. Send a message to MARAS Operations.",
+    chatClosed: "This shipment is closed. Messages can no longer be sent.",
+    chatViewOnly: "View-only account — sending messages is disabled.",
+    messagePlaceholder: "Message MARAS…",
+    attachment: "Attachment",
+    companyInfo: "Company Information",
+    notifSettings: "Notification Settings",
+    language: "Language",
+    help: "Help & Support",
+    about: "About eTIR by MARAS",
+    privacy: "Privacy Policy",
+    signOut: "Sign Out",
+    deleteAccount: "Delete account",
+    verified: "Verified account",
+    clientStaff: "Client Staff",
+    customerApp: "Customer App",
+    companyName: "Company",
+    email: "Email",
+    companyInfoNote: "Company details are managed by MARAS Operations. Contact support to update them.",
+    soundAlerts: "Sound alerts",
+    soundAlertsNote: "Play a sound for new shipment updates",
+    notifSettingsNote: "You'll always receive shipment status updates, messages and shared files as notifications.",
+    languageNote: "The whole app switches immediately, including right-to-left layout for Arabic.",
+    unread: "unread updates",
+    markAllReadShort: "Mark all read",
+    emptyShipmentsTitle: "No shipments yet",
+    emptyShipmentsSub: "When MARAS creates a shipment for your company, it will appear here with live tracking and chat.",
+    emptyNotifTitle: "You're all caught up",
+    emptyNotifSub: "New updates about your shipments — status changes, messages and files — will show up here.",
+    emptyResultsTitle: "No shipments found",
+    emptyResultsSub: "We couldn't find anything matching your search. Try a different number, city, or route.",
+    emptyOfflineTitle: "You're offline",
+    emptyOfflineSub: "We can't reach MARAS right now. Your last synced information is still available.",
+    emptyGpsTitle: "Live location unavailable",
+    emptyGpsSub: "The driver's GPS is off or out of range. Tracking resumes automatically when a new position is received.",
+    track: "Track"
   },
   tr: {
     welcome: "Tekrar hoş geldiniz,",
@@ -103,7 +194,91 @@ const t = {
     markAllRead: "Tümünü Okundu İşaretle",
     noNewNotifs: "Yakın zamanda güncelleme yok",
     viewShipment: "Takip Et",
-    notifications: "Bildirimler"
+    notifications: "Bildirimler",
+    hello: "Merhaba,",
+    currentShipment: "Güncel sevkiyat",
+    trackShipment: "Sevkiyatı Takip Et",
+    details: "Detaylar",
+    lastUpdate: "Son güncelleme",
+    step: "Adım",
+    of: "/",
+    statTotal: "Toplam",
+    statActive: "Yolda",
+    statDelivered: "Teslim",
+    earlierShipments: "Önceki sevkiyatlar",
+    navHome: "Ana Sayfa",
+    navShipments: "Sevkiyatlar",
+    navChat: "Sohbet",
+    navProfile: "Profil",
+    segAll: "Tümü",
+    segActive: "Yolda",
+    segDelivered: "Teslim",
+    segCancelled: "İptal",
+    loadOlder: "Daha eski sevkiyatları yükle",
+    loading: "Yükleniyor…",
+    searchFilter: "Ara & Filtrele",
+    reset: "Sıfırla",
+    searchPlaceholderShort: "Numara, şehir, güzergah ile ara",
+    freightType: "Taşıma türü",
+    filterAllShort: "Tümü",
+    status: "Durum",
+    showResults: "Sonuçları göster",
+    mode_land: "Karayolu · TIR",
+    mode_sea: "Denizyolu · Konteyner",
+    mode_air: "Havayolu · Express",
+    shipmentDetails: "Sevkiyat Detayları",
+    tabOverview: "Genel",
+    tabTracking: "Takip",
+    cargo: "Yük",
+    weight: "Ağırlık",
+    freightTypeLabel: "Taşıma türü",
+    truck: "Tır",
+    created: "Oluşturuldu",
+    filesInChatNote: "CMR ve çeki listesi gibi belgeler sizinle Sohbet içinde paylaşılır.",
+    openChat: "Sevkiyat Sohbetini Aç",
+    live: "Canlı",
+    estArrival: "Tahmini varış",
+    sharedByMaras: "MARAS belirler",
+    viewTimeline: "Zaman çizelgesini gör",
+    journeyProgress: "Yolculuk İlerlemesi",
+    confirmedSteps: "Yalnızca onaylı adımlar",
+    pending: "Bekliyor",
+    chatEmpty: "Henüz mesaj yok. MARAS Operasyon'a bir mesaj gönderin.",
+    chatClosed: "Bu sevkiyat kapatıldı. Artık mesaj gönderilemez.",
+    chatViewOnly: "Salt görüntüleme hesabı — mesaj gönderilemiyor.",
+    messagePlaceholder: "MARAS'a mesaj…",
+    attachment: "Ek",
+    companyInfo: "Şirket Bilgileri",
+    notifSettings: "Bildirim Ayarları",
+    language: "Dil",
+    help: "Yardım & Destek",
+    about: "eTIR by MARAS Hakkında",
+    privacy: "Gizlilik Politikası",
+    signOut: "Çıkış Yap",
+    deleteAccount: "Hesabı sil",
+    verified: "Doğrulanmış hesap",
+    clientStaff: "Müşteri Personeli",
+    customerApp: "Müşteri Uygulaması",
+    companyName: "Şirket",
+    email: "E-posta",
+    companyInfoNote: "Şirket bilgileri MARAS Operasyon tarafından yönetilir. Güncellemek için destek ile iletişime geçin.",
+    soundAlerts: "Sesli uyarılar",
+    soundAlertsNote: "Yeni sevkiyat güncellemelerinde ses çal",
+    notifSettingsNote: "Sevkiyat durum güncellemeleri, mesajlar ve paylaşılan dosyaları her zaman bildirim olarak alırsınız.",
+    languageNote: "Uygulama anında değişir; Arapça için sağdan sola düzen dahil.",
+    unread: "okunmamış güncelleme",
+    markAllReadShort: "Tümünü okundu işaretle",
+    emptyShipmentsTitle: "Henüz sevkiyat yok",
+    emptyShipmentsSub: "MARAS şirketiniz için bir sevkiyat oluşturduğunda, canlı takip ve sohbet ile burada görünür.",
+    emptyNotifTitle: "Her şey güncel",
+    emptyNotifSub: "Sevkiyatlarınızla ilgili yeni güncellemeler — durum, mesaj ve dosyalar — burada görünür.",
+    emptyResultsTitle: "Sevkiyat bulunamadı",
+    emptyResultsSub: "Aramaya uygun bir sonuç bulamadık. Farklı bir numara, şehir veya güzergah deneyin.",
+    emptyOfflineTitle: "Çevrimdışısınız",
+    emptyOfflineSub: "Şu an MARAS'a ulaşılamıyor. Son senkronize bilgiler hâlâ mevcut.",
+    emptyGpsTitle: "Canlı konum yok",
+    emptyGpsSub: "Sürücünün GPS'i kapalı veya kapsama dışı. Yeni konum alınınca takip otomatik devam eder.",
+    track: "Takip"
   },
   ar: {
     welcome: "مرحباً بك مجدداً،",
@@ -146,9 +321,110 @@ const t = {
     markAllRead: "تحديد الكل كمقروء",
     noNewNotifs: "لا توجد تحديثات مؤخرة",
     viewShipment: "تتبع",
-    notifications: "الإشعارات"
+    notifications: "الإشعارات",
+    hello: "مرحباً،",
+    currentShipment: "الشحنة الحالية",
+    trackShipment: "تتبّع الشحنة",
+    details: "التفاصيل",
+    lastUpdate: "آخر تحديث",
+    step: "الخطوة",
+    of: "من",
+    statTotal: "الإجمالي",
+    statActive: "في الطريق",
+    statDelivered: "تم التسليم",
+    earlierShipments: "شحنات سابقة",
+    navHome: "الرئيسية",
+    navShipments: "الشحنات",
+    navChat: "الدردشة",
+    navProfile: "الملف",
+    segAll: "الكل",
+    segActive: "في الطريق",
+    segDelivered: "تم التسليم",
+    segCancelled: "ملغاة",
+    loadOlder: "تحميل شحنات أقدم",
+    loading: "جارٍ التحميل…",
+    searchFilter: "بحث وتصفية",
+    reset: "إعادة ضبط",
+    searchPlaceholderShort: "ابحث بالرقم أو المدينة أو المسار",
+    freightType: "نوع الشحن",
+    filterAllShort: "الكل",
+    status: "الحالة",
+    showResults: "عرض النتائج",
+    mode_land: "بري · TIR",
+    mode_sea: "بحري · حاويات",
+    mode_air: "جوي · سريع",
+    shipmentDetails: "تفاصيل الشحنة",
+    tabOverview: "نظرة عامة",
+    tabTracking: "التتبّع",
+    cargo: "البضاعة",
+    weight: "الوزن",
+    freightTypeLabel: "نوع الشحن",
+    truck: "الشاحنة",
+    created: "تاريخ الإنشاء",
+    filesInChatNote: "يتم مشاركة المستندات مثل CMR وقائمة التعبئة معك داخل الدردشة.",
+    openChat: "فتح دردشة الشحنة",
+    live: "مباشر",
+    estArrival: "الوصول المتوقع",
+    sharedByMaras: "يحدده مكتب MARAS",
+    viewTimeline: "عرض الخط الزمني",
+    journeyProgress: "تقدّم الرحلة",
+    confirmedSteps: "الخطوات المؤكدة فقط",
+    pending: "قيد الانتظار",
+    chatEmpty: "لا توجد رسائل بعد. أرسل رسالة إلى مكتب MARAS.",
+    chatClosed: "هذه الشحنة مغلقة. لم يعد بالإمكان إرسال رسائل.",
+    chatViewOnly: "حساب للاطلاع فقط — لا يمكن إرسال الرسائل.",
+    messagePlaceholder: "راسل MARAS…",
+    attachment: "مرفق",
+    companyInfo: "معلومات الشركة",
+    notifSettings: "إعدادات الإشعارات",
+    language: "اللغة",
+    help: "المساعدة والدعم",
+    about: "حول eTIR by MARAS",
+    privacy: "سياسة الخصوصية",
+    signOut: "تسجيل الخروج",
+    deleteAccount: "حذف الحساب",
+    verified: "حساب موثّق",
+    clientStaff: "موظف العميل",
+    customerApp: "تطبيق العميل",
+    companyName: "الشركة",
+    email: "البريد الإلكتروني",
+    companyInfoNote: "تدار بيانات الشركة من قبل مكتب MARAS. تواصل مع الدعم للتحديث.",
+    soundAlerts: "تنبيهات صوتية",
+    soundAlertsNote: "تشغيل صوت عند وصول تحديثات جديدة",
+    notifSettingsNote: "ستصلك دائماً تحديثات حالة الشحنة والرسائل والملفات كإشعارات.",
+    languageNote: "يتغير التطبيق بالكامل فوراً، بما في ذلك التخطيط من اليمين لليسار.",
+    unread: "تحديثات غير مقروءة",
+    markAllReadShort: "تحديد الكل كمقروء",
+    emptyShipmentsTitle: "لا توجد شحنات بعد",
+    emptyShipmentsSub: "عندما ينشئ مكتب MARAS شحنة لشركتك، ستظهر هنا مع التتبّع المباشر والدردشة.",
+    emptyNotifTitle: "لا جديد لديك",
+    emptyNotifSub: "ستظهر هنا التحديثات الجديدة حول شحناتك — الحالة والرسائل والملفات.",
+    emptyResultsTitle: "لم يتم العثور على شحنات",
+    emptyResultsSub: "لم نجد شيئاً يطابق بحثك. جرّب رقماً أو مدينة أو مساراً مختلفاً.",
+    emptyOfflineTitle: "أنت غير متصل",
+    emptyOfflineSub: "تعذر الوصول إلى MARAS الآن. ما زالت آخر المعلومات المتزامنة متاحة.",
+    emptyGpsTitle: "الموقع المباشر غير متاح",
+    emptyGpsSub: "جهاز GPS لدى السائق مطفأ أو خارج التغطية. يستأنف التتبّع تلقائياً عند ورود موقع جديد.",
+    track: "تتبع"
   }
 };
+
+// Small country-flag glyph shown beside the Home hero route, matching the
+// approved design mockup. Maps known country names to an emoji flag; an
+// unknown country renders nothing (graceful — identical to before). Purely
+// cosmetic — no data, permission, or business-logic impact.
+const COUNTRY_ISO: Record<string, string> = {
+  "turkey": "TR", "türkiye": "TR", "turkiye": "TR",
+  "iraq": "IQ", "syria": "SY", "iran": "IR", "jordan": "JO",
+  "saudi arabia": "SA", "kuwait": "KW", "united arab emirates": "AE", "uae": "AE",
+  "qatar": "QA", "bahrain": "BH", "oman": "OM", "lebanon": "LB", "egypt": "EG",
+};
+function countryFlag(name?: string | null): string {
+  if (!name) return "";
+  const iso = COUNTRY_ISO[name.toLowerCase().trim()];
+  if (!iso) return "";
+  return String.fromCodePoint(...[...iso].map((c) => 127397 + c.charCodeAt(0)));
+}
 
 interface ClientDashboardProps {
   lang: Language;
@@ -156,6 +432,7 @@ interface ClientDashboardProps {
   clientEmail: string;
   clientId: string;
   onLogout: () => void;
+  onLanguageChange?: (lang: Language) => void;
   isMobile?: boolean;
   viewOnly?: boolean;
 }
@@ -167,7 +444,7 @@ interface ClientDashboardProps {
 const INQUIRY_COMPOSER_MIN_HEIGHT_PX = 56;
 const INQUIRY_COMPOSER_MAX_HEIGHT_PX = 160;
 
-export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, isMobile = false, viewOnly = false }: ClientDashboardProps) {
+export default function ClientDashboard({ lang, clientCompanyName, clientEmail, clientId, onLogout, onLanguageChange, isMobile = false, viewOnly = false }: ClientDashboardProps) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   // Phase 2A follow-up (blocking-issue fix): GET /api/shipments now
   // returns only the latest page (default 50) — these track cursor
@@ -320,6 +597,21 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
   const curT = t[lang] || t.en;
   const isRtl = lang === "ar";
 
+  // Customer App — Design Revision A navigation state. Purely presentational:
+  // it selects which approved screen is shown. No data/permission/API change.
+  const [activeTab, setActiveTab] = useState<"home" | "shipments" | "chat" | "profile">("home");
+  const [screen, setScreen] = useState<null | "tracking" | "journey" | "details" | "search" | "company" | "notifSettings" | "language">(null);
+  const [detailsTab, setDetailsTab] = useState<"overview" | "tracking" | "chat">("overview");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "delivered" | "cancelled">("all");
+  // Real, working setting (surfaced in Profile → Notification Settings): gates
+  // the existing new-notification chime. Persisted locally.
+  const [notifSoundEnabled, setNotifSoundEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("etir_client_notif_sound") !== "off"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("etir_client_notif_sound", notifSoundEnabled ? "on" : "off"); } catch { /* ignore */ }
+  }, [notifSoundEnabled]);
+
   useEffect(() => {
     fetchDashboardData();
   }, [clientCompanyName]);
@@ -362,7 +654,7 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 }
               }
             }
-            if (hasNew) {
+            if (hasNew && notifSoundEnabled) {
               try {
                 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
                 const oscillator = audioCtx.createOscillator();
@@ -800,906 +1092,781 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
     return matchesSearch && matchesFreight;
   });
 
-  return (
-    <div className="space-y-6 w-full max-w-7xl mx-auto p-4 md:p-6 text-slate-100 font-sans" dir={isRtl ? "rtl" : "ltr"}>
-      
-      {/* 1. Client Greeting Card */}
-      <div className="bg-gradient-to-r from-slate-900 via-slate-950 to-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="space-y-1.5 text-left">
-          <span className="text-xs uppercase text-orange-500 font-extrabold tracking-widest">{curT.subtitle}</span>
-          <h2 className="text-xl md:text-2xl font-black text-white leading-tight">
-            {curT.welcome} <span className="text-orange-400">{clientCompanyName}</span>
-          </h2>
-          <p className="text-xs text-slate-400 max-w-lg font-medium">
-            Authorized Account Profile: <strong className="text-slate-200">{clientEmail}</strong>
-          </p>
-        </div>
+  // ==========================================================================
+  // Customer (Trader) App — Design Revision A (approved) presentation layer.
+  // Everything above (state, effects, handlers, permissions, business rules)
+  // is unchanged. This section only renders those exact values in the approved
+  // light-theme, tab-based interface. No API, workflow, or permission changes.
+  // ==========================================================================
+  const CARD = "bg-white border border-slate-200 rounded-2xl shadow-sm";
+  const dirBack = isRtl ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />;
 
-        {/* flex-wrap: this row (notification bell, refresh, Delete Account,
-            Sign Out) must never overflow off-screen on a narrower
-            viewport (iPad portrait / split-view multitasking) with no
-            visible affordance to reach the clipped buttons — see the
-            Apple 5.1.1(v) rejection this fix addresses. Wrapping onto a
-            second line keeps every control, especially Delete Account,
-            always visible instead of silently truncated. */}
-        <div className="flex items-center flex-wrap gap-3">
-          {viewOnly && (
-            <span className="px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-lg flex items-center gap-1.5">
-              <Eye className="w-3 h-3" />
-              {lang === 'tr' ? "Müşteri Personeli" : (lang === 'ar' ? "موظفو العميل" : "Client Staff")}
-            </span>
+  const primaryShipment =
+    shipments.find(s => !["Delivered", "Completed", "Closed", "Arrived", "Cancelled"].includes(s.status))
+    || shipments[0] || null;
+  const chatShipment = selectedShipment || primaryShipment;
+
+  const statusChipClass = (status: string) =>
+    ["Delivered", "Completed", "Closed", "Arrived"].includes(status) ? "bg-emerald-50 text-emerald-700"
+      : (status as string) === "Cancelled" ? "bg-slate-100 text-slate-500"
+      : "bg-blue-50 text-blue-700";
+  const statusLabel = (status: string) => {
+    const l = getShipmentStatusLabel(status) as any;
+    return l?.[lang] || l?.en || status;
+  };
+  const modeOf = (s: Shipment) => resolveFreightMode(s.freightType);
+  const modeLabel = (m: "land" | "sea" | "air") => m === "sea" ? curT.mode_sea : m === "air" ? curT.mode_air : curT.mode_land;
+  const FreightIcon = ({ s, className }: { s: Shipment; className?: string }) => {
+    const m = modeOf(s);
+    return m === "sea" ? <Ship className={className} /> : m === "air" ? <Plane className={className} /> : <Truck className={className} />;
+  };
+  const journeyOf = (s: Shipment) => {
+    const seq = getStatusSequenceForFreightMode(resolveFreightMode(s.freightType));
+    const idx = seq.indexOf(normalizeStatusForSequence(s.status as any));
+    const step = idx >= 0 ? idx + 1 : 0;
+    const total = seq.length;
+    const pct = total ? Math.round((step / total) * 100) : 0;
+    return { step, total, pct };
+  };
+  const fmtDate = (ts?: string) => {
+    if (!ts) return "—";
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? ts : d.toLocaleDateString(lang === "tr" ? "tr-TR" : lang === "ar" ? "ar" : "en-US", { year: "numeric", month: "short", day: "numeric" });
+  };
+  const lastUpdateOf = (s: Shipment) => {
+    const ts = (s as any).updatedAt || (s as any).createdAt;
+    if (!ts) return "—";
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? "—" : d.toLocaleDateString(lang === "tr" ? "tr-TR" : lang === "ar" ? "ar" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+  const initials = (name: string) => (name || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+  const langLabel = (l: Language) => l === "ar" ? "العربية" : l === "tr" ? "Türkçe" : "English";
+
+  // Filter/status combine on top of the preserved `filteredShipments`.
+  const visibleShipments = filteredShipments.filter(s => {
+    if (statusFilter === "all") return true;
+    const terminal = ["Delivered", "Completed", "Closed", "Arrived"].includes(s.status);
+    if (statusFilter === "delivered") return terminal;
+    if (statusFilter === "cancelled") return (s.status as string) === "Cancelled";
+    return !terminal && (s.status as string) !== "Cancelled";
+  });
+
+  const openTracking = (s: Shipment) => { setSelectedShipment(s); setScreen("tracking"); };
+  const openDetails = (s: Shipment) => { setSelectedShipment(s); setDetailsTab("overview"); setScreen("details"); };
+  const openChatFor = (s: Shipment) => { setSelectedShipment(s); setScreen(null); setActiveTab("chat"); };
+
+  const journeyBar = (s: Shipment) => {
+    const j = journeyOf(s);
+    return (
+      <>
+        <div className="flex items-center justify-between">
+          <span className="text-[13px] font-extrabold text-slate-900">{statusLabel(s.status)}</span>
+          {j.total > 0 && <span className="text-[12px] font-bold text-slate-400">{curT.step} {j.step} {curT.of} {j.total}</span>}
+        </div>
+        <div className="h-2 rounded-full bg-slate-100 mt-2.5 overflow-hidden">
+          <div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-blue-600" style={{ width: `${j.pct}%` }} />
+        </div>
+      </>
+    );
+  };
+
+  const stat = (label: string, val: number | string, color: string) => (
+    <div className="flex-1 text-center">
+      <div className={`text-[22px] font-extrabold ${color}`}>{val}</div>
+      <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 mt-0.5">{label}</div>
+    </div>
+  );
+
+  const shipmentRow = (s: Shipment) => (
+    <button key={s.id} onClick={() => openDetails(s)} className={`${CARD} w-full p-[15px] text-start block`}>
+      <div className="flex items-center justify-between">
+        <span className="text-[15px] font-extrabold text-slate-900">{s.shipmentNumber}</span>
+        <span className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold ${statusChipClass(s.status)}`}>{statusLabel(s.status)}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-2.5">
+        <span className="text-[15px] font-bold text-slate-900">{s.loadingCity}</span>
+        <ArrowRight className={`w-4 h-4 text-slate-300 ${isRtl ? "rotate-180" : ""}`} />
+        <span className="text-[15px] font-bold text-slate-900" dir="ltr">{s.deliveryCity}</span>
+      </div>
+      <div className="flex items-center justify-between mt-2.5">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-[11px] font-bold">
+          <FreightIcon s={s} className="w-3.5 h-3.5" /> {modeLabel(modeOf(s))}
+        </span>
+        <span className="text-[11.5px] font-bold text-slate-400">{lastUpdateOf(s)}</span>
+      </div>
+    </button>
+  );
+
+  const detailRow = (Icon: any, k: string, v: React.ReactNode, last = false) => (
+    <div className={`flex items-center justify-between py-3.5 ${last ? "" : "border-b border-slate-100"}`}>
+      <span className="flex items-center gap-3 text-[14px] font-semibold text-slate-500">
+        <span className="w-9 h-9 rounded-xl bg-slate-50 text-blue-600 flex items-center justify-center"><Icon className="w-[17px] h-[17px]" /></span>{k}
+      </span>
+      <span className="text-[14.5px] font-extrabold text-slate-900 text-end max-w-[58%]">{v}</span>
+    </div>
+  );
+
+  const carrierRows = (s: Shipment) => {
+    const items: [any, string, string][] = [];
+    if (s.freightType === "sea") {
+      if (s.shippingLine) items.push([Ship, curT.shippingLine, s.shippingLine]);
+      if (s.vesselName) items.push([Ship, curT.vessel, s.vesselName]);
+      if (s.bookingNumber) items.push([FileText, curT.bookingNo, s.bookingNumber]);
+      if (s.billOfLadingNumber) items.push([FileText, curT.billOfLading, s.billOfLadingNumber]);
+    } else if (s.freightType === "air") {
+      if (s.airline) items.push([Plane, curT.airline, s.airline]);
+      if (s.flightNumber) items.push([Plane, "Flight", s.flightNumber]);
+      if (s.airWaybillNumber) items.push([FileText, curT.waybill, s.airWaybillNumber]);
+    }
+    if (s.etd) items.push([Clock, curT.etd, fmtDate(s.etd)]);
+    if (s.eta) items.push([Clock, curT.eta, fmtDate(s.eta)]);
+    return items.map(([Ic, k, v], i) => (
+      <div key={`c${i}`} className="flex items-center justify-between py-3.5 border-b border-slate-100">
+        <span className="flex items-center gap-3 text-[14px] font-semibold text-slate-500">
+          <span className="w-9 h-9 rounded-xl bg-slate-50 text-blue-600 flex items-center justify-center"><Ic className="w-[17px] h-[17px]" /></span>{k}
+        </span>
+        <span className="text-[14.5px] font-extrabold text-slate-900 text-end max-w-[58%]">{v}</span>
+      </div>
+    ));
+  };
+
+  const segmented = (opts: [string, string][], val: string, on: (v: string) => void) => (
+    <div className="flex bg-slate-100 rounded-2xl p-1 gap-1">
+      {opts.map(([k, label]) => (
+        <button key={k} onClick={() => on(k)} className={`flex-1 text-center text-[12.5px] py-2 rounded-xl transition-all ${val === k ? "bg-white text-slate-900 font-extrabold shadow-sm" : "text-slate-500 font-bold"}`}>{label}</button>
+      ))}
+    </div>
+  );
+
+  const homeSkeleton = (
+    <div className="space-y-3.5 pt-1">
+      <div className="h-40 rounded-2xl bg-slate-200/60 animate-pulse" />
+      <div className="h-14 rounded-2xl bg-slate-200/60 animate-pulse" />
+      <div className="h-20 rounded-2xl bg-slate-200/60 animate-pulse" />
+    </div>
+  );
+
+  const renderInlineEmpty = (kind: string) => {
+    const map: Record<string, [any, string, string, string, string]> = {
+      "no-shipments": [Package, "text-blue-600", "bg-blue-50", curT.emptyShipmentsTitle, curT.emptyShipmentsSub],
+      "no-notifications": [Bell, "text-emerald-600", "bg-emerald-50", curT.emptyNotifTitle, curT.emptyNotifSub],
+      "no-results": [Search, "text-amber-600", "bg-amber-50", curT.emptyResultsTitle, curT.emptyResultsSub],
+      "offline": [WifiOff, "text-red-500", "bg-red-50", curT.emptyOfflineTitle, curT.emptyOfflineSub],
+      "gps": [MapPin, "text-slate-500", "bg-slate-100", curT.emptyGpsTitle, curT.emptyGpsSub],
+    };
+    const [Icon, color, bg, title, sub] = map[kind] || map["no-shipments"];
+    return (
+      <div className="flex flex-col items-center justify-center text-center py-16 px-6">
+        <div className={`w-28 h-28 rounded-[34px] ${bg} flex items-center justify-center`}><Icon className={`w-[52px] h-[52px] ${color}`} /></div>
+        <div className="text-[20px] font-extrabold text-slate-900 mt-5">{title}</div>
+        <div className="text-[14px] font-medium text-slate-500 leading-relaxed mt-2 max-w-[280px]">{sub}</div>
+      </div>
+    );
+  };
+
+  const ScreenHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
+    <div className="flex-none flex items-center justify-between px-4 h-14 bg-white border-b border-slate-200">
+      <button onClick={() => setScreen(null)} className="w-10 h-10 -ms-2 flex items-center justify-center rounded-xl text-slate-700 hover:bg-slate-100">{dirBack}</button>
+      <div className="font-extrabold text-[16px] text-slate-900">{title}</div>
+      <div className="w-10 flex items-center justify-end">{right}</div>
+    </div>
+  );
+
+  // ── Chat conversation (reused by the Chat tab and the Details → Chat tab) ──
+  const renderChatConversation = (ship: Shipment) => {
+    const msgs = inquiries[ship.id] || [];
+    const locked = isShipmentClosed(ship.status, ship.freightType);
+    const canSend = !locked && canClientSendChatMessage({ isEmployee: viewOnly });
+    return (
+      <div className="flex-1 flex flex-col min-h-0 bg-[#F4F6FA]">
+        <div ref={inquiryFeedRef} onScroll={handleInquiryFeedScroll} className="flex-1 overflow-y-auto px-[18px] py-3.5 space-y-2.5">
+          {msgs.length === 0 && (
+            <div className="text-center text-slate-400 text-[12.5px] font-semibold py-10">{curT.chatEmpty}</div>
           )}
-
-          {/* Bell Icon for Notifications */}
-          <button
-            id="client-notification-bell"
-            onClick={() => setIsNotifOpen(true)}
-            className="p-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700/80 rounded-xl text-slate-300 transition-all cursor-pointer inline-flex items-center justify-center relative"
-            title={curT.notifications}
-          >
-            <Bell className="w-4 h-4 animate-bounce" />
-            {notifications.some(n => !isNotificationReadForUser(n, clientId)) && (
-              <span id="client-notification-bell-badge" className="absolute -top-1 -end-1 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-slate-950 animate-pulse"></span>
-            )}
-          </button>
-
-          <button
-            onClick={fetchDashboardData}
-            disabled={loading}
-            className="p-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700/80 rounded-xl text-slate-300 transition-all cursor-pointer inline-flex items-center justify-center disabled:opacity-50"
-            title="Refresh Operations Stream"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-
-          {/* fix/client-create-username, final confirmed rule: both Client
-              Owner and Client Staff may delete their own personal login
-              account — no longer hidden for Staff (viewOnly). The server
-              (resolveClientAccountDeleteAuthorization) always deletes the
-              AUTHENTICATED session's own id regardless of what this button
-              submits, so this can never delete anyone else's account or
-              the company. */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowClientDeleteConfirm(true);
-              setUnderstandClientDelete(false);
-              setClientDeleteError(null);
-              setClientDeleteCurrentPassword("");
-            }}
-            className="px-4 py-2.5 bg-red-950/10 hover:bg-red-950/20 border border-red-900/30 hover:border-red-500/20 text-red-400 font-bold rounded-xl text-xs shadow transition-all cursor-pointer flex items-center gap-1 shrink-0"
-          >
-            <Trash2 className="w-3.5 h-3.5 shrink-0" />
-            <span>{lang === 'tr' ? "Hesabı Sil" : (lang === 'ar' ? "حذف الحساب" : "Delete Account")}</span>
-          </button>
-
-          <button
-            onClick={onLogout}
-            className="px-4 py-2.5 bg-red-950/20 hover:bg-red-950/40 border border-red-900/40 hover:border-red-500/30 text-red-50 px-4 text-red-400 font-bold rounded-xl text-xs shadow-lg transition-all cursor-pointer shrink-0"
-          >
-            Sign Out
-          </button>
-        </div>
-      </div>
-
-      {/* 2. Bento Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Total Shipments */}
-        <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
-          <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">{curT.statsTotal}</span>
-            <span className="text-2xl font-black text-white">{totalShipments}</span>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-blue-400 border border-slate-800">
-            <Clipboard className="w-5 h-5" />
-          </div>
-        </div>
-
-        {/* Active Transits */}
-        <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
-          <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-              {curT.statsActive}
-              {shipmentsHasMore && <span className="text-slate-600 normal-case font-medium"> ({lang === 'tr' ? 'yüklenen' : (lang === 'ar' ? 'المحمّل' : 'loaded')})</span>}
-            </span>
-            <span className="text-2xl font-black text-orange-400">{activeShipments}</span>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-orange-400 border border-slate-800">
-            <Activity className="w-5 h-5 animate-pulse" />
-          </div>
-        </div>
-
-        {/* Deliveries Completed */}
-        <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl flex items-center justify-between shadow text-left">
-          <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-              {curT.statsCompleted}
-              {shipmentsHasMore && <span className="text-slate-600 normal-case font-medium"> ({lang === 'tr' ? 'yüklenen' : (lang === 'ar' ? 'المحمّل' : 'loaded')})</span>}
-            </span>
-            <span className="text-2xl font-black text-emerald-400">{completedShipments}</span>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-slate-950 flex items-center justify-center text-emerald-400 border border-slate-800">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-        </div>
-
-      </div>
-
-      {/* 3. Filter Navigation & Searches */}
-      <div className="bg-slate-950/40 border border-slate-800 p-4 rounded-2xl flex flex-col lg:flex-row gap-4 justify-between items-center">
-        {/* Navigation Categories Tabs */}
-        <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/80 p-1 border border-slate-800 rounded-xl w-full lg:w-auto">
-          <button
-            onClick={() => setFreightTypeFilter('all')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-              freightTypeFilter === 'all' ? "bg-orange-600 text-white shadow shadow-orange-500/20" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {curT.filterAll}
-          </button>
-          <button
-            onClick={() => setFreightTypeFilter('land')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-              freightTypeFilter === 'land' ? "bg-orange-600 text-white shadow shadow-orange-500/20" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {curT.filterLand}
-          </button>
-          <button
-            onClick={() => setFreightTypeFilter('sea')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-              freightTypeFilter === 'sea' ? "bg-orange-600 text-white shadow shadow-orange-500/20" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {curT.filterSea}
-          </button>
-          <button
-            onClick={() => setFreightTypeFilter('air')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-              freightTypeFilter === 'air' ? "bg-orange-600 text-white shadow shadow-orange-500/20" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {curT.filterAir}
-          </button>
-        </div>
-
-        {/* Fast Action search bar */}
-        <div className="relative w-full lg:w-72">
-          <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={curT.searchPlaceholder}
-            className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-orange-500 rounded-xl text-xs text-slate-100 placeholder-slate-500 font-semibold focus:outline-none transition-all text-left"
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="space-y-4 py-8">
-          <div className="animate-pulse h-28 bg-slate-900 border border-slate-800 rounded-2xl w-full"></div>
-          <div className="animate-pulse h-28 bg-slate-900 border border-slate-800 rounded-2xl w-full"></div>
-          <div className="animate-pulse h-28 bg-slate-900 border border-slate-800 rounded-2xl w-full"></div>
-        </div>
-      ) : filteredShipments.length === 0 ? (
-        <div className="bg-slate-900 dark:bg-slate-900 p-8 rounded-2xl border border-slate-800/80 text-center text-slate-400 font-medium text-xs">
-          {curT.noShipments}
-        </div>
-      ) : (
-        /* 4. Active Shipments Layout Split */
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          
-          {/* LEFT: Shipments Cards Stream */}
-          <div className="lg:col-span-5 space-y-4 h-[calc(100vh-280px)] overflow-y-auto pr-1">
-            {filteredShipments.map(ship => {
-              const isSelected = selectedShipment?.id === ship.id;
-              const typeLabel = ship.freightType === "sea" ? "Sea 🚢" : ship.freightType === "air" ? "Air ✈️" : "Land 🚛";
-              
-              const isDeliverPiled = ["Delivered", "Completed", "Closed"].includes(ship.status);
-              
-              return (
-                <div
-                  key={ship.id}
-                  onClick={() => setSelectedShipment(ship)}
-                  className={`bg-slate-900 border p-4 rounded-2xl transition-all cursor-pointer text-left space-y-3 relative overflow-hidden flex flex-col justify-between ${
-                    isSelected 
-                      ? "ring-1 ring-orange-500 border-orange-500/80 bg-slate-900/90 shadow-lg shadow-orange-500/5" 
-                      : "border-slate-800 hover:border-slate-700 hover:bg-slate-900/60"
-                  }`}
-                >
-                  {/* Card Status Banner indicators */}
-                  <div className="flex items-center justify-between gap-2.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-black text-white selectable">{ship.shipmentNumber}</span>
-                      <span className="px-2 py-0.5 bg-slate-950 border border-slate-800 text-[9px] font-black text-slate-300 rounded-lg">
-                        {typeLabel}
-                      </span>
-                    </div>
-
-                    <span className={`px-2.5 py-1 text-[9px] font-black uppercase rounded-lg border tracking-wide ${
-                      isDeliverPiled 
-                        ? "bg-emerald-950/30 text-emerald-400 border-emerald-900/40" 
-                        : "bg-orange-950/30 text-orange-400 border-orange-900/40 animate-pulse"
-                    }`}>
-                      {ship.status}
+          {msgs.map((msg: any, i: number) => {
+            const sep = shouldShowDateSeparator(msg.timestamp, msgs[i - 1]?.timestamp);
+            const isSystem = msg.type === "system" || msg.sender === "system" || !!msg.isSystem;
+            const isAdmin = msg.sender === "admin" || (msg.senderName && (String(msg.senderName).toLowerCase().includes("admin") || String(msg.senderName).toLowerCase().includes("maras")));
+            const time = new Date(msg.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : lang === "ar" ? "ar" : "en-US", { hour: "numeric", minute: "2-digit" });
+            return (
+              <div key={i}>
+                {sep && <div className="flex justify-center py-1.5"><span className="px-3 py-1 rounded-full bg-white border border-slate-200 text-slate-500 text-[11px] font-bold">{formatDateSeparatorLabel(msg.timestamp, lang)}</span></div>}
+                {isSystem ? (
+                  // Refinement #6 — automatic system updates read as a subtle,
+                  // centred status line, clearly distinct from human messages.
+                  <div className="flex justify-center py-1">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-100 border border-slate-200 text-slate-500 text-[11.5px] font-bold">
+                      <Info className="w-3.5 h-3.5 text-slate-400" /> {msg.text || statusLabel(ship.status)} · {time}
                     </span>
                   </div>
-
-                  {/* Route flow overview */}
-                  <div className="grid grid-cols-7 items-center text-[11px] font-semibold text-slate-300">
-                    <div className="col-span-3 text-left">
-                      <p className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">{ship.loadingCountry}</p>
-                      <p className="font-extrabold text-white line-clamp-1">{ship.loadingCity}</p>
-                    </div>
-                    
-                    <div className="col-span-1 flex justify-center items-center">
-                      <ArrowRight className="w-3.5 h-3.5 text-orange-500 animate-pulse" />
-                    </div>
-
-                    <div className="col-span-3 text-right">
-                      <p className="text-[9px] text-slate-500 uppercase font-bold tracking-wider" dir="ltr">{ship.deliveryCountry}</p>
-                      <p className="font-extrabold text-white line-clamp-1" dir="ltr">{ship.deliveryCity}</p>
-                    </div>
-                  </div>
-
-                  {/* Weight, Plate info */}
-                  <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-800 pt-3">
-                    <div className="flex items-center gap-1">
-                      <Truck className="w-3.5 h-3.5 text-slate-500" />
-                      <span className="font-bold text-slate-300">{ship.truckNumber || "M-7733-IQ"}</span>
-                    </div>
-                    <p className="text-slate-500 font-bold">
-                      {ship.cargoWeight ? `${ship.cargoWeight.toLocaleString()} KG` : "—"}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* Phase 2A follow-up (blocking-issue fix): explicit "Load
-                Older Shipments" action — GET /api/shipments now returns
-                only the latest 50 (default) at a time. Search/filter
-                above only searches whatever is currently loaded. */}
-            {shipmentsHasMore && (
-              <div className="flex justify-center pt-2">
-                <button
-                  type="button"
-                  onClick={handleLoadMoreShipments}
-                  disabled={shipmentsLoadingMore}
-                  className="px-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-xs font-bold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                >
-                  {shipmentsLoadingMore
-                    ? (lang === 'tr' ? "Yükleniyor..." : (lang === 'ar' ? "جارٍ التحميل..." : "Loading..."))
-                    : (lang === 'tr' ? "Daha Eski Sevkiyatları Yükle" : (lang === 'ar' ? "تحميل شحنات أقدم" : "Load Older Shipments"))}
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* RIGHT: Selected Shipment Deep-dive Panel */}
-          <div className="lg:col-span-7">
-            {selectedShipmentLoading ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 flex items-center justify-center h-64">
-                <div className="animate-pulse text-slate-500 text-xs font-bold">
-                  {lang === 'tr' ? "Sevkiyat yükleniyor..." : (lang === 'ar' ? "جارٍ تحميل الشحنة..." : "Loading shipment...")}
-                </div>
-              </div>
-            ) : selectedShipment ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 text-left space-y-6">
-                
-                {/* Header overview */}
-                <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-5">
-                  <div className="space-y-1">
-                    <span className="text-[10px] uppercase font-bold text-orange-500 tracking-wider">Active Cargo Spotlight</span>
-                    <h3 className="text-xl font-black text-white flex items-center gap-2">
-                      <span className="selectable">{selectedShipment.shipmentNumber}</span>
-                    </h3>
-                    <p className="text-xs text-slate-400 font-medium">
-                      Cargo: <strong className="text-slate-200">{selectedShipment.cargoDescription}</strong>
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() => setSelectedShipment(null)}
-                    className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer"
-                    title={curT.close}
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-
-                {/* Specific Sea/Air details section */}
-                {(selectedShipment.freightType === "sea" || selectedShipment.freightType === "air") && (
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
-                    {selectedShipment.freightType === "sea" && (
-                      <>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">{curT.shippingLine}</p>
-                          <p className="font-extrabold text-white">{selectedShipment.shippingLine || "MAERSK LINE"}</p>
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">{curT.vessel}</p>
-                          <p className="font-extrabold text-white">{selectedShipment.vesselName || "MAERSK MC-KINNEY MOLLER"}</p>
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">{curT.bookingNo}</p>
-                          <p className="font-extrabold text-white">{selectedShipment.bookingNumber || "MSK-BK-91902"}</p>
-                        </div>
-                        {selectedShipment.containerNumber && (
-                          <div className="space-y-1">
-                            <p className="text-[9px] text-slate-500 uppercase font-black">Container No</p>
-                            <p className="font-extrabold text-white">{selectedShipment.containerNumber}</p>
-                          </div>
-                        )}
-                        {selectedShipment.billOfLadingNumber && (
-                          <div className="space-y-1">
-                            <p className="text-[9px] text-slate-500 uppercase font-black">{curT.billOfLading}</p>
-                            <p className="font-extrabold text-white">{selectedShipment.billOfLadingNumber}</p>
-                          </div>
-                        )}
-                      </>
-                    )}
-
-                    {selectedShipment.freightType === "air" && (
-                      <>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">{curT.airline}</p>
-                          <p className="font-extrabold text-white">{selectedShipment.airline || "Turkish Airlines Cargo"}</p>
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">Flight No</p>
-                          <p className="font-extrabold text-white">{selectedShipment.flightNumber || "TK-6192"}</p>
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-[9px] text-slate-500 uppercase font-black">{curT.waybill}</p>
-                          <p className="font-extrabold text-white">{selectedShipment.airWaybillNumber || "235-9018293"}</p>
-                        </div>
-                      </>
-                    )}
-
-                    {selectedShipment.etd && (
-                      <div className="space-y-1">
-                        <p className="text-[9px] text-slate-500 uppercase font-black">{curT.etd}</p>
-                        <p className="font-extrabold text-white">{new Date(selectedShipment.etd).toLocaleString(lang === "tr" ? "tr-TR" : "en-US")}</p>
-                      </div>
-                    )}
-                    {selectedShipment.eta && (
-                      <div className="space-y-1">
-                        <p className="text-[9px] text-slate-500 uppercase font-black">{curT.eta}</p>
-                        <p className="font-extrabold text-orange-400">{new Date(selectedShipment.eta).toLocaleString(lang === "tr" ? "tr-TR" : "en-US")}</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Satellite Maps block */}
-                <div className="space-y-2">
-                  <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-2">
-                    <Globe className="w-3.5 h-3.5 text-orange-500 animate-spin-slow" />
-                    <span>{curT.viewMap}</span>
-                  </h4>
-                  <ClientShipmentMap shipment={selectedShipment} drivers={drivers} lang={lang} />
-                  <p className="text-[9.5px] text-slate-500 leading-relaxed">{curT.smartTrackingNote}</p>
-                </div>
-
-                {/* Split layout: Timeline on left, Documents + inquiries on right */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2">
-                  
-                  {/* Timeline section */}
-                  <div className="space-y-4">
-                    <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
-                      <Clock className="w-3.5 h-3.5 text-slate-400" />
-                      <span>{curT.timeline}</span>
-                    </h4>
-
-                    {selectedShipment.timeline && selectedShipment.timeline.length > 0 ? (
-                      <div className="space-y-3.5 text-xs max-h-72 overflow-y-auto pr-1">
-                        {selectedShipment.timeline.map((update, idx) => {
-                          const dateObj = new Date(update.timestamp);
-                          const formattedTime = isNaN(dateObj.getTime()) 
-                            ? update.timestamp 
-                            : dateObj.toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { 
-                                month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" 
-                              });
-                          
-                          const label = lang === "tr" ? update.labelTr : lang === "ar" ? update.labelAr : update.labelEn;
-                          const details = lang === "tr" ? update.detailsTr : lang === "ar" ? update.detailsAr : update.detailsEn;
-
-                          return (
-                            <div key={idx} className="flex gap-3 relative pb-1">
-                              {/* Continuous connector line */}
-                              {idx < selectedShipment.timeline.length - 1 && (
-                                <div className="absolute top-2 w-0.5 bg-slate-800 h-full left-1.5"></div>
-                              )}
-                              
-                              <div className={`w-3.5 h-3.5 rounded-full z-15 shrink-0 flex items-center justify-center ${
-                                idx === 0 
-                                  ? "bg-orange-500 shadow shadow-orange-500/30" 
-                                  : "bg-slate-800"
-                              }`}>
-                                <div className="w-1.5 h-1.5 rounded-full bg-white"></div>
-                              </div>
-
-                              <div className="space-y-0.5 text-left">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <p className="font-extrabold text-white text-[11px] leading-tight">{label}</p>
-                                  <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">{formattedTime}</span>
-                                </div>
-                                {details && <p className="text-[10px] text-slate-400 leading-normal">{details}</p>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center text-slate-500 text-[11px] font-semibold">
-                        Freight manifests initialized. Full-scale tracking trace will activate upon truck engine start.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Documents + Support chat section */}
-                  <div className="space-y-6">
-                    
-                    {/* Share documents container */}
-                    <div className="space-y-3">
-                      <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
-                        <FileText className="w-3.5 h-3.5 text-slate-400" />
-                        <span>{curT.documents}</span>
-                      </h4>
-
-                      {selectedShipment.documents && selectedShipment.documents.length > 0 ? (
-                        <div className="grid grid-cols-1 gap-1.5">
-                          {selectedShipment.documents.map((doc, dIdx) => (
-                            <div key={dIdx} className="bg-slate-950 border border-slate-800 p-2 text-xs rounded-xl flex items-center justify-between hover:border-slate-800">
-                              <div className="flex items-center gap-2 truncate">
-                                <FileText className="w-4 h-4 text-orange-500 shrink-0" />
-                                <div className="truncate text-left">
-                                  <p className="font-extrabold text-white truncate text-[11px] leading-tight">{doc.name}</p>
-                                  <span className="text-[9px] font-black uppercase text-slate-500">{doc.category}</span>
-                                </div>
-                              </div>
-
-                              <a 
-                                href={doc.url} 
-                                target="_blank" 
-                                rel="noreferrer" 
-                                className="p-1 px-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-300 hover:text-white font-extrabold text-[10px] transition-colors flex items-center gap-1.5 whitespace-nowrap"
-                              >
-                                <Download className="w-3 h-3 text-orange-400" />
-                                <span>Get File</span>
-                              </a>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center text-slate-400 text-[11px] font-semibold">
-                          {curT.noDocs}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Support inquiries block — existing customer/admin
-                        chat (client_admin channel only, see chatVisibility.ts).
-                        Client Owner and Client Staff share this same view;
-                        see canClientSendChatMessage below for why sending is
-                        never gated on viewOnly here. */}
-                    <div className="space-y-3">
-                      <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
-                        <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
-                        <span>{curT.inquiryTitle}</span>
-                      </h4>
-
-                      <div className="space-y-3">
-                        <p className="text-[10px] text-slate-400 leading-normal font-medium">
-                          {curT.inquiryDesc}
-                        </p>
-
-                        {/* Message Feed logs — feature/chat-ui-ux-phase2:
-                            was max-h-36 (144px, ~2 messages visible at
-                            once); bumped to a genuinely usable size, plus
-                            smart auto-scroll and date separators to match
-                            the other three chat surfaces. */}
-                        {inquiries[selectedShipment!.id] && inquiries[selectedShipment!.id].length > 0 && (
-                          <div
-                            ref={inquiryFeedRef}
-                            onScroll={handleInquiryFeedScroll}
-                            className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-72 sm:max-h-96 overflow-y-auto space-y-2 text-[11px]"
-                          >
-                            {inquiries[selectedShipment!.id].map((msg, mIdx) => {
-                              const isAdminSender = msg.sender === "admin" || (msg.senderName && (msg.senderName.toLowerCase().includes("admin") || msg.senderName.toLowerCase().includes("maras")));
-                              const showDateSeparator = shouldShowDateSeparator(msg.timestamp, inquiries[selectedShipment!.id][mIdx - 1]?.timestamp);
-                              return (
-                                <div key={mIdx}>
-                                  {showDateSeparator && (
-                                    <div className="flex items-center justify-center py-1.5">
-                                      <span className="px-2 py-0.5 rounded-full bg-slate-900 text-slate-500 text-[10px] font-bold">
-                                        {formatDateSeparatorLabel(msg.timestamp, lang)}
-                                      </span>
-                                    </div>
-                                  )}
-                                  <div className="space-y-0.5 text-left border-b border-slate-900 pb-1 last:border-0">
-                                  <div className="flex items-center justify-between gap-2.5">
-                                    <span className={`font-black uppercase text-[11px] ${isAdminSender ? 'text-orange-400' : 'text-slate-300'}`}>
-                                      {msg.senderName || msg.sender}
-                                    </span>
-                                    <span className="text-[10px] text-slate-500 font-bold">
-                                      {new Date(msg.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
-                                    </span>
-                                  </div>
-                                  {msg.type === "file" ? (
-                                    <div className="space-y-1">
-                                      <span className="inline-block bg-slate-900 text-slate-400 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">
-                                        {msg.fileCategory || "file"}
-                                      </span>
-                                      <a
-                                        href={msg.fileUrl || "#"}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        onClick={(e) => {
-                                          if (!msg.fileUrl || msg.fileUrl === "#") e.preventDefault();
-                                        }}
-                                        className="flex items-center gap-1 text-slate-200 hover:text-orange-400 font-bold text-[11px] underline break-all"
-                                      >
-                                        <Download className="w-3 h-3 text-orange-400 shrink-0" />
-                                        <span>{msg.fileName || "Attachment"}</span>
-                                      </a>
-                                      {msg.text && (
-                                        <p className="text-slate-300 text-[11px] leading-tight break-words">{msg.text}</p>
-                                      )}
-                                    </div>
-                                  ) : (
-                                    <p className="text-slate-300 text-[11px] leading-tight break-words">{msg.text}</p>
-                                  )}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            <div ref={inquiryFeedEndRef} />
-                          </div>
-                        )}
-
-                        {/* customer-chat-enablement-safety-review, updated
-                            fix/client-create-username: Client Staff
-                            (viewOnly) get identical chat send access to the
-                            Client Owner — this branch is effectively dead
-                            code today since canClientSendChatMessage always
-                            returns true, kept as a named, reviewable
-                            extension point (see clientAccess.ts). */}
-                        {isChatClosed ? (
-                          <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
-                            <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
-                            <span>{lang === 'ar' ? "هذه الشحنة مغلقة. لم يعد بالإمكان إرسال رسائل." : lang === 'tr' ? "Bu sevkiyat kapatıldı. Artık mesaj gönderilemez." : "This shipment is closed. Messages can no longer be sent."}</span>
-                          </div>
-                        ) : !canClientSendChatMessage({ isEmployee: viewOnly }) ? (
-                          <div className="flex items-center gap-2 p-3 bg-slate-950 border border-slate-800 rounded-xl text-[10px] text-slate-500 font-semibold">
-                            <Lock className="w-3.5 h-3.5 shrink-0 text-slate-600" />
-                            <span>{lang === 'ar' ? "حساب المشاهدة فقط — لا يمكن إرسال الرسائل." : lang === 'tr' ? "Salt görüntüleme hesabı — mesaj gönderilemiyor." : "View-only account — sending messages is disabled."}</span>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <textarea
-                              ref={inquiryTextareaRef}
-                              rows={2}
-                              value={inquiryText}
-                              onChange={(e) => setInquiryText(e.target.value)}
-                              onKeyDown={(e) => {
-                                // Enter sends; Shift+Enter inserts a
-                                // newline (this textarea can already grow
-                                // to multiple lines).
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault();
-                                  handleSendInquiry(selectedShipment!.id);
-                                }
-                              }}
-                              placeholder={curT.inquiryPlaceholder}
-                              maxLength={MAX_CHAT_TEXT_LENGTH}
-                              disabled={sendingInquiry}
-                              style={{ minHeight: INQUIRY_COMPOSER_MIN_HEIGHT_PX, maxHeight: INQUIRY_COMPOSER_MAX_HEIGHT_PX }}
-                              className="w-full bg-slate-950 border border-slate-800 p-2.5 hover:border-slate-800 focus:border-orange-500/80 rounded-xl text-xs text-white focus:outline-none transition-all resize-none disabled:opacity-60 overflow-y-auto leading-normal"
-                            />
-
-                            <div className="flex items-center gap-2">
-                              <label
-                                title={curT.attachFile}
-                                className="p-3 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-400 hover:text-orange-400 cursor-pointer transition-colors shrink-0"
-                              >
-                                <Paperclip className="w-3.5 h-3.5" />
-                                <input
-                                  type="file"
-                                  accept="image/jpeg,image/png,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                  onChange={handleAttachmentSelect}
-                                  disabled={isUploadingFile || sendingInquiry}
-                                  className="hidden"
-                                />
-                              </label>
-
-                              {selectedFile && (
-                                <div className="flex items-center gap-1.5 min-w-0 flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-300 font-semibold">
-                                  <FileText className="w-3 h-3 text-orange-400 shrink-0" />
-                                  <span className="truncate">{selectedFile.name}</span>
-                                  <button
-                                    type="button"
-                                    onClick={handleRemoveAttachment}
-                                    title={curT.removeFile}
-                                    disabled={isUploadingFile || sendingInquiry}
-                                    className="ml-auto shrink-0 p-2 -m-1 text-slate-500 hover:text-red-400 border-0 bg-transparent cursor-pointer"
-                                  >
-                                    <X className="w-3 h-3" />
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-
-                            {fileError && (
-                              <p className="text-[10px] text-red-400 font-extrabold">{fileError}</p>
-                            )}
-                            {inquiryStatus === "success" && (
-                              <p className="text-[10px] text-emerald-400 font-extrabold">{curT.inquirySuccess}</p>
-                            )}
-                            {inquiryStatus === "error" && (
-                              <p className="text-[10px] text-red-400 font-extrabold">{curT.inquiryError}</p>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => handleSendInquiry(selectedShipment!.id)}
-                              disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry, isLocked: isChatClosed })}
-                              className="w-full py-3 px-3 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white font-extrabold text-[11px] rounded-xl transition-all border-0 shadow flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-widest"
-                            >
-                              {isUploadingFile ? (
-                                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                              ) : (
-                                <Send className="w-3.5 h-3.5" />
-                              )}
-                              <span>{isUploadingFile ? curT.uploadingFile : curT.submitInquiry}</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-
-              </div>
-            ) : (
-              <div className="bg-slate-900/40 p-12 text-center text-slate-400 font-medium text-xs border border-slate-800 border-dashed rounded-2xl h-80 flex flex-col justify-center items-center gap-3">
-                <div className="p-3 bg-slate-900 text-orange-400 rounded-xl border border-slate-800">
-                  <Star className="w-5 h-5" />
-                </div>
-                <div className="space-y-0.5">
-                  <h4 className="font-extrabold text-white block">No shipment selected</h4>
-                  <p className="text-[11px] text-slate-500">Pick an active or completed cargo service on the left stream to inspect satellite status updates, tracking documents, or send support inquiries.</p>
-                </div>
-              </div>
-            )}
-          </div>
-
-        </div>
-      )}
-
-      {/* Real-time Customer Notification Center Overlay slide-over panel */}
-      {isNotifOpen && (
-        <div id="notifications-overlay" className="fixed inset-0 z-50 overflow-hidden flex justify-end">
-          {/* Backdrop */}
-          <div 
-            className="absolute inset-0 bg-black/60 backdrop-blur-xs transition-opacity"
-            onClick={() => setIsNotifOpen(false)}
-          ></div>
-
-          {/* Sliding Panel */}
-          <div className="relative w-full max-w-md bg-slate-950 border-l border-slate-800 text-slate-100 flex flex-col h-full shadow-2xl select-none">
-            <div className="p-5 border-b border-slate-800 flex items-center justify-between">
-              <div className="space-y-1 text-left">
-                <h3 className="font-extrabold text-sm uppercase tracking-wider font-mono flex items-center gap-2 text-white">
-                  <Bell className="w-4 h-4 text-orange-400 animate-pulse" />
-                  <span>{curT.notifsTitle}</span>
-                </h3>
-                <p className="text-[10px] text-slate-500 font-medium">
-                  {notifications.filter(n => !isNotificationReadForUser(n, clientId)).length} unread updates matching your shipments
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {notifications.some(n => !isNotificationReadForUser(n, clientId)) && (
-                  <button
-                    onClick={handleMarkAllRead}
-                    className="p-1 px-2.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 hover:border-orange-500/30 text-[9px] uppercase tracking-wider font-mono font-black rounded-lg transition-all active:scale-95 cursor-pointer"
-                  >
-                    {curT.markAllRead}
-                  </button>
-                )}
-                <button 
-                  onClick={() => setIsNotifOpen(false)}
-                  className="p-1.5 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 hover:text-white rounded-lg cursor-pointer transition-all active:scale-95"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {notifications.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 space-y-2 py-12">
-                  <Bell className="w-8 h-8 text-slate-700 stroke-[1.5]" />
-                  <p className="text-xs font-semibold">{curT.noNewNotifs}</p>
-                </div>
-              ) : (
-                [...notifications].sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map((notif) => {
-                  const title = lang === 'en' ? notif.titleEn : (lang === 'tr' ? notif.titleTr : notif.titleAr);
-                  const msg = lang === 'en' ? notif.messageEn : (lang === 'tr' ? notif.messageTr : notif.messageAr);
-                  const isUnread = !isNotificationReadForUser(notif, clientId);
-
-                  return (
-                    <div 
-                      key={notif.id} 
-                      className={`p-3.5 border rounded-2xl transition-all relative overflow-hidden flex flex-col justify-between gap-2.5 ${
-                        isUnread 
-                          ? "bg-slate-900/60 border-orange-500/20 hover:border-orange-500/30 shadow-md shadow-orange-500-[2%]" 
-                          : "bg-slate-900/20 border-slate-800 hover:border-slate-900"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3 text-left">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[10px] bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-lg text-slate-400 font-black font-mono">
-                              #{notif.shipmentNumber}
-                            </span>
-                            {isUnread && (
-                              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full"></span>
-                            )}
-                          </div>
-                          <h4 className="text-xs font-black text-white">{title}</h4>
-                          <p className="text-[10.5px] text-slate-400 font-medium leading-normal">{msg}</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between border-t border-slate-900 pt-2 text-[9px] font-bold text-slate-500">
-                        <span>
-                          {new Date(notif.timestamp).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "short", day: "numeric" })} at {new Date(notif.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}
-                        </span>
-                        {notif.shipmentId && (
-                          // Phase 2A follow-up (blocking-issue fix): no
-                          // longer gated on the shipment already being in
-                          // the loaded page — openShipmentById fetches it
-                          // directly via GET /api/shipments/:id when it
-                          // isn't, so a notification for an older shipment
-                          // is still reachable.
-                          <button
-                            onClick={async () => {
-                              setIsNotifOpen(false);
-                              await openShipmentById(notif.shipmentId);
-                            }}
-                            className="text-orange-400 hover:text-white flex items-center gap-0.5 uppercase tracking-wider font-mono font-extrabold cursor-pointer transition-all active:scale-95"
-                          >
-                            <span>{curT.viewShipment}</span>
-                            <ChevronRight className="w-3 h-3" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Account Modal */}
-      {showClientDeleteConfirm && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in text-left">
-          <div className="bg-gradient-to-b from-slate-900 to-slate-950 border border-red-900/40 rounded-3xl p-6 max-w-md w-full shadow-[0_20px_50px_rgba(239,68,68,0.15)] space-y-6">
-            <div className="flex items-start gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-red-900/20 border border-red-800/40 flex items-center justify-center text-red-100 shrink-0 select-none">
-                <ShieldAlert className="w-5 h-5 text-red-500 animate-pulse" />
-              </div>
-              <div>
-                <h3 className="font-extrabold text-base text-white tracking-tight uppercase font-mono">
-                  {lang === 'tr' ? "Hesabınızı Kalıcı Olarak Silin" : (lang === 'ar' ? "حذف حساب العميل نهائياً" : "Permanently Delete Account")}
-                </h3>
-                <p className="text-xs text-slate-400 leading-relaxed mt-1">
-                  {lang === 'tr'
-                    ? "Bu işlem etir tescilli veri tabanından yetkili kuruluş verilerinizi ve geçmiş tüm lojistik kayıtlarınızı siler. Geri alınamaz."
-                    : (lang === 'ar'
-                      ? "سيؤدي هذا الإجراء إلى حذف جميع بيانات ومعاملات الشحن التاريخية الخاصة بشركتكم من خنائم النظام بشكل لا يمكن التراجع عنه."
-                      : "This action will completely remove your corporate credentials, profile associations, and past freight logs from our servers.")}
-                </p>
-                <p className="text-[11px] text-slate-500 leading-relaxed mt-2 pt-2 border-t border-slate-900">
-                  {accountDeletionCopy(lang).privacyNotice}
-                </p>
-              </div>
-            </div>
-
-            {clientDeleteError && (
-              <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-3 text-xs text-red-300 leading-relaxed">
-                {clientDeleteError === "missing"
-                  ? accountDeletionCopy(lang).missingPasswordError
-                  : clientDeleteError === "incorrect"
-                  ? accountDeletionCopy(lang).incorrectPasswordError
-                  : clientDeleteError === "rate_limited"
-                  ? accountDeletionCopy(lang).rateLimitedError
-                  : clientDeleteError === "service_unavailable"
-                  ? accountDeletionCopy(lang).serviceUnavailableError
-                  : clientDeleteError === "network"
-                  ? accountDeletionCopy(lang).networkFailureError
-                  : accountDeletionCopy(lang).genericFailureError}
-              </div>
-            )}
-
-            <div className="bg-slate-950 p-4 rounded-2xl border border-slate-900 space-y-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-300 block">
-                  {accountDeletionCopy(lang).passwordLabel}
-                </label>
-                <input
-                  type="password"
-                  autoComplete="current-password"
-                  value={clientDeleteCurrentPassword}
-                  onChange={(e) => setClientDeleteCurrentPassword(e.target.value)}
-                  placeholder={accountDeletionCopy(lang).passwordPlaceholder}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 text-xs focus:ring-1 focus:ring-red-500 focus:border-red-500 outline-none"
-                />
-              </div>
-              <label className="flex items-start gap-3 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white">
-                <input
-                  type="checkbox"
-                  checked={understandClientDelete}
-                  onChange={(e) => setUnderstandClientDelete(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-800 bg-slate-900 text-red-500 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-red-500 mt-0.5"
-                />
-                <span className="leading-normal">
-                  {lang === 'tr'
-                    ? "İş ortağımız MARAS sistemindeki tüm kurumsal erişimlerimin kaldırılmasını kabul ediyorum."
-                    : (lang === 'ar'
-                      ? "أقر وأوافق على إلغاء ترخيص حسابي وإزالة جميع الصلاحيات اللوجستية."
-                      : "I consent to permanently cancel my account license and release all freight manifests associated with this client ID.")}
-                </span>
-              </label>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                disabled={isDeletingClientAccount}
-                onClick={() => setShowClientDeleteConfirm(false)}
-                className="flex-1 py-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
-              >
-                {lang === 'tr' ? "İptal Et" : (lang === 'ar' ? "إلغاء الأمر" : "Cancel")}
-              </button>
-
-              <button
-                type="button"
-                disabled={isDeletingClientAccount || !understandClientDelete}
-                onClick={handleDeleteClientAccount}
-                className="flex-1 py-3 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 disabled:opacity-40 text-white font-extrabold text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0 shadow-[0_4px_15px_rgba(239,68,68,0.2)] active:scale-95"
-              >
-                {isDeletingClientAccount ? (
-                  <>
-                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
-                    <span>{accountDeletionCopy(lang).deletingLabel}</span>
-                  </>
                 ) : (
-                  <>
-                    <Trash2 className="w-4 h-4 text-white" />
-                    <span>{lang === 'tr' ? "Hesabımı Sil" : (lang === 'ar' ? "حذف الحساب" : "Confirm Delete")}</span>
-                  </>
+                  <div className={`max-w-[80%] ${isAdmin ? "" : "ms-auto"}`}>
+                    <div className={`${isAdmin ? "bg-white border border-slate-200 rounded-2xl rounded-es-md text-slate-800" : "bg-blue-600 text-white rounded-2xl rounded-ee-md"} p-3`}>
+                      {msg.type === "file" && (
+                        <a href={msg.fileUrl || "#"} target="_blank" rel="noreferrer" onClick={(e) => { if (!msg.fileUrl || msg.fileUrl === "#") e.preventDefault(); }} className={`flex items-center gap-2.5 ${isAdmin ? "text-slate-800" : "text-white"}`}>
+                          <span className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${isAdmin ? "bg-red-50 text-red-500" : "bg-white/20 text-white"}`}><FileText className="w-5 h-5" /></span>
+                          <span className="min-w-0">
+                            <span className="block text-[13px] font-extrabold truncate">{msg.fileName || curT.attachment}</span>
+                            <span className={`block text-[11px] font-semibold ${isAdmin ? "text-slate-400" : "text-white/70"}`}>{String(msg.fileCategory || "file").toUpperCase()}</span>
+                          </span>
+                          <Download className={`w-4 h-4 shrink-0 ${isAdmin ? "text-slate-400" : "text-white/80"}`} />
+                        </a>
+                      )}
+                      {msg.text && <p className={`text-[14.5px] leading-normal break-words ${msg.type === "file" ? "mt-2" : ""}`}>{msg.text}</p>}
+                    </div>
+                    <div className={`text-[11px] text-slate-400 font-semibold mt-1 ${isAdmin ? "ms-1" : "me-1 text-end"}`}>{isAdmin ? `${msg.senderName || "MARAS"} · ${time}` : time}</div>
+                  </div>
                 )}
+              </div>
+            );
+          })}
+          <div ref={inquiryFeedEndRef} />
+        </div>
+        {locked ? (
+          <div className="flex-none p-[18px] border-t border-slate-200 bg-white"><div className="flex items-center gap-2 text-[12px] font-semibold text-slate-500"><Lock className="w-4 h-4 text-slate-400" /> {curT.chatClosed}</div></div>
+        ) : !canSend ? (
+          <div className="flex-none p-[18px] border-t border-slate-200 bg-white"><div className="flex items-center gap-2 text-[12px] font-semibold text-slate-500"><Lock className="w-4 h-4 text-slate-400" /> {curT.chatViewOnly}</div></div>
+        ) : (
+          <div className="flex-none border-t border-slate-200 bg-white px-3.5 py-2.5">
+            {fileError && <p className="text-[11px] font-bold text-red-500 mb-1.5 px-1">{fileError}</p>}
+            {inquiryStatus === "error" && <p className="text-[11px] font-bold text-red-500 mb-1.5 px-1">{curT.inquiryError}</p>}
+            {selectedFile && (
+              <div className="flex items-center gap-2 mb-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[12px] font-semibold text-slate-600">
+                <FileText className="w-4 h-4 text-blue-600 shrink-0" /><span className="truncate flex-1">{selectedFile.name}</span>
+                <button onClick={handleRemoveAttachment} className="text-slate-400 hover:text-red-500"><X className="w-4 h-4" /></button>
+              </div>
+            )}
+            <div className="flex items-center gap-2.5">
+              <label className="w-11 h-11 rounded-full bg-slate-100 text-blue-600 flex items-center justify-center shrink-0 cursor-pointer" title={curT.attachFile}>
+                <Paperclip className="w-5 h-5" />
+                <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleAttachmentSelect} disabled={isUploadingFile || sendingInquiry} className="hidden" />
+              </label>
+              <textarea
+                ref={inquiryTextareaRef}
+                rows={1}
+                value={inquiryText}
+                onChange={(e) => setInquiryText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendInquiry(ship.id); } }}
+                placeholder={curT.messagePlaceholder}
+                maxLength={MAX_CHAT_TEXT_LENGTH}
+                disabled={sendingInquiry}
+                style={{ minHeight: 44, maxHeight: INQUIRY_COMPOSER_MAX_HEIGHT_PX }}
+                className="flex-1 bg-slate-100 rounded-2xl px-4 py-2.5 text-[14.5px] text-slate-900 placeholder-slate-400 outline-none resize-none leading-normal"
+              />
+              <button onClick={() => handleSendInquiry(ship.id)} disabled={!canSubmitChatMessage({ text: inquiryText, hasAttachment: Boolean(selectedFile), isSending: sendingInquiry, isLocked: locked })} className="w-11 h-11 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0 disabled:bg-slate-300 shadow-lg shadow-blue-600/25">
+                {isUploadingFile ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Send className="w-[18px] h-[18px]" />}
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
+    );
+  };
 
-      {/* Real-time Toast Alert Notification Banner */}
-      {toastMessage && (
-        <div id="notifications-toast" className="fixed bottom-5 right-5 z-50 max-w-sm p-4 bg-slate-900 border border-orange-500/40 rounded-xl shadow-2xl flex items-center justify-between gap-3 text-xs text-white">
-          <span>{toastMessage}</span>
-          <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-white cursor-pointer font-bold p-1">&times;</button>
+  const chatHeaderBar = (ship: Shipment) => (
+    <div className="flex-none bg-white border-b border-slate-200 px-4 h-16 flex items-center justify-between">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shrink-0"><MessageSquare className="w-5 h-5" /></div>
+        <div className="min-w-0">
+          <div className="text-[15px] font-extrabold text-slate-900 truncate">MARAS Operations</div>
+          <div className="flex items-center gap-2 mt-0.5"><span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-[10.5px] font-extrabold" dir="ltr">{ship.shipmentNumber}</span><span className="text-[11.5px] font-bold text-emerald-600">{statusLabel(ship.status)}</span></div>
         </div>
-      )}
+      </div>
+    </div>
+  );
 
+  // ── Screens ──────────────────────────────────────────────────────────────
+  const renderHome = () => {
+    const s = primaryShipment;
+    return (
+      <div className="flex-1 overflow-y-auto px-[18px] pt-3 pb-6">
+        <div className="flex items-center justify-between py-2">
+          <div>
+            <div className="text-[13px] font-semibold text-slate-500">{curT.hello}</div>
+            <div className="text-[21px] font-extrabold tracking-tight text-slate-900 leading-tight">{clientCompanyName}</div>
+          </div>
+          <button id="client-notification-bell" onClick={() => setIsNotifOpen(true)} aria-label={curT.notifications} className="relative w-11 h-11 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-600">
+            <Bell className="w-5 h-5" />
+            {notifications.some(n => !isNotificationReadForUser(n, clientId)) && (
+              <span id="client-notification-bell-badge" className="absolute -top-1 -end-1 min-w-[17px] h-[17px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-extrabold flex items-center justify-center border-2 border-[#F4F6FA]">
+                {notifications.filter(n => !isNotificationReadForUser(n, clientId)).length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {loading ? homeSkeleton : !s ? renderInlineEmpty("no-shipments") : (
+          <>
+            <div className="text-[11px] font-extrabold tracking-[0.09em] uppercase text-slate-400 mt-1 mb-2.5 px-0.5">{curT.currentShipment}</div>
+            <div className={`${CARD} p-5`}>
+              <div className="flex items-center justify-between">
+                <span className="text-[14px] font-extrabold text-slate-500" dir="ltr">{s.shipmentNumber}</span>
+                <span className={`px-3 py-1 rounded-full text-[12px] font-extrabold ${statusChipClass(s.status)}`}>{statusLabel(s.status)}</span>
+              </div>
+              <div className="flex items-center gap-2.5 mt-3">
+                {countryFlag(s.loadingCountry) && <span className="text-[19px] leading-none select-none">{countryFlag(s.loadingCountry)}</span>}
+                <div className="text-[21px] font-extrabold tracking-tight text-slate-900">{s.loadingCity}</div>
+                <ArrowRight className={`w-[18px] h-[18px] text-slate-300 ${isRtl ? "rotate-180" : ""}`} />
+                <div className="text-[21px] font-extrabold tracking-tight text-slate-900" dir="ltr">{s.deliveryCity}</div>
+                {countryFlag(s.deliveryCountry) && <span className="text-[19px] leading-none select-none">{countryFlag(s.deliveryCountry)}</span>}
+              </div>
+              <div className="h-px bg-slate-100 my-4" />
+              {journeyBar(s)}
+              <div className="text-[11.5px] font-bold text-slate-400 mt-2.5">{curT.lastUpdate}: {lastUpdateOf(s)}</div>
+            </div>
+
+            <button onClick={() => openTracking(s)} className="w-full h-14 mt-4 rounded-2xl bg-blue-600 text-white font-extrabold text-[16px] flex items-center justify-center gap-2.5 shadow-lg shadow-blue-600/20">
+              <Navigation className="w-5 h-5" /> {curT.trackShipment}
+            </button>
+            <div className="flex gap-3 mt-3">
+              <button onClick={() => openChatFor(s)} className="flex-1 h-[52px] rounded-2xl bg-white border border-blue-200 text-blue-700 font-extrabold text-[15px] flex items-center justify-center gap-2">
+                <MessageSquare className="w-[18px] h-[18px]" /> {curT.navChat}
+              </button>
+              <button onClick={() => openDetails(s)} className="flex-1 h-[52px] rounded-2xl bg-white border border-slate-200 text-slate-600 font-extrabold text-[15px] flex items-center justify-center gap-2">
+                <FileText className="w-[18px] h-[18px]" /> {curT.details}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between mt-5 px-1">
+              {stat(curT.statTotal, totalShipments, "text-slate-900")}
+              <div className="w-px h-9 bg-slate-200" />
+              {stat(curT.statActive, activeShipments, "text-blue-600")}
+              <div className="w-px h-9 bg-slate-200" />
+              {stat(curT.statDelivered, completedShipments, "text-emerald-600")}
+            </div>
+
+            {shipments.length > 1 && (
+              <>
+                <div className="text-[11px] font-extrabold tracking-[0.09em] uppercase text-slate-400 mt-6 mb-2.5 px-0.5">{curT.earlierShipments}</div>
+                <div className="space-y-2.5">{shipments.filter(x => x.id !== s.id).slice(0, 3).map(x => shipmentRow(x))}</div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderShipments = () => (
+    <div className="flex-1 overflow-y-auto px-[18px] pt-3 pb-6">
+      <div className="flex items-center justify-between py-2">
+        <div className="text-[22px] font-extrabold text-slate-900">{curT.navShipments}</div>
+        <div className="flex items-center gap-2.5">
+          <button onClick={() => setScreen("search")} aria-label={curT.searchFilter} className="w-11 h-11 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-600"><Search className="w-[19px] h-[19px]" /></button>
+          <button onClick={() => setScreen("search")} aria-label={curT.searchFilter} className="w-11 h-11 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-600"><SlidersHorizontal className="w-[19px] h-[19px]" /></button>
+        </div>
+      </div>
+      {segmented([["all", curT.segAll], ["active", curT.segActive], ["delivered", curT.segDelivered], ["cancelled", curT.segCancelled]], statusFilter, (v) => setStatusFilter(v as any))}
+      <div className="space-y-2.5 mt-3.5">
+        {loading ? homeSkeleton
+          : visibleShipments.length === 0 ? renderInlineEmpty(searchQuery ? "no-results" : "no-shipments")
+          : visibleShipments.map(s => shipmentRow(s))}
+        {shipmentsHasMore && !loading && (
+          <button onClick={handleLoadMoreShipments} disabled={shipmentsLoadingMore} className="w-full py-3 rounded-2xl bg-white border border-slate-200 text-slate-600 text-[13px] font-bold disabled:opacity-50">
+            {shipmentsLoadingMore ? curT.loading : curT.loadOlder}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderSearch = () => (
+    <div className="flex-1 flex flex-col min-h-0">
+      <ScreenHeader title={curT.searchFilter} right={<button onClick={() => { setSearchQuery(""); setFreightTypeFilter("all"); setStatusFilter("all"); }} className="text-[12px] font-bold text-slate-500">{curT.reset}</button>} />
+      <div className="flex-1 overflow-y-auto px-[18px] py-4 space-y-5">
+        <div className="h-[50px] rounded-2xl bg-white border border-blue-200 flex items-center gap-3 px-4">
+          <Search className="w-[18px] h-[18px] text-blue-600" />
+          <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder={curT.searchPlaceholderShort} className="flex-1 bg-transparent outline-none text-[14.5px] font-semibold text-slate-900 placeholder-slate-400" />
+        </div>
+        <div>
+          <div className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 mb-2.5">{curT.freightType}</div>
+          <div className="flex flex-wrap gap-2.5">
+            {([["all", curT.filterAllShort], ["land", curT.mode_land], ["sea", curT.mode_sea], ["air", curT.mode_air]] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setFreightTypeFilter(k as any)} className={`px-4 py-2.5 rounded-full text-[13px] font-bold ${freightTypeFilter === k ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{label}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 mb-2.5">{curT.status}</div>
+          <div className="flex flex-wrap gap-2.5">
+            {([["all", curT.segAll], ["active", curT.segActive], ["delivered", curT.segDelivered], ["cancelled", curT.segCancelled]] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setStatusFilter(k as any)} className={`px-4 py-2.5 rounded-full text-[13px] font-bold ${statusFilter === k ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex-none p-[18px] border-t border-slate-200 bg-white">
+        <button onClick={() => { setActiveTab("shipments"); setScreen(null); }} className="w-full h-[52px] rounded-2xl bg-blue-600 text-white font-extrabold text-[15px]">{curT.showResults} ({visibleShipments.length})</button>
+      </div>
+    </div>
+  );
+
+  const renderJourney = () => {
+    const s = selectedShipment;
+    return (
+      <div className="flex-1 flex flex-col min-h-0">
+        <ScreenHeader title={curT.journeyProgress} right={s ? <span className="text-[11px] font-extrabold text-blue-600" dir="ltr">{s.shipmentNumber.split("-").pop()}</span> : undefined} />
+        <div className="flex-1 overflow-y-auto px-[18px] py-4">
+          {!s ? renderInlineEmpty("no-shipments") : (
+            <>
+              <div className={`${CARD} p-4`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[15px] font-extrabold text-slate-900">{curT.step} {journeyOf(s).step} {curT.of} {journeyOf(s).total}</span>
+                  <span className="text-[12px] font-bold text-slate-400">{curT.confirmedSteps}</span>
+                </div>
+                <div className="h-2.5 rounded-full bg-slate-100 mt-3 overflow-hidden"><div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-blue-600" style={{ width: `${journeyOf(s).pct}%` }} /></div>
+              </div>
+              <div className={`${CARD} p-5 mt-3.5`}>{timelineList(s)}</div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const timelineList = (s: Shipment) => {
+    const events = (s.timeline || []) as any[];
+    const seq = getStatusSequenceForFreightMode(resolveFreightMode(s.freightType));
+    const curIdx = seq.indexOf(normalizeStatusForSequence(s.status as any));
+    const futureSteps = curIdx >= 0 ? seq.slice(curIdx + 1) : [];
+    type Row = { label: string; sub: string; state: "done" | "cur" | "pending"; details?: string };
+    const rows: Row[] = [];
+    events.forEach((u, i) => {
+      const d = new Date(u.timestamp);
+      const sub = isNaN(d.getTime()) ? u.timestamp : d.toLocaleDateString(lang === "tr" ? "tr-TR" : lang === "ar" ? "ar" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const label = lang === "tr" ? u.labelTr : lang === "ar" ? u.labelAr : u.labelEn;
+      const details = lang === "tr" ? u.detailsTr : lang === "ar" ? u.detailsAr : u.detailsEn;
+      rows.push({ label: label || u.status, sub, details, state: i === events.length - 1 ? "cur" : "done" });
+    });
+    futureSteps.forEach(st => rows.push({ label: statusLabel(st), sub: curT.pending, state: "pending" }));
+    return (
+      <div>
+        {rows.map((r, i) => (
+          <div key={i} className="flex gap-3.5 relative pb-5 last:pb-0">
+            {i < rows.length - 1 && <div className={`absolute top-9 w-0.5 ${r.state === "done" ? "bg-emerald-500" : "bg-slate-200"}`} style={{ insetInlineStart: "17px", bottom: "-4px" }} />}
+            <div className={`w-[36px] h-[36px] rounded-full flex items-center justify-center shrink-0 z-10 ${r.state === "done" ? "bg-emerald-500 text-white" : r.state === "cur" ? "bg-blue-600 text-white ring-4 ring-blue-100 scale-110 shadow-lg shadow-blue-600/30" : "bg-white border-2 border-slate-200 text-slate-300"}`}>
+              {r.state === "done" ? <CheckCircle2 className="w-5 h-5" /> : r.state === "cur" ? <FreightIcon s={s} className="w-[18px] h-[18px]" /> : <span className="text-[13px] font-extrabold">{i + 1}</span>}
+            </div>
+            <div className="min-w-0 pt-1">
+              <div className={`text-[14.5px] ${r.state === "cur" ? "font-extrabold text-blue-700" : r.state === "pending" ? "font-bold text-slate-400" : "font-bold text-slate-900"}`}>{r.label}</div>
+              <div className={`text-[12px] font-semibold mt-0.5 ${r.state === "cur" ? "text-blue-500" : "text-slate-400"}`}>{r.sub}</div>
+              {r.details && r.state !== "pending" && <div className="text-[12px] text-slate-500 font-medium mt-1 leading-snug">{r.details}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderDetails = () => {
+    const s = selectedShipment;
+    return (
+      <div className="flex-1 flex flex-col min-h-0">
+        <ScreenHeader title={curT.shipmentDetails} />
+        {!s ? <div className="flex-1 overflow-y-auto px-[18px] py-4">{renderInlineEmpty("no-shipments")}</div> : (
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="px-[18px] pt-3">
+              <div className={`${CARD} p-4`}>
+                <div className="flex items-center justify-between"><div className="text-[18px] font-extrabold text-slate-900" dir="ltr">{s.shipmentNumber}</div><span className={`px-3 py-1 rounded-full text-[12px] font-extrabold ${statusChipClass(s.status)}`}>{statusLabel(s.status)}</span></div>
+                <div className="text-[12.5px] font-semibold text-slate-500 mt-1">{s.loadingCity}, {s.loadingCountry} → {s.deliveryCity}, {s.deliveryCountry}</div>
+              </div>
+              <div className="flex gap-6 border-b border-slate-200 mt-3.5 px-1">
+                {([["overview", curT.tabOverview], ["tracking", curT.tabTracking], ["chat", curT.navChat]] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setDetailsTab(k as any)} className={`relative py-3 text-[14px] ${detailsTab === k ? "text-blue-600 font-extrabold" : "text-slate-400 font-bold"}`}>{label}{detailsTab === k && <span className="absolute inset-x-0 -bottom-px h-[2.5px] rounded-full bg-blue-600" />}</button>
+                ))}
+              </div>
+            </div>
+            {detailsTab === "overview" && (
+              <div className="flex-1 overflow-y-auto px-[18px] py-3.5 space-y-3">
+                <div className={`${CARD} px-4`}>
+                  {detailRow(Package, curT.cargo, s.cargoDescription || "—")}
+                  {typeof s.cargoWeight === "number" && detailRow(Scale, curT.weight, `${s.cargoWeight.toLocaleString()} kg`)}
+                  <div className="flex items-center justify-between py-3.5 border-b border-slate-100">
+                    <span className="flex items-center gap-3 text-[14px] font-semibold text-slate-500"><span className="w-9 h-9 rounded-xl bg-slate-50 text-blue-600 flex items-center justify-center"><FreightIcon s={s} className="w-[17px] h-[17px]" /></span>{curT.freightTypeLabel}</span>
+                    <span className="text-[14.5px] font-extrabold text-slate-900 text-end">{modeLabel(modeOf(s))}</span>
+                  </div>
+                  {s.truckNumber && detailRow(Navigation, curT.truck, s.truckNumber)}
+                  {carrierRows(s)}
+                  {detailRow(Clock, curT.created, fmtDate((s as any).createdAt))}
+                  {detailRow(Clock, curT.lastUpdate, lastUpdateOf(s), true)}
+                </div>
+                <div className="bg-blue-50/60 border border-blue-100 rounded-2xl p-3.5 flex items-center gap-3">
+                  <span className="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center shrink-0"><Info className="w-[18px] h-[18px]" /></span>
+                  <p className="text-[12.5px] font-semibold text-slate-600 leading-snug">{curT.filesInChatNote}</p>
+                </div>
+                <button onClick={() => openChatFor(s)} className="w-full h-[52px] rounded-2xl bg-blue-600 text-white font-extrabold text-[15px] flex items-center justify-center gap-2"><MessageSquare className="w-[18px] h-[18px]" /> {curT.openChat}</button>
+              </div>
+            )}
+            {detailsTab === "tracking" && (
+              <div className="flex-1 overflow-y-auto px-[18px] py-3.5 space-y-3">
+                <div className={`${CARD} overflow-hidden p-0`}><ClientShipmentMap shipment={s} drivers={drivers} lang={lang} variant="card" /></div>
+                <div className={`${CARD} p-3.5`}>{journeyBar(s)}</div>
+                <button onClick={() => openTracking(s)} className="w-full h-[52px] rounded-2xl bg-blue-600 text-white font-extrabold text-[15px] flex items-center justify-center gap-2"><Navigation className="w-[18px] h-[18px]" /> {curT.trackShipment}</button>
+                <button onClick={() => setScreen("journey")} className="w-full py-3 rounded-2xl bg-white border border-slate-200 text-slate-700 font-bold text-[13.5px]">{curT.viewTimeline}</button>
+              </div>
+            )}
+            {detailsTab === "chat" && renderChatConversation(s)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderTracking = () => {
+    const s = selectedShipment;
+    if (!s) {
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <ScreenHeader title={curT.trackShipment} />
+          <div className="flex-1 overflow-y-auto">{renderInlineEmpty("no-shipments")}</div>
+        </div>
+      );
+    }
+    return (
+      <div className="flex-1 flex flex-col min-h-0 relative bg-slate-100">
+        <div className="absolute inset-0"><ClientShipmentMap shipment={s} drivers={drivers} lang={lang} variant="fill" /></div>
+        <div className="relative z-10 flex items-center justify-between px-4 pt-3">
+          <button onClick={() => setScreen(null)} aria-label="Back" className="w-11 h-11 rounded-2xl bg-white shadow-md flex items-center justify-center text-slate-700">{dirBack}</button>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-white shadow-md text-[12px] font-extrabold text-emerald-600"><span className="w-2 h-2 rounded-full bg-emerald-500" />{curT.live}</span>
+            <button onClick={fetchDashboardData} aria-label="Refresh" className="w-11 h-11 rounded-2xl bg-white shadow-md flex items-center justify-center text-slate-700"><RefreshCw className={`w-[18px] h-[18px] ${loading ? "animate-spin" : ""}`} /></button>
+          </div>
+        </div>
+        <div className="flex-1" />
+        {/* Refinement #2 — taller, more readable info sheet. */}
+        <div className="relative z-10 bg-[#F4F6FA] rounded-t-3xl px-[18px] pt-3 pb-5 shadow-[0_-10px_40px_rgba(15,27,45,0.12)]">
+          <div className="w-11 h-1.5 rounded-full bg-slate-300 mx-auto mb-3.5" />
+          <div className="flex items-center justify-between">
+            <div><div className="text-[18px] font-extrabold text-slate-900" dir="ltr">{s.shipmentNumber}</div><div className="text-[12.5px] font-semibold text-slate-500">{s.loadingCity} → {s.deliveryCity}</div></div>
+            <span className={`px-3 py-1 rounded-full text-[12px] font-extrabold ${statusChipClass(s.status)}`}>{statusLabel(s.status)}</span>
+          </div>
+          <div className={`${CARD} p-3.5 mt-3.5`}>{journeyBar(s)}</div>
+          <div className="flex gap-3 mt-3">
+            <div className={`${CARD} flex-1 p-3.5`}><div className="text-[10.5px] font-extrabold uppercase tracking-wider text-slate-400">{curT.lastUpdate}</div><div className="text-[14px] font-extrabold text-slate-900 mt-1">{lastUpdateOf(s)}</div></div>
+            <div className={`${CARD} flex-1 p-3.5`}><div className="text-[10.5px] font-extrabold uppercase tracking-wider text-slate-400">{curT.estArrival}</div><div className="text-[13px] font-bold text-slate-500 mt-1">{s.eta ? fmtDate(s.eta) : curT.sharedByMaras}</div></div>
+          </div>
+          <button onClick={() => setScreen("journey")} className="w-full mt-3 py-3 rounded-2xl bg-white border border-slate-200 text-slate-700 font-bold text-[13.5px] flex items-center justify-center gap-2">{curT.viewTimeline}<ChevronRight className={`w-4 h-4 ${isRtl ? "rotate-180" : ""}`} /></button>
+          <div className="text-[11px] text-slate-400 font-semibold text-center mt-2.5">{curT.smartTrackingNote}</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderChatTab = () => {
+    const ship = chatShipment;
+    if (!ship) {
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-none bg-white border-b border-slate-200 px-4 h-16 flex items-center"><div className="text-[18px] font-extrabold text-slate-900">{curT.navChat}</div></div>
+          <div className="flex-1 overflow-y-auto">{renderInlineEmpty("no-shipments")}</div>
+        </div>
+      );
+    }
+    return (
+      <div className="flex-1 flex flex-col min-h-0">
+        {chatHeaderBar(ship)}
+        {renderChatConversation(ship)}
+      </div>
+    );
+  };
+
+  const profileRow = (Icon: any, label: string, onClick: () => void, value?: string) => (
+    <button onClick={onClick} className="w-full flex items-center justify-between px-[18px] py-4 border-b border-slate-100 last:border-0">
+      <span className="flex items-center gap-3.5 text-[15px] font-bold text-slate-900"><span className="w-9 h-9 rounded-xl bg-slate-50 text-blue-600 flex items-center justify-center"><Icon className="w-[17px] h-[17px]" /></span>{label}</span>
+      <span className="flex items-center gap-2 text-[13.5px] font-bold text-slate-400">{value}<ChevronRight className={`w-[17px] h-[17px] ${isRtl ? "rotate-180" : ""}`} /></span>
+    </button>
+  );
+
+  const renderProfile = () => (
+    <div className="flex-1 overflow-y-auto px-[18px] pt-3 pb-6">
+      <div className="text-[22px] font-extrabold text-slate-900 py-2">{curT.navProfile}</div>
+      <div className={`${CARD} p-5 flex items-center gap-4`}>
+        <div className="w-[60px] h-[60px] rounded-2xl bg-gradient-to-br from-blue-600 to-blue-700 text-white flex items-center justify-center text-[21px] font-extrabold shrink-0">{initials(clientCompanyName)}</div>
+        <div className="min-w-0"><div className="text-[18px] font-extrabold text-slate-900 truncate">{clientCompanyName}</div><div className="text-[12.5px] font-semibold text-slate-500 truncate">{clientEmail}</div><span className="inline-block mt-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] font-extrabold">{viewOnly ? curT.clientStaff : curT.verified}</span></div>
+      </div>
+      <div className={`${CARD} mt-3.5 overflow-hidden`}>
+        {profileRow(Building2, curT.companyInfo, () => setScreen("company"))}
+        {profileRow(Bell, curT.notifSettings, () => setScreen("notifSettings"))}
+        {profileRow(Globe, curT.language, () => setScreen("language"), langLabel(lang))}
+      </div>
+      <div className={`${CARD} mt-3.5 overflow-hidden`}>
+        {profileRow(LifeBuoy, curT.help, () => { })}
+        {profileRow(Info, curT.about, () => { })}
+        {profileRow(Shield, curT.privacy, () => { })}
+      </div>
+      <div className={`${CARD} mt-3.5 overflow-hidden`}>
+        <button onClick={onLogout} className="w-full flex items-center px-[18px] py-4">
+          <span className="flex items-center gap-3.5 text-[15px] font-bold text-red-600"><span className="w-9 h-9 rounded-xl bg-red-50 text-red-600 flex items-center justify-center"><LogOut className="w-[17px] h-[17px]" /></span>{curT.signOut}</span>
+        </button>
+      </div>
+      <div className="text-center mt-5">
+        <button onClick={() => { setShowClientDeleteConfirm(true); setUnderstandClientDelete(false); setClientDeleteError(null); setClientDeleteCurrentPassword(""); }} className="text-[12px] font-semibold text-slate-400 hover:text-red-500">{curT.deleteAccount}</button>
+      </div>
+      <div className="text-center text-[11px] font-semibold text-slate-300 mt-2">eTIR by MARAS · {curT.customerApp}</div>
+    </div>
+  );
+
+  const renderCompany = () => (
+    <div className="flex-1 flex flex-col min-h-0">
+      <ScreenHeader title={curT.companyInfo} />
+      <div className="flex-1 overflow-y-auto px-[18px] py-4">
+        <div className={`${CARD} px-4`}>
+          {detailRow(Building2, curT.companyName, clientCompanyName)}
+          {detailRow(Mail, curT.email, clientEmail || "—", true)}
+        </div>
+        <p className="text-[12px] text-slate-400 font-semibold mt-3 px-1 leading-snug">{curT.companyInfoNote}</p>
+      </div>
+    </div>
+  );
+
+  const renderNotifSettings = () => (
+    <div className="flex-1 flex flex-col min-h-0">
+      <ScreenHeader title={curT.notifSettings} />
+      <div className="flex-1 overflow-y-auto px-[18px] py-4 space-y-3">
+        <div className={`${CARD} p-4 flex items-center justify-between`}>
+          <div className="min-w-0 pe-3"><div className="text-[15px] font-extrabold text-slate-900">{curT.soundAlerts}</div><div className="text-[12.5px] font-semibold text-slate-500 mt-0.5">{curT.soundAlertsNote}</div></div>
+          <button onClick={() => setNotifSoundEnabled(v => !v)} aria-label={curT.soundAlerts} className={`w-[52px] h-[31px] rounded-full relative shrink-0 transition-colors ${notifSoundEnabled ? "bg-blue-600" : "bg-slate-300"}`}>
+            <span className={`absolute top-[3px] w-[25px] h-[25px] rounded-full bg-white shadow transition-all ${notifSoundEnabled ? "end-[3px]" : "start-[3px]"}`} />
+          </button>
+        </div>
+        <p className="text-[12px] text-slate-400 font-semibold px-1 leading-snug">{curT.notifSettingsNote}</p>
+      </div>
+    </div>
+  );
+
+  const renderLanguage = () => (
+    <div className="flex-1 flex flex-col min-h-0">
+      <ScreenHeader title={curT.language} />
+      <div className="flex-1 overflow-y-auto px-[18px] py-4 space-y-3">
+        {([["en", "English", "English"], ["ar", "العربية", "Arabic · RTL"], ["tr", "Türkçe", "Turkish"]] as const).map(([code, name, sub]) => (
+          <button key={code} onClick={() => onLanguageChange && onLanguageChange(code as Language)} className={`${CARD} w-full p-4 flex items-center justify-between ${lang === code ? "ring-2 ring-blue-500 border-blue-500" : ""}`}>
+            <div className="text-start"><div className="text-[16px] font-extrabold text-slate-900">{name}</div><div className="text-[12px] font-semibold text-slate-400 mt-0.5">{sub}</div></div>
+            <span className={`w-7 h-7 rounded-full flex items-center justify-center ${lang === code ? "bg-blue-600 text-white" : "border-2 border-slate-200"}`}>{lang === code ? <CheckCircle2 className="w-4 h-4" /> : null}</span>
+          </button>
+        ))}
+        <p className="text-[12px] text-slate-400 font-semibold text-center mt-1">{curT.languageNote}</p>
+      </div>
+    </div>
+  );
+
+  const bottomNav = (
+    <nav className="flex-none bg-white border-t border-slate-200 grid grid-cols-4 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      {([["home", curT.navHome, Home], ["shipments", curT.navShipments, Package], ["chat", curT.navChat, MessageSquare], ["profile", curT.navProfile, User]] as const).map(([key, label, Icon]) => {
+        const on = activeTab === key;
+        return (
+          <button key={key} onClick={() => { setScreen(null); setActiveTab(key); }} className="flex flex-col items-center gap-1 py-1.5 rounded-xl">
+            <Icon className={`w-6 h-6 ${on ? "text-blue-600" : "text-slate-400"}`} strokeWidth={on ? 2.4 : 2} />
+            <span className={`text-[10.5px] ${on ? "text-blue-600 font-extrabold" : "text-slate-400 font-semibold"}`}>{label}</span>
+            <span className={`h-[3px] w-4 rounded-full ${on ? "bg-blue-600" : "bg-transparent"}`} />
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  const notifOverlay = isNotifOpen ? (
+    <div id="notifications-overlay" className="fixed inset-0 z-50 flex justify-end">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setIsNotifOpen(false)} />
+      <div className="relative w-full max-w-md bg-[#F4F6FA] h-full flex flex-col shadow-2xl">
+        <div className="flex-none bg-white border-b border-slate-200 px-4 h-16 flex items-center justify-between">
+          <div>
+            <div className="text-[16px] font-extrabold text-slate-900">{curT.notifications}</div>
+            <div className="text-[11.5px] font-semibold text-slate-400">{notifications.filter(n => !isNotificationReadForUser(n, clientId)).length} {curT.unread}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {notifications.some(n => !isNotificationReadForUser(n, clientId)) && <button onClick={handleMarkAllRead} className="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-[11px] font-extrabold">{curT.markAllReadShort}</button>}
+            <button onClick={() => setIsNotifOpen(false)} aria-label={curT.close} className="w-9 h-9 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-500"><X className="w-4 h-4" /></button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2.5">
+          {notifications.length === 0 ? renderInlineEmpty("no-notifications") : [...notifications].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map((notif) => {
+            const title = lang === "en" ? notif.titleEn : (lang === "tr" ? notif.titleTr : notif.titleAr);
+            const msg = lang === "en" ? notif.messageEn : (lang === "tr" ? notif.messageTr : notif.messageAr);
+            const unread = !isNotificationReadForUser(notif, clientId);
+            return (
+              <div key={notif.id} className={`${CARD} p-4 ${unread ? "border-blue-200" : ""}`}>
+                <div className="flex items-start gap-3">
+                  <span className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0"><Bell className="w-[18px] h-[18px]" /></span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2"><span className="text-[10.5px] font-extrabold text-slate-400" dir="ltr">#{notif.shipmentNumber}</span>{unread && <span className="w-2 h-2 rounded-full bg-orange-500" />}</div>
+                    <div className="text-[14px] font-extrabold text-slate-900 mt-0.5">{title}</div>
+                    <div className="text-[12.5px] font-medium text-slate-500 mt-0.5 leading-snug">{msg}</div>
+                    <div className="flex items-center justify-between mt-2">
+                      <span className="text-[11px] font-semibold text-slate-400">{new Date(notif.timestamp).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "short", day: "numeric" })} · {new Date(notif.timestamp).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-US", { hour: "numeric", minute: "2-digit" })}</span>
+                      {notif.shipmentId && <button onClick={async () => { setIsNotifOpen(false); await openShipmentById(notif.shipmentId); setDetailsTab("overview"); setScreen("details"); }} className="text-blue-600 font-extrabold text-[12px] flex items-center gap-0.5">{curT.track}<ChevronRight className={`w-3.5 h-3.5 ${isRtl ? "rotate-180" : ""}`} /></button>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const deleteModal = showClientDeleteConfirm ? (
+    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50 text-start" dir={isRtl ? "rtl" : "ltr"}>
+      <div className="bg-white border border-slate-200 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-5">
+        <div className="flex items-start gap-3.5">
+          <div className="w-11 h-11 rounded-2xl bg-red-50 flex items-center justify-center text-red-500 shrink-0"><ShieldAlert className="w-5 h-5" /></div>
+          <div>
+            <h3 className="font-extrabold text-[17px] text-slate-900">{lang === "tr" ? "Hesabınızı Kalıcı Olarak Silin" : (lang === "ar" ? "حذف حساب العميل نهائياً" : "Permanently Delete Account")}</h3>
+            <p className="text-[13px] text-slate-500 leading-relaxed mt-1">{accountDeletionCopy(lang).privacyNotice}</p>
+          </div>
+        </div>
+        {clientDeleteError && (
+          <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-[12.5px] text-red-600 leading-relaxed">
+            {clientDeleteError === "missing" ? accountDeletionCopy(lang).missingPasswordError
+              : clientDeleteError === "incorrect" ? accountDeletionCopy(lang).incorrectPasswordError
+              : clientDeleteError === "rate_limited" ? accountDeletionCopy(lang).rateLimitedError
+              : clientDeleteError === "service_unavailable" ? accountDeletionCopy(lang).serviceUnavailableError
+              : clientDeleteError === "network" ? accountDeletionCopy(lang).networkFailureError
+              : accountDeletionCopy(lang).genericFailureError}
+          </div>
+        )}
+        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
+          <label className="text-[13px] font-bold text-slate-700 block">{accountDeletionCopy(lang).passwordLabel}</label>
+          <input type="password" autoComplete="current-password" value={clientDeleteCurrentPassword} onChange={(e) => setClientDeleteCurrentPassword(e.target.value)} placeholder={accountDeletionCopy(lang).passwordPlaceholder} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-slate-900 text-[13px] focus:ring-1 focus:ring-red-500 focus:border-red-500 outline-none" />
+          <label className="flex items-start gap-3 cursor-pointer text-[13px] font-semibold text-slate-700">
+            <input type="checkbox" checked={understandClientDelete} onChange={(e) => setUnderstandClientDelete(e.target.checked)} className="w-4 h-4 rounded border-slate-300 text-red-500 accent-red-500 mt-0.5" />
+            <span className="leading-normal">{lang === "tr" ? "Tüm kurumsal erişimlerimin kaldırılmasını kabul ediyorum." : (lang === "ar" ? "أوافق على إلغاء ترخيص حسابي وإزالة جميع الصلاحيات." : "I consent to permanently cancel my account and release all records associated with this client ID.")}</span>
+          </label>
+        </div>
+        <div className="flex gap-3">
+          <button type="button" disabled={isDeletingClientAccount} onClick={() => setShowClientDeleteConfirm(false)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-[13px] rounded-xl transition-all">{lang === "tr" ? "İptal" : (lang === "ar" ? "إلغاء" : "Cancel")}</button>
+          <button type="button" disabled={isDeletingClientAccount || !understandClientDelete} onClick={handleDeleteClientAccount} className="flex-1 py-3 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-extrabold text-[13px] rounded-xl transition-all flex items-center justify-center gap-1.5">
+            {isDeletingClientAccount ? <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /><span>{accountDeletionCopy(lang).deletingLabel}</span></> : <><Trash2 className="w-4 h-4" /><span>{lang === "tr" ? "Hesabı Sil" : (lang === "ar" ? "حذف الحساب" : "Delete")}</span></>}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const toast = toastMessage ? (
+    <div id="notifications-toast" className="fixed bottom-24 inset-x-4 z-50 max-w-md mx-auto p-4 bg-white border border-slate-200 rounded-2xl shadow-2xl flex items-center justify-between gap-3 text-[13px] font-semibold text-slate-800">
+      <span className="min-w-0">{toastMessage}</span>
+      <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-slate-700 shrink-0"><X className="w-4 h-4" /></button>
+    </div>
+  ) : null;
+
+  return (
+    <div className="h-full flex flex-col bg-[#F4F6FA] text-slate-900 select-none" dir={isRtl ? "rtl" : "ltr"}>
+      {screen === "tracking" ? renderTracking()
+        : screen === "journey" ? renderJourney()
+        : screen === "details" ? renderDetails()
+        : screen === "search" ? renderSearch()
+        : screen === "company" ? renderCompany()
+        : screen === "notifSettings" ? renderNotifSettings()
+        : screen === "language" ? renderLanguage()
+        : activeTab === "home" ? renderHome()
+        : activeTab === "shipments" ? renderShipments()
+        : activeTab === "chat" ? renderChatTab()
+        : renderProfile()}
+      {!screen && bottomNav}
+      {notifOverlay}
+      {deleteModal}
+      {toast}
     </div>
   );
 }

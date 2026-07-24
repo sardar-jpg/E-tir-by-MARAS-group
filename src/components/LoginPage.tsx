@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Language, Driver, TRUCK_TYPES } from "../types";
 import { Ship, Globe, User, Lock, Phone, Truck, ClipboardSignature, KeyRound, Mail, LogIn, LifeBuoy, CheckCircle2 } from "lucide-react";
 import { signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification } from "firebase/auth";
@@ -49,6 +49,20 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isResettingPassword, setResettingPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  // "Remember me" (UI-only, no auth-architecture change): when enabled we
+  // keep the last-used identifier in localStorage so it prefills next time.
+  // It never stores the password and never alters the session/auth flow.
+  const [rememberMe, setRememberMe] = useState(true);
+
+  useEffect(() => {
+    try {
+      const remembered = localStorage.getItem("etir_remember_identifier");
+      if (remembered) {
+        setLoginUsername(remembered);
+        setRememberMe(true);
+      }
+    } catch { /* localStorage unavailable — ignore */ }
+  }, []);
 
   // Registration inputs
   const [regFullName, setRegFullName] = useState("");
@@ -77,6 +91,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       signIn: "Sign In",
       signingIn: "Signing in...",
       forgotPassword: "Forgot password?",
+      rememberMe: "Remember me",
       sendingReset: "Sending link...",
       needHelp: "Need help?",
       registerBtn: "Register as Driver",
@@ -119,6 +134,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       signIn: "Giriş Yap",
       signingIn: "Giriş yapılıyor...",
       forgotPassword: "Şifremi unuttum?",
+      rememberMe: "Beni hatırla",
       sendingReset: "Gönderiliyor...",
       needHelp: "Yardıma mı ihtiyacınız var?",
       registerBtn: "Sürücü Olarak Kaydol",
@@ -161,6 +177,7 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
       signIn: "تسجيل الدخول",
       signingIn: "جاري تسجيل الدخول...",
       forgotPassword: "نسيت كلمة المرور؟",
+      rememberMe: "تذكرني",
       sendingReset: "جاري الإرسال...",
       needHelp: "هل تحتاج مساعدة؟",
       registerBtn: "تسجيل أخصائي نقل جديد",
@@ -220,6 +237,13 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
 
       const identifier = loginUsername.trim();
       const enteredEmail = resolveEmail(identifier);
+
+      // "Remember me": persist only the identifier (never the password) so
+      // it prefills next time; clear it when the box is unchecked.
+      try {
+        if (rememberMe) localStorage.setItem("etir_remember_identifier", identifier);
+        else localStorage.removeItem("etir_remember_identifier");
+      } catch { /* localStorage unavailable — ignore */ }
 
       // Single unified endpoint — the server alone decides whether this
       // identity is an admin, driver, or client. The client never chooses
@@ -656,6 +680,16 @@ export default function LoginPage({ lang, onSetLang, onLoginSuccess, onViewPriva
                       hideLabel={t.hidePassword}
                     />
                   </div>
+
+                  <label className="flex items-center gap-2.5 cursor-pointer select-none w-fit">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 focus:ring-1 focus:ring-blue-500 accent-blue-600 cursor-pointer"
+                    />
+                    <span className="text-[12px] font-semibold text-slate-400">{t.rememberMe}</span>
+                  </label>
 
                   <button
                     type="submit"
