@@ -409,6 +409,23 @@ const t = {
   }
 };
 
+// Small country-flag glyph shown beside the Home hero route, matching the
+// approved design mockup. Maps known country names to an emoji flag; an
+// unknown country renders nothing (graceful — identical to before). Purely
+// cosmetic — no data, permission, or business-logic impact.
+const COUNTRY_ISO: Record<string, string> = {
+  "turkey": "TR", "türkiye": "TR", "turkiye": "TR",
+  "iraq": "IQ", "syria": "SY", "iran": "IR", "jordan": "JO",
+  "saudi arabia": "SA", "kuwait": "KW", "united arab emirates": "AE", "uae": "AE",
+  "qatar": "QA", "bahrain": "BH", "oman": "OM", "lebanon": "LB", "egypt": "EG",
+};
+function countryFlag(name?: string | null): string {
+  if (!name) return "";
+  const iso = COUNTRY_ISO[name.toLowerCase().trim()];
+  if (!iso) return "";
+  return String.fromCodePoint(...[...iso].map((c) => 127397 + c.charCodeAt(0)));
+}
+
 interface ClientDashboardProps {
   lang: Language;
   clientCompanyName: string;
@@ -1387,9 +1404,11 @@ export default function ClientDashboard({ lang, clientCompanyName, clientEmail, 
                 <span className={`px-3 py-1 rounded-full text-[12px] font-extrabold ${statusChipClass(s.status)}`}>{statusLabel(s.status)}</span>
               </div>
               <div className="flex items-center gap-2.5 mt-3">
+                {countryFlag(s.loadingCountry) && <span className="text-[19px] leading-none select-none">{countryFlag(s.loadingCountry)}</span>}
                 <div className="text-[21px] font-extrabold tracking-tight text-slate-900">{s.loadingCity}</div>
                 <ArrowRight className={`w-[18px] h-[18px] text-slate-300 ${isRtl ? "rotate-180" : ""}`} />
                 <div className="text-[21px] font-extrabold tracking-tight text-slate-900" dir="ltr">{s.deliveryCity}</div>
+                {countryFlag(s.deliveryCountry) && <span className="text-[19px] leading-none select-none">{countryFlag(s.deliveryCountry)}</span>}
               </div>
               <div className="h-px bg-slate-100 my-4" />
               {journeyBar(s)}
