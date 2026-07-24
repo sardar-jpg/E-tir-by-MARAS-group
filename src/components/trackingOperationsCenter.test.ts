@@ -130,7 +130,7 @@ describe("Phase 2 — Operations Center layout", () => {
     // Expanded: fixed ~19% panel column, map takes the rest; collapsed: the
     // map spans the full grid. Height is viewport-driven (map-dominant page).
     expect(TRACKING_MAP).toContain("lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]");
-    expect(TRACKING_MAP).toMatch(/panelCollapsed \? "lg:grid-cols-1"/);
+    expect(TRACKING_MAP).toMatch(/\(panelCollapsed \|\| operatorRoom\) \? "lg:grid-cols-1"/);
     expect(TRACKING_MAP).toMatch(/lg:h-\[calc\(100vh-\d+px\)\]/);
     // The old fixed 620px band and the even 4/8 split must be gone.
     expect(TRACKING_MAP).not.toContain("lg:h-[620px]");
@@ -281,6 +281,62 @@ describe("Journey Progress — honest milestone timeline in the drawer", () => {
     // No GPS inputs anywhere near milestone derivation: the lib only takes
     // status + timeline (checked above), and TrackingMap passes exactly that.
     expect(TRACKING_MAP).not.toMatch(/deriveJourneyProgress\([^)]*(?:lat|lng|gps|position)/i);
+  });
+});
+
+describe("Full Screen vs Operator Room — two distinct features", () => {
+  const OVERLAY = readFileSync(join(__dirname, "admin", "tracking", "OperatorRoomOverlay.tsx"), "utf-8");
+
+  it("Full Screen uses the real browser Fullscreen API with a CSS fallback", () => {
+    expect(TRACKING_MAP).toContain("requestFullscreen");
+    expect(TRACKING_MAP).toContain("document.exitFullscreen");
+    expect(TRACKING_MAP).toContain("fullscreenchange");
+    // CSS takeover kept ONLY as the fallback path (API missing/rejected).
+    expect(TRACKING_MAP).toContain("setFsMethod('css')");
+    expect(TRACKING_MAP).toMatch(/fsMethod !== 'css'\s*\)\s*return/);
+    // No button toggles the old raw state directly anymore.
+    expect(TRACKING_MAP).not.toContain("setIsFullscreen(f => !f)");
+  });
+
+  it("Operator Room is a dedicated mode, not merely the Full Screen trigger", () => {
+    // Distinct state + distinct entry point, wired to its own handler.
+    expect(TRACKING_MAP).toContain("const [operatorRoom, setOperatorRoom]");
+    expect(TRACKING_MAP).toContain("onClick={enterOperatorRoom}");
+    expect(TRACKING_MAP).toContain("onClick={toggleFullscreen}");
+    // Its identity is the monitoring layout: overlay component + hidden
+    // panel/drawer/controls — not just a fullscreen request.
+    expect(TRACKING_MAP).toContain('import OperatorRoomOverlay');
+    expect(TRACKING_MAP).toContain("<OperatorRoomOverlay");
+    expect(TRACKING_MAP).toMatch(/selectedShipment && !operatorRoom && \(\(\) =>/);
+    expect(TRACKING_MAP).toMatch(/\(panelCollapsed \|\| operatorRoom\)/);
+  });
+
+  it("Operator Room overlay is read-only: no fetches, ETA actions, chat, or form controls", () => {
+    expect(OVERLAY).not.toMatch(/apiFetch|fetch\(|distance-matrix|handleCalculateEta|onOpenShipmentChat|onOpenShipmentDetails/);
+    expect(OVERLAY).not.toMatch(/<input|<select|<textarea/);
+    // The only map-area interaction is the pause/resume click-capture layer.
+    expect(OVERLAY).toContain("onClick={onTogglePause}");
+    expect(OVERLAY).toContain("onExit");
+  });
+
+  it("Operator Room shows only existing honest data and TV affordances", () => {
+    // No fabricated telemetry or randomness in the overlay.
+    expect(OVERLAY).not.toMatch(/Math\.random|speed|heading|bearing/i);
+    // KPIs come from the same trackingCounts/derived state as the normal mode.
+    expect(TRACKING_MAP).toMatch(/operatorKpis[\s\S]{0,600}trackingCounts\.live_gps/);
+    // Auto-cycle targets flow through the pure helper over honest placements.
+    expect(TRACKING_MAP).toContain("selectCycleTargets(filteredTransit");
+    expect(TRACKING_MAP).toContain("advanceCycle(");
+    // TV affordances: wake lock + cursor auto-hide + Escape exit.
+    expect(OVERLAY).toContain("wakeLock");
+    expect(OVERLAY).toContain("cursor-none");
+    expect(OVERLAY).toMatch(/key === "Escape"/);
+  });
+
+  it("the three toolbar controls use clearly different icons", () => {
+    expect(TRACKING_MAP).toMatch(/PanelLeftOpen|PanelLeftClose/); // panel collapse
+    expect(TRACKING_MAP).toContain("<Tv");                        // operator room
+    expect(TRACKING_MAP).toContain("<Maximize2");                 // full screen
   });
 });
 

@@ -26,7 +26,10 @@ import {
   Minus,
   MessageSquare,
   FileText,
-  ChevronRight
+  ChevronRight,
+  Tv,
+  PanelLeftClose,
+  PanelLeftOpen
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { getGpsFreshness } from "../lib/gpsFreshness";
@@ -39,6 +42,8 @@ import {
 } from "../lib/trackingPositions";
 import { clusterMarkers } from "../lib/markerClustering";
 import { deriveJourneyProgress, type JourneyMilestoneKey } from "../lib/journeyMilestones";
+import { advanceCycle, selectCycleTargets, OPERATOR_CYCLE_INTERVAL_MS } from "../lib/operatorCycle";
+import OperatorRoomOverlay, { type OperatorKpi } from "./admin/tracking/OperatorRoomOverlay";
 import TrackingLegend from "./admin/tracking/TrackingLegend";
 import { stateColors } from "./admin/tracking/trackingMarkerStyles";
 import GoogleClusterMarkers, { type GoogleTrackMarker } from "./admin/tracking/GoogleClusterMarkers";
@@ -701,6 +706,23 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     return Boolean((window as any).googleMapsAuthFailed);
   });
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  // Full Screen uses the REAL browser Fullscreen API on the tracking root
+  // whenever it exists, falling back to the legacy CSS takeover only where
+  // the API is unavailable/limited (e.g. iOS Safari). fsMethod records which
+  // path is active so the Escape/body-overflow shim runs only for the CSS
+  // fallback (native fullscreen handles both itself).
+  const trackingRootRef = useRef<HTMLDivElement>(null);
+  const [fsMethod, setFsMethod] = useState<'native' | 'css' | null>(null);
+
+  // Operator Room — a dedicated READ-ONLY monitoring mode for the operations
+  // TV. Distinct from Full Screen: it switches the page into a monitoring
+  // LAYOUT (map dominant; panel/filters/drawer/actions hidden; TV-scale
+  // overlay chrome) and merely requests browser fullscreen as a convenience
+  // on entry. Same data, permissions, polling and honesty model.
+  const [operatorRoom, setOperatorRoom] = useState<boolean>(false);
+  const [cyclePaused, setCyclePaused] = useState<boolean>(false);
+  const cycleIdxRef = useRef<number>(-1);
+
   // feature/admin-mobile-ui: on narrow viewports the sidebar (filters +
   // shipment list) and the map can't reasonably sit side-by-side, so
   // mobile shows one at a time full-height with a small toggle — desktop
@@ -759,18 +781,90 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     }
   }, [mapViewMode]);
 
+  // Native Fullscreen API lifecycle: keep isFullscreen in sync with the
+  // browser (covers Esc, F11, OS gestures). Also exits the Operator Room
+  // when the user leaves native fullscreen while the room is open.
   useEffect(() => {
-    if (!isFullscreen) return;
+    const onFsChange = () => {
+      const active = Boolean(document.fullscreenElement);
+      if (!active) {
+        setIsFullscreen(false);
+        setFsMethod(null);
+        setOperatorRoom(prev => (prev ? false : prev));
+      } else {
+        setIsFullscreen(true);
+        setFsMethod('native');
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const enterFullscreen = () => {
+    const el = trackingRootRef.current;
+    if (el && typeof el.requestFullscreen === "function") {
+      el.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+        setFsMethod('native');
+      }).catch(() => {
+        // API present but rejected (permissions/embedding) — CSS fallback.
+        setIsFullscreen(true);
+        setFsMethod('css');
+      });
+    } else {
+      // Fullscreen API unavailable (e.g. iOS Safari) — CSS takeover fallback.
+      setIsFullscreen(true);
+      setFsMethod('css');
+    }
+  };
+  const exitFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+    setIsFullscreen(false);
+    setFsMethod(null);
+  };
+  const toggleFullscreen = () => {
+    if (isFullscreen) exitFullscreen();
+    else enterFullscreen();
+  };
+
+  // Escape/body-overflow shim — ONLY for the CSS fallback (native fullscreen
+  // provides its own Escape handling and viewport isolation).
+  useEffect(() => {
+    if (!isFullscreen || fsMethod !== 'css') return;
     document.body.style.overflow = "hidden";
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsFullscreen(false);
+      if (e.key === "Escape") { setIsFullscreen(false); setFsMethod(null); }
     };
     window.addEventListener("keydown", handleEscape);
     return () => {
       document.body.style.overflow = "";
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [isFullscreen]);
+  }, [isFullscreen, fsMethod]);
+
+  // ---- Operator Room ------------------------------------------------------
+  const enterOperatorRoom = () => {
+    setOperatorRoom(true);
+    setCyclePaused(false);
+    cycleIdxRef.current = -1;
+    // Convenience only — the room's identity is its monitoring layout, not
+    // fullscreen. Best-effort; failure changes nothing.
+    const el = trackingRootRef.current;
+    if (el && typeof el.requestFullscreen === "function" && !document.fullscreenElement) {
+      el.requestFullscreen().then(() => { setIsFullscreen(true); setFsMethod('native'); }).catch(() => {});
+    }
+  };
+  const exitOperatorRoom = () => {
+    setOperatorRoom(false);
+    setCyclePaused(false);
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+      setFsMethod(null);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -1113,6 +1207,30 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     });
   };
 
+  // Operator Room auto-cycle: slowly steps the focus through the REAL,
+  // placeable shipments (pure selectCycleTargets/advanceCycle sequencing —
+  // shipments with no honest position are skipped, nothing is fabricated).
+  // Focuses the first target immediately on entry; a click on the room's
+  // capture layer pauses/resumes.
+  const cycleTargets = useMemo(
+    () => selectCycleTargets(filteredTransit, s => (trackingById[s.id]?.lat ?? null) !== null),
+    [filteredTransit, trackingById]
+  );
+  useEffect(() => {
+    if (!operatorRoom || cyclePaused || cycleTargets.length === 0) return;
+    if (cycleIdxRef.current < 0 || cycleIdxRef.current >= cycleTargets.length) {
+      cycleIdxRef.current = 0;
+      handleSelectShipment(cycleTargets[0]);
+    }
+    const id = setInterval(() => {
+      cycleIdxRef.current = advanceCycle(cycleIdxRef.current, cycleTargets.length);
+      const next = cycleTargets[cycleIdxRef.current];
+      if (next) handleSelectShipment(next);
+    }, OPERATOR_CYCLE_INTERVAL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operatorRoom, cyclePaused, cycleTargets]);
+
   const handleAutoFocusRoute = (s: Shipment) => {
     const start = findVectorCity(s.loadingCity);
     const end = findVectorCity(s.deliveryCity);
@@ -1165,11 +1283,51 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
     });
   };
 
+  // "Estimated ETA Today": shipments whose server-stored eta (persisted by
+  // the distance-matrix route) falls on the current local day. Real stored
+  // data only — shared by the KPI strip and the Operator Room.
+  const etaTodayCount = shipments.filter(s => {
+    if (!s.eta) return false;
+    const d = new Date(s.eta);
+    const now = new Date();
+    return !Number.isNaN(d.getTime()) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  }).length;
+
+  // Operator Room derived props — every value comes from the same honest
+  // state the normal mode renders; nothing is recomputed differently and
+  // nothing is fabricated for the TV.
+  const operatorKpis: OperatorKpi[] = [
+    { label: t.kpiActive, value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length, tone: "text-white" },
+    { label: t.kpiInTransit, value: shipments.filter(s => s.status === "In Transit").length, tone: "text-white" },
+    { label: t.kpiGpsOnline, value: trackingCounts.live_gps, tone: "text-emerald-400" },
+    { label: t.trackReported, value: trackingCounts.last_reported, tone: "text-amber-400" },
+    { label: t.kpiEtaToday, value: etaTodayCount, tone: "text-sky-400" },
+    { label: t.trackUnavailable, value: trackingCounts.unavailable, tone: "text-slate-400" },
+  ];
+  const operatorFocus = selectedShipment ? (() => {
+    const st = getShipmentGpsState(selectedShipment);
+    const drv = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
+    const fr = getGpsFreshness(drv?.lastUpdated, Date.now());
+    return {
+      shipmentNumber: selectedShipment.shipmentNumber,
+      route: `${selectedShipment.loadingCity} → ${selectedShipment.deliveryCity}`,
+      stateLabel: st === "live_gps" ? t.trackLive : st === "last_reported" ? t.trackReported : st === "estimated" ? t.trackEstimated : t.trackUnavailable,
+      stateTone: stateColors(st).text,
+      lastUpdate: fr.status === "none" ? "—" : fr.minutesAgo === 0 ? t.justNow : `${fr.minutesAgo} ${t.minAgo}`,
+      status: selectedShipment.status,
+    };
+  })() : null;
+
   return (
-    <div className={isFullscreen
-      ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-2 p-3"
-      : "space-y-2"
-    }>
+    <div
+      ref={trackingRootRef}
+      className={operatorRoom
+        ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col"
+        : isFullscreen
+          ? "fixed inset-0 z-50 bg-slate-950 overflow-hidden flex flex-col gap-2 p-3"
+          : "space-y-2"
+      }
+    >
       {/* feature/admin-mobile-ui correction pass: compact mobile-only
           header — icon, honest runtime-derived status text (same
           isGoogleMapsLive logic as the desktop deck below), a small
@@ -1177,6 +1335,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
           desktop deck (hidden below via lg:flex) plus the amber
           "operational stats" paragraph drawer, which is redundant with
           the status text and was pure vertical space on a phone. */}
+      {!operatorRoom && (
       <div className="lg:hidden bg-slate-900 border border-slate-800 text-white rounded-2xl px-3 py-2.5 flex items-center gap-2">
         <Compass className="w-4 h-4 text-orange-500 shrink-0 animate-spin" style={{ animationDuration: '10s' }} />
         <p className={`flex-1 min-w-0 truncate text-[11px] font-bold flex items-center gap-1.5 ${mapViewMode === 'vector' || isGoogleMapsLive ? 'text-orange-400' : 'text-slate-400'}`}>
@@ -1201,12 +1360,13 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
         </button>
         <button
           type="button"
-          onClick={() => setIsFullscreen(f => !f)}
+          onClick={toggleFullscreen}
           className="shrink-0 w-8 h-8 flex items-center justify-center bg-slate-950 border border-slate-800 rounded-lg text-slate-300 cursor-pointer"
         >
           {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
         </button>
       </div>
+      )}
 
       {/* Operations Center top bar — desktop only. Dark app-bar per the
           approved design: title + honest engine status, an honest "Live
@@ -1215,6 +1375,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
           the primary actions: Google Map | Vector Radar segmented toggle,
           panel collapse, fullscreen. Status wording still derives from
           isGoogleMapsLive — never an unconditional "Live" claim. */}
+      {!operatorRoom && (
       <div className="hidden lg:flex items-center gap-4 bg-slate-900 border border-slate-800 text-white rounded-xl px-4 py-2.5 shadow-sm">
         <div className="min-w-0">
           <h3 className="text-[13px] font-bold text-slate-100 leading-tight truncate">{t.opsTitle}</h3>
@@ -1260,27 +1421,46 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
               {lang === 'tr' ? "Vektör Radar" : lang === 'ar' ? "رادار متجه" : "Vector Radar"}
             </button>
           </div>
+          {/* Three DISTINCT controls: panel collapse (panel icon), Full
+              Screen (expand icon, real browser fullscreen), Operator Room
+              (TV icon, dedicated monitoring mode — not a fullscreen alias). */}
           <button
             onClick={() => setPanelCollapsed(c => !c)}
+            aria-label={panelCollapsed
+              ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
+              : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
             title={panelCollapsed
               ? (lang === "ar" ? "إظهار لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini göster" : "Show shipment panel")
               : (lang === "ar" ? "إخفاء لوحة الشحنات" : lang === "tr" ? "Sevkiyat panelini gizle" : "Hide shipment panel")}
             className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
-            {panelCollapsed ? <Expand className="w-3.5 h-3.5" /> : <Minimize className="w-3.5 h-3.5" />}
+            {panelCollapsed ? <PanelLeftOpen className="w-4 h-4 rtl:rotate-180" /> : <PanelLeftClose className="w-4 h-4 rtl:rotate-180" />}
           </button>
           <button
             type="button"
-            onClick={() => setIsFullscreen(f => !f)}
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen
+              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Full Screen")
+              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Full Screen")}
             title={isFullscreen
-              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Fullscreen")
-              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Fullscreen")}
+              ? (lang === "tr" ? "Tam Ekrandan Çık" : lang === "ar" ? "الخروج من ملء الشاشة" : "Exit Full Screen")
+              : (lang === "tr" ? "Tam Ekran" : lang === "ar" ? "ملء الشاشة" : "Full Screen")}
             className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 flex items-center justify-center transition-all cursor-pointer"
           >
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
+          <button
+            type="button"
+            onClick={enterOperatorRoom}
+            aria-label={lang === "ar" ? "غرفة العمليات" : lang === "tr" ? "Operasyon Odası" : "Operator Room"}
+            title={lang === "ar" ? "غرفة العمليات (شاشة المراقبة)" : lang === "tr" ? "Operasyon Odası (izleme ekranı)" : "Operator Room (monitoring display)"}
+            className="w-8 h-8 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-orange-400 hover:border-orange-500/50 flex items-center justify-center transition-all cursor-pointer"
+          >
+            <Tv className="w-4 h-4" />
+          </button>
         </div>
       </div>
+      )}
 
       {/* KPI strip — six flat light cards with honest, real-data counts:
           Active / In Transit come straight from shipment statuses; GPS
@@ -1289,18 +1469,14 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
           whose server-stored `eta` (persisted by the distance-matrix route)
           falls on the current local day — never a fabricated forecast.
           Desktop only (mobile keeps its compact header). */}
+      {!operatorRoom && (
       <div className="hidden lg:grid grid-cols-6 gap-2">
         {([
           { key: null, label: t.kpiActive, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status !== "Closed" && s.status !== "Delivered").length },
           { key: null, label: t.kpiInTransit, dot: "bg-slate-400", text: "text-slate-900", value: shipments.filter(s => s.status === "In Transit").length },
           { key: "live_gps" as const, label: t.kpiGpsOnline, dot: "bg-emerald-500", text: "text-emerald-600", value: null },
           { key: "last_reported" as const, label: t.trackReported, dot: "bg-amber-500", text: "text-amber-600", value: null },
-          { key: null, label: t.kpiEtaToday, dot: "bg-sky-500", text: "text-sky-600", value: shipments.filter(s => {
-            if (!s.eta) return false;
-            const d = new Date(s.eta);
-            const now = new Date();
-            return !Number.isNaN(d.getTime()) && d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-          }).length },
+          { key: null, label: t.kpiEtaToday, dot: "bg-sky-500", text: "text-sky-600", value: etaTodayCount },
           { key: "unavailable" as const, label: t.trackUnavailable, dot: "bg-slate-300", text: "text-slate-400", value: null },
         ]).map(item => (
           <div key={item.label} className="bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm min-w-0" title={item.label}>
@@ -1312,11 +1488,13 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
           </div>
         ))}
       </div>
+      )}
 
       {/* feature/admin-mobile-ui: mobile-only List/Map toggle — the
           sidebar and map below render one at a time on narrow viewports
           (see mobileListOpen), so this pill is the way to switch between
           them. Hidden at lg: where both already show side-by-side. */}
+      {!operatorRoom && (
       <div className="lg:hidden bg-slate-100 p-1 rounded-xl border border-slate-200 flex gap-1 text-xs font-bold">
         <button
           type="button"
@@ -1333,15 +1511,16 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
           {lang === "tr" ? "Liste" : lang === "ar" ? "القائمة" : "List"} ({inTransitShipments.length})
         </button>
       </div>
+      )}
 
       {/* MAIN CONTAINER LAYOUT — map-dominant. The shipment panel takes a
           fixed ~19% column (clamped so it stays usable at small lg widths)
           and the map takes the rest; collapsed => the map spans everything.
           Height is viewport-driven so the map owns ~80-85% of the page. */}
-      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${panelCollapsed ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${isFullscreen ? "flex-1 min-h-0" : "lg:h-[calc(100vh-235px)] lg:min-h-[500px]"}`}>
+      <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 ${(panelCollapsed || operatorRoom) ? "lg:grid-cols-1" : "lg:grid-cols-[clamp(230px,19vw,320px)_minmax(0,1fr)]"} max-w-full ${(isFullscreen || operatorRoom) ? "flex-1 min-h-0" : "lg:h-[calc(100vh-235px)] lg:min-h-[500px]"}`}>
 
         {/* LEFT SIDEBAR: ACTIVE TRACKS STATUS CARD */}
-        <div className={`${mobileListOpen ? "flex" : "hidden"} ${panelCollapsed ? "lg:hidden" : "lg:flex"} border-r border-slate-200 flex-col bg-slate-50/50 lg:min-h-0 lg:overflow-hidden ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
+        <div className={`${operatorRoom ? "hidden" : mobileListOpen ? "flex" : "hidden"} ${(panelCollapsed || operatorRoom) ? "lg:hidden" : "lg:flex"} border-r border-slate-200 flex-col bg-slate-50/50 lg:min-h-0 lg:overflow-hidden ${isFullscreen ? "min-h-0 overflow-hidden" : ""}`}>
           
           {/* Panel header — Operations Center: title + count, search, status
               chips, and two compact dropdown filters. All map-focus actions
@@ -1500,7 +1679,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
         </div>
 
         {/* RIGHT CONTAINER: PRISTINE LIVE VECTOR RADAR GRACEFULLY HANDLING INTERPOLATED POSITIONS WITH TRANSITIONS */}
-        <div className={`${mobileListOpen ? "hidden" : "flex"} lg:flex relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${isFullscreen ? "h-full" : "h-[65vh] lg:h-full"}`}>
+        <div className={`${(mobileListOpen && !operatorRoom) ? "hidden" : "flex"} lg:flex relative w-full min-w-[200px] bg-slate-950 flex-col justify-between overflow-hidden ${(isFullscreen || operatorRoom) ? "h-full" : "h-[65vh] lg:h-full"}`}>
           
           {/* Floating map overlays — low-weight professional chrome. */}
           <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-xs text-white px-2 py-1 rounded-md shadow-md text-[9px] font-bold font-mono tracking-tight flex items-center gap-1.5 border border-slate-800/80 z-10">
@@ -1533,7 +1712,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                 zoom, Reset View, Auto-Center Focus, and Focus on Driver GPS.
                 Shifts inward when the details drawer is open so they never
                 overlap it. */}
-            <div className={`absolute bottom-5 flex flex-col gap-1.5 z-25 transition-all ${selectedShipment ? "right-5 sm:right-[332px]" : "right-5"}`}>
+            <div className={`absolute bottom-5 flex-col gap-1.5 z-25 transition-all ${operatorRoom ? "hidden" : "flex"} ${selectedShipment && !operatorRoom ? "right-5 sm:right-[332px]" : "right-5"}`}>
               <button
                 onClick={increaseZoom}
                 className="bg-white hover:bg-slate-100 text-slate-900 border border-slate-200 w-9 h-9 rounded-lg shadow-md cursor-pointer flex items-center justify-center font-bold"
@@ -2093,7 +2272,7 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
                   Chat action) route to the existing Chat Center thread where
                   messages AND documents are already managed. No new chat or
                   document surfaces or APIs. */}
-              {selectedShipment && (() => {
+              {selectedShipment && !operatorRoom && (() => {
                 const gpsState = getShipmentGpsState(selectedShipment);
                 const colors = stateColors(gpsState);
                 const driver = localDrivers.find(d => d.id === selectedShipment.assignedDriverId);
@@ -2405,6 +2584,22 @@ export default function TrackingMap({ shipments, lang, drivers, onOpenShipmentDe
         </div>
 
       </div>
+
+      {/* Operator Room chrome — rendered ON TOP of the same live map. The
+          overlay is read-only by construction (click layer only pauses the
+          cycle; Exit/Escape leave the mode) and all values are the exact
+          derived state the normal mode shows. */}
+      {operatorRoom && (
+        <OperatorRoomOverlay
+          lang={lang}
+          lastDataAt={lastDataAt}
+          kpis={operatorKpis}
+          focus={operatorFocus}
+          paused={cyclePaused}
+          onTogglePause={() => setCyclePaused(p => !p)}
+          onExit={exitOperatorRoom}
+        />
+      )}
     </div>
   );
 }
